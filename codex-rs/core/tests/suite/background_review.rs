@@ -589,6 +589,44 @@ async fn foreground_turn_cancels_pending_review_and_releases_repo_lock() -> Resu
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreground_turn_preserves_cancel_reason_for_running_review() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = create_git_repo()?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let _responses_mock =
+        responses::mount_sse_sequence(&server, code_changing_turn_responses("first-running")).await;
+    let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the first feature")).await?;
+    let first_statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Running,
+    ))
+    .await;
+    let first_run_id = first_statuses[0].run_id.clone();
+
+    Box::pin(submit_turn(&test.codex, &cwd, "add the second feature")).await?;
+    let cancelled_statuses = Box::pin(background_review_statuses_until(
+        &test.codex,
+        BackgroundAutoReviewStatus::Cancelled,
+    ))
+    .await;
+    assert_eq!(cancelled_statuses[0].run_id, first_run_id);
+
+    let store = AutoReviewStore::for_scope(test.codex_home_path(), repo.path());
+    let first = store.load_run(&first_run_id)?;
+    assert_eq!(first.status, AutoReviewRunStatus::Cancelled);
+    assert_eq!(
+        first.cancel_reason.as_deref(),
+        Some("foreground_work_started")
+    );
+
+    Ok(())
+}
+
 /// Reproduces the August 1 mismatch with the repository review orchestrator
 /// present while the detached child has no collaboration tools. The bounded
 /// direct-review contract must still preserve #571's exact diff and publish the

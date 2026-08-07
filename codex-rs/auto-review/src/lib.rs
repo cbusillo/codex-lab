@@ -446,6 +446,28 @@ impl AutoReviewStore {
         active_head: Option<&str>,
         active_review_target: Option<&ReviewTarget>,
     ) -> Result<usize> {
+        self.mark_superseded_by_fingerprint_with_target_and_filter(
+            diff_fingerprint,
+            superseded_by,
+            active_branch,
+            active_head,
+            active_review_target,
+            |_| true,
+        )
+    }
+
+    pub fn mark_superseded_by_fingerprint_with_target_and_filter<F>(
+        &self,
+        diff_fingerprint: &str,
+        superseded_by: &str,
+        active_branch: Option<&str>,
+        active_head: Option<&str>,
+        active_review_target: Option<&ReviewTarget>,
+        mut is_eligible: F,
+    ) -> Result<usize>
+    where
+        F: FnMut(&AutoReviewRun) -> bool,
+    {
         let fingerprint = diff_fingerprint.trim();
         if fingerprint.is_empty() {
             return Ok(0);
@@ -458,6 +480,7 @@ impl AutoReviewStore {
                 || !duplicate_target_matches_branch_head(&run, active_branch, active_head)
                 || active_review_target
                     .is_some_and(|active_review_target| run.review_target != *active_review_target)
+                || !is_eligible(&run)
             {
                 continue;
             }

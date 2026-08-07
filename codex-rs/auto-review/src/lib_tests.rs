@@ -1603,6 +1603,39 @@ fn mark_superseded_by_fingerprint_only_supersedes_clean_matching_scope() -> anyh
 }
 
 #[test]
+fn mark_superseded_by_fingerprint_respects_candidate_filter() -> anyhow::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let scope = tempfile::tempdir()?;
+    let store = AutoReviewStore::for_scope(codex_home.path(), scope.path());
+    for run_id in ["same-owner", "foreign-owner"] {
+        store.save_run(&AutoReviewRun {
+            target: target_with_fingerprint("sha256:abc"),
+            ..sample_run(run_id, &sample_output(Vec::new()))
+        })?;
+    }
+
+    let changed = store.mark_superseded_by_fingerprint_with_target_and_filter(
+        "sha256:abc",
+        "new_run",
+        Some("main"),
+        Some("head-2"),
+        /*active_review_target*/ None,
+        |run| run.run_id == "same-owner",
+    )?;
+
+    assert_eq!(changed, 1);
+    assert_eq!(
+        store.load_run("same-owner")?.status,
+        AutoReviewRunStatus::Superseded
+    );
+    assert_eq!(
+        store.load_run("foreign-owner")?.status,
+        AutoReviewRunStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
 fn mark_superseded_by_fingerprint_requires_matching_review_target() -> anyhow::Result<()> {
     let codex_home = tempfile::tempdir()?;
     let scope = tempfile::tempdir()?;

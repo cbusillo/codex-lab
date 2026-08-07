@@ -559,6 +559,7 @@ impl Session {
             self.cancel_running_background_auto_review(
                 displaced_running_review,
                 AUTO_REVIEW_INTERRUPTED_ERROR_SUMMARY.to_string(),
+                BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON,
             )
             .await;
         }
@@ -879,12 +880,20 @@ impl Session {
         };
         let codex_home = self.codex_home().await;
         let store = AutoReviewStore::for_scope(codex_home, persistence.store_scope());
-        match store.mark_superseded_by_fingerprint_with_target(
+        let current_thread_id = self.thread_id().to_string();
+        match store.mark_superseded_by_fingerprint_with_target_and_filter(
             fingerprint,
             persistence.run_id(),
             persistence.target().branch.as_deref(),
             persistence.target().head_sha.as_deref(),
             Some(persistence.review_target()),
+            |run| {
+                background_auto_review_duplicate_is_visible_to_thread(
+                    &store,
+                    &run.run_id,
+                    &current_thread_id,
+                )
+            },
         ) {
             Ok(changed) => {
                 if changed > 0 {
@@ -980,7 +989,7 @@ impl Session {
         let Some(running_review) = cancellation.running_review else {
             return;
         };
-        self.cancel_running_background_auto_review(running_review, error_summary)
+        self.cancel_running_background_auto_review(running_review, error_summary, cancel_reason)
             .await;
     }
 
@@ -1032,8 +1041,12 @@ impl Session {
             }
             BackgroundAutoReviewControlledRun::Running(running_review) => match action {
                 BackgroundAutoReviewControlAction::Cancel => {
-                    self.cancel_running_background_auto_review(running_review, error_summary)
-                        .await;
+                    self.cancel_running_background_auto_review(
+                        running_review,
+                        error_summary,
+                        BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON,
+                    )
+                    .await;
                 }
                 BackgroundAutoReviewControlAction::Supersede => {
                     self.supersede_running_background_auto_review(
@@ -1051,15 +1064,15 @@ impl Session {
         self: &Arc<Self>,
         running_review: BackgroundAutoReviewRunningHandle,
         error_summary: String,
+        cancel_reason: &str,
     ) {
         let completion = running_review.completion;
         if completion.is_done() {
             return;
         }
-        running_review.persistence.set_cancelled_interruption(
-            error_summary.clone(),
-            BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON.to_string(),
-        );
+        running_review
+            .persistence
+            .set_cancelled_interruption(error_summary.clone(), cancel_reason.to_string());
         let notified = completion.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -1076,7 +1089,7 @@ impl Session {
             .save_cancelled_with_summary_and_reason(
                 self.codex_home().await,
                 error_summary.clone(),
-                BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON.to_string(),
+                cancel_reason.to_string(),
             )
         {
             record_background_review_status(
@@ -1171,7 +1184,9 @@ async fn acquire_background_auto_review_lock(
     coordination: &ReviewCoordination,
     intent: String,
 ) -> anyhow::Result<Option<ReviewLockGuard>> {
-    let deadline = tokio::time::Instant::now() + BACKGROUND_AUTO_REVIEW_LOCK_RETRY;
+    let deadline = tokio::time::Instant::now()
+        + BACKGROUND_AUTO_REVIEW_DEBOUNCE
+        + BACKGROUND_AUTO_REVIEW_LOCK_RETRY;
     loop {
         match coordination.try_acquire_lock(intent.clone())? {
             Some(guard) => return Ok(Some(guard)),

@@ -1,8 +1,12 @@
+use super::BACKGROUND_AUTO_REVIEW_DEBOUNCE;
+use super::acquire_background_auto_review_lock;
 use super::background_auto_review_duplicate_is_visible_to_thread;
 use super::background_auto_review_size_limit_summary;
 use codex_auto_review::AutoReviewRunState;
 use codex_auto_review::AutoReviewStore;
+use codex_auto_review::ReviewCoordination;
 use pretty_assertions::assert_eq;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[test]
@@ -87,4 +91,28 @@ fn background_auto_review_duplicate_visibility_respects_thread_ownership() {
         "foreign-owner",
         "thread-a",
     ));
+}
+
+#[tokio::test]
+async fn background_auto_review_lock_retry_outlasts_pending_debounce_handoff() {
+    let codex_home = TempDir::new().expect("create temp codex home");
+    let scope = TempDir::new().expect("create temp scope");
+    let coordination = ReviewCoordination::for_scope(codex_home.path(), scope.path());
+    let held_guard = coordination
+        .try_acquire_lock("first-pending")
+        .expect("acquire first review lock")
+        .expect("first review lock must be available");
+
+    tokio::spawn(async move {
+        tokio::time::sleep(BACKGROUND_AUTO_REVIEW_DEBOUNCE + Duration::from_millis(100)).await;
+        drop(held_guard);
+    });
+
+    let acquired = acquire_background_auto_review_lock(&coordination, "second-pending".to_string())
+        .await
+        .expect("retry review lock acquisition");
+    assert!(
+        acquired.is_some(),
+        "retry budget must outlast the pending review's debounce window"
+    );
 }
