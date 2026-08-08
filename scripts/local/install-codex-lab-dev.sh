@@ -232,12 +232,23 @@ if [ "\$evidence_state" = inspect ]; then
     evidence_state='current'
   elif git -C "\$EVIDENCE_CHECKOUT" cat-file -e "\$CANDIDATE_COMMIT^{commit}" 2>/dev/null; then
     if git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$CANDIDATE_COMMIT" "\$evidence_commit" 2>/dev/null; then
-      if [ ! -e "\$installer" ]; then
+      if git -C "\$EVIDENCE_CHECKOUT" sparse-checkout list >/dev/null 2>&1; then
+        evidence_state='sparse-checkout'
+      elif [ ! -e "\$installer" ]; then
         evidence_state='installer-missing'
+      elif [ ! -f "\$installer" ]; then
+        evidence_state='installer-not-regular'
       elif [ ! -x "\$installer" ]; then
         evidence_state='installer-not-executable'
+      elif installer_entry="\$(git -C "\$EVIDENCE_CHECKOUT" ls-tree "\$evidence_commit" -- scripts/local/install-codex-lab-dev.sh 2>/dev/null)" && [ -n "\$installer_entry" ]; then
+        installer_mode="\${installer_entry%% *}"
+        if [ "\$installer_mode" = 100755 ]; then
+          evidence_state='source-newer'
+        else
+          evidence_state='installer-unsupported'
+        fi
       else
-        evidence_state='source-newer'
+        evidence_state='installer-untracked'
       fi
     elif git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$evidence_commit" "\$CANDIDATE_COMMIT" 2>/dev/null; then
       evidence_state='candidate-newer'
@@ -274,6 +285,18 @@ installer-missing)
 installer-not-executable)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but scripts/local/install-codex-lab-dev.sh is not executable there. Restore an executable supported installer in a clean checkout; no command is provided."
   ;;
+installer-not-regular)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but scripts/local/install-codex-lab-dev.sh is not a regular file there. Select a clean checkout with the supported installer; no command is provided."
+  ;;
+installer-untracked)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but scripts/local/install-codex-lab-dev.sh is not tracked at that source commit. Select a clean checkout with the supported installer; no command is provided."
+  ;;
+installer-unsupported)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but scripts/local/install-codex-lab-dev.sh is not the supported executable file at that source commit. Restore the tracked installer in a clean checkout; no command is provided."
+  ;;
+sparse-checkout)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but that source is a sparse checkout and cannot prove the full installer inputs are present. Use a clean non-sparse worktree before reinstalling; no command is provided."
+  ;;
 unreadable)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source evidence at \$EVIDENCE_CHECKOUT is not stageable because its commit or clean status could not be read. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; repair Git metadata or select a clean worktree before reinstalling."
   ;;
@@ -285,6 +308,9 @@ source-checkout-missing)
   ;;
 checkout-unavailable)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="No same-repository source checkout is available for provenance comparison. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; launch from a clean checkout of the intended repository."
+  ;;
+*)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source provenance could not be classified safely. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; select a clean intended checkout before reinstalling."
   ;;
 esac
 

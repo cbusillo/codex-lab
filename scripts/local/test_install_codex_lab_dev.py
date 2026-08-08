@@ -498,6 +498,83 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertIn("is not executable there", launch.stderr)
             self.assert_no_refresh_command(launch)
 
+    def test_untracked_installer_replacement_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            installer = checkout / "scripts/local/install-codex-lab-dev.sh"
+            installer.unlink()
+            subprocess.run(
+                ["git", "add", "scripts/local/install-codex-lab-dev.sh"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "remove installer"],
+                cwd=checkout,
+                check=True,
+            )
+            installer.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            installer.chmod(0o755)
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("is not tracked at that source commit", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_directory_at_installer_path_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            installer = checkout / "scripts/local/install-codex-lab-dev.sh"
+            installer.unlink()
+            subprocess.run(
+                ["git", "add", "scripts/local/install-codex-lab-dev.sh"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "remove installer"],
+                cwd=checkout,
+                check=True,
+            )
+            installer.mkdir()
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("is not a regular file there", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_sparse_checkout_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            evidence = self.create_evidence_worktree(root, checkout)
+            self.commit_source_state(evidence, "newer")
+            subprocess.run(
+                [
+                    "git",
+                    "sparse-checkout",
+                    "set",
+                    "--no-cone",
+                    "/scripts/local/",
+                    "/source-state.txt",
+                ],
+                cwd=evidence,
+                check=True,
+            )
+
+            launch = self.launch(launcher, root, environment, "-C", str(evidence))
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("is a sparse checkout", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
     def test_launches_without_git(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
@@ -531,6 +608,21 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn("recorded source checkout is unavailable", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_launches_when_recorded_checkout_is_not_a_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            shutil.rmtree(checkout / ".git")
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(
+                "No same-repository source checkout is available", launch.stderr
+            )
             self.assert_no_refresh_command(launch)
 
     def test_ignores_unrelated_checkout_evidence(self) -> None:
