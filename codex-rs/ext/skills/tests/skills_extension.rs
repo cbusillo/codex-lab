@@ -109,21 +109,26 @@ async fn installed_extension_uses_host_service_snapshot() -> TestResult {
         })
         .await;
 
-    let skill_path = AbsolutePathBuf::try_from(skill_path)?;
+    let skills_root = AbsolutePathBuf::try_from(std::fs::canonicalize(codex_home.join("skills"))?)?;
+    let outcome = load_skills_from_roots(
+        [SkillRoot {
+            path: skills_root,
+            scope: SkillScope::User,
+            file_system: Arc::clone(&LOCAL_FS),
+            plugin_identity: None,
+            plugin_namespace: None,
+            plugin_root: None,
+            discovery_mode: Default::default(),
+        }],
+        /*plugin_skill_snapshots*/ None,
+        Arc::new(Semaphore::new(MAX_CONCURRENT_ROOT_SCANS)),
+    )
+    .await;
+    assert_eq!(outcome.errors, Vec::new());
+    assert_eq!(outcome.skills.len(), 1);
+
+    let skill_path = AbsolutePathBuf::try_from(std::fs::canonicalize(skill_path)?)?;
     let skill_path_string = skill_path.to_string_lossy().into_owned();
-    let mut outcome = SkillLoadOutcome::default();
-    outcome.skills.push(SkillMetadata {
-        name: "demo".to_string(),
-        description: "Demo skill.".to_string(),
-        short_description: None,
-        interface: None,
-        dependencies: None,
-        policy: None,
-        path_to_skills_md: skill_path,
-        scope: SkillScope::User,
-        plugin_id: None,
-        remote_plugin_id: None,
-    });
     let loaded_skills = Arc::new(outcome);
     let skill_prompt_path = skill_path_string.replace('\\', "/");
     let turn_store = ExtensionData::new("turn-1");
