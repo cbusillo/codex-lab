@@ -1106,9 +1106,15 @@ fn plugin_skill_roots(
     };
     let migrated_command_skills = migrated_command_skills_root(plugin_root);
     if migrated_command_skills.is_dir() {
-        paths.push(migrated_command_skills);
+        paths.push(migrated_command_skills.clone());
     }
-    paths.sort_unstable();
+    paths.sort_unstable_by(|left, right| {
+        let left_is_migrated = left == &migrated_command_skills;
+        let right_is_migrated = right == &migrated_command_skills;
+        left_is_migrated
+            .cmp(&right_is_migrated)
+            .then_with(|| left.cmp(right))
+    });
     paths.dedup();
     paths
 }

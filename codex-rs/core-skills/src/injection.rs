@@ -164,6 +164,7 @@ fn emit_skill_injected_metric(
 pub fn collect_explicit_skill_mentions(
     inputs: &[UserInput],
     skills: &[SkillMetadata],
+    path_addressable_skills: &[SkillMetadata],
     disabled_paths: &HashSet<AbsolutePathBuf>,
     connector_slug_counts: &HashMap<String, usize>,
 ) -> Vec<SkillMetadata> {
@@ -171,6 +172,7 @@ pub fn collect_explicit_skill_mentions(
 
     let selection_context = SkillSelectionContext {
         skills,
+        path_addressable_skills,
         disabled_paths,
         skill_name_counts: &skill_name_counts,
         connector_slug_counts,
@@ -192,7 +194,7 @@ pub fn collect_explicit_skill_mentions(
             }
 
             if let Some(skill) = selection_context
-                .skills
+                .path_addressable_skills
                 .iter()
                 .find(|skill| skill.path_to_skills_md == path)
             {
@@ -222,6 +224,7 @@ pub fn collect_explicit_skill_mentions(
 
 struct SkillSelectionContext<'a> {
     skills: &'a [SkillMetadata],
+    path_addressable_skills: &'a [SkillMetadata],
     disabled_paths: &'a HashSet<AbsolutePathBuf>,
     skill_name_counts: &'a HashMap<String, usize>,
     connector_slug_counts: &'a HashMap<String, usize>,
@@ -391,7 +394,7 @@ fn select_skills_from_mentions(
         .map(normalize_skill_path)
         .collect();
 
-    for skill in selection_context.skills {
+    for skill in selection_context.path_addressable_skills {
         if selection_context
             .disabled_paths
             .contains(&skill.path_to_skills_md)

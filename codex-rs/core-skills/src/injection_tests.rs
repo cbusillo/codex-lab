@@ -41,7 +41,13 @@ fn collect_mentions(
     disabled_paths: &HashSet<AbsolutePathBuf>,
     connector_slug_counts: &HashMap<String, usize>,
 ) -> Vec<SkillMetadata> {
-    collect_explicit_skill_mentions(inputs, skills, disabled_paths, connector_slug_counts)
+    collect_explicit_skill_mentions(
+        inputs,
+        skills,
+        skills,
+        disabled_paths,
+        connector_slug_counts,
+    )
 }
 
 #[test]
@@ -262,6 +268,29 @@ fn collect_explicit_skill_mentions_prefers_linked_path_over_name() {
     let selected = collect_mentions(&inputs, &skills, &HashSet::new(), &connector_counts);
 
     assert_eq!(selected, vec![beta]);
+}
+
+#[test]
+fn collect_explicit_skill_mentions_selects_shadowed_skill_by_linked_path() {
+    let visible = make_skill("demo-skill", "/tmp/visible");
+    let shadowed = make_skill("demo-skill", "/tmp/shadowed");
+    let inputs = vec![UserInput::Text {
+        text: format!(
+            "use {}",
+            linked_skill_mention("demo-skill", "/tmp/shadowed")
+        ),
+        text_elements: Vec::new(),
+    }];
+
+    let selected = collect_explicit_skill_mentions(
+        &inputs,
+        std::slice::from_ref(&visible),
+        &[visible.clone(), shadowed.clone()],
+        &HashSet::new(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(selected, vec![shadowed]);
 }
 
 #[test]

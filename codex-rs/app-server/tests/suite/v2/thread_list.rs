@@ -1406,11 +1406,13 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
     let mut threads_to_resume = vec![cli_id.clone()];
 
     for (filename_ts, timestamp, version, capability, should_resume) in [
+        // Stored V1 sessions are deliberately upgraded to V2 when agents are enabled, so direct
+        // input stays blocked after resume just as it is for a stored V2 session.
         (
             "2025-02-01T10-00-00",
             "2025-02-01T10:00:00Z",
             MultiAgentVersion::V1,
-            Some(true),
+            Some(false),
             true,
         ),
         (

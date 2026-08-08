@@ -44,7 +44,6 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
-use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -1354,30 +1353,30 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_fork_freezes_active_paginated_turn_as_interrupted() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V1).await
+async fn thread_fork_persists_developer_interruption_marker_for_root_thread_v2() -> Result<()> {
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ false)
+        .await
 }
 
 #[tokio::test]
 async fn thread_fork_persists_developer_interruption_marker_for_multi_agent_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V2).await
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ true).await
 }
 
 async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
-    multi_agent_version: MultiAgentVersion,
+    fork_as_subagent: bool,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
+    // MultiAgentV2 is the mandatory default whenever agents are enabled. The source distinguishes
+    // the root-thread and subagent cases; it no longer selects between V1 and V2 implementations.
     let config = MockResponsesConfig::new(&server.uri());
-    let (config, expected_marker_role, thread_source) = match multi_agent_version {
-        MultiAgentVersion::V2 => (
-            config.enable_feature(Feature::MultiAgentV2),
-            "developer",
-            Some(ThreadSource::Subagent),
-        ),
-        MultiAgentVersion::V1 => (config, "user", None),
-        MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
+    let thread_source = if fork_as_subagent {
+        Some(ThreadSource::Subagent)
+    } else {
+        None
     };
+    const EXPECTED_MARKER_ROLE: &str = "developer";
     config.write(codex_home.path())?;
     let source_thread_id = create_fake_paginated_rollout(
         codex_home.path(),
@@ -1501,27 +1500,56 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(child_rollout.len(), 4);
     assert!(matches!(
-        child_rollout.as_slice(),
-        [
-            RolloutLine { item: RolloutItem::SessionMeta(_), .. },
-            RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
-                ..
-            },
-            RolloutLine {
-                item: RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::Message {
-                    role,
-                    ..
-                }),
-                ..
-            },
-            RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
-                ..
-            },
-        ] if role == expected_marker_role && aborted.turn_id.as_deref() == Some("active-turn")
+        child_rollout.first(),
+        Some(RolloutLine {
+            item: RolloutItem::SessionMeta(_),
+            ..
+        })
     ));
+    assert!(matches!(
+        child_rollout.get(1),
+        Some(RolloutLine {
+            item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+            ..
+        })
+    ));
+    let interruption_marker_index = child_rollout
+        .iter()
+        .position(|line| {
+            matches!(
+                line,
+                RolloutLine {
+                    item: RolloutItem::ResponseItem(
+                        codex_protocol::models::ResponseItem::Message {
+                            role,
+                            content,
+                            ..
+                        }
+                    ),
+                    ..
+                } if role == EXPECTED_MARKER_ROLE
+                    && content.iter().any(|item| matches!(
+                        item,
+                        ContentItem::InputText { text } if text.contains("<turn_aborted>")
+                    ))
+            )
+        })
+        .expect("forked rollout should persist the interruption marker");
+    let turn_aborted_index = child_rollout
+        .iter()
+        .position(|line| {
+            matches!(
+                line,
+                RolloutLine {
+                    item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
+                    ..
+                } if aborted.turn_id.as_deref() == Some("active-turn")
+            )
+        })
+        .expect("forked rollout should persist the active turn abort event");
+    assert!(interruption_marker_index < turn_aborted_index);
 
     append_rollout_item_to_path(
         codex_home.path(),
@@ -1584,7 +1612,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(!serialized_input.contains("after-fork model input"));
     assert!(input.as_array().is_some_and(|items| {
         items.iter().any(|item| {
-            item["role"] == expected_marker_role
+            item["role"] == EXPECTED_MARKER_ROLE
                 && item["content"].as_array().is_some_and(|content| {
                     content.iter().any(|fragment| {
                         fragment["text"]
@@ -1739,7 +1767,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .body_json::<Value>()?;
     let model_input = request_body["input"].as_array().expect("model input");
     assert!(model_input.iter().any(|item| {
-        item["role"] == expected_marker_role
+        item["role"] == EXPECTED_MARKER_ROLE
             && item["content"].as_array().is_some_and(|content| {
                 content.iter().any(|fragment| {
                     fragment["text"]

@@ -158,12 +158,13 @@ fn merge_skill_root_snapshots(snapshots: Vec<SkillRootSnapshot>) -> SkillLoadOut
         .skills
         .retain(|skill| seen.insert(skill.path_to_skills_md.clone()));
     outcome.skills.sort_by_key(|skill| scope_rank(skill.scope));
+    outcome.path_addressable_skills = outcome.skills.clone();
     let mut seen_names = HashSet::new();
     outcome
         .skills
         .retain(|skill| seen_names.insert(skill.name.clone()));
     let retained_skill_paths = outcome
-        .skills
+        .path_addressable_skills
         .iter()
         .map(|skill| skill.path_to_skills_md.clone())
         .collect::<HashSet<_>>();
@@ -175,6 +176,12 @@ fn merge_skill_root_snapshots(snapshots: Vec<SkillRootSnapshot>) -> SkillLoadOut
     outcome.skill_root_by_path = Arc::new(skill_root_by_path);
     outcome.file_systems_by_skill_path = SkillFileSystemsByPath::new(file_systems_by_skill_path);
 
+    outcome.path_addressable_skills.sort_by(|a, b| {
+        scope_rank(a.scope)
+            .cmp(&scope_rank(b.scope))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.path_to_skills_md.cmp(&b.path_to_skills_md))
+    });
     outcome.skills.sort_by(|a, b| {
         scope_rank(a.scope)
             .cmp(&scope_rank(b.scope))

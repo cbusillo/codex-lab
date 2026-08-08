@@ -159,7 +159,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     )?;
     let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
-        .env("CODEX_HOME", codex_home.path())
+        .env("CODEX_LAB_HOME", codex_home.path())
         .env("CODEX_API_KEY", "test-api-key")
         .env(
             codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR,

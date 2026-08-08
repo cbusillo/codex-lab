@@ -20,9 +20,6 @@ use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ByteRange;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::CollabAgentStatus;
-use codex_app_server_protocol::CollabAgentTool;
-use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionStatus;
@@ -585,8 +582,8 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
         .last()
         .expect("expected at least one model request");
     assert!(
-        body_contains(request, "## Skills"),
-        "expected outgoing request to include the skills section"
+        !body_contains(request, "## Skills"),
+        "expected the empty skills section to be omitted after all descriptions were trimmed"
     );
     assert!(
         !body_contains(request, "- alpha-skill:") && !body_contains(request, "- beta-skill:"),
@@ -3145,18 +3142,20 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()> {
+async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
-    const REQUESTED_MODEL: &str = "gpt-5.2";
+    const REQUESTED_MODEL: &str = "gpt-5.6-terra";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "fork_turns": "none",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
     }))?;
@@ -3167,7 +3166,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "multi_agent_v1",
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -3175,7 +3174,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         ]),
     )
     .await;
-    let _child_turn = responses::mount_sse_once_match(
+    let child_turn = responses::mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -3230,82 +3229,24 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         })
         .await?;
 
-    let spawn_started = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &started.item
-                && id == SPAWN_CALL_ID
-            {
-                return Ok::<ThreadItem, anyhow::Error>(started.item);
-            }
-        }
-    })
-    .await??;
-    assert_eq!(
-        spawn_started,
-        ThreadItem::CollabAgentToolCall {
-            id: SPAWN_CALL_ID.to_string(),
-            tool: CollabAgentTool::SpawnAgent,
-            status: CollabAgentToolCallStatus::InProgress,
-            sender_thread_id: thread.id.clone(),
-            receiver_thread_ids: Vec::new(),
-            prompt: Some(CHILD_PROMPT.to_string()),
-            model: Some(REQUESTED_MODEL.to_string()),
-            reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
-            agents_states: HashMap::new(),
-        }
-    );
-
-    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
+    let (receiver_thread_id, agent_path) = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+            if let ThreadItem::SubAgentActivity {
+                id,
+                kind: SubAgentActivityKind::Started,
+                agent_thread_id,
+                agent_path,
+            } = completed.item
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                return Ok::<(String, String), anyhow::Error>((agent_thread_id, agent_path));
             }
         }
     })
     .await??;
-    let ThreadItem::CollabAgentToolCall {
-        id,
-        tool,
-        status,
-        sender_thread_id,
-        receiver_thread_ids,
-        prompt,
-        model,
-        reasoning_effort,
-        agents_states,
-    } = spawn_completed
-    else {
-        unreachable!("loop ensures we break on collab agent tool call items");
-    };
-    let receiver_thread_id = receiver_thread_ids
-        .first()
-        .cloned()
-        .expect("spawn completion should include child thread id");
-    assert_eq!(id, SPAWN_CALL_ID);
-    assert_eq!(tool, CollabAgentTool::SpawnAgent);
-    assert_eq!(status, CollabAgentToolCallStatus::Completed);
-    assert_eq!(sender_thread_id, thread.id);
-    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
-    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
-    let agent_state = agents_states
-        .get(&receiver_thread_id)
-        .expect("spawn completion should include child agent state");
-    assert!(
-        matches!(
-            agent_state.status,
-            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
-        ),
-        "child agent should still be initializing or already running, got {:?}",
-        agent_state.status
-    );
-    assert_eq!(agent_state.message, None);
+    assert_eq!(agent_path, "/root/worker");
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -3319,6 +3260,22 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
     assert_eq!(turn_completed.turn.id, turn.turn.id);
+    let child_bodies = child_turn
+        .requests()
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .filter(|body| {
+            body["client_metadata"]["thread_id"].as_str() == Some(receiver_thread_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert!(!child_bodies.is_empty());
+    for child_body in child_bodies {
+        assert_eq!(child_body["model"], json!(REQUESTED_MODEL));
+        assert_eq!(
+            child_body["reasoning"]["effort"],
+            json!(REQUESTED_REASONING_EFFORT.to_string())
+        );
+    }
 
     // Reuse this live spawn setup to cover thread/delete's ThreadManager descendant path.
     let _: ThreadDeleteResponse = mcp
@@ -3515,13 +3472,13 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2() -> Result<()> {
+async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
-    const REQUESTED_MODEL: &str = "gpt-5.2";
+    const REQUESTED_MODEL: &str = "gpt-5.6-terra";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
     const ROLE_MODEL: &str = "gpt-5.4";
     const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
@@ -3529,6 +3486,8 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "fork_turns": "none",
         "agent_type": "custom",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
@@ -3540,7 +3499,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "multi_agent_v1",
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -3548,7 +3507,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
         ]),
     )
     .await;
-    let _child_turn = responses::mount_sse_once_match(
+    let child_turn = responses::mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -3620,56 +3579,25 @@ config_file = "./custom-role.toml"
         })
         .await?;
 
-    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
+    let (receiver_thread_id, agent_path) = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+            if let ThreadItem::SubAgentActivity {
+                id,
+                kind: SubAgentActivityKind::Started,
+                agent_thread_id,
+                agent_path,
+            } = completed.item
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+                return Ok::<(String, String), anyhow::Error>((agent_thread_id, agent_path));
             }
         }
     })
     .await??;
-    let ThreadItem::CollabAgentToolCall {
-        id,
-        tool,
-        status,
-        sender_thread_id,
-        receiver_thread_ids,
-        prompt,
-        model,
-        reasoning_effort,
-        agents_states,
-    } = spawn_completed
-    else {
-        unreachable!("loop ensures we break on collab agent tool call items");
-    };
-    let receiver_thread_id = receiver_thread_ids
-        .first()
-        .cloned()
-        .expect("spawn completion should include child thread id");
-    assert_eq!(id, SPAWN_CALL_ID);
-    assert_eq!(tool, CollabAgentTool::SpawnAgent);
-    assert_eq!(status, CollabAgentToolCallStatus::Completed);
-    assert_eq!(sender_thread_id, thread.id);
-    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
-    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(ROLE_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
-    let agent_state = agents_states
-        .get(&receiver_thread_id)
-        .expect("spawn completion should include child agent state");
-    assert!(
-        matches!(
-            agent_state.status,
-            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
-        ),
-        "child agent should still be initializing or already running, got {:?}",
-        agent_state.status
-    );
-    assert_eq!(agent_state.message, None);
+    assert_eq!(agent_path, "/root/worker");
+    assert!(!receiver_thread_id.is_empty());
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -3682,6 +3610,22 @@ config_file = "./custom-role.toml"
     })
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
+    let child_bodies = child_turn
+        .requests()
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .filter(|body| {
+            body["client_metadata"]["thread_id"].as_str() == Some(receiver_thread_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert!(!child_bodies.is_empty());
+    for child_body in child_bodies {
+        assert_eq!(child_body["model"], json!(ROLE_MODEL));
+        assert_eq!(
+            child_body["reasoning"]["effort"],
+            json!(ROLE_REASONING_EFFORT.to_string())
+        );
+    }
 
     Ok(())
 }
