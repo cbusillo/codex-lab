@@ -14,7 +14,7 @@ fn app_scoped_key_path_quotes_dotted_app_ids() {
 #[test]
 fn agent_selector_edit_quotes_dotted_selector_names() {
     assert_eq!(
-        agent_selector_enabled_edit("antigravity-gemini-3.6-flash", false),
+        agent_selector_enabled_edit("antigravity-gemini-3.6-flash", /*enabled*/ false),
         ConfigEdit {
             key_path: "agents.selectors.\"antigravity-gemini-3.6-flash\".enabled".to_string(),
             value: serde_json::json!(false),
@@ -34,7 +34,7 @@ fn agent_selector_default_edits_use_typed_model_and_effort_fields() {
         }
     );
     assert_eq!(
-        agent_selector_effort_edit("antigravity", None),
+        agent_selector_effort_edit("antigravity", /*effort*/ None),
         ConfigEdit {
             key_path: "agents.selectors.\"antigravity\".effort".to_string(),
             value: serde_json::Value::Null,

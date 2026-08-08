@@ -27,7 +27,7 @@ async fn empty_preview_does_not_create_storage_or_lock_state() {
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("empty preview");
 
@@ -60,7 +60,8 @@ async fn preview_ignores_state_db_only_rows() {
     .expect("initialize state DB");
     let uuid = Uuid::from_u128(38);
     let thread_id = thread_id(uuid);
-    let path = write_compressible_session(home.path(), false, uuid).expect("write session");
+    let path =
+        write_compressible_session(home.path(), /*archived*/ false, uuid).expect("write session");
     codex_rollout::state_db::reconcile_rollout(
         Some(state_db.as_ref()),
         path.as_path(),
@@ -82,7 +83,7 @@ async fn preview_ignores_state_db_only_rows() {
     let store = LocalThreadStore::new(config, Some(state_db.clone()));
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("state DB preview");
 
@@ -101,21 +102,22 @@ async fn active_then_archived_candidates_page_without_mutation() {
     let home = TempDir::new().expect("temp dir");
     let active_id = Uuid::from_u128(1);
     let archived_id = Uuid::from_u128(2);
-    let active_path =
-        write_compressible_session(home.path(), false, active_id).expect("write active session");
+    let active_path = write_compressible_session(home.path(), /*archived*/ false, active_id)
+        .expect("write active session");
     let archived_path =
-        write_compressible_session(home.path(), true, archived_id).expect("write archived session");
+        write_compressible_session(home.path(), /*archived*/ true, archived_id)
+            .expect("write archived session");
     set_old_mtime(active_path.as_path()).expect("age active session");
     set_old_mtime(archived_path.as_path()).expect("age archived session");
     let before = [snapshot(&active_path), snapshot(&archived_path)];
     let store = enabled_store(home.path());
 
     let first = store
-        .retention_preview(preview_params(1, None))
+        .retention_preview(preview_params(/*limit*/ 1, /*cursor*/ None))
         .await
         .expect("first preview page");
     let second = store
-        .retention_preview(preview_params(1, first.next_cursor.clone()))
+        .retention_preview(preview_params(/*limit*/ 1, first.next_cursor.clone()))
         .await
         .expect("second preview page");
 
@@ -150,12 +152,13 @@ async fn active_then_archived_candidates_page_without_mutation() {
 async fn exact_active_page_without_archived_rollouts_has_no_next_cursor() {
     let home = TempDir::new().expect("temp dir");
     let active_path =
-        write_compressible_session(home.path(), false, Uuid::from_u128(8)).expect("write session");
+        write_compressible_session(home.path(), /*archived*/ false, Uuid::from_u128(8))
+            .expect("write session");
     set_old_mtime(active_path.as_path()).expect("age session");
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(1, None))
+        .retention_preview(preview_params(/*limit*/ 1, /*cursor*/ None))
         .await
         .expect("preview");
 
@@ -168,7 +171,8 @@ async fn active_lease_is_protected_without_touching_lock_mtime() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(3);
     let thread_id = thread_id(uuid);
-    let path = write_compressible_session(home.path(), false, uuid).expect("write session");
+    let path =
+        write_compressible_session(home.path(), /*archived*/ false, uuid).expect("write session");
     set_old_mtime(path.as_path()).expect("age session");
     let lease =
         RolloutLease::acquire_shared(home.path(), RolloutCompressionMode::Enabled, thread_id)
@@ -183,7 +187,7 @@ async fn active_lease_is_protected_without_touching_lock_mtime() {
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("leased preview");
 
@@ -199,7 +203,8 @@ async fn active_writer_is_protected_without_touching_lock_state() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(31);
     let thread_id = thread_id(uuid);
-    let path = write_compressible_session(home.path(), false, uuid).expect("write session");
+    let path =
+        write_compressible_session(home.path(), /*archived*/ false, uuid).expect("write session");
     set_old_mtime(path.as_path()).expect("age session");
     let store = enabled_store(home.path());
     let writer_lock = store
@@ -213,7 +218,7 @@ async fn active_writer_is_protected_without_touching_lock_state() {
     let lock_before = snapshot(&lock_path);
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("writer preview");
 
@@ -228,15 +233,17 @@ async fn active_writer_is_protected_without_touching_lock_state() {
 async fn disabled_compression_protects_active_and_archived_rollouts() {
     let home = TempDir::new().expect("temp dir");
     let active_path =
-        write_compressible_session(home.path(), false, Uuid::from_u128(32)).expect("active");
+        write_compressible_session(home.path(), /*archived*/ false, Uuid::from_u128(32))
+            .expect("active");
     let archived_path =
-        write_compressible_session(home.path(), true, Uuid::from_u128(33)).expect("archived");
+        write_compressible_session(home.path(), /*archived*/ true, Uuid::from_u128(33))
+            .expect("archived");
     set_old_mtime(active_path.as_path()).expect("age active");
     set_old_mtime(archived_path.as_path()).expect("age archived");
     let store = disabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("disabled preview");
 
@@ -253,9 +260,11 @@ async fn disabled_compression_protects_active_and_archived_rollouts() {
 async fn fresh_and_compressed_rollouts_are_protected_explicitly() {
     let home = TempDir::new().expect("temp dir");
     let _fresh_path =
-        write_compressible_session(home.path(), false, Uuid::from_u128(34)).expect("fresh");
+        write_compressible_session(home.path(), /*archived*/ false, Uuid::from_u128(34))
+            .expect("fresh");
     let compressed_plain =
-        write_compressible_session(home.path(), false, Uuid::from_u128(35)).expect("compressed");
+        write_compressible_session(home.path(), /*archived*/ false, Uuid::from_u128(35))
+            .expect("compressed");
     let compressed_path = codex_rollout::compressed_rollout_path(compressed_plain.as_path());
     let encoded = zstd::stream::encode_all(
         fs::read(compressed_plain.as_path())
@@ -270,7 +279,7 @@ async fn fresh_and_compressed_rollouts_are_protected_explicitly() {
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("protected preview");
 
@@ -293,9 +302,11 @@ async fn fresh_and_compressed_rollouts_are_protected_explicitly() {
 async fn archived_rollouts_page_deterministically() {
     let home = TempDir::new().expect("temp dir");
     let older_path =
-        write_compressible_session(home.path(), true, Uuid::from_u128(36)).expect("older");
+        write_compressible_session(home.path(), /*archived*/ true, Uuid::from_u128(36))
+            .expect("older");
     let newer_path =
-        write_compressible_session(home.path(), true, Uuid::from_u128(37)).expect("newer");
+        write_compressible_session(home.path(), /*archived*/ true, Uuid::from_u128(37))
+            .expect("newer");
     let shared_modified = SystemTime::now()
         .checked_sub(Duration::from_secs(8 * 24 * 60 * 60))
         .expect("old time");
@@ -304,15 +315,15 @@ async fn archived_rollouts_page_deterministically() {
     let store = enabled_store(home.path());
 
     let first = store
-        .retention_preview(preview_params(1, None))
+        .retention_preview(preview_params(/*limit*/ 1, /*cursor*/ None))
         .await
         .expect("first archived page");
     let repeated_first = store
-        .retention_preview(preview_params(1, None))
+        .retention_preview(preview_params(/*limit*/ 1, /*cursor*/ None))
         .await
         .expect("repeated first archived page");
     let second = store
-        .retention_preview(preview_params(1, first.next_cursor.clone()))
+        .retention_preview(preview_params(/*limit*/ 1, first.next_cursor.clone()))
         .await
         .expect("second archived page");
 
@@ -328,8 +339,13 @@ async fn fork_reference_and_history_pointer_are_both_protected() {
     let home = TempDir::new().expect("temp dir");
     let source_id = thread_id(Uuid::from_u128(4));
     let child_id = thread_id(Uuid::from_u128(5));
-    let source_path =
-        write_reference_rollout(home.path(), source_id, None, "12-00-00").expect("write source");
+    let source_path = write_reference_rollout(
+        home.path(),
+        source_id,
+        /*history_base*/ None,
+        "12-00-00",
+    )
+    .expect("write source");
     let history_base = HistoryPosition {
         thread_id: source_id,
         end_ordinal_exclusive: 1,
@@ -342,7 +358,7 @@ async fn fork_reference_and_history_pointer_are_both_protected() {
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("reference preview");
 
@@ -364,8 +380,9 @@ async fn fork_reference_and_history_pointer_are_both_protected() {
 #[tokio::test]
 async fn unreadable_metadata_fail_protects_other_candidates() {
     let home = TempDir::new().expect("temp dir");
-    let valid_path = write_compressible_session(home.path(), false, Uuid::from_u128(6))
-        .expect("write valid session");
+    let valid_path =
+        write_compressible_session(home.path(), /*archived*/ false, Uuid::from_u128(6))
+            .expect("write valid session");
     set_old_mtime(valid_path.as_path()).expect("age valid session");
     let malformed_path = home
         .path()
@@ -380,7 +397,7 @@ async fn unreadable_metadata_fail_protects_other_candidates() {
     let store = enabled_store(home.path());
 
     let report = store
-        .retention_preview(preview_params(25, None))
+        .retention_preview(preview_params(/*limit*/ 25, /*cursor*/ None))
         .await
         .expect("uncertain preview");
 
@@ -398,15 +415,18 @@ async fn invalid_cursor_and_limit_are_rejected() {
     let store = enabled_store(home.path());
 
     let cursor_error = store
-        .retention_preview(preview_params(25, Some("not-a-cursor".to_string())))
+        .retention_preview(preview_params(
+            /*limit*/ 25,
+            Some("not-a-cursor".to_string()),
+        ))
         .await
         .expect_err("invalid cursor");
     let limit_error = store
-        .retention_preview(preview_params(101, None))
+        .retention_preview(preview_params(/*limit*/ 101, /*cursor*/ None))
         .await
         .expect_err("invalid limit");
     let zero_error = store
-        .retention_preview(preview_params(0, None))
+        .retention_preview(preview_params(/*limit*/ 0, /*cursor*/ None))
         .await
         .expect_err("zero limit");
 

@@ -571,13 +571,15 @@ async fn timed_out_preflight_kills_process_group() {
     let backend = ExternalCommandAgentBackendConfig::default();
 
     let error = run_external_agent_preflight_command_with_timeout(
-        &backend,
-        &command_path,
-        &[],
-        temp_dir.path(),
-        &["--version"],
-        "version",
-        ExternalAgentPreflightOutputLimit::Diagnostic,
+        ExternalAgentPreflightCommand {
+            backend: &backend,
+            resolved_command: &command_path,
+            command_args: &[],
+            workspace: temp_dir.path(),
+            args: &["--version"],
+            probe_name: "version",
+            output_limit: ExternalAgentPreflightOutputLimit::Diagnostic,
+        },
         Duration::from_millis(500),
     )
     .await

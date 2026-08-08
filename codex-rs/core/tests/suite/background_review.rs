@@ -1246,7 +1246,7 @@ async fn background_review_caps_tool_output_and_rejects_projected_followup() -> 
             "shell_command",
             &serde_json::to_string(&shell_arguments)?,
         ),
-        responses::ev_completed_with_tokens("resp-review-tool", 19_000),
+        responses::ev_completed_with_tokens("resp-review-tool", /*total_tokens*/ 19_000),
     ]));
     let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
     let budget = AutoReviewBudget {
@@ -1419,7 +1419,7 @@ async fn background_review_accounts_multiple_requests_without_projection_stackin
             "shell_command",
             &serde_json::to_string(&shell_arguments)?,
         ),
-        responses::ev_completed_with_tokens("resp-review-tool-1", 2_000),
+        responses::ev_completed_with_tokens("resp-review-tool-1", /*total_tokens*/ 2_000),
     ]));
     bodies.push(responses::sse(vec![
         responses::ev_response_created("resp-review-tool-2"),
@@ -1428,7 +1428,7 @@ async fn background_review_accounts_multiple_requests_without_projection_stackin
             "shell_command",
             &serde_json::to_string(&shell_arguments)?,
         ),
-        responses::ev_completed_with_tokens("resp-review-tool-2", 3_000),
+        responses::ev_completed_with_tokens("resp-review-tool-2", /*total_tokens*/ 3_000),
     ]));
     bodies.push(responses::sse(vec![
         responses::ev_response_created("resp-review-final"),
@@ -1436,7 +1436,7 @@ async fn background_review_accounts_multiple_requests_without_projection_stackin
             "msg-review-final",
             &seeded_defect_review_output(repo.path()),
         ),
-        responses::ev_completed_with_tokens("resp-review-final", 4_000),
+        responses::ev_completed_with_tokens("resp-review-final", /*total_tokens*/ 4_000),
     ]));
     let responses_mock = responses::mount_sse_sequence(&server, bodies).await;
     let budget = AutoReviewBudget {

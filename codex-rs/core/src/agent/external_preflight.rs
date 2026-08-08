@@ -48,6 +48,16 @@ pub(super) enum ExternalAgentPreflightOutputLimit {
     Capability,
 }
 
+pub(super) struct ExternalAgentPreflightCommand<'a> {
+    pub(super) backend: &'a ExternalCommandAgentBackendConfig,
+    pub(super) resolved_command: &'a Path,
+    pub(super) command_args: &'a [String],
+    pub(super) workspace: &'a Path,
+    pub(super) args: &'a [&'a str],
+    pub(super) probe_name: &'a str,
+    pub(super) output_limit: ExternalAgentPreflightOutputLimit,
+}
+
 impl ExternalAgentPreflightOutputLimit {
     fn bytes(self) -> usize {
         match self {
@@ -158,8 +168,8 @@ async fn probe_external_agent_backend(
         Err(error) => {
             return failed_capability_probe(
                 cli_family,
-                None,
-                None,
+                /*cli_version*/ None,
+                /*resolved_command*/ None,
                 Vec::new(),
                 ExternalAgentFailureDetail::new(
                     ExternalAgentFailureKind::LaunchFailed,
@@ -173,8 +183,8 @@ async fn probe_external_agent_backend(
         if !workspace.is_dir() {
             return failed_capability_probe(
                 cli_family,
-                None,
-                None,
+                /*cli_version*/ None,
+                /*resolved_command*/ None,
                 command_args,
                 ExternalAgentFailureDetail::new(
                     ExternalAgentFailureKind::LaunchFailed,
@@ -188,8 +198,8 @@ async fn probe_external_agent_backend(
         if let Err(error) = tokio::fs::create_dir_all(&launch_cwd).await {
             return failed_capability_probe(
                 cli_family,
-                None,
-                None,
+                /*cli_version*/ None,
+                /*resolved_command*/ None,
                 command_args,
                 ExternalAgentFailureDetail::new(
                     ExternalAgentFailureKind::LaunchFailed,
@@ -205,7 +215,13 @@ async fn probe_external_agent_backend(
         match resolve_external_agent_command(backend, command.as_path(), launch_cwd.as_path()) {
             Ok(command) => command,
             Err(failure) => {
-                return failed_capability_probe(cli_family, None, None, command_args, failure);
+                return failed_capability_probe(
+                    cli_family,
+                    /*cli_version*/ None,
+                    /*resolved_command*/ None,
+                    command_args,
+                    failure,
+                );
             }
         };
     let cli_version = match capture_external_agent_cli_version(
@@ -220,7 +236,7 @@ async fn probe_external_agent_backend(
         Err(failure) => {
             return failed_capability_probe(
                 cli_family,
-                None,
+                /*cli_version*/ None,
                 Some(resolved_command),
                 command_args,
                 failure,
@@ -554,7 +570,7 @@ fn authentication_failure_from_output(
     backend: &ExternalCommandAgentBackendConfig,
     output: &std::process::Output,
 ) -> ExternalAgentFailureDetail {
-    authentication_failure_from_output_with_signed_out(backend, output, false)
+    authentication_failure_from_output_with_signed_out(backend, output, /*signed_out*/ false)
 }
 
 fn authentication_failure_from_output_with_signed_out(
@@ -593,6 +609,25 @@ async fn run_external_agent_preflight_command(
     output_limit: ExternalAgentPreflightOutputLimit,
 ) -> Result<std::process::Output, ExternalAgentFailureDetail> {
     run_external_agent_preflight_command_with_timeout(
+        ExternalAgentPreflightCommand {
+            backend,
+            resolved_command,
+            command_args,
+            workspace,
+            args,
+            probe_name,
+            output_limit,
+        },
+        THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT,
+    )
+    .await
+}
+
+pub(super) async fn run_external_agent_preflight_command_with_timeout(
+    command_spec: ExternalAgentPreflightCommand<'_>,
+    timeout: Duration,
+) -> Result<std::process::Output, ExternalAgentFailureDetail> {
+    let ExternalAgentPreflightCommand {
         backend,
         resolved_command,
         command_args,
@@ -600,21 +635,7 @@ async fn run_external_agent_preflight_command(
         args,
         probe_name,
         output_limit,
-        THIRD_PARTY_CLI_PREFLIGHT_TIMEOUT,
-    )
-    .await
-}
-
-pub(super) async fn run_external_agent_preflight_command_with_timeout(
-    backend: &ExternalCommandAgentBackendConfig,
-    resolved_command: &Path,
-    command_args: &[String],
-    workspace: &Path,
-    args: &[&str],
-    probe_name: &str,
-    output_limit: ExternalAgentPreflightOutputLimit,
-    timeout: Duration,
-) -> Result<std::process::Output, ExternalAgentFailureDetail> {
+    } = command_spec;
     let mut command = Command::new(resolved_command);
     command
         .args(command_args)

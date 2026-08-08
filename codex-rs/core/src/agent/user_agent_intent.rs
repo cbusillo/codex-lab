@@ -84,7 +84,7 @@ impl UserAgentIntent {
                 )
             })
             .collect::<Vec<_>>();
-        aliases.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+        aliases.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
 
         let mut previous_mention: Option<AgentMention> = None;
         let mut index = 0;

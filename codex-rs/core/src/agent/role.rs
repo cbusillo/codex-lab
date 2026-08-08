@@ -232,7 +232,7 @@ pub(crate) fn dynamic_antigravity_role_config(
     selector: &str,
     effort: Option<&str>,
 ) -> Option<AgentRoleConfig> {
-    configured_antigravity_role_config(config, selector, None, effort)
+    configured_antigravity_role_config(config, selector, /*model_override*/ None, effort)
 }
 
 fn configured_antigravity_role_config(
@@ -350,7 +350,7 @@ pub(crate) fn install_external_role_defaults(
 }
 
 pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
-    built_in::external_agent_role_config_with_override(role_name, None)
+    built_in::external_agent_role_config_with_override(role_name, /*enabled_override*/ None)
 }
 
 /// Resolves an external-command backend regardless of selector enablement.

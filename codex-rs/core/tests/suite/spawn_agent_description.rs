@@ -275,13 +275,10 @@ async fn configured_agent_roles_expose_spawn_agent_type() -> Result<()> {
 
     test.submit_turn("hello").await?;
 
-    assert_eq!(
-        spawn_agent_exposes_agent_type(
-            &response.single_request().body_json(),
-            MULTI_AGENT_V2_NAMESPACE
-        ),
-        true
-    );
+    assert!(spawn_agent_exposes_agent_type(
+        &response.single_request().body_json(),
+        MULTI_AGENT_V2_NAMESPACE
+    ));
     Ok(())
 }
 

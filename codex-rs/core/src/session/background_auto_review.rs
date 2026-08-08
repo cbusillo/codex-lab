@@ -48,6 +48,16 @@ const BACKGROUND_AUTO_REVIEW_LOCK_RETRY_INTERVAL: Duration = Duration::from_mill
 const MANUAL_AUTO_REVIEW_RECOVERY_GRACE_SECS: i64 = 24 * 60 * 60;
 const BACKGROUND_AUTO_REVIEW_CONTROL_CANCEL_REASON: &str = "background_auto_review_control";
 
+struct DetachedBackgroundAutoReviewStart {
+    turn_context: Arc<TurnContext>,
+    generation: u64,
+    fingerprint: String,
+    persistence: ReviewPersistenceContext,
+    turn_diff: String,
+    coordination: ReviewCoordination,
+    review_lock_guard: ReviewLockGuard,
+}
+
 impl Session {
     pub(crate) async fn record_background_auto_review_turn_start(
         self: &Arc<Self>,
@@ -322,15 +332,15 @@ impl Session {
                 debug!("background auto review debounce superseded");
                 return;
             }
-            sess.start_detached_background_auto_review(
+            sess.start_detached_background_auto_review(DetachedBackgroundAutoReviewStart {
                 turn_context,
-                schedule.generation,
-                schedule.fingerprint,
+                generation: schedule.generation,
+                fingerprint: schedule.fingerprint,
                 persistence,
                 turn_diff,
                 coordination,
                 review_lock_guard,
-            )
+            })
             .await;
         });
     }
@@ -349,14 +359,17 @@ impl Session {
 
     async fn start_detached_background_auto_review(
         self: &Arc<Self>,
-        turn_context: Arc<TurnContext>,
-        generation: u64,
-        fingerprint: String,
-        persistence: ReviewPersistenceContext,
-        turn_diff: String,
-        coordination: ReviewCoordination,
-        review_lock_guard: ReviewLockGuard,
+        start: DetachedBackgroundAutoReviewStart,
     ) {
+        let DetachedBackgroundAutoReviewStart {
+            turn_context,
+            generation,
+            fingerprint,
+            persistence,
+            turn_diff,
+            coordination,
+            review_lock_guard,
+        } = start;
         if self.input_queue.has_trigger_turn_mailbox_items().await
             || self.active_turn.lock().await.is_some()
         {

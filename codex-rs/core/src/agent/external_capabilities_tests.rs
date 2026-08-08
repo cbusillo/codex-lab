@@ -13,7 +13,7 @@ fn claude_capabilities_use_current_catalog_and_mark_fable_explicit() {
     let capabilities = claude_capabilities(
         Some("2.1.220 (Claude Code)".to_string()),
         b"--model <model>\n--effort <level>\n",
-        false,
+        /*help_truncated*/ false,
     );
 
     assert!(capabilities.supports_model_selection);
@@ -35,9 +35,9 @@ fn antigravity_capabilities_produce_provider_qualified_selectors() {
     let capabilities = antigravity_capabilities(
         Some("1.1.9".to_string()),
         b"gemini-3.6-flash-high\ngemini-3.1-pro-low\n",
-        false,
+        /*models_truncated*/ false,
         b"--model Model\n--effort low|medium|high\n",
-        false,
+        /*help_truncated*/ false,
     );
 
     assert_eq!(
@@ -64,15 +64,26 @@ fn antigravity_capabilities_produce_provider_qualified_selectors() {
 
 #[test]
 fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
-    let malformed = antigravity_capabilities(None, b"Gemini 3.1 Pro\n", false, b"--model\n", false);
+    let malformed = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"Gemini 3.1 Pro\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
     assert_eq!(
         malformed.failure.as_ref().map(|failure| failure.kind),
         Some(ExternalAgentFailureKind::MalformedOutput)
     );
     assert!(malformed.models.is_empty());
 
-    let leading_dash =
-        antigravity_capabilities(None, b"--dangerous-flag\n", false, b"--model\n", false);
+    let leading_dash = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"--dangerous-flag\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
     assert_eq!(
         leading_dash.failure.as_ref().map(|failure| failure.kind),
         Some(ExternalAgentFailureKind::MalformedOutput)
@@ -83,8 +94,13 @@ fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
         .map(|index| format!("gemini-test-{index}"))
         .collect::<Vec<_>>()
         .join("\n");
-    let oversized =
-        antigravity_capabilities(None, oversized.as_bytes(), false, b"--model\n", false);
+    let oversized = antigravity_capabilities(
+        /*cli_version*/ None,
+        oversized.as_bytes(),
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
     assert_eq!(
         oversized.failure.as_ref().map(|failure| failure.kind),
         Some(ExternalAgentFailureKind::MalformedOutput)
@@ -97,9 +113,9 @@ fn explicit_model_and_effort_requests_are_validated() {
     let capabilities = antigravity_capabilities(
         Some("1.1.9".to_string()),
         b"gemini-3.6-flash-high\n",
-        false,
+        /*models_truncated*/ false,
         b"--model Model\n--effort low|medium|high\n",
-        false,
+        /*help_truncated*/ false,
     );
 
     validate_requested_capabilities(
@@ -144,9 +160,9 @@ fn capability_cache_only_reuses_successful_reports() {
     let capabilities = antigravity_capabilities(
         Some("1.1.9".to_string()),
         b"gemini-3.6-flash-high\n",
-        false,
+        /*models_truncated*/ false,
         b"--model\n--effort\n",
-        false,
+        /*help_truncated*/ false,
     );
 
     cache_capabilities(key.clone(), &capabilities);
@@ -171,7 +187,7 @@ fn discovery_cache_reuses_failures_during_backoff() {
     let key = ExternalAgentDiscoveryCacheKey::new(&backend, Path::new("/tmp/workspace"));
     let failed = ExternalAgentCapabilities::conservative(
         "antigravity",
-        None,
+        /*cli_version*/ None,
         ExternalAgentFailureDetail::new(ExternalAgentFailureKind::CommandMissing, "missing agy"),
     );
 

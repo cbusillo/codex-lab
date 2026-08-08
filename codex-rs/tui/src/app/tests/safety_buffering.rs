@@ -28,6 +28,10 @@ const RETRY_GOAL: &str = "Preserve this goal across the retry";
 const ASSISTANT_REPLY: &str = "done";
 /// Trailing cell every replayed turn renders once automatic validation reports in.
 const VALIDATION_CELL: &str = "Automatic Validation";
+const SKILLS_BUDGET_WARNING_PREFIXES: [&str; 2] = [
+    "Skill descriptions were shortened to fit the",
+    "Exceeded skills context budget",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SafetyRetryScenario {
@@ -702,9 +706,15 @@ goals = true
         drain_active_thread_events(&mut app);
         while let Ok(event) = app_event_rx.try_recv() {
             if let AppEvent::InsertHistoryCell(cell) = event {
-                replayed_history.push_str(&lines_to_single_string(
-                    &cell.transcript_lines(/*width*/ 80),
-                ));
+                let rendered_cell = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
+                // This snapshot covers safety-retry lineage. User- and host-scoped skill catalogs
+                // can independently emit a startup warning, so exclude that unrelated cell.
+                if !SKILLS_BUDGET_WARNING_PREFIXES
+                    .iter()
+                    .any(|prefix| rendered_cell.contains(prefix))
+                {
+                    replayed_history.push_str(&rendered_cell);
+                }
             }
         }
         if fork_replay_is_complete(&replayed_history, scenario, committed_steer) {

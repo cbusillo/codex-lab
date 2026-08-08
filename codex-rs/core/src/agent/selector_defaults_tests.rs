@@ -24,7 +24,10 @@ async fn bare_antigravity_without_defaults_stays_provider_default() {
         resolve_effective_selector(&config, "antigravity"),
         "antigravity"
     );
-    assert_eq!(resolve_effort(&config, "antigravity", None), None);
+    assert_eq!(
+        resolve_effort(&config, "antigravity", /*explicit_effort*/ None),
+        None
+    );
 }
 
 #[tokio::test]
@@ -44,7 +47,7 @@ async fn configured_antigravity_model_promotes_bare_selector() {
         "antigravity-gemini-3.1-pro"
     );
     assert_eq!(
-        resolve_effort(&config, "antigravity", None).as_deref(),
+        resolve_effort(&config, "antigravity", /*explicit_effort*/ None).as_deref(),
         Some("high")
     );
     assert_eq!(

@@ -6,6 +6,8 @@ use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
 use crate::agent::external_diagnostics::classify_provider_failure_text;
 use crate::agent::external_diagnostics::redact_external_agent_status;
 #[cfg(all(test, unix))]
+use crate::agent::external_preflight::ExternalAgentPreflightCommand;
+#[cfg(all(test, unix))]
 use crate::agent::external_preflight::ExternalAgentPreflightOutputLimit;
 use crate::agent::external_preflight::antigravity_launch_dir;
 #[cfg(test)]

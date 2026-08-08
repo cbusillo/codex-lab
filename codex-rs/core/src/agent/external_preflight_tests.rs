@@ -107,13 +107,15 @@ async fn timed_out_preflight_reports_the_probe_and_command() {
         .expect("hanging provider should be executable");
 
     let error = run_external_agent_preflight_command_with_timeout(
-        &ExternalCommandAgentBackendConfig::default(),
-        &command_path,
-        &[],
-        temp_dir.path(),
-        &["auth", "status"],
-        "authentication",
-        ExternalAgentPreflightOutputLimit::Diagnostic,
+        ExternalAgentPreflightCommand {
+            backend: &ExternalCommandAgentBackendConfig::default(),
+            resolved_command: &command_path,
+            command_args: &[],
+            workspace: temp_dir.path(),
+            args: &["auth", "status"],
+            probe_name: "authentication",
+            output_limit: ExternalAgentPreflightOutputLimit::Diagnostic,
+        },
         Duration::from_millis(200),
     )
     .await

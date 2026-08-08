@@ -109,9 +109,13 @@ async fn list_preview_threads(
             ));
         }
         if items.len() == limit {
-            let archived =
-                super::list_threads::list_threads(store, list_params(1, None, /*archived*/ true))
-                    .await?;
+            let archived = super::list_threads::list_threads(
+                store,
+                list_params(
+                    /*page_size*/ 1, /*cursor*/ None, /*archived*/ true,
+                ),
+            )
+            .await?;
             let next_cursor = if archived.items.is_empty() {
                 None
             } else {
@@ -181,8 +185,8 @@ async fn classify_thread(
             thread.thread_id,
             collection,
             RetentionReason::RolloutPathUnavailable,
-            0,
-            None,
+            /*current_storage_bytes*/ 0,
+            /*recovery_path*/ None,
         );
     };
     let Some(actual_path) = codex_rollout::existing_rollout_path(plain_path.as_path()).await else {
@@ -190,7 +194,7 @@ async fn classify_thread(
             thread.thread_id,
             collection,
             RetentionReason::RolloutPathUnavailable,
-            0,
+            /*current_storage_bytes*/ 0,
             Some(plain_path),
         );
     };
@@ -201,7 +205,7 @@ async fn classify_thread(
                 thread.thread_id,
                 collection,
                 RetentionReason::RolloutPathUnavailable,
-                0,
+                /*current_storage_bytes*/ 0,
                 Some(actual_path),
             );
         }
