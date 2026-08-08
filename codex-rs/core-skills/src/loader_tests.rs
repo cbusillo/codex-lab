@@ -2746,6 +2746,13 @@ async fn deduplicates_by_name_preferring_higher_priority_scope() {
     assert_eq!(outcome.skills[0].description, "from repo");
     assert_eq!(outcome.skills[0].path_to_skills_md, normalized(&repo_path));
     assert_eq!(outcome.skills[0].scope, SkillScope::Repo);
+    assert_eq!(outcome.path_addressable_skills().len(), 4);
+    assert!(
+        outcome
+            .path_addressable_skills()
+            .iter()
+            .any(|skill| skill.description == "from system")
+    );
 }
 
 #[tokio::test]

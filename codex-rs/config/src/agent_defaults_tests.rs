@@ -180,8 +180,9 @@ fn model_guide_describes_antigravity_as_google_family_lane() {
     );
     assert!(guide.contains("release/workflow, infrastructure, security, or product-risk"));
     assert!(guide.contains("unless there is a clear reason to skip it"));
-    assert!(guide.contains("AGY uses its configured model"));
-    assert!(guide.contains("not per-run Gemini Pro/Flash flags"));
+    assert!(guide.contains("discovers installed AGY models"));
+    assert!(guide.contains("provider-qualified selectors"));
+    assert!(guide.contains("explicit per-run model and effort routing"));
 }
 
 #[test]
@@ -339,5 +340,5 @@ fn custom_model_guide_lines_override_and_extend_builtins() {
 
     assert!(markdown.contains("- `google`: Custom Google lane."));
     assert!(markdown.contains("- `local-specialist`: Private local agent."));
-    assert!(!markdown.contains("- `antigravity`: Google/Gemini-family agent via Antigravity CLI; use for Google perspective after consumer Gemini CLI retirement. AGY uses its configured model, not per-run Gemini Pro/Flash flags."));
+    assert!(!markdown.contains("- `antigravity`: Google/Gemini-family agent"));
 }

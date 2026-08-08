@@ -227,7 +227,8 @@ impl SkillsService {
         .await;
         let outcome =
             crate::filter_skill_load_outcome_for_product(outcome, self.restriction_product);
-        let disabled_paths = resolve_disabled_skill_paths(&outcome.skills, skill_config_rules);
+        let disabled_paths =
+            resolve_disabled_skill_paths(outcome.path_addressable_skills(), skill_config_rules);
         finalize_skill_outcome(outcome, disabled_paths)
     }
 

@@ -188,17 +188,20 @@ fn world_state_budget_reserves_complete_skills_fragment_overhead() {
                 entry(
                     &format!("skill-{index:03}"),
                     &"description ".repeat(200),
-                    None,
+                    /*short_description*/ None,
                 )
             })
             .collect(),
         warnings: Vec::new(),
     };
-    let budget = world_state_skill_metadata_budget(Some(258_400), true);
+    let budget = world_state_skill_metadata_budget(
+        Some(258_400),
+        /*include_skills_usage_instructions*/ true,
+    );
     let fragment =
         render_available_skills(&catalog, SkillCatalogRenderPolicy::CoreCompatible, budget)
             .expect("skills should render")
-            .into_fragment(true)
+            .into_fragment(/*include_skills_usage_instructions*/ true)
             .expect("skills fragment should render");
     let rendered = fragment.render();
 
@@ -213,15 +216,24 @@ fn world_state_budget_reserves_complete_skills_fragment_overhead() {
 fn omitted_host_skills_include_a_model_visible_lookup_mechanism() {
     let catalog = SkillCatalog {
         entries: (0..1_000)
-            .map(|index| entry(&format!("skill-{index:04}"), "description", None))
+            .map(|index| {
+                entry(
+                    &format!("skill-{index:04}"),
+                    "description",
+                    /*short_description*/ None,
+                )
+            })
             .collect(),
         warnings: Vec::new(),
     };
-    let budget = world_state_skill_metadata_budget(Some(258_400), false);
+    let budget = world_state_skill_metadata_budget(
+        Some(258_400),
+        /*include_skills_usage_instructions*/ false,
+    );
     let rendered =
         render_available_skills(&catalog, SkillCatalogRenderPolicy::CoreCompatible, budget)
             .expect("skills should render")
-            .into_fragment(false)
+            .into_fragment(/*include_skills_usage_instructions*/ false)
             .expect("skills fragment should render")
             .render();
 

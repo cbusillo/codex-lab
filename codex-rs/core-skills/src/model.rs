@@ -24,6 +24,7 @@ pub struct SkillError {
 #[derive(Debug, Clone, Default)]
 pub struct SkillLoadOutcome {
     pub skills: Vec<SkillMetadata>,
+    pub(crate) path_addressable_skills: Vec<SkillMetadata>,
     pub errors: Vec<SkillError>,
     pub disabled_paths: HashSet<AbsolutePathBuf>,
     pub(crate) skill_roots: Vec<AbsolutePathBuf>,
@@ -54,6 +55,20 @@ impl SkillLoadOutcome {
         self.skills
             .iter()
             .map(|skill| (skill, self.is_skill_enabled(skill)))
+    }
+
+    /// Returns every path-unique skill, including entries shadowed by a higher-priority skill with
+    /// the same name. Shadowed entries remain available only for exact linked-path selection.
+    pub fn path_addressable_skills_with_enabled(
+        &self,
+    ) -> impl Iterator<Item = (&SkillMetadata, bool)> {
+        self.path_addressable_skills
+            .iter()
+            .map(|skill| (skill, self.is_skill_enabled(skill)))
+    }
+
+    pub fn path_addressable_skills(&self) -> &[SkillMetadata] {
+        &self.path_addressable_skills
     }
 
     /// Returns the discovery root that supplied a loaded skill path.
@@ -138,8 +153,11 @@ pub fn filter_skill_load_outcome_for_product(
     outcome
         .skills
         .retain(|skill| skill.matches_product_restriction_for_product(restriction_product));
+    outcome
+        .path_addressable_skills
+        .retain(|skill| skill.matches_product_restriction_for_product(restriction_product));
     let retained_paths: HashSet<AbsolutePathBuf> = outcome
-        .skills
+        .path_addressable_skills
         .iter()
         .map(|skill| skill.path_to_skills_md.clone())
         .collect();

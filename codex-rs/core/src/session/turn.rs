@@ -860,6 +860,7 @@ async fn required_mcp_servers_for_input(
     let mentioned_skills = collect_explicit_skill_mentions(
         user_input,
         &skills_outcome.skills,
+        skills_outcome.path_addressable_skills(),
         &skills_outcome.disabled_paths,
         &connector_slug_counts,
     );
@@ -938,6 +939,7 @@ async fn build_skills_and_plugins(
     let mentioned_skills = collect_explicit_skill_mentions(
         user_input,
         &skills_outcome.skills,
+        skills_outcome.path_addressable_skills(),
         &skills_outcome.disabled_paths,
         &connector_slug_counts,
     );
