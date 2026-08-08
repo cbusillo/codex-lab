@@ -690,6 +690,16 @@ impl Match for ResponseMock {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ResponseBodyInvariantMatcher;
+
+impl Match for ResponseBodyInvariantMatcher {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        validate_request_body_invariants(request);
+        true
+    }
+}
+
 /// Build an SSE stream body from a list of JSON events.
 pub fn sse(events: Vec<Value>) -> String {
     use std::fmt::Write as _;
@@ -1055,10 +1065,12 @@ where
 
 fn base_mock() -> (MockBuilder, ResponseMock) {
     let response_mock = ResponseMock::new();
-    let mock = Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .and(response_mock.clone());
+    let mock = responses_mock().and(response_mock.clone());
     (mock, response_mock)
+}
+
+fn responses_mock() -> MockBuilder {
+    Mock::given(method("POST")).and(path_regex(".*/responses$"))
 }
 
 fn compact_mock() -> (MockBuilder, ResponseMock) {
@@ -1083,6 +1095,29 @@ where
 {
     let (mock, response_mock) = base_mock();
     mock.and(matcher)
+        .respond_with(sse_response(body))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    response_mock
+}
+
+pub async fn mount_sse_once_match_recording_matches<M>(
+    server: &MockServer,
+    matcher: M,
+    body: String,
+) -> ResponseMock
+where
+    M: wiremock::Match + Send + Sync + 'static,
+{
+    let response_mock = ResponseMock::new();
+    // Apply the request-specific matcher before recording so the handle only exposes requests
+    // that this mock actually served. Keep invariant validation ahead of the custom matcher so
+    // rejected requests receive the same safety checks as the standard response mocks.
+    responses_mock()
+        .and(ResponseBodyInvariantMatcher)
+        .and(matcher)
+        .and(response_mock.clone())
         .respond_with(sse_response(body))
         .up_to_n_times(1)
         .mount(server)
