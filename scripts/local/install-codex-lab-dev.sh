@@ -192,7 +192,9 @@ for argument in "\$@"; do
 done
 
 EVIDENCE_CHECKOUT=''
+evidence_state='git-missing'
 if command -v git >/dev/null 2>&1; then
+  evidence_state='checkout-unavailable'
   if [ -n "\$evidence_argument" ]; then
     same_repository_checkout "\$evidence_argument" || true
   fi
@@ -202,11 +204,16 @@ if command -v git >/dev/null 2>&1; then
   if [ -z "\$EVIDENCE_CHECKOUT" ]; then
     same_repository_checkout "\$SOURCE_CHECKOUT" || true
   fi
+  if [ -n "\$EVIDENCE_CHECKOUT" ]; then
+    evidence_state='inspect'
+  elif [ ! -d "\$SOURCE_CHECKOUT" ]; then
+    evidence_state='source-checkout-missing'
+  fi
 fi
 
 printf 'Pinned Codex Lab candidate: %s (%s)\n' "\$CANDIDATE_COMMIT" "\$CANDIDATE_DIRTY_STATE" >&2
 
-if [ -n "\$EVIDENCE_CHECKOUT" ]; then
+if [ "\$evidence_state" = inspect ]; then
   evidence_commit="\$(git -C "\$EVIDENCE_CHECKOUT" rev-parse --verify HEAD 2>/dev/null || true)"
   evidence_dirty_state=unavailable
   if evidence_status="\$(git -C "\$EVIDENCE_CHECKOUT" status --porcelain --untracked-files=no 2>/dev/null)"; then
@@ -216,29 +223,74 @@ if [ -n "\$EVIDENCE_CHECKOUT" ]; then
     fi
   fi
 
-  relationship=''
-  if [ -n "\$evidence_commit" ] && [ "\$evidence_commit" = "\$CANDIDATE_COMMIT" ]; then
-    if [ "\$evidence_dirty_state" = unavailable ]; then
-      relationship=''
-    elif [ "\$evidence_dirty_state" != "\$CANDIDATE_DIRTY_STATE" ]; then
-      relationship='matches the local source commit, but has different dirty provenance from'
-    fi
-  elif [ -n "\$evidence_commit" ] && git -C "\$EVIDENCE_CHECKOUT" cat-file -e "\$CANDIDATE_COMMIT^{commit}" 2>/dev/null; then
+  installer="\$EVIDENCE_CHECKOUT/scripts/local/install-codex-lab-dev.sh"
+  if [ -z "\$evidence_commit" ] || [ "\$evidence_dirty_state" = unavailable ]; then
+    evidence_state='unreadable'
+  elif [ "\$evidence_dirty_state" = dirty ]; then
+    evidence_state='dirty'
+  elif [ "\$evidence_commit" = "\$CANDIDATE_COMMIT" ]; then
+    evidence_state='current'
+  elif git -C "\$EVIDENCE_CHECKOUT" cat-file -e "\$CANDIDATE_COMMIT^{commit}" 2>/dev/null; then
     if git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$CANDIDATE_COMMIT" "\$evidence_commit" 2>/dev/null; then
-      relationship='is older than'
+      if [ ! -e "\$installer" ]; then
+        evidence_state='installer-missing'
+      elif [ ! -x "\$installer" ]; then
+        evidence_state='installer-not-executable'
+      else
+        evidence_state='source-newer'
+      fi
     elif git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$evidence_commit" "\$CANDIDATE_COMMIT" 2>/dev/null; then
-      relationship='is newer than'
+      evidence_state='candidate-newer'
     else
-      relationship='has diverged from'
+      evidence_state='diverged'
     fi
+  else
+    evidence_state='incomparable'
   fi
+fi
 
-  if [ -n "\$relationship" ]; then
-    refresh_command="\$(shell_quote "\$EVIDENCE_CHECKOUT/scripts/local/install-codex-lab-dev.sh") --bin-dir \$(shell_quote "\$INSTALL_BIN_DIR") --codex-lab-home \$(shell_quote "\$DEFAULT_CODEX_LAB_HOME") --profile \$(shell_quote "\$INSTALL_PROFILE")"
-    CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) \$relationship local source \$evidence_commit (\$evidence_dirty_state) at \$EVIDENCE_CHECKOUT. Refresh: \$refresh_command"
-    export CODEX_LAB_PINNED_CANDIDATE_WARNING
-    printf 'warning: %s\n' "\$CODEX_LAB_PINNED_CANDIDATE_WARNING" >&2
-  fi
+case "\$evidence_state" in
+current)
+  ;;
+source-newer)
+  refresh_command="\$(shell_quote "\$installer") --bin-dir \$(shell_quote "\$INSTALL_BIN_DIR") --codex-lab-home \$(shell_quote "\$DEFAULT_CODEX_LAB_HOME") --profile \$(shell_quote "\$INSTALL_PROFILE")"
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT. Refresh command: \$refresh_command"
+  ;;
+candidate-newer)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is ahead of clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT. Reinstalling from this checkout would downgrade the candidate, so no command is provided. Select a clean checkout at the candidate commit or newer."
+  ;;
+dirty)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source \$evidence_commit is dirty at \$EVIDENCE_CHECKOUT; candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned. Commit or stash the changes, or select a clean worktree, before reinstalling."
+  ;;
+diverged)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) and clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT have diverged. Select a clean checkout from the intended history before reinstalling; no replacement command is provided."
+  ;;
+incomparable)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) cannot be compared with clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT. Select a clean checkout containing the intended candidate history before reinstalling."
+  ;;
+installer-missing)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but that checkout does not contain scripts/local/install-codex-lab-dev.sh. Use a clean intended checkout with the supported installer; no command is provided."
+  ;;
+installer-not-executable)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but scripts/local/install-codex-lab-dev.sh is not executable there. Restore an executable supported installer in a clean checkout; no command is provided."
+  ;;
+unreadable)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source evidence at \$EVIDENCE_CHECKOUT is not stageable because its commit or clean status could not be read. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; repair Git metadata or select a clean worktree before reinstalling."
+  ;;
+git-missing)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source freshness is unavailable because Git is not on PATH. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; install Git and launch from a clean intended checkout to compare provenance."
+  ;;
+source-checkout-missing)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="The recorded source checkout is unavailable at \$SOURCE_CHECKOUT. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; launch from a clean checkout of the same repository to compare provenance."
+  ;;
+checkout-unavailable)
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="No same-repository source checkout is available for provenance comparison. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; launch from a clean checkout of the intended repository."
+  ;;
+esac
+
+if [ -n "\${CODEX_LAB_PINNED_CANDIDATE_WARNING:-}" ]; then
+  export CODEX_LAB_PINNED_CANDIDATE_WARNING
+  printf 'warning: %s\n' "\$CODEX_LAB_PINNED_CANDIDATE_WARNING" >&2
 fi
 
 if [ ! -x "\$CANDIDATE" ]; then

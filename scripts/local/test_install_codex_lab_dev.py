@@ -23,6 +23,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO_ROOT / relative_path, destination)
         (checkout / "codex-rs").mkdir()
+        (checkout / "codex-rs" / ".keep").touch()
         subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
         subprocess.run(
             ["git", "config", "user.name", "Codex Lab Test"],
@@ -133,6 +134,49 @@ class InstallCodexLabDevTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         return checkout, fake_cargo, lab_home, environment, result
 
+    def commit_source_state(self, checkout: Path, state: str) -> str:
+        (checkout / "source-state.txt").write_text(f"{state}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "source-state.txt"], cwd=checkout, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", state], cwd=checkout, check=True)
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+        ).strip()
+
+    def create_evidence_worktree(self, root: Path, checkout: Path) -> Path:
+        evidence = root / "newer's evidence"
+        subprocess.run(["git", "branch", "evidence"], cwd=checkout, check=True)
+        subprocess.run(
+            ["git", "worktree", "add", "-q", str(evidence), "evidence"],
+            cwd=checkout,
+            check=True,
+        )
+        return evidence
+
+    def launch(
+        self,
+        launcher: Path,
+        cwd: Path,
+        environment: dict[str, str],
+        *arguments: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(launcher), *arguments],
+            cwd=cwd,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def refresh_command(self, launch: subprocess.CompletedProcess[str]) -> str:
+        return launch.stderr.split("Refresh command: ", maxsplit=1)[1].strip()
+
+    def assert_no_refresh_command(
+        self, launch: subprocess.CompletedProcess[str]
+    ) -> None:
+        self.assertNotIn("Refresh command:", launch.stderr)
+        self.assertNotIn("install-codex-lab-dev.sh' --bin-dir", launch.stderr)
+
     def test_installs_launcher_pinned_to_staged_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
@@ -187,68 +231,65 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn("candidate=", launch.stdout)
             self.assertIn("Pinned Codex Lab candidate:", launch.stderr)
-            self.assertNotIn("warning:", launch.stderr)
+            self.assertIn("recorded source checkout is unavailable", launch.stderr)
+            self.assertNotIn("Refresh command:", launch.stderr)
             self.assertTrue(runtime_home.is_dir())
             self.assertEqual(
                 (root / "cargo.log").read_text(encoding="utf-8"), "build\n"
             )
-            candidate = Path(launch.stdout.split("candidate=", maxsplit=1)[1].strip())
+            candidate = Path(
+                launch.stdout.split("candidate=", maxsplit=1)[1].splitlines()[0]
+            )
             companion = candidate.parent / "codex-code-mode-host"
             self.assertTrue(companion.is_file())
             self.assertFalse(companion.stat().st_mode & 0o222)
 
-    def test_warns_when_explicit_source_checkout_is_newer(self) -> None:
+    def test_executes_printed_refresh_for_clean_newer_source_and_clears_warning(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             checkout, _, _, environment, _ = self.install_fake_candidate(root)
             launcher = root / "bin with spaces" / "codex-lab"
-            evidence = root / "newer's evidence"
-            subprocess.run(["git", "branch", "evidence"], cwd=checkout, check=True)
-            subprocess.run(
-                ["git", "worktree", "add", "-q", str(evidence), "evidence"],
-                cwd=checkout,
-                check=True,
-            )
-            (evidence / "source-state.txt").write_text("newer\n", encoding="utf-8")
-            subprocess.run(["git", "add", "source-state.txt"], cwd=evidence, check=True)
-            subprocess.run(
-                ["git", "commit", "-q", "-m", "newer"], cwd=evidence, check=True
-            )
-            newer_commit = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=evidence, text=True
-            ).strip()
+            evidence = self.create_evidence_worktree(root, checkout)
+            newer_commit = self.commit_source_state(evidence, "newer")
+            relative_evidence = os.path.relpath(evidence, root)
 
-            launch = subprocess.run(
-                [str(launcher), "-C", str(evidence)],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            launch = self.launch(launcher, root, environment, "-C", relative_evidence)
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn(" is older than local source ", launch.stderr)
+            self.assertIn(" is older than clean local source ", launch.stderr)
             self.assertIn(newer_commit, launch.stderr)
-            refresh_command = launch.stderr.split("Refresh: ", maxsplit=1)[1].strip()
+            refresh_command = self.refresh_command(launch)
             self.assertIn("newer'\"'\"'s evidence", refresh_command)
-            refresh_syntax = subprocess.run(
-                ["/bin/sh", "-n", "-c", refresh_command],
+            refreshed_environment = {
+                **environment,
+                "FAKE_BINARY_COMMIT": newer_commit,
+            }
+            refresh = subprocess.run(
+                ["/bin/sh", "-c", refresh_command],
+                cwd=root,
+                env=refreshed_environment,
                 capture_output=True,
                 text=True,
                 check=False,
             )
-            self.assertEqual(refresh_syntax.returncode, 0, refresh_syntax.stderr)
+            self.assertEqual(refresh.returncode, 0, refresh.stderr)
             self.assertIn("--profile 'dev'", launch.stderr)
             self.assertIn("startup_warning=Pinned Codex Lab candidate", launch.stdout)
 
-            passthrough = subprocess.run(
-                [str(launcher), "--", "-C", str(evidence)],
-                cwd=root,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
+            current = self.launch(
+                launcher,
+                root,
+                refreshed_environment,
+                f"--cd={relative_evidence}",
+            )
+            self.assertEqual(current.returncode, 0, current.stderr)
+            self.assertIn(f"Pinned Codex Lab candidate: {newer_commit}", current.stderr)
+            self.assertNotIn("warning:", current.stderr)
+
+            passthrough = self.launch(
+                launcher, root, refreshed_environment, "--", "-C", str(checkout)
             )
             self.assertEqual(passthrough.returncode, 0, passthrough.stderr)
             self.assertNotIn("warning:", passthrough.stderr)
@@ -277,8 +318,10 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn(" is newer than local source ", launch.stderr)
+            self.assertIn(" is ahead of clean local source ", launch.stderr)
             self.assertIn(older_commit, launch.stderr)
+            self.assertIn("would downgrade the candidate", launch.stderr)
+            self.assert_no_refresh_command(launch)
 
     def test_warns_when_source_checkout_diverged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -308,7 +351,11 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn(" has diverged from local source ", launch.stderr)
+            self.assertIn("have diverged", launch.stderr)
+            self.assertIn(
+                "Select a clean checkout from the intended history", launch.stderr
+            )
+            self.assert_no_refresh_command(launch)
 
     def test_warns_when_matching_source_checkout_is_dirty(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -327,11 +374,164 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn(
-                "matches the local source commit, but has different dirty provenance from",
-                launch.stderr,
+            self.assertIn("Local source", launch.stderr)
+            self.assertIn("is dirty", launch.stderr)
+            self.assertIn("Commit or stash the changes", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_dirty_source_at_different_commit_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            newer_commit = self.commit_source_state(checkout, "newer")
+            (checkout / "source-state.txt").write_text("dirty\n", encoding="utf-8")
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(f"Local source {newer_commit} is dirty", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_incomparable_rewritten_history_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            candidate_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=checkout, text=True
+            ).strip()
+            subprocess.run(
+                ["git", "checkout", "-q", "--orphan", "rewritten"],
+                cwd=checkout,
+                check=True,
             )
-            self.assertIn("(dirty)", launch.stderr)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "rewritten"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(["git", "branch", "-D", "master"], cwd=checkout, check=True)
+            subprocess.run(
+                ["git", "reflog", "expire", "--expire=now", "--all"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(["git", "gc", "--prune=now"], cwd=checkout, check=True)
+            missing = subprocess.run(
+                ["git", "cat-file", "-e", f"{candidate_commit}^{{commit}}"],
+                cwd=checkout,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("cannot be compared with clean local source", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_unreadable_unborn_head_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            subprocess.run(
+                ["git", "checkout", "-q", "--orphan", "unborn"],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("commit or clean status could not be read", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_missing_installer_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            (checkout / "scripts/local/install-codex-lab-dev.sh").unlink()
+            subprocess.run(
+                ["git", "add", "scripts/local/install-codex-lab-dev.sh"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "remove installer"],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn(
+                "does not contain scripts/local/install-codex-lab-dev.sh", launch.stderr
+            )
+            self.assert_no_refresh_command(launch)
+
+    def test_non_executable_installer_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            installer = checkout / "scripts/local/install-codex-lab-dev.sh"
+            installer.chmod(0o644)
+            subprocess.run(
+                ["git", "add", "scripts/local/install-codex-lab-dev.sh"],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "disable installer"],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("is not executable there", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_launches_without_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            _, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            runtime_bin = root / "runtime bin"
+            runtime_bin.mkdir()
+            for command in ("mkdir", "python3"):
+                executable = shutil.which(command)
+                self.assertIsNotNone(executable)
+                (runtime_bin / command).symlink_to(executable)
+
+            launch = self.launch(
+                launcher,
+                root,
+                {**environment, "PATH": str(runtime_bin)},
+            )
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("Git is not on PATH", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
+    def test_launches_when_recorded_source_checkout_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            shutil.rmtree(checkout)
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("recorded source checkout is unavailable", launch.stderr)
+            self.assert_no_refresh_command(launch)
 
     def test_ignores_unrelated_checkout_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
