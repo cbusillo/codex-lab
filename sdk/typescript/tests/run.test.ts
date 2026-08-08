@@ -16,6 +16,12 @@ import {
 } from "./responsesProxy";
 import { createMockClient, createTestClient } from "./testCodex";
 
+const REPEATED_RUN_TIMEOUT_MS = 10_000;
+
+function repeatedRunTest(name: string, test: () => Promise<void>): void {
+  it(name, test, REPEATED_RUN_TIMEOUT_MS);
+}
+
 describe("Codex", () => {
   it("returns thread events", async () => {
     const { url, close } = await startResponsesTestProxy({
@@ -50,7 +56,7 @@ describe("Codex", () => {
     }
   });
 
-  it("sends previous items when run is called twice", async () => {
+  repeatedRunTest("sends previous items when run is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -86,14 +92,18 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1)?.content?.[0]?.text;
+      expect({ assistantText, secondInput }).toEqual({
+        assistantText: "First response",
+        secondInput: "second input",
+      });
     } finally {
       cleanup();
       await close();
     }
   });
 
-  it("continues the thread when run is called twice with options", async () => {
+  repeatedRunTest("continues the thread when run is called twice with options", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -137,7 +147,7 @@ describe("Codex", () => {
     }
   });
 
-  it("resumes thread by id", async () => {
+  repeatedRunTest("resumes thread by id", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [

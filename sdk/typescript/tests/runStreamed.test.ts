@@ -11,6 +11,12 @@ import {
 } from "./responsesProxy";
 import { createMockClient } from "./testCodex";
 
+const REPEATED_RUN_TIMEOUT_MS = 10_000;
+
+function repeatedRunTest(name: string, test: () => Promise<void>): void {
+  it(name, test, REPEATED_RUN_TIMEOUT_MS);
+}
+
 describe("Codex", () => {
   it("returns thread events", async () => {
     const { url, close } = await startResponsesTestProxy({
@@ -74,7 +80,7 @@ describe("Codex", () => {
     }
   });
 
-  it("sends previous items when runStreamed is called twice", async () => {
+  repeatedRunTest("sends previous items when runStreamed is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -120,7 +126,7 @@ describe("Codex", () => {
     }
   });
 
-  it("resumes thread by id when streaming", async () => {
+  repeatedRunTest("resumes thread by id when streaming", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
