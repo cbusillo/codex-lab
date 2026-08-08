@@ -105,22 +105,22 @@ async fn list_preview_threads(
                 Some(encode_cursor(&PreviewCursor {
                     collection: RetentionCollection::Active,
                     inner: Some(inner),
-                })),
+                })?),
             ));
         }
         if items.len() == limit {
             let archived =
                 super::list_threads::list_threads(store, list_params(1, None, /*archived*/ true))
                     .await?;
-            return Ok((
-                items,
-                (!archived.items.is_empty()).then(|| {
-                    encode_cursor(&PreviewCursor {
-                        collection: RetentionCollection::Archived,
-                        inner: None,
-                    })
-                }),
-            ));
+            let next_cursor = if archived.items.is_empty() {
+                None
+            } else {
+                Some(encode_cursor(&PreviewCursor {
+                    collection: RetentionCollection::Archived,
+                    inner: None,
+                })?)
+            };
+            return Ok((items, next_cursor));
         }
     }
 
@@ -140,12 +140,15 @@ async fn list_preview_threads(
             .into_iter()
             .map(|thread| (RetentionCollection::Archived, thread)),
     );
-    let next_cursor = page.next_cursor.map(|inner| {
-        encode_cursor(&PreviewCursor {
-            collection: RetentionCollection::Archived,
-            inner: Some(inner),
+    let next_cursor = page
+        .next_cursor
+        .map(|inner| {
+            encode_cursor(&PreviewCursor {
+                collection: RetentionCollection::Archived,
+                inner: Some(inner),
+            })
         })
-    });
+        .transpose()?;
     Ok((items, next_cursor))
 }
 
@@ -412,16 +415,20 @@ struct PreviewCursor {
     inner: Option<String>,
 }
 
-fn encode_cursor(cursor: &PreviewCursor) -> String {
-    let encoded = serde_json::to_vec(cursor).expect("retention cursor serializes");
+fn encode_cursor(cursor: &PreviewCursor) -> ThreadStoreResult<String> {
+    let encoded = serde_json::to_vec(cursor).map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to serialize retention preview cursor: {err}"),
+    })?;
     let mut output = String::with_capacity(CURSOR_PREFIX.len() + 1 + encoded.len() * 2);
     output.push_str(CURSOR_PREFIX);
     output.push('-');
     for byte in encoded {
         use std::fmt::Write as _;
-        write!(&mut output, "{byte:02x}").expect("writing to String cannot fail");
+        write!(&mut output, "{byte:02x}").map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to encode retention preview cursor: {err}"),
+        })?;
     }
-    output
+    Ok(output)
 }
 
 fn decode_cursor(cursor: &str) -> ThreadStoreResult<PreviewCursor> {

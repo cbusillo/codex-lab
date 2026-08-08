@@ -17,14 +17,20 @@ from codex_lab_package.layout import OFFICIAL_APP_BUNDLE_IDENTIFIER
 from codex_lab_package.layout import OFFICIAL_APP_CANDIDATE_PATHS
 from codex_lab_package.layout import OFFICIAL_APP_TEAM_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_ARCHIVE_ROOT
+from codex_lab_package.engine_contract import ENGINE_CLI_ARCHIVE_PATH
+from codex_lab_package.engine_contract import CODE_MODE_HOST_ARCHIVE_PATH
+from codex_lab_package.engine_contract import CODE_MODE_HOST_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
+from codex_lab_package.engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from codex_lab_package.release_tag import release_version_from_tag
 from codex_package.version import read_workspace_version
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
+LEGACY_ENGINE_ARCHIVE_ROOT = "codex"
 PRODUCT = "codex-lab"
 CHANNEL = "lab"
 PLATFORM = "aarch64-apple-darwin"
@@ -59,7 +65,7 @@ ARTIFACTS = (
         role="engineZip",
         file_name=ENGINE_ZIP,
         archive_root=ENGINE_ARCHIVE_ROOT,
-        description="Individually signed managed engine pinned by the Codex Lab supervisor.",
+        description="Signed managed CLI and Code Mode host pinned by the Codex Lab supervisor.",
     ),
 )
 
@@ -208,10 +214,32 @@ def build_manifest(
         "generatedAt": timestamp,
         "managedEngine": {
             "artifactRole": "engineZip",
+            "companions": {
+                "codeModeHost": {
+                    "archivePath": CODE_MODE_HOST_ARCHIVE_PATH,
+                    "requiredEntitlements": list(REQUIRED_CODE_MODE_HOST_ENTITLEMENTS),
+                    "sha256": sha256_zip_member(
+                        dist_dir / ENGINE_ZIP,
+                        CODE_MODE_HOST_ARCHIVE_PATH,
+                        expected_members=(
+                            CODE_MODE_HOST_ARCHIVE_PATH,
+                            ENGINE_CLI_ARCHIVE_PATH,
+                        ),
+                    ),
+                    "signingIdentifier": CODE_MODE_HOST_SIGNING_IDENTIFIER
+                    if engine_signed
+                    else None,
+                    "teamIdentifier": ENGINE_TEAM_IDENTIFIER if engine_signed else None,
+                },
+            },
             "requiredEntitlements": list(REQUIRED_ENGINE_ENTITLEMENTS),
             "sha256": sha256_zip_member(
                 dist_dir / ENGINE_ZIP,
-                ENGINE_ARCHIVE_ROOT,
+                ENGINE_CLI_ARCHIVE_PATH,
+                expected_members=(
+                    CODE_MODE_HOST_ARCHIVE_PATH,
+                    ENGINE_CLI_ARCHIVE_PATH,
+                ),
             ),
             "signingIdentifier": ENGINE_SIGNING_IDENTIFIER if engine_signed else None,
             "sourceCommit": commit,
@@ -283,7 +311,8 @@ def validate_manifest(
     missing = sorted(required_top_level - manifest.keys())
     if missing:
         raise ValueError(f"Manifest is missing required fields: {missing}")
-    if manifest["schemaVersion"] != SCHEMA_VERSION:
+    schema_version = manifest["schemaVersion"]
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
         raise ValueError(f"Unsupported schemaVersion: {manifest['schemaVersion']}")
     if manifest["product"] != PRODUCT:
         raise ValueError(f"Unexpected product: {manifest['product']}")
@@ -306,7 +335,8 @@ def validate_manifest(
             f"Manifest artifact roles mismatch: {actual_roles} != {expected_roles}"
         )
 
-    for artifact in ARTIFACTS:
+    artifact_specs = artifacts_for_schema(schema_version)
+    for artifact in artifact_specs:
         entry = artifacts[artifact.role]
         if not isinstance(entry, dict):
             raise ValueError(f"{artifact.role} must be an object")
@@ -318,6 +348,7 @@ def validate_manifest(
         source=manifest["source"],
         release=manifest.get("release"),
         dist_dir=dist_dir,
+        schema_version=schema_version,
     )
     validate_release_download_urls(manifest.get("release"), artifacts)
 
@@ -458,6 +489,7 @@ def validate_managed_engine(
     source: object,
     release: object,
     dist_dir: Path | None,
+    schema_version: int,
 ) -> None:
     if not isinstance(managed_engine, dict):
         raise ValueError("Manifest managedEngine must be an object")
@@ -486,6 +518,15 @@ def validate_managed_engine(
     if managed_engine["requiredEntitlements"] != list(REQUIRED_ENGINE_ENTITLEMENTS):
         raise ValueError("managedEngine requiredEntitlements are invalid")
 
+    if schema_version >= 3:
+        validate_code_mode_host(
+            managed_engine.get("companions"),
+            engine_signed=engine_artifact["signed"],
+            dist_dir=dist_dir,
+        )
+    elif "companions" in managed_engine:
+        raise ValueError("schemaVersion 2 managedEngine must not include companions")
+
     if engine_artifact["signed"]:
         if managed_engine["signingIdentifier"] != ENGINE_SIGNING_IDENTIFIER:
             raise ValueError("managedEngine signingIdentifier is invalid")
@@ -504,7 +545,15 @@ def validate_managed_engine(
     if dist_dir is not None:
         actual_sha256 = sha256_zip_member(
             dist_dir / ENGINE_ZIP,
-            ENGINE_ARCHIVE_ROOT,
+            ENGINE_CLI_ARCHIVE_PATH
+            if schema_version >= 3
+            else LEGACY_ENGINE_ARCHIVE_ROOT,
+            expected_members=(
+                CODE_MODE_HOST_ARCHIVE_PATH,
+                ENGINE_CLI_ARCHIVE_PATH,
+            )
+            if schema_version >= 3
+            else (LEGACY_ENGINE_ARCHIVE_ROOT,),
         )
         if managed_engine["sha256"] != actual_sha256:
             raise ValueError("managedEngine sha256 does not match the engine archive")
@@ -541,21 +590,90 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def sha256_zip_member(path: Path, member_name: str) -> str:
+def sha256_zip_member(
+    path: Path,
+    member_name: str,
+    *,
+    expected_members: tuple[str, ...] | None = None,
+) -> str:
     with zipfile.ZipFile(path) as archive:
         members = [info for info in archive.infolist() if not info.is_dir()]
-        if len(members) != 1 or members[0].filename != member_name:
+        expected = expected_members or (member_name,)
+        if sorted(info.filename for info in members) != sorted(expected):
             raise ValueError(
-                f"Engine archive must contain exactly {member_name}: {path}"
+                f"Engine archive must contain exactly {sorted(expected)}: {path}"
             )
-        mode = (members[0].external_attr >> 16) & 0o777777
+        member = next(info for info in members if info.filename == member_name)
+        mode = (member.external_attr >> 16) & 0o777777
         if mode and not stat.S_ISREG(mode):
             raise ValueError(f"Engine archive member must be a regular file: {path}")
         digest = hashlib.sha256()
-        with archive.open(members[0]) as artifact:
+        with archive.open(member) as artifact:
             for chunk in iter(lambda: artifact.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+
+def artifacts_for_schema(schema_version: int) -> tuple[ArtifactSpec, ...]:
+    if schema_version >= 3:
+        return ARTIFACTS
+    return tuple(
+        ArtifactSpec(
+            role=artifact.role,
+            file_name=artifact.file_name,
+            archive_root=LEGACY_ENGINE_ARCHIVE_ROOT
+            if artifact.role == "engineZip"
+            else artifact.archive_root,
+            description=artifact.description,
+        )
+        for artifact in ARTIFACTS
+    )
+
+
+def validate_code_mode_host(
+    companions: object,
+    *,
+    engine_signed: bool,
+    dist_dir: Path | None,
+) -> None:
+    if not isinstance(companions, dict) or set(companions) != {"codeModeHost"}:
+        raise ValueError("managedEngine companions must contain codeModeHost")
+    host = companions["codeModeHost"]
+    if not isinstance(host, dict):
+        raise ValueError("managedEngine codeModeHost companion must be an object")
+    required_fields = {
+        "archivePath",
+        "requiredEntitlements",
+        "sha256",
+        "signingIdentifier",
+        "teamIdentifier",
+    }
+    missing = sorted(required_fields - host.keys())
+    if missing:
+        raise ValueError(f"codeModeHost is missing required fields: {missing}")
+    if host["archivePath"] != CODE_MODE_HOST_ARCHIVE_PATH:
+        raise ValueError("codeModeHost archivePath is invalid")
+    if host["requiredEntitlements"] != list(REQUIRED_CODE_MODE_HOST_ENTITLEMENTS):
+        raise ValueError("codeModeHost requiredEntitlements are invalid")
+    if not is_sha256(host["sha256"]):
+        raise ValueError("codeModeHost sha256 must be a lowercase SHA-256 digest")
+    if engine_signed:
+        if host["signingIdentifier"] != CODE_MODE_HOST_SIGNING_IDENTIFIER:
+            raise ValueError("codeModeHost signingIdentifier is invalid")
+        if host["teamIdentifier"] != ENGINE_TEAM_IDENTIFIER:
+            raise ValueError("codeModeHost teamIdentifier is invalid")
+    elif host["signingIdentifier"] is not None or host["teamIdentifier"] is not None:
+        raise ValueError(
+            "Unsigned codeModeHost metadata must not claim a signing identity"
+        )
+    if dist_dir is not None:
+        actual_sha256 = sha256_zip_member(
+            dist_dir / ENGINE_ZIP,
+            CODE_MODE_HOST_ARCHIVE_PATH,
+            expected_members=(CODE_MODE_HOST_ARCHIVE_PATH, ENGINE_CLI_ARCHIVE_PATH),
+        )
+        if host["sha256"] != actual_sha256:
+            raise ValueError("codeModeHost sha256 does not match the engine archive")
 
 
 def normalize_download_base_url(url: str | None) -> str | None:

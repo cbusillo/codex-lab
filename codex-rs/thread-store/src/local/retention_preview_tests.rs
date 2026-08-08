@@ -469,7 +469,7 @@ fn write_reference_rollout(
 ) -> std::io::Result<PathBuf> {
     let directory = home.join("sessions/2025/01/03");
     fs::create_dir_all(&directory)?;
-    let path = directory.join(format!("rollout-2025-01-03T{time}-{}.jsonl", thread_id));
+    let path = directory.join(format!("rollout-2025-01-03T{time}-{thread_id}.jsonl"));
     let metadata = serde_json::json!({
         "timestamp": "2025-01-03T12:00:00Z",
         "type": "session_meta",

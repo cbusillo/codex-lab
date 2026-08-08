@@ -68,10 +68,14 @@ jobs:
             echo "- Target size before build: \`$target_size\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build Codex Lab CLI
+      - name: Build Codex Lab engine binaries
         working-directory: codex-rs
         shell: bash
-        run: cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
+        run: |
+          set -euo pipefail
+          cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
+          cargo build --timings --profile ci-app -p codex-code-mode-host --bin codex-code-mode-host
+          echo "CODE_MODE_HOST_BIN=$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host" >> "$GITHUB_ENV"
 
       - name: Report Cargo cache after build
         if: always()
@@ -150,8 +154,11 @@ jobs:
           engine_dir="${output_root}/engine"
           source_commit="$(git rev-parse HEAD)"
           mkdir -p "$engine_dir"
+          cp "$CODE_MODE_HOST_BIN" "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
+          chmod 0755 "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
           cp "$CODEX_LAB_BIN" "${engine_dir}/codex"
-          chmod 0755 "${engine_dir}/codex"
+          cp "$CODE_MODE_HOST_BIN" "${engine_dir}/codex-code-mode-host"
+          chmod 0755 "${engine_dir}/codex" "${engine_dir}/codex-code-mode-host"
           start=$SECONDS
           ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
           app_zip_seconds=$((SECONDS - start))
@@ -159,14 +166,16 @@ jobs:
           ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
           shim_zip_seconds=$((SECONDS - start))
           start=$SECONDS
-          ditto -c -k --norsrc "${engine_dir}/codex" "$engine_zip"
+          ditto -c -k --norsrc --keepParent "$engine_dir" "$engine_zip"
           engine_zip_seconds=$((SECONDS - start))
           app_zip_bytes="$(wc -c < "$app_zip" | tr -d '[:space:]')"
           shim_zip_bytes="$(wc -c < "$shim_zip" | tr -d '[:space:]')"
           engine_zip_bytes="$(wc -c < "$engine_zip" | tr -d '[:space:]')"
           unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
+          unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-code-mode-host"
           unzip -l "$shim_zip" | grep -F "bin/codex-lab"
-          unzip -l "$engine_zip" | grep -F "codex"
+          unzip -l "$engine_zip" | grep -F "engine/codex"
+          unzip -l "$engine_zip" | grep -F "engine/codex-code-mode-host"
           if { unzip -l "$app_zip"; unzip -l "$shim_zip"; unzip -l "$engine_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
             echo "unexpected AppleDouble file in archive" >&2
             exit 1

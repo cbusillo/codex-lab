@@ -213,11 +213,11 @@ macOS ARM64 app, shim, and engine, signs and verifies the engine on the trusted
 macOS runner, validates the staged distribution on `macos-26`, and grants
 `contents: write` only to the separate publication job.
 
-The signed engine contract pins the executable digest, source commit, version,
-stable identifier, TeamIdentifier, hardened runtime, and required V8
-entitlements. Manual dispatch with `publish: false` performs a complete signed
-dry run without creating a release. Publishing is restricted to explicit manual
-dispatches from the default branch and creates a public GitHub prerelease; it
+The signed engine contract pins the CLI and Code Mode host digests, source
+commit, version, stable identifiers, TeamIdentifier, hardened runtime, and
+required V8 entitlements. Manual dispatch with `publish: false` performs a
+complete signed dry run without creating a release. Publishing is restricted to
+explicit manual dispatches from the default branch and creates a public GitHub prerelease; it
 does not use upstream R2, package identities, release domains, or credentials.
 
 Release tags use the isolated namespace:

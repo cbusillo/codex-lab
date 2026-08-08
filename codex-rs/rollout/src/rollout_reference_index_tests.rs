@@ -94,15 +94,15 @@ async fn bounded_scan_reports_truncation() -> anyhow::Result<()> {
     write_rollout(
         active_rollout_path(home.path(), Uuid::from_u128(12)),
         thread_id(Uuid::from_u128(12))?,
-        None,
+        /*history_base*/ None,
     )?;
     write_rollout(
         active_rollout_path(home.path(), Uuid::from_u128(13)),
         thread_id(Uuid::from_u128(13))?,
-        None,
+        /*history_base*/ None,
     )?;
 
-    let index = RolloutReferenceIndex::scan_bounded(home.path(), 1).await?;
+    let index = RolloutReferenceIndex::scan_bounded(home.path(), /*max_rollouts*/ 1).await?;
 
     assert!(!index.is_complete());
     assert_eq!(index.scanned_rollouts(), 1);

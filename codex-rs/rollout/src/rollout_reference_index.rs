@@ -31,8 +31,12 @@ pub struct RolloutReferenceIndex {
 impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata without a deadline.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        let Some(index) =
-            Self::scan_with_deadline(codex_home, ScanDeadline::Unlimited, None).await?
+        let Some(index) = Self::scan_with_deadline(
+            codex_home,
+            ScanDeadline::Unlimited,
+            /*max_rollouts*/ None,
+        )
+        .await?
         else {
             return Err(io::Error::other(
                 "unlimited rollout reference scan exceeded a deadline",
@@ -71,7 +75,7 @@ impl RolloutReferenceIndex {
                 started_at,
                 max_runtime,
             },
-            None,
+            /*max_rollouts*/ None,
         )
         .await
     }

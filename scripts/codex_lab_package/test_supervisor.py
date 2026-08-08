@@ -17,6 +17,7 @@ from codex_lab_package.supervisor import SupervisorTools
 from codex_lab_package.supervisor import build_launch_agent_plist
 from codex_lab_package.supervisor import build_supervisor_runner
 from codex_lab_package.supervisor import inspect_engine
+from codex_lab_package.supervisor import inspect_code_mode_host
 from codex_lab_package.supervisor import install_supervisor
 
 
@@ -46,7 +47,7 @@ exit 2
             entitlement_output = f"""cat <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><{entitlement_value}/></dict></plist>
+<plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><{entitlement_value}/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/></dict></plist>
 EOF
 """
         path.write_text(
@@ -132,6 +133,36 @@ echo 'TeamIdentifier=TEAM123456' >&2
 
                     with self.assertRaisesRegex(ValueError, "V8 JIT entitlement"):
                         inspect_engine(engine, codesign_path=codesign)
+
+    def test_inspects_and_pins_code_mode_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            paths = SupervisorPaths(
+                lab_home=root / "lab",
+                launch_agents_dir=root / "LaunchAgents",
+            )
+            self._write_engine(paths.code_mode_host)
+            codesign = root / "codesign"
+            self._write_codesign(codesign, entitlement_value="true")
+
+            host_identity = inspect_code_mode_host(
+                paths.code_mode_host,
+                codesign_path=codesign,
+            )
+            runner = build_supervisor_runner(
+                paths,
+                self._identity(),
+                code_mode_host_identity=host_identity,
+            )
+
+            self.assertEqual(
+                host_identity.sha256,
+                hashlib.sha256(paths.code_mode_host.read_bytes()).hexdigest(),
+            )
+            self.assertIn(f"CODE_MODE_HOST={paths.code_mode_host}", runner)
+            self.assertIn("EXPECTED_CODE_MODE_HOST_SHA256=", runner)
+            self.assertIn("allow-unsigned-executable-memory", runner)
+            self.assertIn("&& verify_code_mode_host", runner)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS supervisor runner")
     def test_runner_check_requires_v8_jit_entitlement(self) -> None:
