@@ -81,7 +81,7 @@ status, rollback, or reinstall command blocks.
 Install the pinned candidate:
 
 ```sh
-installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
+installer_commit=ccbe0d9cf812148def35ffb1c17ae4a015cf6e51
 release_tag=codex-lab-v0.1.0-lab.2
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$release_tag" \
@@ -106,7 +106,7 @@ Add `~/.local/bin` to `PATH` if Terminal cannot find `codex-lab`.
 Run all of these before dogfooding:
 
 ```sh
-installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
+installer_commit=ccbe0d9cf812148def35ffb1c17ae4a015cf6e51
 run_codex_lab_installer "$installer_commit" --status
 codex-lab --version
 codex-lab debug provenance --json
@@ -200,7 +200,7 @@ Roll back through the same transactional installer path to the exact supported
 prior release:
 
 ```sh
-installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
+installer_commit=ccbe0d9cf812148def35ffb1c17ae4a015cf6e51
 rollback_tag=codex-lab-v0.1.0-lab.1
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$rollback_tag" \
