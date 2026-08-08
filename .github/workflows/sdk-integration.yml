@@ -41,7 +41,7 @@ jobs:
           target: aarch64-apple-darwin
           cache-scope: sdk-integration
 
-      - name: Build codex with Bazel
+      - name: Build codex and its code-mode host with Bazel
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
@@ -54,35 +54,48 @@ jobs:
             "--build_metadata=COMMIT_SHA=${GITHUB_SHA}" \
             --build_metadata=TAG_job=sdk-integration \
             -- \
-            //codex-rs/cli:codex
+            //codex-rs/cli:codex \
+            //codex-rs/code-mode-host:code-mode-host
 
-          cquery_output="$(
-            ./.github/scripts/run-bazel-ci.sh \
-              -- \
-              cquery \
-              --output=files \
-              -- \
-              //codex-rs/cli:codex \
-              | grep -E '^(/|bazel-out/)' \
-              | tail -n 1
-          )"
-          if [[ "${cquery_output}" = /* ]]; then
-            codex_bazel_output_path="${cquery_output}"
-          else
-            codex_bazel_output_path="${GITHUB_WORKSPACE}/${cquery_output}"
-          fi
-          if [[ -z "${codex_bazel_output_path}" ]]; then
-            echo "Bazel did not report an output path for //codex-rs/cli:codex." >&2
-            exit 1
-          fi
-          if [[ ! -e "${codex_bazel_output_path}" ]]; then
-            echo "Unable to locate the Bazel-built codex binary at ${codex_bazel_output_path}." >&2
-            exit 1
-          fi
+          bazel_output_path() {
+            local target="$1"
+            local cquery_output
+            cquery_output="$(
+              ./.github/scripts/run-bazel-ci.sh \
+                -- \
+                cquery \
+                --output=files \
+                -- \
+                "$target" \
+                | grep -E '^(/|bazel-out/)' \
+                | tail -n 1
+            )"
+            if [[ -z "${cquery_output}" ]]; then
+              echo "Bazel did not report an output path for ${target}." >&2
+              return 1
+            fi
+            if [[ "${cquery_output}" = /* ]]; then
+              printf '%s\n' "${cquery_output}"
+            else
+              printf '%s\n' "${GITHUB_WORKSPACE}/${cquery_output}"
+            fi
+          }
+
+          codex_bazel_output_path="$(bazel_output_path //codex-rs/cli:codex)"
+          # The Bazel rule retains the crate name while Cargo's declared bin
+          # and the runtime lookup contract use codex-code-mode-host.
+          host_bazel_output_path="$(bazel_output_path //codex-rs/code-mode-host:code-mode-host)"
+          for output_path in "${codex_bazel_output_path}" "${host_bazel_output_path}"; do
+            if [[ ! -e "${output_path}" ]]; then
+              echo "Unable to locate a Bazel-built SDK binary at ${output_path}." >&2
+              exit 1
+            fi
+          done
 
           install_dir="${GITHUB_WORKSPACE}/.tmp/sdk-ci"
           mkdir -p "${install_dir}"
           install -m 755 "${codex_bazel_output_path}" "${install_dir}/codex"
+          install -m 755 "${host_bazel_output_path}" "${install_dir}/codex-code-mode-host"
           echo "CODEX_EXEC_PATH=${install_dir}/codex" >> "$GITHUB_ENV"
 
       - name: Warm up Bazel-built codex

@@ -26,6 +26,7 @@ from codex_lab_package.distribution_manifest import MANIFEST_NAME
 from codex_lab_package.distribution_manifest import SHIM_ZIP
 from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
+from codex_lab_package.distribution_manifest import sha256_zip_member
 from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
 from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabReleaseSummary
@@ -46,9 +47,11 @@ from codex_lab_package.installer import select_latest_lab_release_tag
 from codex_lab_package.installer import update_from_latest_release
 from codex_lab_package.installer import uninstall_codex_lab
 from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
+from codex_lab_package.engine_contract import CODE_MODE_HOST_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.layout import CodexLabAppOptions
 from codex_lab_package.layout import build_codex_lab_app
+from codex_lab_package.supervisor import CodeModeHostIdentity
 from codex_lab_package.supervisor import EngineIdentity
 from codex_lab_package.supervisor import SupervisorPaths
 import install_codex_lab as install_codex_lab_cli
@@ -68,6 +71,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             inspect=fake_inspect_engine,
             install_supervisor=self._install_supervisor,
             uninstall_supervisor=self._uninstall_supervisor,
+            inspect_code_mode_host=fake_inspect_code_mode_host,
         )
         self.default_paths_patch = mock.patch(
             "codex_lab_package.installer.default_supervisor_paths",
@@ -344,6 +348,52 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(status.supervisor_label, self.supervisor_paths.label)
             self.assertEqual(status.version, "1.2.3")
 
+    def test_downgrades_to_schema_two_release_and_removes_managed_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current_release = build_test_release(
+                root / "current",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+            )
+            rollback_release = build_test_release(root / "rollback")
+            convert_test_release_to_schema_two(rollback_release)
+            install_root = root / "install"
+            self.supervisor_paths.code_mode_host.parent.mkdir(parents=True)
+            write_file(self.supervisor_paths.code_mode_host, "user host")
+            current = install_from_manifest_url(
+                current_release.manifest_url,
+                app_dir=install_root / "Codex Lab.app",
+                shim_dir=install_root / "bin",
+                state_path=install_root / "install-state.json",
+                force=True,
+                download=current_release.download,
+            )
+            self.assertTrue(self.supervisor_paths.code_mode_host.is_file())
+
+            rolled_back = install_from_manifest_url(
+                rollback_release.manifest_url,
+                app_dir=current.app_dir,
+                shim_dir=current.shim_path.parent if current.shim_path else None,
+                state_path=current.state_path,
+                supervisor_paths=self.supervisor_paths,
+                force=True,
+                download=rollback_release.download,
+            )
+
+            self.assertIsNone(rolled_back.code_mode_host_path)
+            self.assertFalse(self.supervisor_paths.code_mode_host.exists())
+            self.assertEqual(read_install_state(current.state_path).version, "1.2.3")
+            uninstalled = uninstall_codex_lab(state_path=current.state_path)
+            self.assertEqual(
+                uninstalled.restored_code_mode_host_path,
+                self.supervisor_paths.code_mode_host,
+            )
+            self.assertEqual(
+                self.supervisor_paths.code_mode_host.read_text(encoding="utf-8"),
+                "user host",
+            )
+
     def test_rejects_unsigned_engine_before_installing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -405,6 +455,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 inspect=fake_inspect_engine,
                 install_supervisor=fail_supervisor,
                 uninstall_supervisor=self._uninstall_supervisor,
+                inspect_code_mode_host=fake_inspect_code_mode_host,
             )
             with self.assertRaisesRegex(RuntimeError, "supervisor failed"):
                 install_from_manifest_url(
@@ -480,6 +531,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 inspect=fake_inspect_engine,
                 install_supervisor=fail_supervisor,
                 uninstall_supervisor=self._uninstall_supervisor,
+                inspect_code_mode_host=fake_inspect_code_mode_host,
             )
             with (
                 mock.patch(
@@ -555,6 +607,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 inspect=fake_inspect_engine,
                 install_supervisor=self._install_supervisor,
                 uninstall_supervisor=fail_uninstall,
+                inspect_code_mode_host=fake_inspect_code_mode_host,
             )
             with self.assertRaisesRegex(RuntimeError, "could not stop"):
                 uninstall_codex_lab(
@@ -1622,6 +1675,14 @@ def fake_inspect_engine(path: Path) -> EngineIdentity:
     )
 
 
+def fake_inspect_code_mode_host(path: Path) -> CodeModeHostIdentity:
+    return CodeModeHostIdentity(
+        sha256=sha256_file(path),
+        signing_identifier=CODE_MODE_HOST_SIGNING_IDENTIFIER,
+        team_identifier=ENGINE_TEAM_IDENTIFIER,
+    )
+
+
 def build_test_release(
     root: Path,
     *,
@@ -1657,7 +1718,10 @@ def build_test_release(
         json.dumps({"sourceCommit": commit, "version": version}),
     )
     os.chmod(engine_bin, 0o755)
-    zip_tree(engine_bin, dist_dir / ENGINE_ZIP, arcname=Path("codex"))
+    code_mode_host_bin = engine_bin.with_name("codex-code-mode-host")
+    write_file(code_mode_host_bin, "signed Code Mode host fixture")
+    os.chmod(code_mode_host_bin, 0o755)
+    zip_tree(engine_bin.parent, dist_dir / ENGINE_ZIP, arcname=Path("engine"))
     write_file(
         dist_dir / "SHA256SUMS",
         f"{sha256_file(dist_dir / APP_ZIP)}  {APP_ZIP}\n"
@@ -1695,6 +1759,32 @@ def update_manifest_artifact(release: TestRelease, role: str, file_name: str) ->
     release.manifest = {**release.manifest, "artifacts": artifacts}
     artifacts[role]["sha256"] = sha256_file(release.dist_dir / file_name)
     artifacts[role]["sizeBytes"] = (release.dist_dir / file_name).stat().st_size
+
+
+def convert_test_release_to_schema_two(release: TestRelease) -> None:
+    engine_zip = release.dist_dir / ENGINE_ZIP
+    with ZipFile(engine_zip) as archive:
+        engine_bytes = archive.read("engine/codex")
+    engine_info = ZipInfo("codex")
+    engine_info.external_attr = ((stat.S_IFREG | 0o755) & 0xFFFF) << 16
+    with ZipFile(engine_zip, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr(engine_info, engine_bytes)
+    release.manifest["schemaVersion"] = 2
+    engine_artifact = release.manifest["artifacts"]["engineZip"]
+    engine_artifact["archiveRoot"] = "codex"
+    engine_artifact["sha256"] = sha256_file(engine_zip)
+    engine_artifact["sizeBytes"] = engine_zip.stat().st_size
+    managed_engine = release.manifest["managedEngine"]
+    managed_engine.pop("companions")
+    managed_engine["requiredEntitlements"] = ["com.apple.security.cs.allow-jit"]
+    managed_engine["sha256"] = sha256_zip_member(engine_zip, "codex")
+    write_file(
+        release.dist_dir / "SHA256SUMS",
+        "".join(
+            f"{sha256_file(release.dist_dir / file_name)}  {file_name}\n"
+            for file_name in (APP_ZIP, SHIM_ZIP, ENGINE_ZIP)
+        ),
+    )
 
 
 def zip_tree(source: Path, dest: Path, *, arcname: Path | None = None) -> None:

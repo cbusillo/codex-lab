@@ -17,6 +17,8 @@ import tempfile
 import time
 from typing import Any
 
+from .engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
+from .engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from .layout import APP_SERVER_LABEL
 from .layout import APP_SERVER_LISTEN_HOST
 from .layout import APP_SERVER_LISTEN_PORT
@@ -31,8 +33,11 @@ LEGACY_LABEL = "dev.everycode.codex-lab.daemon-supervisor"
 DEFAULT_LISTEN_HOST = APP_SERVER_LISTEN_HOST
 DEFAULT_LISTEN_PORT = APP_SERVER_LISTEN_PORT
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
-ALLOW_JIT_ENTITLEMENT = "com.apple.security.cs.allow-jit"
+CODE_MODE_HOST_NAME = "codex-code-mode-host"
 ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH = r"com\.apple\.security\.cs\.allow-jit"
+ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH = (
+    r"com\.apple\.security\.cs\.allow-unsigned-executable-memory"
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,13 @@ class EngineIdentity:
 
 
 @dataclass(frozen=True)
+class CodeModeHostIdentity:
+    sha256: str
+    signing_identifier: str
+    team_identifier: str
+
+
+@dataclass(frozen=True)
 class SupervisorPaths:
     lab_home: Path
     launch_agents_dir: Path
@@ -64,6 +76,10 @@ class SupervisorPaths:
     @property
     def managed_cli(self) -> Path:
         return self.lab_home / MANAGED_CLI_RELATIVE_PATH
+
+    @property
+    def code_mode_host(self) -> Path:
+        return self.managed_cli.with_name(CODE_MODE_HOST_NAME)
 
     @property
     def supervisor_dir(self) -> Path:
@@ -114,50 +130,22 @@ def inspect_engine(
     codesign_path: Path = Path("/usr/bin/codesign"),
 ) -> EngineIdentity:
     managed_cli = managed_cli.expanduser().absolute()
-    try:
-        mode = managed_cli.lstat().st_mode
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"managed Codex Lab engine is not executable: {managed_cli}"
-        ) from exc
-    if (
-        managed_cli.is_symlink()
-        or not stat.S_ISREG(mode)
-        or not os.access(managed_cli, os.X_OK)
-    ):
-        raise FileNotFoundError(
-            f"managed Codex Lab engine is not executable: {managed_cli}"
-        )
-    if mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise ValueError("managed Codex Lab engine must not be group/world writable")
+    _require_managed_executable(managed_cli, description="engine")
 
     provenance = read_cli_provenance(managed_cli)
     if provenance["build_profile"] != "release":
         raise ValueError("managed Codex Lab engine must use the release build profile")
-    subprocess.run(
-        [str(codesign_path), "--verify", "--strict", str(managed_cli)],
-        check=True,
-        capture_output=True,
-        text=True,
+    signing_identifier, team_identifier = _signing_identity(
+        managed_cli,
+        codesign_path=codesign_path,
     )
-    signature = subprocess.run(
-        [str(codesign_path), "-dvvv", str(managed_cli)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    signature_output = signature.stdout + signature.stderr
-    signing_identifier = _signature_field(signature_output, "Identifier")
-    team_identifier = _signature_field(signature_output, "TeamIdentifier")
-    if not signing_identifier or not team_identifier or team_identifier == "not set":
-        raise ValueError("managed Codex Lab engine lacks a stable signing identity")
     code_signing_entitlements = _code_signing_entitlements(
         managed_cli,
         codesign_path=codesign_path,
     )
-    if ALLOW_JIT_ENTITLEMENT not in code_signing_entitlements:
+    if set(code_signing_entitlements) != set(REQUIRED_ENGINE_ENTITLEMENTS):
         raise ValueError(
-            "managed Codex Lab engine lacks the required V8 JIT entitlement"
+            "managed Codex Lab engine entitlements do not match the release contract"
         )
     return EngineIdentity(
         build_channel=provenance["build_channel"],
@@ -170,10 +158,77 @@ def inspect_engine(
     )
 
 
+def inspect_code_mode_host(
+    path: Path,
+    *,
+    codesign_path: Path = Path("/usr/bin/codesign"),
+) -> CodeModeHostIdentity:
+    path = path.expanduser().absolute()
+    _require_managed_executable(path, description="Code Mode host")
+    signing_identifier, team_identifier = _signing_identity(
+        path,
+        codesign_path=codesign_path,
+    )
+    entitlements = _code_signing_entitlements(path, codesign_path=codesign_path)
+    if set(entitlements) != set(REQUIRED_CODE_MODE_HOST_ENTITLEMENTS):
+        raise ValueError(
+            "managed Codex Lab Code Mode host entitlements do not match the release contract"
+        )
+    return CodeModeHostIdentity(
+        sha256=_sha256_file(path),
+        signing_identifier=signing_identifier,
+        team_identifier=team_identifier,
+    )
+
+
+def _require_managed_executable(path: Path, *, description: str) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"managed Codex Lab {description} is not executable: {path}"
+        ) from exc
+    if path.is_symlink() or not stat.S_ISREG(mode) or not os.access(path, os.X_OK):
+        raise FileNotFoundError(
+            f"managed Codex Lab {description} is not executable: {path}"
+        )
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError(
+            f"managed Codex Lab {description} must not be group/world writable"
+        )
+
+
+def _signing_identity(path: Path, *, codesign_path: Path) -> tuple[str, str]:
+    subprocess.run(
+        [str(codesign_path), "--verify", "--strict", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    signature = subprocess.run(
+        [str(codesign_path), "-dvvv", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    signature_output = signature.stdout + signature.stderr
+    signing_identifier = _signature_field(signature_output, "Identifier")
+    team_identifier = _signature_field(signature_output, "TeamIdentifier")
+    if not signing_identifier or not team_identifier or team_identifier == "not set":
+        raise ValueError("managed Codex Lab executable lacks a stable signing identity")
+    if (
+        re.search(r"^CodeDirectory .* flags=.*runtime", signature_output, re.MULTILINE)
+        is None
+    ):
+        raise ValueError("managed Codex Lab executable lacks hardened runtime")
+    return signing_identifier, team_identifier
+
+
 def build_supervisor_runner(
     paths: SupervisorPaths,
     identity: EngineIdentity,
     *,
+    code_mode_host_identity: CodeModeHostIdentity | None = None,
     tools: SupervisorTools = SupervisorTools(),
     blocked_retry_seconds: int = 60,
 ) -> str:
@@ -182,6 +237,43 @@ def build_supervisor_runner(
 
     def quote(value: object) -> str:
         return shlex.quote(str(value))
+
+    if code_mode_host_identity is None:
+        code_mode_host_variables = ""
+        verify_code_mode_host = "verify_code_mode_host() { return 0; }"
+    else:
+        code_mode_host_variables = f"""CODE_MODE_HOST={quote(paths.code_mode_host)}
+EXPECTED_CODE_MODE_HOST_SHA256={quote(code_mode_host_identity.sha256)}
+EXPECTED_CODE_MODE_HOST_SIGNING_IDENTIFIER={quote(code_mode_host_identity.signing_identifier)}
+EXPECTED_CODE_MODE_HOST_TEAM_IDENTIFIER={quote(code_mode_host_identity.team_identifier)}"""
+        verify_code_mode_host = """verify_code_mode_host() {
+  [ -x "$CODE_MODE_HOST" ] || return 1
+  actual_sha256=$("$SHASUM" -a 256 "$CODE_MODE_HOST" | /usr/bin/awk '{ print $1 }')
+  [ "$actual_sha256" = "$EXPECTED_CODE_MODE_HOST_SHA256" ] || return 1
+  "$CODESIGN" --verify --strict "$CODE_MODE_HOST" >/dev/null 2>&1 || return 1
+  signature=$("$CODESIGN" -dvvv "$CODE_MODE_HOST" 2>&1 || true)
+  printf '%s\n' "$signature" | /usr/bin/grep -Eq '^CodeDirectory .* flags=.*runtime' || return 1
+  signing_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "Identifier" { print substr($0, index($0, "=") + 1); exit }')
+  team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" { print substr($0, index($0, "=") + 1); exit }')
+  [ "$signing_identifier" = "$EXPECTED_CODE_MODE_HOST_SIGNING_IDENTIFIER" ] || return 1
+  [ "$team_identifier" = "$EXPECTED_CODE_MODE_HOST_TEAM_IDENTIFIER" ] || return 1
+  ENTITLEMENTS_FILE=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/codex-lab-host-entitlements.XXXXXX")
+  if ! "$CODESIGN" -d --entitlements :- "$CODE_MODE_HOST" >"$ENTITLEMENTS_FILE" 2>/dev/null; then
+    discard_entitlements
+    return 1
+  fi
+  if ! "$PLUTIL" -convert xml1 "$ENTITLEMENTS_FILE"; then
+    discard_entitlements
+    return 1
+  fi
+  allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  allow_unsigned_executable_memory=$("$PLUTIL" -extract "$ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  entitlement_key_count=$(/usr/bin/grep -o '<key>' "$ENTITLEMENTS_FILE" | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')
+  discard_entitlements
+  [ "$allow_jit" = true ] \
+    && [ "$allow_unsigned_executable_memory" = true ] \
+    && [ "$entitlement_key_count" = 2 ]
+}"""
 
     return f"""#!/bin/sh
 set -u
@@ -195,7 +287,9 @@ EXPECTED_SOURCE_COMMIT={quote(identity.source_commit)}
 EXPECTED_VERSION={quote(identity.version)}
 EXPECTED_SIGNING_IDENTIFIER={quote(identity.signing_identifier)}
 EXPECTED_TEAM_IDENTIFIER={quote(identity.team_identifier)}
+{code_mode_host_variables}
 ALLOW_JIT_ENTITLEMENT_KEY_PATH={quote(ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH)}
+ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH={quote(ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH)}
 CODESIGN={quote(tools.codesign)}
 PLUTIL={quote(tools.plutil)}
 SHASUM={quote(tools.shasum)}
@@ -249,12 +343,14 @@ verify_no_pid_daemon() {{
     *) return 0 ;;
   esac
 }}
+{verify_code_mode_host}
 verify_engine() {{
   [ -x "$MANAGED_CLI" ] || return 1
   actual_sha256=$("$SHASUM" -a 256 "$MANAGED_CLI" | /usr/bin/awk '{{ print $1 }}')
   [ "$actual_sha256" = "$EXPECTED_SHA256" ] || return 1
   "$CODESIGN" --verify --strict "$MANAGED_CLI" >/dev/null 2>&1 || return 1
   signature=$("$CODESIGN" -dvvv "$MANAGED_CLI" 2>&1 || true)
+  printf '%s\n' "$signature" | /usr/bin/grep -Eq '^CodeDirectory .* flags=.*runtime' || return 1
   signing_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "Identifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   [ "$signing_identifier" = "$EXPECTED_SIGNING_IDENTIFIER" ] || return 1
@@ -264,9 +360,18 @@ verify_engine() {{
     discard_entitlements
     return 1
   fi
+  if ! "$PLUTIL" -convert xml1 "$ENTITLEMENTS_FILE"; then
+    discard_entitlements
+    return 1
+  fi
   allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  allow_unsigned_executable_memory=$("$PLUTIL" -extract "$ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  entitlement_key_count=$(/usr/bin/grep -o '<key>' "$ENTITLEMENTS_FILE" | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')
   discard_entitlements
-  [ "$allow_jit" = true ] || return 1
+  [ "$allow_jit" = true ] \
+    && [ "$allow_unsigned_executable_memory" = true ] \
+    && [ "$entitlement_key_count" = 2 ] \
+    || return 1
   PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor.XXXXXX")
   if ! "$MANAGED_CLI" debug provenance --json >"$PROVENANCE_FILE"; then
     discard_provenance
@@ -291,6 +396,7 @@ verify_engine() {{
     && [ "$source_commit" = "$EXPECTED_SOURCE_COMMIT" ] \
     && [ "$dirty_state" = clean ] \
     && [ "$executable_path" -ef "$MANAGED_CLI" ] \
+    && verify_code_mode_host \
     && verify_no_updater \
     && verify_no_pid_daemon
 }}
@@ -349,6 +455,9 @@ def install_supervisor(
     expected_sha256: str,
     expected_source_commit: str,
     expected_version: str,
+    expected_code_mode_host_sha256: str | None = None,
+    expected_code_mode_host_signing_identifier: str | None = None,
+    expected_code_mode_host_team_identifier: str | None = None,
     launchctl_path: Path = Path("/bin/launchctl"),
     tools: SupervisorTools = SupervisorTools(),
     uid: int | None = None,
@@ -362,6 +471,28 @@ def install_supervisor(
         expected_source_commit=expected_source_commit,
         expected_version=expected_version,
     )
+    code_mode_host_identity = None
+    expected_host_values = (
+        expected_code_mode_host_sha256,
+        expected_code_mode_host_signing_identifier,
+        expected_code_mode_host_team_identifier,
+    )
+    if any(value is not None for value in expected_host_values):
+        if any(value is None for value in expected_host_values):
+            raise ValueError("expected Code Mode host identity must be complete")
+        code_mode_host_identity = inspect_code_mode_host(
+            paths.code_mode_host,
+            codesign_path=tools.codesign,
+        )
+        actual_host_values = (
+            code_mode_host_identity.sha256,
+            code_mode_host_identity.signing_identifier,
+            code_mode_host_identity.team_identifier,
+        )
+        if actual_host_values != expected_host_values:
+            raise ValueError(
+                "managed Code Mode host does not match the expected candidate"
+            )
     _stop_pid_daemon(paths)
     service = _service_name(paths.label, uid)
     domain = service.rsplit("/", maxsplit=1)[0]
@@ -378,7 +509,12 @@ def install_supervisor(
     try:
         _write_atomic(
             paths.runner,
-            build_supervisor_runner(paths, identity, tools=tools).encode(),
+            build_supervisor_runner(
+                paths,
+                identity,
+                code_mode_host_identity=code_mode_host_identity,
+                tools=tools,
+            ).encode(),
             0o755,
         )
         _write_atomic(paths.plist, build_launch_agent_plist(paths), 0o644)
@@ -407,6 +543,9 @@ def install_supervisor(
     _remove_legacy_supervisor(paths, launchctl_path, uid)
     return {
         "engine": asdict(identity),
+        "codeModeHost": asdict(code_mode_host_identity)
+        if code_mode_host_identity is not None
+        else None,
         "label": paths.label,
         "plistPath": str(paths.plist),
         "runnerPath": str(paths.runner),

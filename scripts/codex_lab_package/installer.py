@@ -21,15 +21,18 @@ from .distribution_manifest import SHIM_ZIP
 from .distribution_manifest import is_https_url
 from .distribution_manifest import read_sha256sums
 from .distribution_manifest import validate_manifest
-from .engine_contract import ENGINE_ARCHIVE_ROOT
+from .engine_contract import CODE_MODE_HOST_ARCHIVE_PATH
+from .engine_contract import ENGINE_CLI_ARCHIVE_PATH
 from .layout import build_shim_script
 from .release_tag import LAB_RELEASE_TAG_PREFIX
 from .release_tag import codex_lab_release_order
 from .smoke import smoke_check
+from .supervisor import CodeModeHostIdentity
 from .supervisor import EngineIdentity
 from .supervisor import SupervisorPaths
 from .supervisor import default_supervisor_paths
 from .supervisor import inspect_engine
+from .supervisor import inspect_code_mode_host
 from .supervisor import install_supervisor
 from .supervisor import uninstall_supervisor
 
@@ -69,6 +72,7 @@ class CodexLabReleaseSummary:
 @dataclass(frozen=True)
 class CodexLabInstallResult:
     app_dir: Path
+    code_mode_host_path: Path | None
     engine_path: Path
     release_tag: str
     shim_path: Path | None
@@ -81,6 +85,8 @@ class CodexLabInstallResult:
 class CodexLabInstallStatus:
     app_path: Path
     bundle_version: str
+    code_mode_host_backup_path: Path | None
+    code_mode_host_path: Path | None
     engine_backup_path: Path | None
     engine_path: Path | None
     lab_home: Path | None
@@ -111,7 +117,9 @@ class CodexLabUpdateResult:
 @dataclass(frozen=True)
 class CodexLabUninstallResult:
     app_path: Path
+    code_mode_host_path: Path | None
     engine_path: Path | None
+    restored_code_mode_host_path: Path | None
     restored_engine_path: Path | None
     shim_path: Path | None
     state_path: Path
@@ -119,6 +127,7 @@ class CodexLabUninstallResult:
 
 @dataclass(frozen=True)
 class ManagedEngineRelease:
+    code_mode_host: "ManagedCodeModeHostRelease | None"
     sha256: str
     signing_identifier: str
     source_commit: str
@@ -126,7 +135,15 @@ class ManagedEngineRelease:
     version: str
 
 
+@dataclass(frozen=True)
+class ManagedCodeModeHostRelease:
+    sha256: str
+    signing_identifier: str
+    team_identifier: str
+
+
 InspectEngineFunc = Callable[[Path], EngineIdentity]
+InspectCodeModeHostFunc = Callable[[Path], CodeModeHostIdentity]
 InstallSupervisorFunc = Callable[[SupervisorPaths, ManagedEngineRelease], None]
 UninstallSupervisorFunc = Callable[[SupervisorPaths], None]
 
@@ -136,6 +153,7 @@ class EngineProvisioningOperations:
     inspect: InspectEngineFunc
     install_supervisor: InstallSupervisorFunc
     uninstall_supervisor: UninstallSupervisorFunc
+    inspect_code_mode_host: InspectCodeModeHostFunc | None = None
 
 
 @dataclass(frozen=True)
@@ -149,11 +167,21 @@ def install_release_supervisor(
     paths: SupervisorPaths,
     release: ManagedEngineRelease,
 ) -> None:
+    code_mode_host = release.code_mode_host
     install_supervisor(
         paths,
         expected_sha256=release.sha256,
         expected_source_commit=release.source_commit,
         expected_version=release.version,
+        expected_code_mode_host_sha256=code_mode_host.sha256
+        if code_mode_host is not None
+        else None,
+        expected_code_mode_host_signing_identifier=code_mode_host.signing_identifier
+        if code_mode_host is not None
+        else None,
+        expected_code_mode_host_team_identifier=code_mode_host.team_identifier
+        if code_mode_host is not None
+        else None,
     )
 
 
@@ -165,6 +193,7 @@ DEFAULT_ENGINE_OPERATIONS = EngineProvisioningOperations(
     inspect=inspect_engine,
     install_supervisor=install_release_supervisor,
     uninstall_supervisor=uninstall_release_supervisor,
+    inspect_code_mode_host=inspect_code_mode_host,
 )
 
 
@@ -272,14 +301,32 @@ def install_from_manifest_url(
             archive_root="bin/codex-lab",
             extract_dir=extract_dir / "shim",
         )
-        engine_source = extract_artifact(
+        engine_archive_source = extract_artifact(
             dist_dir / ENGINE_ZIP,
-            archive_root=ENGINE_ARCHIVE_ROOT,
+            archive_root=artifacts["engineZip"]["archiveRoot"],
             extract_dir=extract_dir / "engine",
         )
+        if engine_release.code_mode_host is None:
+            engine_source = engine_archive_source
+            code_mode_host_source = None
+        else:
+            engine_source = engine_archive_source / Path(ENGINE_CLI_ARCHIVE_PATH).name
+            code_mode_host_source = (
+                engine_archive_source / Path(CODE_MODE_HOST_ARCHIVE_PATH).name
+            )
         smoke_check(app_source, shim_source)
         staged_identity = engine_operations.inspect(engine_source)
         require_engine_release_identity(staged_identity, engine_release)
+        if engine_release.code_mode_host is not None:
+            if engine_operations.inspect_code_mode_host is None:
+                raise ValueError("Code Mode host inspection is unavailable")
+            staged_code_mode_host_identity = engine_operations.inspect_code_mode_host(
+                code_mode_host_source
+            )
+            require_code_mode_host_release_identity(
+                staged_code_mode_host_identity,
+                engine_release.code_mode_host,
+            )
 
         preflight_install_parent(app_dir.parent)
         preflight_install_target(app_dir, force=force)
@@ -289,6 +336,8 @@ def install_from_manifest_url(
         preflight_install_parent(state_path.parent)
         preflight_install_parent(supervisor_paths.managed_cli.parent)
         preflight_install_target(supervisor_paths.managed_cli, force=force)
+        if code_mode_host_source is not None:
+            preflight_install_target(supervisor_paths.code_mode_host, force=force)
 
         previous_status = read_optional_install_state(state_path)
         if previous_status is not None:
@@ -311,6 +360,13 @@ def install_from_manifest_url(
         )
         if engine_backup_path is not None:
             require_engine_backup(engine_backup_path)
+        code_mode_host_backup_path = (
+            previous_status.code_mode_host_backup_path
+            if previous_status is not None
+            else None
+        )
+        if code_mode_host_backup_path is not None:
+            require_engine_backup(code_mode_host_backup_path)
 
         engine_was_installer_managed = (
             previous_status is not None
@@ -325,9 +381,39 @@ def install_from_manifest_url(
             engine_backup_path = default_engine_backup_path(state_path)
             preflight_new_backup_path(engine_backup_path)
 
+        code_mode_host_was_installer_managed = (
+            previous_status is not None
+            and previous_status.code_mode_host_path == supervisor_paths.code_mode_host
+        )
+        preserve_existing_code_mode_host = (
+            code_mode_host_source is not None
+            and not code_mode_host_was_installer_managed
+            and code_mode_host_backup_path is None
+            and path_exists(supervisor_paths.code_mode_host)
+        )
+        if preserve_existing_code_mode_host:
+            code_mode_host_backup_path = default_code_mode_host_backup_path(state_path)
+            preflight_new_backup_path(code_mode_host_backup_path)
+
         replacements = []
         installed_shim = None
         try:
+            if code_mode_host_source is not None:
+                replacements.append(
+                    replace_path(
+                        code_mode_host_source,
+                        supervisor_paths.code_mode_host,
+                        force=force,
+                        backup_path=code_mode_host_backup_path
+                        if preserve_existing_code_mode_host
+                        else None,
+                        preserve_backup=preserve_existing_code_mode_host,
+                    )
+                )
+            elif code_mode_host_was_installer_managed and path_exists(
+                supervisor_paths.code_mode_host
+            ):
+                replacements.append(stage_path_removal(supervisor_paths.code_mode_host))
             engine_replacement = replace_path(
                 engine_source,
                 supervisor_paths.managed_cli,
@@ -362,6 +448,10 @@ def install_from_manifest_url(
                 state_source,
                 manifest,
                 app_dir=installed_app,
+                code_mode_host_backup_path=code_mode_host_backup_path,
+                code_mode_host_path=supervisor_paths.code_mode_host
+                if code_mode_host_source is not None
+                else None,
                 engine_backup_path=engine_backup_path,
                 shim_path=installed_shim,
                 supervisor_paths=supervisor_paths,
@@ -386,6 +476,9 @@ def install_from_manifest_url(
         cleanup_replacements(replacements)
         return CodexLabInstallResult(
             app_dir=installed_app,
+            code_mode_host_path=supervisor_paths.code_mode_host
+            if code_mode_host_source is not None
+            else None,
             engine_path=supervisor_paths.managed_cli,
             release_tag=release["tag"],
             shim_path=installed_shim,
@@ -397,7 +490,17 @@ def install_from_manifest_url(
 
 def managed_engine_release_from_manifest(manifest: dict) -> ManagedEngineRelease:
     managed_engine = manifest["managedEngine"]
+    companions = managed_engine.get("companions")
+    code_mode_host = None
+    if isinstance(companions, dict):
+        host = companions["codeModeHost"]
+        code_mode_host = ManagedCodeModeHostRelease(
+            sha256=host["sha256"],
+            signing_identifier=host["signingIdentifier"],
+            team_identifier=host["teamIdentifier"],
+        )
     return ManagedEngineRelease(
+        code_mode_host=code_mode_host,
         sha256=managed_engine["sha256"],
         signing_identifier=managed_engine["signingIdentifier"],
         source_commit=managed_engine["sourceCommit"],
@@ -408,8 +511,16 @@ def managed_engine_release_from_manifest(manifest: dict) -> ManagedEngineRelease
 
 def managed_engine_release_from_identity(
     identity: EngineIdentity,
+    code_mode_host_identity: CodeModeHostIdentity | None = None,
 ) -> ManagedEngineRelease:
     return ManagedEngineRelease(
+        code_mode_host=ManagedCodeModeHostRelease(
+            sha256=code_mode_host_identity.sha256,
+            signing_identifier=code_mode_host_identity.signing_identifier,
+            team_identifier=code_mode_host_identity.team_identifier,
+        )
+        if code_mode_host_identity is not None
+        else None,
         sha256=identity.sha256,
         signing_identifier=identity.signing_identifier,
         source_commit=identity.source_commit,
@@ -448,6 +559,26 @@ def require_engine_release_identity(
         )
 
 
+def require_code_mode_host_release_identity(
+    identity: CodeModeHostIdentity,
+    release: ManagedCodeModeHostRelease,
+) -> None:
+    actual = (
+        identity.sha256,
+        identity.signing_identifier,
+        identity.team_identifier,
+    )
+    expected = (
+        release.sha256,
+        release.signing_identifier,
+        release.team_identifier,
+    )
+    if actual != expected:
+        raise ValueError(
+            "Managed Code Mode host identity does not match the release manifest"
+        )
+
+
 def read_optional_install_state(state_path: Path) -> CodexLabInstallStatus | None:
     if not path_exists(state_path):
         return None
@@ -481,10 +612,22 @@ def require_recorded_install(
         raise ValueError(
             "Recorded managed engine provenance does not match the install state"
         )
+    if status.code_mode_host_path is not None:
+        if status.code_mode_host_path != supervisor_paths.code_mode_host:
+            raise ValueError(
+                "Recorded Code Mode host path does not match the requested Lab home"
+            )
+        if engine_operations.inspect_code_mode_host is None:
+            raise ValueError("Code Mode host inspection is unavailable")
+        engine_operations.inspect_code_mode_host(status.code_mode_host_path)
 
 
 def default_engine_backup_path(state_path: Path) -> Path:
     return state_path.parent / "engine-backup" / "codex"
+
+
+def default_code_mode_host_backup_path(state_path: Path) -> Path:
+    return state_path.parent / "engine-backup" / "codex-code-mode-host"
 
 
 def require_engine_backup(path: Path) -> None:
@@ -529,6 +672,10 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
         )
     engine_backup_path = optional_state_path(state, "engineBackupPath", state_path)
     engine_path = optional_state_path(state, "enginePath", state_path)
+    code_mode_host_backup_path = optional_state_path(
+        state, "codeModeHostBackupPath", state_path
+    )
+    code_mode_host_path = optional_state_path(state, "codeModeHostPath", state_path)
     lab_home = optional_state_path(state, "labHome", state_path)
     launch_agents_dir = optional_state_path(state, "launchAgentsDir", state_path)
     listen_host = optional_state_string(state, "listenHost", state_path)
@@ -543,6 +690,8 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
     return CodexLabInstallStatus(
         app_path=Path(required_state_string(state, "appPath", state_path)),
         bundle_version=required_state_string(state, "bundleVersion", state_path),
+        code_mode_host_backup_path=code_mode_host_backup_path,
+        code_mode_host_path=code_mode_host_path,
         engine_backup_path=engine_backup_path,
         engine_path=engine_path,
         lab_home=lab_home,
@@ -638,14 +787,34 @@ def uninstall_codex_lab(
     )
     if status.engine_backup_path is not None:
         require_engine_backup(status.engine_backup_path)
+    manages_code_mode_host = (
+        manages_engine and status.code_mode_host_path == supervisor_paths.code_mode_host
+    )
+    if status.code_mode_host_backup_path is not None:
+        require_engine_backup(status.code_mode_host_backup_path)
+        if not manages_code_mode_host and path_exists(supervisor_paths.code_mode_host):
+            raise ValueError(
+                "Cannot restore the recorded Code Mode host backup over an unmanaged "
+                f"path. Move {supervisor_paths.code_mode_host} aside before uninstalling "
+                f"so {status.code_mode_host_backup_path} can be restored."
+            )
     current_engine_release = None
     if manages_engine:
+        current_code_mode_host_identity = None
+        if manages_code_mode_host:
+            if engine_operations.inspect_code_mode_host is None:
+                raise ValueError("Code Mode host inspection is unavailable")
+            current_code_mode_host_identity = engine_operations.inspect_code_mode_host(
+                supervisor_paths.code_mode_host
+            )
         current_engine_release = managed_engine_release_from_identity(
-            engine_operations.inspect(supervisor_paths.managed_cli)
+            engine_operations.inspect(supervisor_paths.managed_cli),
+            current_code_mode_host_identity,
         )
 
     removals: list[Replacement] = []
     restored_engine_path = None
+    restored_code_mode_host_path = None
     try:
         for target in (status.app_path, status.shim_path):
             if target is not None and path_exists(target):
@@ -654,6 +823,8 @@ def uninstall_codex_lab(
 
         if manages_engine:
             engine_operations.uninstall_supervisor(supervisor_paths)
+            if manages_code_mode_host:
+                removals.append(stage_path_removal(supervisor_paths.code_mode_host))
             removals.append(stage_path_removal(supervisor_paths.managed_cli))
         if manages_engine and status.engine_backup_path is not None:
             supervisor_paths.managed_cli.parent.mkdir(parents=True, exist_ok=True)
@@ -662,8 +833,23 @@ def uninstall_codex_lab(
                 str(supervisor_paths.managed_cli),
             )
             restored_engine_path = supervisor_paths.managed_cli
+        if manages_engine and status.code_mode_host_backup_path is not None:
+            supervisor_paths.code_mode_host.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(
+                str(status.code_mode_host_backup_path),
+                str(supervisor_paths.code_mode_host),
+            )
+            restored_code_mode_host_path = supervisor_paths.code_mode_host
     except Exception as uninstall_error:
         try:
+            if restored_code_mode_host_path is not None:
+                status.code_mode_host_backup_path.parent.mkdir(
+                    parents=True, exist_ok=True
+                )
+                shutil.move(
+                    str(restored_code_mode_host_path),
+                    str(status.code_mode_host_backup_path),
+                )
             if restored_engine_path is not None:
                 status.engine_backup_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(
@@ -686,7 +872,11 @@ def uninstall_codex_lab(
     cleanup_replacements(removals)
     return CodexLabUninstallResult(
         app_path=status.app_path,
+        code_mode_host_path=status.code_mode_host_path
+        if manages_code_mode_host
+        else None,
         engine_path=status.engine_path if manages_engine else None,
+        restored_code_mode_host_path=restored_code_mode_host_path,
         restored_engine_path=restored_engine_path,
         shim_path=status.shim_path,
         state_path=status.state_path,
@@ -1051,6 +1241,8 @@ def write_install_state(
     manifest: dict,
     *,
     app_dir: Path,
+    code_mode_host_backup_path: Path | None,
+    code_mode_host_path: Path | None,
     engine_backup_path: Path | None,
     shim_path: Path | None,
     supervisor_paths: SupervisorPaths,
@@ -1067,6 +1259,12 @@ def write_install_state(
             for role, entry in manifest["artifacts"].items()
         },
         "bundleVersion": manifest["bundleVersion"],
+        "codeModeHostBackupPath": str(code_mode_host_backup_path)
+        if code_mode_host_backup_path is not None
+        else None,
+        "codeModeHostPath": str(code_mode_host_path)
+        if code_mode_host_path is not None
+        else None,
         "engineBackupPath": str(engine_backup_path)
         if engine_backup_path is not None
         else None,

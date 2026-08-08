@@ -197,10 +197,16 @@ jobs:
             echo "CODEX_BUILD_DIRTY=clean"
           } >> "$GITHUB_ENV"
 
-      - name: Build Codex Lab CLI
+      - name: Build Codex Lab engine binaries
         working-directory: codex-rs
         shell: bash
-        run: cargo build --locked --timings --release -p codex-cli --bin codex-lab
+        run: |
+          set -euo pipefail
+          cargo build --locked --timings --release -p codex-cli --bin codex-lab
+          cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
+          code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
+          test -x "$code_mode_host_bin"
+          echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
 
       - name: Report Cargo cache after build
         if: always()
@@ -242,63 +248,80 @@ jobs:
         run: |
           set -euo pipefail
           release_dir="$(dirname "$CODEX_LAB_BIN")"
-          dsym_dir="${release_dir}/codex-lab.dSYM"
           staged_dir="${RUNNER_TEMP}/codex-lab-engine-staging"
           symbols_dir="${RUNNER_TEMP}/codex-lab-symbols"
           rm -rf "$staged_dir" "$symbols_dir"
           mkdir -p "$staged_dir" "$symbols_dir"
-          if [[ ! -d "$dsym_dir" ]]; then
-            echo "Cargo did not emit ${dsym_dir}; expected CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed" >&2
-            exit 1
-          fi
+          for binary in codex-lab codex-code-mode-host; do
+            dsym_dir="${release_dir}/${binary}.dSYM"
+            if [[ ! -d "$dsym_dir" ]]; then
+              echo "Cargo did not emit ${dsym_dir}; expected CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed" >&2
+              exit 1
+            fi
+          done
           # Strip a staged copy. The persistent Cargo target cache keeps the
           # symbolicateable binary its fingerprints still describe, so a later
           # incremental run cannot reuse an already-stripped artifact.
           cp "$CODEX_LAB_BIN" "${staged_dir}/codex-lab"
-          cp -RL "$dsym_dir" "${staged_dir}/codex-lab.dSYM"
-          chmod 0755 "${staged_dir}/codex-lab"
-          unstripped_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
+          cp "$CODE_MODE_HOST_BIN" "${staged_dir}/codex-code-mode-host"
+          cp -RL "${release_dir}/codex-lab.dSYM" "${staged_dir}/codex-lab.dSYM"
+          cp -RL "${release_dir}/codex-code-mode-host.dSYM" "${staged_dir}/codex-code-mode-host.dSYM"
+          chmod 0755 "${staged_dir}/codex-lab" "${staged_dir}/codex-code-mode-host"
+          unstripped_engine_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
+          unstripped_host_bytes="$(wc -c < "${staged_dir}/codex-code-mode-host" | tr -d '[:space:]')"
           bash .github/scripts/archive-release-symbols-and-strip-binaries.sh \
             --target "$SYMBOLS_TARGET" \
             --artifact-name "$SYMBOLS_ARTIFACT_NAME" \
             --release-dir "$staged_dir" \
             --archive-dir "$symbols_dir" \
-            --binaries codex-lab
-          stripped_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
-          debug_map_entries="$(nm -pa "${staged_dir}/codex-lab" | grep -c ' OSO ' || true)"
-          if [[ "$debug_map_entries" != "0" ]]; then
-            echo "Stripped engine still carries ${debug_map_entries} debug map entries" >&2
+            --binaries "codex-lab codex-code-mode-host"
+          stripped_engine_bytes="$(wc -c < "${staged_dir}/codex-lab" | tr -d '[:space:]')"
+          stripped_host_bytes="$(wc -c < "${staged_dir}/codex-code-mode-host" | tr -d '[:space:]')"
+          for binary in codex-lab codex-code-mode-host; do
+            debug_map_entries="$(nm -pa "${staged_dir}/${binary}" | grep -c ' OSO ' || true)"
+            if [[ "$debug_map_entries" != "0" ]]; then
+              echo "Stripped ${binary} still carries ${debug_map_entries} debug map entries" >&2
+              exit 1
+            fi
+          done
+          if (( stripped_engine_bytes >= unstripped_engine_bytes )); then
+            echo "Strip did not shrink the engine (${unstripped_engine_bytes} -> ${stripped_engine_bytes} bytes)" >&2
             exit 1
           fi
-          if (( stripped_bytes >= unstripped_bytes )); then
-            echo "Strip did not shrink the engine (${unstripped_bytes} -> ${stripped_bytes} bytes)" >&2
+          if (( stripped_host_bytes >= unstripped_host_bytes )); then
+            echo "Strip did not shrink the Code Mode host (${unstripped_host_bytes} -> ${stripped_host_bytes} bytes)" >&2
             exit 1
           fi
           symbols_archive="${symbols_dir}/codex-symbols-${SYMBOLS_ARTIFACT_NAME}.tar.gz"
-          dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/"
-          dwarf_file_count="$(
-            tar -tzf "$symbols_archive" |
-              awk -v prefix="$dwarf_prefix" '
-                index($0, prefix) == 1 {
-                  suffix = substr($0, length(prefix) + 1)
-                  if (suffix != "" && suffix !~ /\//) {
-                    count++
+          for binary in codex-lab codex-code-mode-host; do
+            dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/${binary}.dSYM/Contents/Resources/DWARF/"
+            dwarf_file_count="$(
+              tar -tzf "$symbols_archive" |
+                awk -v prefix="$dwarf_prefix" '
+                  index($0, prefix) == 1 {
+                    suffix = substr($0, length(prefix) + 1)
+                    if (suffix != "" && suffix !~ /\//) {
+                      count++
+                    }
                   }
-                }
-                END { print count + 0 }
-              '
-          )"
-          if [[ "$dwarf_file_count" != "1" ]]; then
-            echo "Expected one archived dSYM DWARF file below ${dwarf_prefix}, found ${dwarf_file_count}" >&2
-            tar -tzf "$symbols_archive" >&2
-            exit 1
-          fi
+                  END { print count + 0 }
+                '
+            )"
+            if [[ "$dwarf_file_count" != "1" ]]; then
+              echo "Expected one archived dSYM DWARF file below ${dwarf_prefix}, found ${dwarf_file_count}" >&2
+              tar -tzf "$symbols_archive" >&2
+              exit 1
+            fi
+          done
           # Every later step -- bundle, smoke, signing, archiving -- must consume
           # the stripped engine, so repoint CODEX_LAB_BIN before they run.
           echo "CODEX_LAB_BIN=${staged_dir}/codex-lab" >> "$GITHUB_ENV"
+          echo "CODE_MODE_HOST_BIN=${staged_dir}/codex-code-mode-host" >> "$GITHUB_ENV"
           {
-            echo "- Engine bytes before strip: \`$unstripped_bytes\`"
-            echo "- Engine bytes after strip: \`$stripped_bytes\`"
+            echo "- Engine bytes before strip: \`$unstripped_engine_bytes\`"
+            echo "- Engine bytes after strip: \`$stripped_engine_bytes\`"
+            echo "- Code Mode host bytes before strip: \`$unstripped_host_bytes\`"
+            echo "- Code Mode host bytes after strip: \`$stripped_host_bytes\`"
             echo "- Engine symbols archive: \`$(basename "$symbols_archive")\`"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "symbols_dir=$symbols_dir" >> "$GITHUB_OUTPUT"
@@ -345,21 +368,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           echo "output_root=$output_root" >> "$GITHUB_OUTPUT"
 
-      - name: Sign and verify managed Codex Lab engine
+      - name: Sign and verify managed Codex Lab engine binaries
         id: engine
         shell: bash
         run: |
           set -euo pipefail
           engine_dir="${RUNNER_TEMP}/codex-lab-signed-engine"
           engine_path="${engine_dir}/codex"
+          code_mode_host_path="${engine_dir}/codex-code-mode-host"
           engine_identifier="$(PYTHONPATH=scripts python3 -c 'from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER; print(ENGINE_SIGNING_IDENTIFIER)')"
+          code_mode_host_identifier="$(PYTHONPATH=scripts python3 -c 'from codex_lab_package.engine_contract import CODE_MODE_HOST_SIGNING_IDENTIFIER; print(CODE_MODE_HOST_SIGNING_IDENTIFIER)')"
           engine_team_identifier="$(PYTHONPATH=scripts python3 -c 'from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER; print(ENGINE_TEAM_IDENTIFIER)')"
           signing_identity="Developer ID Application: Shiny Computers Leasing LLC (${engine_team_identifier})"
           signing_keychain="$HOME/Library/Keychains/login.keychain-db"
           rm -rf "$engine_dir"
           mkdir -p "$engine_dir"
           cp "$CODEX_LAB_BIN" "$engine_path"
-          chmod 0755 "$engine_path"
+          cp "$CODE_MODE_HOST_BIN" "$code_mode_host_path"
+          chmod 0755 "$engine_path" "$code_mode_host_path"
           security unlock-keychain -p "" "$signing_keychain"
           security set-keychain-settings -lut 21600 "$signing_keychain"
           security find-identity -v -p codesigning | grep -F "$signing_identity"
@@ -371,17 +397,28 @@ jobs:
             --options runtime \
             --timestamp true \
             --entitlements .github/scripts/macos-signing/codex.entitlements.plist
-          PYTHONPATH=scripts python3 - "$engine_path" "$(git rev-parse HEAD)" <<'PY'
+          .github/scripts/macos-signing/sign_macos_code.sh \
+            --target "$code_mode_host_path" \
+            --identity "$signing_identity" \
+            --deep false \
+            --identifier "$code_mode_host_identifier" \
+            --options runtime \
+            --timestamp true \
+            --entitlements .github/scripts/macos-signing/codex-code-mode-host.entitlements.plist
+          PYTHONPATH=scripts python3 - "$engine_path" "$code_mode_host_path" "$(git rev-parse HEAD)" <<'PY'
           from pathlib import Path
           import os
           import sys
 
+          from codex_lab_package.engine_contract import CODE_MODE_HOST_SIGNING_IDENTIFIER
           from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
           from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
+          from codex_lab_package.supervisor import inspect_code_mode_host
           from codex_lab_package.supervisor import inspect_engine
 
           identity = inspect_engine(Path(sys.argv[1]))
-          expected_source_commit = sys.argv[2]
+          host_identity = inspect_code_mode_host(Path(sys.argv[2]))
+          expected_source_commit = sys.argv[3]
           expected_version = os.environ["CODE_VERSION"]
           if identity.signing_identifier != ENGINE_SIGNING_IDENTIFIER:
               raise ValueError(f"unexpected engine signing identifier: {identity}")
@@ -393,9 +430,15 @@ jobs:
               raise ValueError(f"unexpected engine version: {identity}")
           if identity.build_channel != "lab":
               raise ValueError(f"unexpected engine build channel: {identity}")
+          if host_identity.signing_identifier != CODE_MODE_HOST_SIGNING_IDENTIFIER:
+              raise ValueError(f"unexpected Code Mode host signing identifier: {host_identity}")
+          if host_identity.team_identifier != ENGINE_TEAM_IDENTIFIER:
+              raise ValueError(f"unexpected Code Mode host TeamIdentifier: {host_identity}")
           print(identity)
+          print(host_identity)
           PY
           echo "engine_path=$engine_path" >> "$GITHUB_OUTPUT"
+          echo "code_mode_host_path=$code_mode_host_path" >> "$GITHUB_OUTPUT"
 
       - name: Archive Codex Lab release artifacts
         id: archive
@@ -406,6 +449,7 @@ jobs:
           set -euo pipefail
           output_root="${{ steps.package.outputs.output_root }}"
           signed_engine="${{ steps.engine.outputs.engine_path }}"
+          signed_code_mode_host="${{ steps.engine.outputs.code_mode_host_path }}"
           release_tag="${RELEASE_TAG:?missing release tag}"
           dist_dir="${RUNNER_TEMP}/codex-lab-dist"
           engine_dir="${RUNNER_TEMP}/codex-lab-engine-archive"
@@ -416,8 +460,15 @@ jobs:
           source_commit="$(git rev-parse HEAD)"
           download_base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}"
           rm -rf "$engine_dir"
-          mkdir -p "$engine_dir"
-          cp "$signed_engine" "${engine_dir}/codex"
+          mkdir -p "${engine_dir}/engine"
+          cp "$signed_code_mode_host" "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
+          chmod 0755 "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
+          python3 scripts/codex_lab_package/smoke.py \
+            "${output_root}/Codex Lab.app" \
+            --shim-path "${output_root}/bin/codex-lab" \
+            --expected-source-commit "$source_commit"
+          cp "$signed_engine" "${engine_dir}/engine/codex"
+          cp "$signed_code_mode_host" "${engine_dir}/engine/codex-code-mode-host"
           start=$SECONDS
           ditto -c -k --norsrc --keepParent "${output_root}/Codex Lab.app" "$app_zip"
           app_zip_seconds=$((SECONDS - start))
@@ -425,14 +476,16 @@ jobs:
           ditto -c -k --norsrc --keepParent "${output_root}/bin/codex-lab" "$shim_zip"
           shim_zip_seconds=$((SECONDS - start))
           start=$SECONDS
-          ditto -c -k --norsrc "${engine_dir}/codex" "$engine_zip"
+          ditto -c -k --norsrc --keepParent "${engine_dir}/engine" "$engine_zip"
           engine_zip_seconds=$((SECONDS - start))
           app_zip_bytes="$(wc -c < "$app_zip" | tr -d '[:space:]')"
           shim_zip_bytes="$(wc -c < "$shim_zip" | tr -d '[:space:]')"
           engine_zip_bytes="$(wc -c < "$engine_zip" | tr -d '[:space:]')"
           unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-lab"
+          unzip -l "$app_zip" | grep -F "Codex Lab.app/Contents/Resources/codex-code-mode-host"
           unzip -l "$shim_zip" | grep -F "bin/codex-lab"
-          unzip -l "$engine_zip" | grep -F "codex"
+          unzip -l "$engine_zip" | grep -F "engine/codex"
+          unzip -l "$engine_zip" | grep -F "engine/codex-code-mode-host"
           if { unzip -l "$app_zip"; unzip -l "$shim_zip"; unzip -l "$engine_zip"; } | grep -E '/\._|(^|[[:space:]])\._'; then
             echo "unexpected AppleDouble file in archive" >&2
             exit 1
@@ -442,8 +495,9 @@ jobs:
           mkdir -p "$engine_validation_dir"
           ditto -x -k "$engine_zip" "$engine_validation_dir"
           PYTHONPATH=scripts python3 -c \
-            'from pathlib import Path; import sys; from codex_lab_package.supervisor import inspect_engine; print(inspect_engine(Path(sys.argv[1])))' \
-            "${engine_validation_dir}/codex"
+            'from pathlib import Path; import sys; from codex_lab_package.supervisor import inspect_code_mode_host, inspect_engine; print(inspect_engine(Path(sys.argv[1]))); print(inspect_code_mode_host(Path(sys.argv[2])))' \
+            "${engine_validation_dir}/engine/codex" \
+            "${engine_validation_dir}/engine/codex-code-mode-host"
           start=$SECONDS
           (cd "$dist_dir" && shasum -a 256 -- *.zip > SHA256SUMS)
           python3 scripts/build_codex_lab_distribution_manifest.py generate \
@@ -516,7 +570,8 @@ jobs:
               and .artifacts.shimZip.downloadUrl
               and .artifacts.engineZip.downloadUrl
               and .artifacts.engineZip.signed == true
-              and .managedEngine.sha256' \
+              and .managedEngine.sha256
+              and .managedEngine.companions.codeModeHost.sha256' \
             dist/codex-lab-distribution.json
 
       - name: Verify release tag is available
@@ -569,9 +624,9 @@ jobs:
           cat > release-notes.md <<'EOF'
           Codex Lab macOS ARM64 distribution artifact.
 
-          The managed Codex Lab engine is individually Developer ID signed and
-          carries the required V8 JIT entitlement. The app and companion shim
-          remain unsigned Lab launch surfaces.
+          The managed Codex Lab CLI and Code Mode host are individually
+          Developer ID signed and carry the required V8 entitlements. The app
+          and companion shim remain unsigned Lab launch surfaces.
 
           Assets:
           - codex-lab-app-aarch64-apple-darwin.zip

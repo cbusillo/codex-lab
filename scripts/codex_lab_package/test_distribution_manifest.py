@@ -21,7 +21,9 @@ from codex_lab_package.distribution_manifest import sha256_file
 from codex_lab_package.distribution_manifest import sha256_zip_member
 from codex_lab_package.distribution_manifest import validate_manifest
 from codex_lab_package.engine_contract import ENGINE_SIGNING_IDENTIFIER
+from codex_lab_package.engine_contract import CODE_MODE_HOST_SIGNING_IDENTIFIER
 from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
+from codex_lab_package.engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from codex_lab_package.release_tag import release_version_from_tag
 
@@ -65,7 +67,7 @@ class DistributionManifestTest(unittest.TestCase):
             self.assertEqual(manifest["product"], "codex-lab")
             self.assertEqual(manifest["channel"], "lab")
             self.assertEqual(manifest["platform"], "aarch64-apple-darwin")
-            self.assertEqual(manifest["schemaVersion"], 2)
+            self.assertEqual(manifest["schemaVersion"], 3)
             self.assertEqual(manifest["source"]["commit"], "abc123")
             self.assertEqual(manifest["release"], {"tag": "codex-lab-v1.2.3-lab.42"})
             self.assertEqual(
@@ -125,8 +127,8 @@ class DistributionManifestTest(unittest.TestCase):
             self.assertEqual(
                 manifest["artifacts"]["engineZip"],
                 {
-                    "archiveRoot": "codex",
-                    "description": "Individually signed managed engine pinned by the Codex Lab supervisor.",
+                    "archiveRoot": "engine",
+                    "description": "Signed managed CLI and Code Mode host pinned by the Codex Lab supervisor.",
                     "fileName": ENGINE_ZIP,
                     "downloadUrl": "https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3-lab.42/"
                     + ENGINE_ZIP,
@@ -140,8 +142,33 @@ class DistributionManifestTest(unittest.TestCase):
                 manifest["managedEngine"],
                 {
                     "artifactRole": "engineZip",
+                    "companions": {
+                        "codeModeHost": {
+                            "archivePath": "engine/codex-code-mode-host",
+                            "requiredEntitlements": list(
+                                REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
+                            ),
+                            "sha256": sha256_zip_member(
+                                engine_zip,
+                                "engine/codex-code-mode-host",
+                                expected_members=(
+                                    "engine/codex",
+                                    "engine/codex-code-mode-host",
+                                ),
+                            ),
+                            "signingIdentifier": CODE_MODE_HOST_SIGNING_IDENTIFIER,
+                            "teamIdentifier": ENGINE_TEAM_IDENTIFIER,
+                        }
+                    },
                     "requiredEntitlements": list(REQUIRED_ENGINE_ENTITLEMENTS),
-                    "sha256": sha256_zip_member(engine_zip, "codex"),
+                    "sha256": sha256_zip_member(
+                        engine_zip,
+                        "engine/codex",
+                        expected_members=(
+                            "engine/codex",
+                            "engine/codex-code-mode-host",
+                        ),
+                    ),
                     "signingIdentifier": ENGINE_SIGNING_IDENTIFIER,
                     "sourceCommit": "abc123",
                     "teamIdentifier": ENGINE_TEAM_IDENTIFIER,
@@ -416,10 +443,13 @@ def _create_fixtures(dist_dir: Path) -> tuple[Path, Path, Path]:
     engine_zip = dist_dir / ENGINE_ZIP
     _copy_fixture(app_zip)
     _copy_fixture(shim_zip)
-    engine_info = ZipInfo("codex")
+    engine_info = ZipInfo("engine/codex")
     engine_info.external_attr = (stat.S_IFREG | 0o755) << 16
+    host_info = ZipInfo("engine/codex-code-mode-host")
+    host_info.external_attr = (stat.S_IFREG | 0o755) << 16
     with ZipFile(engine_zip, "w") as archive:
         archive.writestr(engine_info, b"signed engine fixture")
+        archive.writestr(host_info, b"signed Code Mode host fixture")
     return app_zip, shim_zip, engine_zip
 
 

@@ -70,10 +70,10 @@ and managed CLI builds must have matching fixed source/build provenance.
 The GitHub workflow uploads `codex-lab-distribution.json` beside the app zip,
 shim zip, managed-engine zip, and `SHA256SUMS`. The manifest records artifact
 roles, sizes, checksums, source workflow metadata, supported install layouts,
-release tags, download URLs when published, and the managed engine's binary
-digest, Developer ID identifier, TeamIdentifier, version, source commit, and
-required JIT entitlement. PR app artifacts carry an unsigned engine for package
-validation; published release manifests require the engine artifact to be
+release tags, download URLs when published, and the managed CLI and Code Mode
+host digests, Developer ID identifiers, TeamIdentifiers, version, source commit,
+and required V8 entitlements. PR app artifacts carry unsigned engine binaries
+for package validation; published release manifests require both binaries to be
 individually Developer ID signed.
 
 Packaging workflows bind the static smoke to the expected source commit before
@@ -82,9 +82,9 @@ the interactive GUI smoke is performed.
 ## Installing a published release
 
 The published-release installer provisions the app, optional shim, individually
-signed managed engine, and the `dev.everycode.codex-lab.app-server.v1` user
-LaunchAgent as one rollback-aware transaction. No manual canary provisioning is
-required for a supported release.
+signed managed CLI and Code Mode host, and the
+`dev.everycode.codex-lab.app-server.v1` user LaunchAgent as one rollback-aware
+transaction. No manual canary provisioning is required for a supported release.
 
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:
