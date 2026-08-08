@@ -794,7 +794,9 @@ def uninstall_codex_lab(
         require_engine_backup(status.code_mode_host_backup_path)
         if not manages_code_mode_host and path_exists(supervisor_paths.code_mode_host):
             raise ValueError(
-                "Cannot restore the recorded Code Mode host backup over an unmanaged path"
+                "Cannot restore the recorded Code Mode host backup over an unmanaged "
+                f"path. Move {supervisor_paths.code_mode_host} aside before uninstalling "
+                f"so {status.code_mode_host_backup_path} can be restored."
             )
     current_engine_release = None
     if manages_engine:

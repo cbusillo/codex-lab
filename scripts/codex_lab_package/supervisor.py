@@ -262,6 +262,10 @@ EXPECTED_CODE_MODE_HOST_TEAM_IDENTIFIER={quote(code_mode_host_identity.team_iden
     discard_entitlements
     return 1
   fi
+  if ! "$PLUTIL" -convert xml1 "$ENTITLEMENTS_FILE"; then
+    discard_entitlements
+    return 1
+  fi
   allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
   allow_unsigned_executable_memory=$("$PLUTIL" -extract "$ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
   entitlement_key_count=$(/usr/bin/grep -o '<key>' "$ENTITLEMENTS_FILE" | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')
@@ -353,6 +357,10 @@ verify_engine() {{
   [ "$team_identifier" = "$EXPECTED_TEAM_IDENTIFIER" ] || return 1
   ENTITLEMENTS_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-entitlements.XXXXXX")
   if ! "$CODESIGN" -d --entitlements :- "$MANAGED_CLI" >"$ENTITLEMENTS_FILE" 2>/dev/null; then
+    discard_entitlements
+    return 1
+  fi
+  if ! "$PLUTIL" -convert xml1 "$ENTITLEMENTS_FILE"; then
     discard_entitlements
     return 1
   fi
