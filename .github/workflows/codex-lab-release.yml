@@ -204,7 +204,9 @@ jobs:
           set -euo pipefail
           cargo build --locked --timings --release -p codex-cli --bin codex-lab
           cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
-          echo "CODE_MODE_HOST_BIN=$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host" >> "$GITHUB_ENV"
+          code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
+          test -x "$code_mode_host_bin"
+          echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
 
       - name: Report Cargo cache after build
         if: always()
@@ -291,18 +293,26 @@ jobs:
             exit 1
           fi
           symbols_archive="${symbols_dir}/codex-symbols-${SYMBOLS_ARTIFACT_NAME}.tar.gz"
-          dwarf_file_count="$(
-            tar -tzf "$symbols_archive" |
-              awk '
-                /\.dSYM\/Contents\/Resources\/DWARF\/[^/]+$/ { count++ }
-                END { print count + 0 }
-              '
-          )"
-          if [[ "$dwarf_file_count" != "2" ]]; then
-            echo "Expected two archived dSYM DWARF files, found ${dwarf_file_count}" >&2
-            tar -tzf "$symbols_archive" >&2
-            exit 1
-          fi
+          for binary in codex-lab codex-code-mode-host; do
+            dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/${binary}.dSYM/Contents/Resources/DWARF/"
+            dwarf_file_count="$(
+              tar -tzf "$symbols_archive" |
+                awk -v prefix="$dwarf_prefix" '
+                  index($0, prefix) == 1 {
+                    suffix = substr($0, length(prefix) + 1)
+                    if (suffix != "" && suffix !~ /\//) {
+                      count++
+                    }
+                  }
+                  END { print count + 0 }
+                '
+            )"
+            if [[ "$dwarf_file_count" != "1" ]]; then
+              echo "Expected one archived dSYM DWARF file below ${dwarf_prefix}, found ${dwarf_file_count}" >&2
+              tar -tzf "$symbols_archive" >&2
+              exit 1
+            fi
+          done
           # Every later step -- bundle, smoke, signing, archiving -- must consume
           # the stripped engine, so repoint CODEX_LAB_BIN before they run.
           echo "CODEX_LAB_BIN=${staged_dir}/codex-lab" >> "$GITHUB_ENV"
@@ -453,6 +463,10 @@ jobs:
           mkdir -p "${engine_dir}/engine"
           cp "$signed_code_mode_host" "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
           chmod 0755 "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
+          python3 scripts/codex_lab_package/smoke.py \
+            "${output_root}/Codex Lab.app" \
+            --shim-path "${output_root}/bin/codex-lab" \
+            --expected-source-commit "$source_commit"
           cp "$signed_engine" "${engine_dir}/engine/codex"
           cp "$signed_code_mode_host" "${engine_dir}/engine/codex-code-mode-host"
           start=$SECONDS

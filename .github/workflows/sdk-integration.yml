@@ -82,6 +82,8 @@ jobs:
           }
 
           codex_bazel_output_path="$(bazel_output_path //codex-rs/cli:codex)"
+          # The Bazel rule retains the crate name while Cargo's declared bin
+          # and the runtime lookup contract use codex-code-mode-host.
           host_bazel_output_path="$(bazel_output_path //codex-rs/code-mode-host:code-mode-host)"
           for output_path in "${codex_bazel_output_path}" "${host_bazel_output_path}"; do
             if [[ ! -e "${output_path}" ]]; then

@@ -17,6 +17,8 @@ import tempfile
 import time
 from typing import Any
 
+from .engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
+from .engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from .layout import APP_SERVER_LABEL
 from .layout import APP_SERVER_LISTEN_HOST
 from .layout import APP_SERVER_LISTEN_PORT
@@ -32,7 +34,6 @@ DEFAULT_LISTEN_HOST = APP_SERVER_LISTEN_HOST
 DEFAULT_LISTEN_PORT = APP_SERVER_LISTEN_PORT
 MANAGED_CLI_RELATIVE_PATH = Path("packages/standalone/current/codex")
 CODE_MODE_HOST_NAME = "codex-code-mode-host"
-ALLOW_JIT_ENTITLEMENT = "com.apple.security.cs.allow-jit"
 ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH = r"com\.apple\.security\.cs\.allow-jit"
 ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH = (
     r"com\.apple\.security\.cs\.allow-unsigned-executable-memory"
@@ -142,9 +143,9 @@ def inspect_engine(
         managed_cli,
         codesign_path=codesign_path,
     )
-    if ALLOW_JIT_ENTITLEMENT not in code_signing_entitlements:
+    if set(code_signing_entitlements) != set(REQUIRED_ENGINE_ENTITLEMENTS):
         raise ValueError(
-            "managed Codex Lab engine lacks the required V8 JIT entitlement"
+            "managed Codex Lab engine entitlements do not match the release contract"
         )
     return EngineIdentity(
         build_channel=provenance["build_channel"],
@@ -169,14 +170,9 @@ def inspect_code_mode_host(
         codesign_path=codesign_path,
     )
     entitlements = _code_signing_entitlements(path, codesign_path=codesign_path)
-    required = {
-        ALLOW_JIT_ENTITLEMENT,
-        "com.apple.security.cs.allow-unsigned-executable-memory",
-    }
-    missing = sorted(required - set(entitlements))
-    if missing:
+    if set(entitlements) != set(REQUIRED_CODE_MODE_HOST_ENTITLEMENTS):
         raise ValueError(
-            f"managed Codex Lab Code Mode host lacks required entitlements: {missing}"
+            "managed Codex Lab Code Mode host entitlements do not match the release contract"
         )
     return CodeModeHostIdentity(
         sha256=_sha256_file(path),
@@ -220,6 +216,11 @@ def _signing_identity(path: Path, *, codesign_path: Path) -> tuple[str, str]:
     team_identifier = _signature_field(signature_output, "TeamIdentifier")
     if not signing_identifier or not team_identifier or team_identifier == "not set":
         raise ValueError("managed Codex Lab executable lacks a stable signing identity")
+    if (
+        re.search(r"^CodeDirectory .* flags=.*runtime", signature_output, re.MULTILINE)
+        is None
+    ):
+        raise ValueError("managed Codex Lab executable lacks hardened runtime")
     return signing_identifier, team_identifier
 
 
@@ -244,14 +245,14 @@ def build_supervisor_runner(
         code_mode_host_variables = f"""CODE_MODE_HOST={quote(paths.code_mode_host)}
 EXPECTED_CODE_MODE_HOST_SHA256={quote(code_mode_host_identity.sha256)}
 EXPECTED_CODE_MODE_HOST_SIGNING_IDENTIFIER={quote(code_mode_host_identity.signing_identifier)}
-EXPECTED_CODE_MODE_HOST_TEAM_IDENTIFIER={quote(code_mode_host_identity.team_identifier)}
-ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH={quote(ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH)}"""
+EXPECTED_CODE_MODE_HOST_TEAM_IDENTIFIER={quote(code_mode_host_identity.team_identifier)}"""
         verify_code_mode_host = """verify_code_mode_host() {
   [ -x "$CODE_MODE_HOST" ] || return 1
   actual_sha256=$("$SHASUM" -a 256 "$CODE_MODE_HOST" | /usr/bin/awk '{ print $1 }')
   [ "$actual_sha256" = "$EXPECTED_CODE_MODE_HOST_SHA256" ] || return 1
   "$CODESIGN" --verify --strict "$CODE_MODE_HOST" >/dev/null 2>&1 || return 1
   signature=$("$CODESIGN" -dvvv "$CODE_MODE_HOST" 2>&1 || true)
+  printf '%s\n' "$signature" | /usr/bin/grep -Eq '^CodeDirectory .* flags=.*runtime' || return 1
   signing_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "Identifier" { print substr($0, index($0, "=") + 1); exit }')
   team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" { print substr($0, index($0, "=") + 1); exit }')
   [ "$signing_identifier" = "$EXPECTED_CODE_MODE_HOST_SIGNING_IDENTIFIER" ] || return 1
@@ -263,8 +264,11 @@ ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH={quote(ALLOW_UNSIGNED_EXECUTABLE_MEMOR
   fi
   allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
   allow_unsigned_executable_memory=$("$PLUTIL" -extract "$ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  entitlement_key_count=$(/usr/bin/grep -o '<key>' "$ENTITLEMENTS_FILE" | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')
   discard_entitlements
-  [ "$allow_jit" = true ] && [ "$allow_unsigned_executable_memory" = true ]
+  [ "$allow_jit" = true ] \
+    && [ "$allow_unsigned_executable_memory" = true ] \
+    && [ "$entitlement_key_count" = 2 ]
 }"""
 
     return f"""#!/bin/sh
@@ -281,6 +285,7 @@ EXPECTED_SIGNING_IDENTIFIER={quote(identity.signing_identifier)}
 EXPECTED_TEAM_IDENTIFIER={quote(identity.team_identifier)}
 {code_mode_host_variables}
 ALLOW_JIT_ENTITLEMENT_KEY_PATH={quote(ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH)}
+ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH={quote(ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH)}
 CODESIGN={quote(tools.codesign)}
 PLUTIL={quote(tools.plutil)}
 SHASUM={quote(tools.shasum)}
@@ -341,6 +346,7 @@ verify_engine() {{
   [ "$actual_sha256" = "$EXPECTED_SHA256" ] || return 1
   "$CODESIGN" --verify --strict "$MANAGED_CLI" >/dev/null 2>&1 || return 1
   signature=$("$CODESIGN" -dvvv "$MANAGED_CLI" 2>&1 || true)
+  printf '%s\n' "$signature" | /usr/bin/grep -Eq '^CodeDirectory .* flags=.*runtime' || return 1
   signing_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "Identifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   team_identifier=$(printf '%s\n' "$signature" | /usr/bin/awk -F= '$1 == "TeamIdentifier" {{ print substr($0, index($0, "=") + 1); exit }}')
   [ "$signing_identifier" = "$EXPECTED_SIGNING_IDENTIFIER" ] || return 1
@@ -351,8 +357,13 @@ verify_engine() {{
     return 1
   fi
   allow_jit=$("$PLUTIL" -extract "$ALLOW_JIT_ENTITLEMENT_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  allow_unsigned_executable_memory=$("$PLUTIL" -extract "$ALLOW_UNSIGNED_EXECUTABLE_MEMORY_KEY_PATH" raw -o - "$ENTITLEMENTS_FILE" 2>/dev/null || true)
+  entitlement_key_count=$(/usr/bin/grep -o '<key>' "$ENTITLEMENTS_FILE" | /usr/bin/wc -l | /usr/bin/tr -d '[:space:]')
   discard_entitlements
-  [ "$allow_jit" = true ] || return 1
+  [ "$allow_jit" = true ] \
+    && [ "$allow_unsigned_executable_memory" = true ] \
+    && [ "$entitlement_key_count" = 2 ] \
+    || return 1
   PROVENANCE_FILE=$(/usr/bin/mktemp "${{TMPDIR:-/tmp}}/codex-lab-supervisor.XXXXXX")
   if ! "$MANAGED_CLI" debug provenance --json >"$PROVENANCE_FILE"; then
     discard_provenance

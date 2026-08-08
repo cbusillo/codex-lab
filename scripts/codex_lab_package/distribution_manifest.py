@@ -31,6 +31,7 @@ from codex_package.version import read_workspace_version
 SCHEMA_VERSION = 3
 SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
 LEGACY_ENGINE_ARCHIVE_ROOT = "codex"
+LEGACY_REQUIRED_ENGINE_ENTITLEMENTS = ("com.apple.security.cs.allow-jit",)
 PRODUCT = "codex-lab"
 CHANNEL = "lab"
 PLATFORM = "aarch64-apple-darwin"
@@ -515,7 +516,12 @@ def validate_managed_engine(
         raise ValueError("managedEngine sourceCommit must match the manifest source")
     if not is_sha256(managed_engine["sha256"]):
         raise ValueError("managedEngine sha256 must be a lowercase SHA-256 digest")
-    if managed_engine["requiredEntitlements"] != list(REQUIRED_ENGINE_ENTITLEMENTS):
+    required_engine_entitlements = (
+        REQUIRED_ENGINE_ENTITLEMENTS
+        if schema_version >= 3
+        else LEGACY_REQUIRED_ENGINE_ENTITLEMENTS
+    )
+    if managed_engine["requiredEntitlements"] != list(required_engine_entitlements):
         raise ValueError("managedEngine requiredEntitlements are invalid")
 
     if schema_version >= 3:

@@ -21,6 +21,8 @@ from .distribution_manifest import SHIM_ZIP
 from .distribution_manifest import is_https_url
 from .distribution_manifest import read_sha256sums
 from .distribution_manifest import validate_manifest
+from .engine_contract import CODE_MODE_HOST_ARCHIVE_PATH
+from .engine_contract import ENGINE_CLI_ARCHIVE_PATH
 from .layout import build_shim_script
 from .release_tag import LAB_RELEASE_TAG_PREFIX
 from .release_tag import codex_lab_release_order
@@ -308,8 +310,10 @@ def install_from_manifest_url(
             engine_source = engine_archive_source
             code_mode_host_source = None
         else:
-            engine_source = engine_archive_source / "codex"
-            code_mode_host_source = engine_archive_source / "codex-code-mode-host"
+            engine_source = engine_archive_source / Path(ENGINE_CLI_ARCHIVE_PATH).name
+            code_mode_host_source = (
+                engine_archive_source / Path(CODE_MODE_HOST_ARCHIVE_PATH).name
+            )
         smoke_check(app_source, shim_source)
         staged_identity = engine_operations.inspect(engine_source)
         require_engine_release_identity(staged_identity, engine_release)
@@ -827,7 +831,7 @@ def uninstall_codex_lab(
                 str(supervisor_paths.managed_cli),
             )
             restored_engine_path = supervisor_paths.managed_cli
-        if status.code_mode_host_backup_path is not None:
+        if manages_engine and status.code_mode_host_backup_path is not None:
             supervisor_paths.code_mode_host.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(
                 str(status.code_mode_host_backup_path),

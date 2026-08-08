@@ -75,7 +75,9 @@ jobs:
           set -euo pipefail
           cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
           cargo build --timings --profile ci-app -p codex-code-mode-host --bin codex-code-mode-host
-          echo "CODE_MODE_HOST_BIN=$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host" >> "$GITHUB_ENV"
+          code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
+          test -x "$code_mode_host_bin"
+          echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
 
       - name: Report Cargo cache after build
         if: always()
@@ -156,6 +158,10 @@ jobs:
           mkdir -p "$engine_dir"
           cp "$CODE_MODE_HOST_BIN" "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
           chmod 0755 "${output_root}/Codex Lab.app/Contents/Resources/codex-code-mode-host"
+          python3 scripts/codex_lab_package/smoke.py \
+            "${output_root}/Codex Lab.app" \
+            --shim-path "${output_root}/bin/codex-lab" \
+            --expected-source-commit "$source_commit"
           cp "$CODEX_LAB_BIN" "${engine_dir}/codex"
           cp "$CODE_MODE_HOST_BIN" "${engine_dir}/codex-code-mode-host"
           chmod 0755 "${engine_dir}/codex" "${engine_dir}/codex-code-mode-host"

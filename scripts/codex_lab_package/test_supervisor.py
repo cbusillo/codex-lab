@@ -41,15 +41,27 @@ exit 2
         path: Path,
         *,
         entitlement_value: str | None,
+        extra_entitlement: bool = False,
+        hardened_runtime: bool = True,
     ) -> None:
         entitlement_output = ""
         if entitlement_value is not None:
+            extra_entitlement_xml = (
+                "<key>com.apple.security.cs.disable-library-validation</key><true/>"
+                if extra_entitlement
+                else ""
+            )
             entitlement_output = f"""cat <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><{entitlement_value}/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/></dict></plist>
+<plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><{entitlement_value}/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>{extra_entitlement_xml}</dict></plist>
 EOF
 """
+        runtime_output = (
+            "echo 'CodeDirectory v=20500 size=100 flags=0x10000(runtime)' >&2"
+            if hardened_runtime
+            else "echo 'CodeDirectory v=20500 size=100 flags=0x0(none)' >&2"
+        )
         path.write_text(
             """#!/bin/sh
 if [ "${1:-}" = --verify ]; then
@@ -61,7 +73,10 @@ __ENTITLEMENT_OUTPUT__
 fi
 echo 'Identifier=dev.example.codex-lab' >&2
 echo 'TeamIdentifier=TEAM123456' >&2
-""".replace("__ENTITLEMENT_OUTPUT__", entitlement_output),
+__RUNTIME_OUTPUT__
+""".replace("__ENTITLEMENT_OUTPUT__", entitlement_output).replace(
+                "__RUNTIME_OUTPUT__", runtime_output
+            ),
             encoding="utf-8",
         )
         os.chmod(path, 0o755)
@@ -131,8 +146,38 @@ echo 'TeamIdentifier=TEAM123456' >&2
                         entitlement_value=entitlement_value,
                     )
 
-                    with self.assertRaisesRegex(ValueError, "V8 JIT entitlement"):
+                    with self.assertRaisesRegex(ValueError, "entitlements"):
                         inspect_engine(engine, codesign_path=codesign)
+
+    def test_inspection_rejects_unexpected_entitlement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = root / "codex"
+            self._write_engine(engine)
+            codesign = root / "codesign"
+            self._write_codesign(
+                codesign,
+                entitlement_value="true",
+                extra_entitlement=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "release contract"):
+                inspect_engine(engine, codesign_path=codesign)
+
+    def test_inspection_rejects_missing_hardened_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            engine = root / "codex"
+            self._write_engine(engine)
+            codesign = root / "codesign"
+            self._write_codesign(
+                codesign,
+                entitlement_value="true",
+                hardened_runtime=False,
+            )
+
+            with self.assertRaisesRegex(ValueError, "hardened runtime"):
+                inspect_engine(engine, codesign_path=codesign)
 
     def test_inspects_and_pins_code_mode_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

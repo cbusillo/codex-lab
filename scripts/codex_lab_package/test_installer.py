@@ -1776,6 +1776,7 @@ def convert_test_release_to_schema_two(release: TestRelease) -> None:
     engine_artifact["sizeBytes"] = engine_zip.stat().st_size
     managed_engine = release.manifest["managedEngine"]
     managed_engine.pop("companions")
+    managed_engine["requiredEntitlements"] = ["com.apple.security.cs.allow-jit"]
     managed_engine["sha256"] = sha256_zip_member(engine_zip, "codex")
     write_file(
         release.dist_dir / "SHA256SUMS",
