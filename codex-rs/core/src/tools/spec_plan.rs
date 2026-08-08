@@ -492,8 +492,8 @@ fn agent_type_description(
         .or_else(|| crate::agent::role::external_agent_role_config("antigravity"));
     let selectors = antigravity_backend
         .and_then(|role| role.backend)
-        .and_then(|backend| match backend {
-            crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => Some(backend),
+        .map(|backend| match backend {
+            crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => backend,
         })
         .map(|backend| {
             crate::agent::external_capabilities::discovered_antigravity_selectors(

@@ -75,7 +75,7 @@ pub(crate) struct BackgroundAutoReviewDisplacedPending {
 pub(crate) enum BackgroundAutoReviewPendingRecord {
     Rejected,
     Recorded {
-        displaced: Option<BackgroundAutoReviewDisplacedPending>,
+        displaced: Option<Box<BackgroundAutoReviewDisplacedPending>>,
     },
 }
 
@@ -265,11 +265,13 @@ impl BackgroundAutoReviewSchedulerState {
             persistence,
         });
         BackgroundAutoReviewPendingRecord::Recorded {
-            displaced: displaced.map(|previous| BackgroundAutoReviewDisplacedPending {
-                generation: previous.generation,
-                fingerprint: previous.fingerprint,
-                cancellation_token: previous.cancellation_token,
-                persistence: previous.persistence,
+            displaced: displaced.map(|previous| {
+                Box::new(BackgroundAutoReviewDisplacedPending {
+                    generation: previous.generation,
+                    fingerprint: previous.fingerprint,
+                    cancellation_token: previous.cancellation_token,
+                    persistence: previous.persistence,
+                })
             }),
         }
     }

@@ -68,63 +68,85 @@ async fn discovered_external_selector_is_advertised_without_user_roles() {
             .expect("workspace should be absolute");
     let selector = "antigravity-gemini-3.6-flash-high";
 
-    let plan = probe(|turn| {
+    let backend = crate::agent::role::external_agent_role_config("antigravity")
+        .and_then(|role| role.backend)
+        .map(|backend| match backend {
+            crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => backend,
+        })
+        .expect("built-in Antigravity backend");
+    crate::agent::external_capabilities::record_active_capability_catalog(
+        &backend,
+        workspace.as_path(),
+        &crate::agent::external_capabilities::ExternalAgentCapabilities {
+            cli_family: "antigravity".to_string(),
+            cli_version: Some("1.1.10".to_string()),
+            supports_model_selection: true,
+            supports_effort_selection: true,
+            models: vec![
+                crate::agent::external_capabilities::ExternalAgentModelCapability {
+                    selector: selector.to_string(),
+                    model: "gemini-3.6-flash-high".to_string(),
+                    explicit_only: false,
+                },
+            ],
+            effort_levels: vec!["high".to_string()],
+            source: crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
+            freshness: crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
+            observed_at_unix_seconds: 0,
+            failure: None,
+        },
+    );
+
+    let disabled_plan = probe(|turn| {
         set_features(turn, &[Feature::Collab, Feature::MultiAgentV2]);
         update_config(turn, |config| {
             config.cwd = workspace.clone();
             config.agent_roles.clear();
         });
-        let backend = crate::agent::role::external_agent_role_config("antigravity")
-            .and_then(|role| role.backend)
-            .map(|backend| match backend {
-                crate::config::AgentRoleBackendConfig::ExternalCommand(backend) => backend,
-            })
-            .expect("built-in Antigravity backend");
-        crate::agent::external_capabilities::record_active_capability_catalog(
-            &backend,
-            workspace.as_path(),
-            &crate::agent::external_capabilities::ExternalAgentCapabilities {
-                cli_family: "antigravity".to_string(),
-                cli_version: Some("1.1.10".to_string()),
-                supports_model_selection: true,
-                supports_effort_selection: true,
-                models: vec![
-                    crate::agent::external_capabilities::ExternalAgentModelCapability {
-                        selector: selector.to_string(),
-                        model: "gemini-3.6-flash-high".to_string(),
-                        explicit_only: false,
-                    },
-                ],
-                effort_levels: vec!["high".to_string()],
-                source:
-                    crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
-                freshness:
-                    crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
-                observed_at_unix_seconds: 0,
-                failure: None,
-            },
-        );
     })
     .await;
 
-    let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
-        panic!("expected agents namespace");
-    };
-    let spawn_agent = namespace
-        .tools
-        .iter()
-        .find_map(|tool| match tool {
-            ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent" => Some(tool),
-            ResponsesApiNamespaceTool::Function(_) => None,
-        })
-        .expect("spawn_agent tool");
-    let parameters = serde_json::to_value(&spawn_agent.parameters).expect("serialize parameters");
-    let agent_type_description = parameters
-        .pointer("/properties/agent_type/description")
-        .and_then(serde_json::Value::as_str)
-        .expect("discovered selectors should expose agent_type");
+    let plan = probe(|turn| {
+        set_features(turn, &[Feature::Collab, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.cwd = workspace.clone();
+            config.agent_roles.clear();
+            config.agent_selector_overrides.insert(
+                selector.to_string(),
+                codex_config::config_toml::AgentSelectorToml {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            );
+        });
+    })
+    .await;
 
-    assert!(agent_type_description.contains(selector));
+    let advertised_selectors = |plan: &ToolPlanProbe| {
+        let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
+            panic!("expected agents namespace");
+        };
+        let spawn_agent = namespace
+            .tools
+            .iter()
+            .find_map(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent" => {
+                    Some(tool)
+                }
+                ResponsesApiNamespaceTool::Function(_) => None,
+            })
+            .expect("spawn_agent tool");
+        let parameters =
+            serde_json::to_value(&spawn_agent.parameters).expect("serialize parameters");
+        parameters
+            .pointer("/properties/agent_type/description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    assert!(!advertised_selectors(&disabled_plan).contains(selector));
+    assert!(advertised_selectors(&plan).contains(selector));
 }
 
 #[derive(Default)]

@@ -144,7 +144,7 @@ fn builder_for_dynamic_external_selector(
             },
         );
         config.agent_selector_overrides.insert(
-            selector.clone(),
+            selector,
             AgentSelectorToml {
                 enabled: Some(true),
                 ..Default::default()
@@ -467,7 +467,7 @@ async fn assert_claude_effort_reaches_launch(
             .agent_roles
             .get_mut("claude-sonnet-4.6")
             .expect("test role should exist")
-            .config_file = Some(role_config.clone());
+            .config_file = Some(role_config);
     });
     let test = builder.build(&server).await?;
     test.submit_turn(PROMPT).await?;

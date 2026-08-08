@@ -8,7 +8,7 @@ expression: "render_lines(&view, 84)"
 │ Choose how Codex moves between connected accounts. Changes are saved to config.t │
 │ [x] Auto-switch accounts  Switch to another connected account after rate or      │
 │                           usage limits.                                          │
-│ [ ] API key fallback      Use saved API keys only after every ChatGPT account    │
-│                           is limited.                                            │
+│ [ ] API key fallback      Use saved API keys only after every ChatGPT account is │
+│                           limited.                                               │
 │ Press enter to toggle or esc to close                                            │
 └──────────────────────────────────────────────────────────────────────────────────┘
