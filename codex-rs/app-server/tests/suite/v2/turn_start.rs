@@ -110,6 +110,58 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
         .is_some_and(|body| body.contains(text))
 }
 
+async fn wait_for_response_request(
+    server: &wiremock::MockServer,
+    mock: &responses::ResponseMock,
+    label: &str,
+) -> Result<responses::ResponsesRequest> {
+    let result = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            if let Some(request) = mock.last_request() {
+                return request;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    match result {
+        Ok(request) => Ok(request),
+        Err(error) => {
+            let response_request_count = server.received_requests().await.map_or(0, |requests| {
+                requests
+                    .iter()
+                    .filter(|request| request.url.path().ends_with("/responses"))
+                    .count()
+            });
+            Err(error).with_context(|| {
+                format!(
+                    "timed out waiting for {label}; mock server observed {response_request_count} Responses API requests"
+                )
+            })
+        }
+    }
+}
+
+async fn wait_for_response_request_while_draining(
+    mcp: &mut TestAppServer,
+    server: &wiremock::MockServer,
+    mock: &responses::ResponseMock,
+    label: &str,
+) -> Result<responses::ResponsesRequest> {
+    let request = wait_for_response_request(server, mock, label);
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            request = &mut request => return request,
+            message = mcp.read_next_message() => {
+                if message.is_err() {
+                    return request.await;
+                }
+            }
+        }
+    }
+}
+
 async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>> {
     // Two Codex turns hit the mock model (session start + turn/start).
     let responses = vec![
@@ -3174,7 +3226,7 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
         ]),
     )
     .await;
-    let child_turn = responses::mount_sse_once_match(
+    let child_turn = responses::mount_sse_once_match_recording_matches(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -3260,22 +3312,23 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
     assert_eq!(turn_completed.turn.id, turn.turn.id);
-    let child_bodies = child_turn
-        .requests()
-        .iter()
-        .map(core_test_support::responses::ResponsesRequest::body_json)
-        .filter(|body| {
-            body["client_metadata"]["thread_id"].as_str() == Some(receiver_thread_id.as_str())
-        })
-        .collect::<Vec<_>>();
-    assert!(!child_bodies.is_empty());
-    for child_body in child_bodies {
-        assert_eq!(child_body["model"], json!(REQUESTED_MODEL));
-        assert_eq!(
-            child_body["reasoning"]["effort"],
-            json!(REQUESTED_REASONING_EFFORT.to_string())
-        );
-    }
+    let child_request = wait_for_response_request_while_draining(
+        &mut mcp,
+        &server,
+        &child_turn,
+        "requested-model child request",
+    )
+    .await?;
+    let child_body = child_request.body_json();
+    assert_eq!(child_body["model"], json!(REQUESTED_MODEL));
+    assert_eq!(
+        child_body["client_metadata"]["thread_id"],
+        json!(receiver_thread_id)
+    );
+    assert_eq!(
+        child_body["reasoning"]["effort"],
+        json!(REQUESTED_REASONING_EFFORT.to_string())
+    );
 
     // Reuse this live spawn setup to cover thread/delete's ThreadManager descendant path.
     let _: ThreadDeleteResponse = mcp
@@ -3507,7 +3560,7 @@ async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()
         ]),
     )
     .await;
-    let child_turn = responses::mount_sse_once_match(
+    let child_turn = responses::mount_sse_once_match_recording_matches(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -3610,22 +3663,23 @@ config_file = "./custom-role.toml"
     })
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
-    let child_bodies = child_turn
-        .requests()
-        .iter()
-        .map(core_test_support::responses::ResponsesRequest::body_json)
-        .filter(|body| {
-            body["client_metadata"]["thread_id"].as_str() == Some(receiver_thread_id.as_str())
-        })
-        .collect::<Vec<_>>();
-    assert!(!child_bodies.is_empty());
-    for child_body in child_bodies {
-        assert_eq!(child_body["model"], json!(ROLE_MODEL));
-        assert_eq!(
-            child_body["reasoning"]["effort"],
-            json!(ROLE_REASONING_EFFORT.to_string())
-        );
-    }
+    let child_request = wait_for_response_request_while_draining(
+        &mut mcp,
+        &server,
+        &child_turn,
+        "custom-role child request",
+    )
+    .await?;
+    let child_body = child_request.body_json();
+    assert_eq!(child_body["model"], json!(ROLE_MODEL));
+    assert_eq!(
+        child_body["client_metadata"]["thread_id"],
+        json!(receiver_thread_id)
+    );
+    assert_eq!(
+        child_body["reasoning"]["effort"],
+        json!(ROLE_REASONING_EFFORT.to_string())
+    );
 
     Ok(())
 }
