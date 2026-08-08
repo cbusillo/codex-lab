@@ -77,7 +77,7 @@ describe("Codex", () => {
     try {
       const thread = client.startThread();
       await thread.run("first input");
-      await thread.run("second input");
+      const secondResult = await thread.run("second input");
 
       // Check second request continues the same thread
       expect(requests.length).toBeGreaterThanOrEqual(2);
@@ -93,8 +93,9 @@ describe("Codex", () => {
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
       const secondInput = payload.input.at(-1)?.content?.[0]?.text;
-      expect({ assistantText, secondInput }).toEqual({
+      expect({ assistantText, finalResponse: secondResult.finalResponse, secondInput }).toEqual({
         assistantText: "First response",
+        finalResponse: "Second response",
         secondInput: "second input",
       });
     } finally {
