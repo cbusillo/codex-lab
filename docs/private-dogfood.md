@@ -21,8 +21,8 @@ the bounded private-dogfood group.
 Paste this helper into Terminal. It downloads the repository source archive for
 one exact immutable commit only to obtain the standard-library installer,
 deletes the archive and extracted files when the command finishes, and does not
-invoke Git or Cargo. The installer commit below is the reviewed base of the
-release-guide-only change; the installer itself is identical in the release.
+invoke Git or Cargo. The installer commit below is the reviewed release-gate
+repair and is included unchanged in the release candidate.
 
 ```sh
 run_codex_lab_installer() (
@@ -81,7 +81,7 @@ status, rollback, or reinstall command blocks.
 Install the pinned candidate:
 
 ```sh
-installer_commit=f2303379f2606ea18c9beab6bb956886ba992e4d
+installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
 release_tag=codex-lab-v0.1.0-lab.2
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$release_tag" \
@@ -90,9 +90,9 @@ run_codex_lab_installer "$installer_commit" \
 
 The installer verifies the release URLs, asset sizes, SHA-256 checksums,
 archive layout, exact source provenance, Developer ID identity and team,
-hardened runtime, and V8 JIT entitlement before replacing anything. It then
-installs the app, shim, signed engine, state record, and launchd supervisor as a
-rollback-aware transaction. The normal locations are:
+hardened runtime, and required V8 entitlements before replacing anything. It
+then installs the app, shim, signed CLI and Code Mode host, state record, and
+launchd supervisor as a rollback-aware transaction. The normal locations are:
 
 - `~/Applications/Codex Lab.app`
 - `~/.local/bin/codex-lab`
@@ -106,7 +106,7 @@ Add `~/.local/bin` to `PATH` if Terminal cannot find `codex-lab`.
 Run all of these before dogfooding:
 
 ```sh
-installer_commit=f2303379f2606ea18c9beab6bb956886ba992e4d
+installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
 run_codex_lab_installer "$installer_commit" --status
 codex-lab --version
 codex-lab debug provenance --json
@@ -200,7 +200,7 @@ Roll back through the same transactional installer path to the exact supported
 prior release:
 
 ```sh
-installer_commit=f2303379f2606ea18c9beab6bb956886ba992e4d
+installer_commit=b94b562eae7e41b95b0e4456884273b7fd47f7ce
 rollback_tag=codex-lab-v0.1.0-lab.1
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$rollback_tag" \
@@ -213,8 +213,8 @@ Reinstall the candidate with the install command above. After either change,
 confirm the supervisor is healthy and that status and provenance agree. After
 rollback, status must name `codex-lab-v0.1.0-lab.1` and provenance
 `source_commit` must equal `a65d78ad29fbe0994a5de25a7d521cfb90047a45`.
-A failure must leave the prior app, shim, engine, installer state, and supervisor
-usable; if it does not, stop and report a release blocker.
+A failure must leave the prior app, shim, engine binaries, installer state, and
+supervisor usable; if it does not, stop and report a release blocker.
 
 ## Bounded second-user canary
 
