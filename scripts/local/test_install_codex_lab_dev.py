@@ -176,6 +176,12 @@ class InstallCodexLabDevTest(unittest.TestCase):
     ) -> None:
         self.assertNotIn("Refresh command:", launch.stderr)
         self.assertNotIn("install-codex-lab-dev.sh' --bin-dir", launch.stderr)
+        for line in launch.stdout.splitlines():
+            if line.startswith("startup_warning="):
+                self.assertTrue(
+                    line.startswith("startup_warning=Pinned Codex Lab candidate "),
+                    line,
+                )
 
     def test_installs_launcher_pinned_to_staged_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
@@ -374,7 +380,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
             )
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn("Local source", launch.stderr)
+            self.assertIn("local source", launch.stderr)
             self.assertIn("is dirty", launch.stderr)
             self.assertIn("Commit or stash the changes", launch.stderr)
             self.assert_no_refresh_command(launch)
@@ -390,7 +396,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
             launch = self.launch(launcher, root, environment)
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
-            self.assertIn(f"Local source {newer_commit} is dirty", launch.stderr)
+            self.assertIn(f"local source {newer_commit} is dirty", launch.stderr)
             self.assert_no_refresh_command(launch)
 
     def test_incomparable_rewritten_history_does_not_offer_refresh(self) -> None:
@@ -549,6 +555,39 @@ class InstallCodexLabDevTest(unittest.TestCase):
             self.assertIn("is not a regular file there", launch.stderr)
             self.assert_no_refresh_command(launch)
 
+    def test_symlink_installer_does_not_offer_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            checkout, _, _, environment, _ = self.install_fake_candidate(root)
+            launcher = root / "bin with spaces" / "codex-lab"
+            installer = checkout / "scripts/local/install-codex-lab-dev.sh"
+            installer.unlink()
+            replacement = installer.parent / "replacement-installer.sh"
+            replacement.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            replacement.chmod(0o755)
+            installer.symlink_to(replacement.name)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "scripts/local/install-codex-lab-dev.sh",
+                    "scripts/local/replacement-installer.sh",
+                ],
+                cwd=checkout,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "replace installer with symlink"],
+                cwd=checkout,
+                check=True,
+            )
+
+            launch = self.launch(launcher, root, environment)
+
+            self.assertEqual(launch.returncode, 0, launch.stderr)
+            self.assertIn("is not the supported executable file", launch.stderr)
+            self.assert_no_refresh_command(launch)
+
     def test_sparse_checkout_does_not_offer_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
@@ -621,7 +660,7 @@ class InstallCodexLabDevTest(unittest.TestCase):
 
             self.assertEqual(launch.returncode, 0, launch.stderr)
             self.assertIn(
-                "No same-repository source checkout is available", launch.stderr
+                "no same-repository source checkout is available", launch.stderr
             )
             self.assert_no_refresh_command(launch)
 

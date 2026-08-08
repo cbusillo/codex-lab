@@ -232,7 +232,7 @@ if [ "\$evidence_state" = inspect ]; then
     evidence_state='current'
   elif git -C "\$EVIDENCE_CHECKOUT" cat-file -e "\$CANDIDATE_COMMIT^{commit}" 2>/dev/null; then
     if git -C "\$EVIDENCE_CHECKOUT" merge-base --is-ancestor "\$CANDIDATE_COMMIT" "\$evidence_commit" 2>/dev/null; then
-      if git -C "\$EVIDENCE_CHECKOUT" sparse-checkout list >/dev/null 2>&1; then
+      if [ "\$(git -C "\$EVIDENCE_CHECKOUT" config --bool --get core.sparseCheckout 2>/dev/null || true)" = true ]; then
         evidence_state='sparse-checkout'
       elif [ ! -e "\$installer" ]; then
         evidence_state='installer-missing'
@@ -271,7 +271,7 @@ candidate-newer)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is ahead of clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT. Reinstalling from this checkout would downgrade the candidate, so no command is provided. Select a clean checkout at the candidate commit or newer."
   ;;
 dirty)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source \$evidence_commit is dirty at \$EVIDENCE_CHECKOUT; candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned. Commit or stash the changes, or select a clean worktree, before reinstalling."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because local source \$evidence_commit is dirty at \$EVIDENCE_CHECKOUT. Commit or stash the changes, or select a clean worktree, before reinstalling."
   ;;
 diverged)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) and clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT have diverged. Select a clean checkout from the intended history before reinstalling; no replacement command is provided."
@@ -298,19 +298,19 @@ sparse-checkout)
   CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) is older than clean local source \$evidence_commit at \$EVIDENCE_CHECKOUT, but that source is a sparse checkout and cannot prove the full installer inputs are present. Use a clean non-sparse worktree before reinstalling; no command is provided."
   ;;
 unreadable)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source evidence at \$EVIDENCE_CHECKOUT is not stageable because its commit or clean status could not be read. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; repair Git metadata or select a clean worktree before reinstalling."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because local source evidence at \$EVIDENCE_CHECKOUT is not stageable: its commit or clean status could not be read. Repair Git metadata or select a clean worktree before reinstalling."
   ;;
 git-missing)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source freshness is unavailable because Git is not on PATH. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; install Git and launch from a clean intended checkout to compare provenance."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because local source freshness is unavailable: Git is not on PATH. Install Git and launch from a clean intended checkout to compare provenance."
   ;;
 source-checkout-missing)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="The recorded source checkout is unavailable at \$SOURCE_CHECKOUT. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; launch from a clean checkout of the same repository to compare provenance."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because the recorded source checkout is unavailable at \$SOURCE_CHECKOUT. Launch from a clean checkout of the same repository to compare provenance."
   ;;
 checkout-unavailable)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="No same-repository source checkout is available for provenance comparison. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; launch from a clean checkout of the intended repository."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because no same-repository source checkout is available for provenance comparison. Launch from a clean checkout of the intended repository."
   ;;
 *)
-  CODEX_LAB_PINNED_CANDIDATE_WARNING="Local source provenance could not be classified safely. Candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned; select a clean intended checkout before reinstalling."
+  CODEX_LAB_PINNED_CANDIDATE_WARNING="Pinned Codex Lab candidate \$CANDIDATE_COMMIT (\$CANDIDATE_DIRTY_STATE) remains pinned because local source provenance could not be classified safely. Select a clean intended checkout before reinstalling."
   ;;
 esac
 
