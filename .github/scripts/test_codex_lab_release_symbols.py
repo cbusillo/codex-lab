@@ -16,11 +16,11 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
 STEP_NAME = re.compile(r"^\s*-\s+name:\s+(?P<name>.+?)\s*$")
 BUILD_STEPS = (
-    "Build Codex Lab CLI",
+    "Build Codex Lab engine binaries",
     "Archive engine symbols and strip Codex Lab engine",
     "Upload Codex Lab engine symbols",
     "Build Codex Lab app bundle",
-    "Sign and verify managed Codex Lab engine",
+    "Sign and verify managed Codex Lab engine binaries",
     "Archive Codex Lab release artifacts",
     "Upload Codex Lab release staging artifact",
 )
@@ -61,7 +61,11 @@ class CodexLabReleaseSymbolsTest(unittest.TestCase):
 
     def test_symbols_archive_accepts_cargo_hashed_dwarf_filename(self) -> None:
         self.assertIn(
-            'dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/codex-lab.dSYM/Contents/Resources/DWARF/"',
+            "for binary in codex-lab codex-code-mode-host; do",
+            self.contents,
+        )
+        self.assertIn(
+            'dwarf_prefix="codex-symbols-${SYMBOLS_ARTIFACT_NAME}/${binary}.dSYM/Contents/Resources/DWARF/"',
             self.contents,
         )
         self.assertIn('suffix !~ /\\//', self.contents)
