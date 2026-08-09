@@ -171,7 +171,7 @@ async fn matching_shellcheck_files(repo_root: &Path, changed_files: &[PathBuf]) 
     let mut matching_files = Vec::new();
     for path in changed_files {
         if path.extension().and_then(|extension| extension.to_str()) == Some("sh")
-            || file_starts_with_shebang(&repo_root.join(path)).await
+            || file_has_shell_shebang(&repo_root.join(path)).await
         {
             matching_files.push(path.clone());
         }
@@ -181,15 +181,48 @@ async fn matching_shellcheck_files(repo_root: &Path, changed_files: &[PathBuf]) 
     matching_files
 }
 
-async fn file_starts_with_shebang(path: &Path) -> bool {
+async fn file_has_shell_shebang(path: &Path) -> bool {
     let Ok(mut file) = tokio::fs::File::open(path).await else {
         return false;
     };
-    let mut prefix = [0_u8; 3];
+    let mut prefix = [0_u8; 256];
     let Ok(bytes_read) = file.read(&mut prefix).await else {
         return false;
     };
-    prefix[..bytes_read].starts_with(b"#!/")
+    let first_line = prefix[..bytes_read]
+        .split(|byte| *byte == b'\n')
+        .next()
+        .and_then(|line| std::str::from_utf8(line).ok());
+    first_line.is_some_and(is_shell_shebang)
+}
+
+fn is_shell_shebang(line: &str) -> bool {
+    let Some(command) = line.strip_prefix("#!") else {
+        return false;
+    };
+    let mut arguments = command.split_ascii_whitespace();
+    let Some(program) = arguments.next() else {
+        return false;
+    };
+    let program = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str());
+
+    match program {
+        Some("sh" | "bash" | "dash" | "ksh") => true,
+        Some("env") => arguments
+            .find(|argument| !argument.starts_with('-') && !argument.contains('='))
+            .is_some_and(is_supported_shell_name),
+        Some("busybox") => arguments.next().is_some_and(|argument| argument == "sh"),
+        _ => false,
+    }
+}
+
+fn is_supported_shell_name(argument: &str) -> bool {
+    Path::new(argument)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "sh" | "bash" | "dash" | "ksh"))
 }
 
 fn build_shellcheck_command(

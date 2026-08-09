@@ -9,19 +9,35 @@ async fn shellcheck_matching_uses_extension_and_shebang() {
         .expect("write extension fixture");
     std::fs::write(repo.path().join("shebang"), "#!/bin/sh\nprintf ok\n")
         .expect("write shebang fixture");
+    std::fs::write(
+        repo.path().join("env-shebang"),
+        "#!/usr/bin/env bash\nprintf ok\n",
+    )
+    .expect("write env shebang fixture");
+    std::fs::write(
+        repo.path().join("helper.py"),
+        "#!/usr/bin/env python3\nprint('ok')\n",
+    )
+    .expect("write Python fixture");
     std::fs::write(repo.path().join("plain"), "printf ok\n").expect("write plain fixture");
 
     assert_eq!(
         matching_shellcheck_files(
             repo.path(),
             &[
+                PathBuf::from("helper.py"),
                 PathBuf::from("plain"),
                 PathBuf::from("shebang"),
+                PathBuf::from("env-shebang"),
                 PathBuf::from("extension.sh"),
             ],
         )
         .await,
-        vec![PathBuf::from("extension.sh"), PathBuf::from("shebang")]
+        vec![
+            PathBuf::from("env-shebang"),
+            PathBuf::from("extension.sh"),
+            PathBuf::from("shebang"),
+        ]
     );
 }
 
