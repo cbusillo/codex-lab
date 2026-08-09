@@ -1,3 +1,4 @@
+import { multiProcessTest } from "./testTimeouts";
 import { describe, expect, it } from "@jest/globals";
 
 import { ThreadEvent } from "../src/index";
@@ -74,7 +75,7 @@ describe("Codex", () => {
     }
   });
 
-  it("sends previous items when runStreamed is called twice", async () => {
+  multiProcessTest("sends previous items when runStreamed is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -95,13 +96,13 @@ describe("Codex", () => {
     try {
       const thread = client.startThread();
       const first = await thread.runStreamed("first input");
-      await drainEvents(first.events);
+      await collectEvents(first.events);
 
       const second = await thread.runStreamed("second input");
-      await drainEvents(second.events);
+      const secondEvents = await collectEvents(second.events);
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -113,14 +114,36 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
+        assistantText: "First response",
+        secondInputRole: "user",
+        secondInputText: "second input",
+      });
+      expect(secondEvents).toEqual(
+        expect.arrayContaining([
+          {
+            type: "item.completed",
+            item: {
+              id: expect.any(String),
+              type: "agent_message",
+              text: "Second response",
+            },
+          },
+        ]),
+      );
+      expect(secondEvents.at(-1)?.type).toBe("turn.completed");
     } finally {
       cleanup();
       await close();
     }
   });
 
-  it("resumes thread by id when streaming", async () => {
+  multiProcessTest("resumes thread by id when streaming", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -141,15 +164,15 @@ describe("Codex", () => {
     try {
       const originalThread = client.startThread();
       const first = await originalThread.runStreamed("first input");
-      await drainEvents(first.events);
+      await collectEvents(first.events);
 
       const resumedThread = client.resumeThread(originalThread.id!);
       const second = await resumedThread.runStreamed("second input");
-      await drainEvents(second.events);
+      const secondEvents = await collectEvents(second.events);
 
       expect(resumedThread.id).toBe(originalThread.id);
 
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -161,7 +184,29 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
+        assistantText: "First response",
+        secondInputRole: "user",
+        secondInputText: "second input",
+      });
+      expect(secondEvents).toEqual(
+        expect.arrayContaining([
+          {
+            type: "item.completed",
+            item: {
+              id: expect.any(String),
+              type: "agent_message",
+              text: "Second response",
+            },
+          },
+        ]),
+      );
+      expect(secondEvents.at(-1)?.type).toBe("turn.completed");
     } finally {
       cleanup();
       await close();
@@ -193,7 +238,7 @@ describe("Codex", () => {
     try {
       const thread = client.startThread();
       const streamed = await thread.runStreamed("structured", { outputSchema: schema });
-      await drainEvents(streamed.events);
+      await collectEvents(streamed.events);
 
       expect(requests.length).toBeGreaterThanOrEqual(1);
       const payload = requests[0];
@@ -213,9 +258,10 @@ describe("Codex", () => {
   });
 });
 
-async function drainEvents(events: AsyncGenerator<ThreadEvent>): Promise<void> {
-  let done = false;
-  do {
-    done = (await events.next()).done ?? false;
-  } while (!done);
+async function collectEvents(events: AsyncGenerator<ThreadEvent>): Promise<ThreadEvent[]> {
+  const collected: ThreadEvent[] = [];
+  for await (const event of events) {
+    collected.push(event);
+  }
+  return collected;
 }

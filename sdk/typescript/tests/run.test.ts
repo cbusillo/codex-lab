@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
+import { multiProcessTest } from "./testTimeouts";
 import { describe, expect, it } from "@jest/globals";
 
 import {
@@ -50,7 +51,7 @@ describe("Codex", () => {
     }
   });
 
-  it("sends previous items when run is called twice", async () => {
+  multiProcessTest("sends previous items when run is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -71,10 +72,10 @@ describe("Codex", () => {
     try {
       const thread = client.startThread();
       await thread.run("first input");
-      await thread.run("second input");
+      const secondResult = await thread.run("second input");
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -86,14 +87,25 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        finalResponse: secondResult.finalResponse,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
+        assistantText: "First response",
+        finalResponse: "Second response",
+        secondInputRole: "user",
+        secondInputText: "second input",
+      });
     } finally {
       cleanup();
       await close();
     }
   });
 
-  it("continues the thread when run is called twice with options", async () => {
+  multiProcessTest("continues the thread when run is called twice with options", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -112,16 +124,17 @@ describe("Codex", () => {
     const { client, cleanup } = createMockClient(url);
 
     try {
-      const thread = client.startThread();
+      const thread = client.startThread({ model: "gpt-test-1" });
       await thread.run("first input");
       await thread.run("second input");
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
 
+      expect(payload.model).toBe("gpt-test-1");
       expect(payload.input.at(-1)!.content![0]!.text).toBe("second input");
       const assistantEntry = payload.input.find(
         (entry: { role: string }) => entry.role === "assistant",
@@ -137,7 +150,7 @@ describe("Codex", () => {
     }
   });
 
-  it("resumes thread by id", async () => {
+  multiProcessTest("resumes thread by id", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -153,6 +166,7 @@ describe("Codex", () => {
         ),
       ],
     });
+    const { args: spawnArgs, restore } = codexExecSpy();
     const { client, cleanup } = createMockClient(url);
 
     try {
@@ -165,7 +179,7 @@ describe("Codex", () => {
       expect(resumedThread.id).toBe(originalThread.id);
       expect(result.finalResponse).toBe("Second response");
 
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -177,8 +191,24 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
+        assistantText: "First response",
+        secondInputRole: "user",
+        secondInputText: "second input",
+      });
+      expect(spawnArgs).toHaveLength(2);
+      const resumeArgs = spawnArgs[1];
+      expect(resumeArgs).toBeDefined();
+      const resumeIndex = resumeArgs!.indexOf("resume");
+      expect(resumeIndex).toBeGreaterThan(-1);
+      expect(resumeArgs![resumeIndex + 1]).toBe(originalThread.id);
     } finally {
+      restore();
       cleanup();
       await close();
     }
