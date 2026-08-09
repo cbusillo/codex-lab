@@ -1,4 +1,4 @@
-import { multiProcessTest } from "./multiProcessTest";
+import { multiProcessTest } from "./testTimeouts";
 import { describe, expect, it } from "@jest/globals";
 
 import { ThreadEvent } from "../src/index";
@@ -102,7 +102,7 @@ describe("Codex", () => {
       const secondEvents = await collectEvents(second.events);
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -172,7 +172,7 @@ describe("Codex", () => {
 
       expect(resumedThread.id).toBe(originalThread.id);
 
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;

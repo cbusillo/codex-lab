@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
-import { multiProcessTest } from "./multiProcessTest";
+import { multiProcessTest } from "./testTimeouts";
 import { describe, expect, it } from "@jest/globals";
 
 import {
@@ -75,7 +75,7 @@ describe("Codex", () => {
       const secondResult = await thread.run("second input");
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -129,7 +129,7 @@ describe("Codex", () => {
       await thread.run("second input");
 
       // Check second request continues the same thread
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -166,6 +166,7 @@ describe("Codex", () => {
         ),
       ],
     });
+    const { args: spawnArgs, restore } = codexExecSpy();
     const { client, cleanup } = createMockClient(url);
 
     try {
@@ -178,7 +179,7 @@ describe("Codex", () => {
       expect(resumedThread.id).toBe(originalThread.id);
       expect(result.finalResponse).toBe("Second response");
 
-      expect(requests.length).toBeGreaterThanOrEqual(2);
+      expect(requests.length).toBe(2);
       const secondRequest = requests[1];
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
@@ -190,8 +191,24 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      expect(assistantText).toBe("First response");
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
+        assistantText: "First response",
+        secondInputRole: "user",
+        secondInputText: "second input",
+      });
+      expect(spawnArgs).toHaveLength(2);
+      const resumeArgs = spawnArgs[1];
+      expect(resumeArgs).toBeDefined();
+      const resumeIndex = resumeArgs!.indexOf("resume");
+      expect(resumeIndex).toBeGreaterThan(-1);
+      expect(resumeArgs![resumeIndex + 1]).toBe(originalThread.id);
     } finally {
+      restore();
       cleanup();
       await close();
     }
