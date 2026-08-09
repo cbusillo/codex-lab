@@ -204,6 +204,18 @@ export function shell_call(): SseEvent {
   };
 }
 
+export function customToolCall(callId: string, name: string, input: string): SseEvent {
+  return {
+    type: "response.output_item.done",
+    item: {
+      type: "custom_tool_call",
+      call_id: callId,
+      name,
+      input,
+    },
+  };
+}
+
 export function responseFailed(errorMessage: string): SseEvent {
   return {
     type: "error",
