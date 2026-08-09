@@ -1,4 +1,8 @@
+use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
+use codex_config::ConfigRequirements;
+use codex_config::ConfigRequirementsToml;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ModelClient;
 use codex_core::NewThread;
@@ -2502,6 +2506,8 @@ async fn skills_append_to_developer_message() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
+    const SKILL_COUNT: usize = 12;
+
     skip_if_no_network!();
     let server = MockServer::start().await;
 
@@ -2518,7 +2524,7 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
     std::fs::create_dir_all(&long_home_parent).expect("create long home parent");
     let codex_home = Arc::new(TempDir::new_in(long_home_parent).unwrap());
     let skill_root = codex_home.path().join("skills");
-    for index in 0..12 {
+    for index in 0..SKILL_COUNT {
         let skill_dir = skill_root.join(format!("s{index:02}"));
         std::fs::create_dir_all(&skill_dir).expect("create skill dir");
         std::fs::write(
@@ -2534,13 +2540,19 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
         .with_auth(CodexAuth::from_api_key("Test API Key"))
         .with_config(move |config| {
             config.cwd = codex_home_path.abs();
-            let user_config_path = codex_home_path.join("config.toml").abs();
-            config.config_layer_stack = ConfigLayerStack::default()
-                .with_user_config(
-                    &user_config_path,
+            let system_config_path = codex_home_path.join("config.toml").abs();
+            // Avoid ambient user skill roots; this fixture does not exercise user-only skill rules.
+            config.config_layer_stack = ConfigLayerStack::new(
+                vec![ConfigLayerEntry::new(
+                    ConfigLayerSource::System {
+                        file: system_config_path,
+                    },
                     toml! { skills = { bundled = { enabled = false } } }.into(),
-                )
-                .expect("skills user config should be valid");
+                )],
+                ConfigRequirements::default(),
+                ConfigRequirementsToml::default(),
+            )
+            .expect("skills test config should be valid");
             config.model_context_window = Some(12_000);
         });
     let codex = builder
@@ -2578,9 +2590,16 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
         developer_text.contains(&format!("- `r0` = `{expected_root_str}`")),
         "expected root alias for {expected_root_str}: {developer_messages:?}"
     );
+    for i in 0..SKILL_COUNT {
+        let expected_skill = format!("- s{i:02}: d (file: r0/s{i:02}/SKILL.md)");
+        assert!(
+            developer_text.contains(&expected_skill),
+            "expected every skill to keep its description and use the root alias: {developer_messages:?}"
+        );
+    }
     assert!(
-        developer_text.contains("- s00: (file: r0/s00/SKILL.md)"),
-        "expected skill path to use root alias: {developer_messages:?}"
+        !developer_text.contains(&format!("(file: {expected_root_str}")),
+        "expected skill entries to use the root alias instead of absolute paths: {developer_messages:?}"
     );
     assert!(
         developer_text.contains(
