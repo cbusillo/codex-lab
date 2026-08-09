@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
-import { multiProcessTest } from "./testTimeouts";
-import { describe, expect, it } from "@jest/globals";
+import { processTest } from "./testTimeouts";
+import { describe, expect } from "@jest/globals";
 
 import {
   assistantMessage,
@@ -18,7 +18,7 @@ import {
 import { createMockClient, createTestClient } from "./testCodex";
 
 describe("Codex", () => {
-  it("returns thread events", async () => {
+  processTest("returns thread events", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [sse(responseStarted(), assistantMessage("Hi!"), responseCompleted())],
@@ -51,7 +51,7 @@ describe("Codex", () => {
     }
   });
 
-  multiProcessTest("sends previous items when run is called twice", async () => {
+  processTest("sends previous items when run is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -105,7 +105,7 @@ describe("Codex", () => {
     }
   });
 
-  multiProcessTest("continues the thread when run is called twice with options", async () => {
+  processTest("continues the thread when run is called twice with options", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -150,7 +150,7 @@ describe("Codex", () => {
     }
   });
 
-  multiProcessTest("resumes thread by id", async () => {
+  processTest("resumes thread by id", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -214,7 +214,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes turn options to exec", async () => {
+  processTest("passes turn options to exec", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -253,7 +253,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes modelReasoningEffort to exec", async () => {
+  processTest("passes modelReasoningEffort to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -284,7 +284,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes networkAccessEnabled to exec", async () => {
+  processTest("passes networkAccessEnabled to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -315,7 +315,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes webSearchEnabled to exec", async () => {
+  processTest("passes webSearchEnabled to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -346,7 +346,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes webSearchMode to exec", async () => {
+  processTest("passes webSearchMode to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -377,7 +377,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes webSearchEnabled false to exec", async () => {
+  processTest("passes webSearchEnabled false to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -408,7 +408,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes approvalPolicy to exec", async () => {
+  processTest("passes approvalPolicy to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -439,7 +439,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes CodexOptions config overrides as TOML --config flags", async () => {
+  processTest("passes CodexOptions config overrides as TOML --config flags", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -480,7 +480,7 @@ describe("Codex", () => {
     }
   });
 
-  it("lets thread options override CodexOptions config overrides", async () => {
+  processTest("lets thread options override CodexOptions config overrides", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -517,7 +517,7 @@ describe("Codex", () => {
     }
   });
 
-  it("passes additionalDirectories as repeated flags", async () => {
+  processTest("passes additionalDirectories as repeated flags", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -559,7 +559,7 @@ describe("Codex", () => {
     }
   });
 
-  it("writes output schema to a temporary file and forwards it", async () => {
+  processTest("writes output schema to a temporary file and forwards it", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -616,7 +616,7 @@ describe("Codex", () => {
       await close();
     }
   });
-  it("combines structured text input segments", async () => {
+  processTest("combines structured text input segments", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -645,7 +645,7 @@ describe("Codex", () => {
       await close();
     }
   });
-  it("forwards images to exec", async () => {
+  processTest("forwards images to exec", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -692,7 +692,7 @@ describe("Codex", () => {
       await close();
     }
   });
-  it("runs in provided working directory", async () => {
+  processTest("runs in provided working directory", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -728,38 +728,41 @@ describe("Codex", () => {
     }
   });
 
-  it("throws if working directory is not git and no skipGitRepoCheck is provided", async () => {
-    const { url, close } = await startResponsesTestProxy({
-      statusCode: 200,
-      responseBodies: [
-        sse(
-          responseStarted("response_1"),
-          assistantMessage("Working directory applied", "item_1"),
-          responseCompleted("response_1"),
-        ),
-      ],
-    });
-    const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-working-dir-"));
-    const { client, cleanup } = createTestClient({
-      baseUrl: url,
-      apiKey: "test",
-    });
-
-    try {
-      const thread = client.startThread({
-        workingDirectory,
+  processTest(
+    "throws if working directory is not git and no skipGitRepoCheck is provided",
+    async () => {
+      const { url, close } = await startResponsesTestProxy({
+        statusCode: 200,
+        responseBodies: [
+          sse(
+            responseStarted("response_1"),
+            assistantMessage("Working directory applied", "item_1"),
+            responseCompleted("response_1"),
+          ),
+        ],
       });
-      await expect(thread.run("use custom working directory")).rejects.toThrow(
-        /Not inside a trusted directory/,
-      );
-    } finally {
-      cleanup();
-      fs.rmSync(workingDirectory, { recursive: true, force: true });
-      await close();
-    }
-  });
+      const workingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-working-dir-"));
+      const { client, cleanup } = createTestClient({
+        baseUrl: url,
+        apiKey: "test",
+      });
 
-  it("sets the codex sdk originator header", async () => {
+      try {
+        const thread = client.startThread({
+          workingDirectory,
+        });
+        await expect(thread.run("use custom working directory")).rejects.toThrow(
+          /Not inside a trusted directory/,
+        );
+      } finally {
+        cleanup();
+        fs.rmSync(workingDirectory, { recursive: true, force: true });
+        await close();
+      }
+    },
+  );
+
+  processTest("sets the codex sdk originator header", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [sse(responseStarted(), assistantMessage("Hi!"), responseCompleted())],
@@ -782,7 +785,7 @@ describe("Codex", () => {
       await close();
     }
   });
-  it("throws ThreadRunError on turn failures", async () => {
+  processTest("throws ThreadRunError on turn failures", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: (function* (): Generator<SseResponseBody> {
@@ -801,7 +804,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  }, 10000); // TODO(pakrym): remove timeout
+  });
 });
 
 /**

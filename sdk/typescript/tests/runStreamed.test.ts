@@ -1,5 +1,5 @@
-import { multiProcessTest } from "./testTimeouts";
-import { describe, expect, it } from "@jest/globals";
+import { processTest } from "./testTimeouts";
+import { describe, expect } from "@jest/globals";
 
 import { ThreadEvent } from "../src/index";
 
@@ -13,7 +13,7 @@ import {
 import { createMockClient } from "./testCodex";
 
 describe("Codex", () => {
-  it("returns thread events", async () => {
+  processTest("returns thread events", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [sse(responseStarted(), assistantMessage("Hi!"), responseCompleted())],
@@ -75,7 +75,7 @@ describe("Codex", () => {
     }
   });
 
-  multiProcessTest("sends previous items when runStreamed is called twice", async () => {
+  processTest("sends previous items when runStreamed is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -143,7 +143,7 @@ describe("Codex", () => {
     }
   });
 
-  multiProcessTest("resumes thread by id when streaming", async () => {
+  processTest("resumes thread by id when streaming", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -213,7 +213,7 @@ describe("Codex", () => {
     }
   });
 
-  it("applies output schema turn options when streaming", async () => {
+  processTest("applies output schema turn options when streaming", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
