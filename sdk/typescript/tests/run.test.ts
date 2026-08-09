@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
+import { multiProcessTest } from "./multiProcessTest";
 import { describe, expect, it } from "@jest/globals";
 
 import {
@@ -15,12 +16,6 @@ import {
   SseResponseBody,
 } from "./responsesProxy";
 import { createMockClient, createTestClient } from "./testCodex";
-
-const REPEATED_RUN_TIMEOUT_MS = 10_000;
-
-function repeatedRunTest(name: string, test: () => Promise<void>): void {
-  it(name, test, REPEATED_RUN_TIMEOUT_MS);
-}
 
 describe("Codex", () => {
   it("returns thread events", async () => {
@@ -56,7 +51,7 @@ describe("Codex", () => {
     }
   });
 
-  repeatedRunTest("sends previous items when run is called twice", async () => {
+  multiProcessTest("sends previous items when run is called twice", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -92,11 +87,17 @@ describe("Codex", () => {
       const assistantText = assistantEntry?.content?.find(
         (item: { type: string; text: string }) => item.type === "output_text",
       )?.text;
-      const secondInput = payload.input.at(-1)?.content?.[0]?.text;
-      expect({ assistantText, finalResponse: secondResult.finalResponse, secondInput }).toEqual({
+      const secondInput = payload.input.at(-1);
+      expect({
+        assistantText,
+        finalResponse: secondResult.finalResponse,
+        secondInputRole: secondInput?.role,
+        secondInputText: secondInput?.content?.[0]?.text,
+      }).toEqual({
         assistantText: "First response",
         finalResponse: "Second response",
-        secondInput: "second input",
+        secondInputRole: "user",
+        secondInputText: "second input",
       });
     } finally {
       cleanup();
@@ -104,7 +105,7 @@ describe("Codex", () => {
     }
   });
 
-  repeatedRunTest("continues the thread when run is called twice with options", async () => {
+  multiProcessTest("continues the thread when run is called twice with options", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
@@ -123,7 +124,7 @@ describe("Codex", () => {
     const { client, cleanup } = createMockClient(url);
 
     try {
-      const thread = client.startThread();
+      const thread = client.startThread({ model: "gpt-test-1" });
       await thread.run("first input");
       await thread.run("second input");
 
@@ -133,6 +134,7 @@ describe("Codex", () => {
       expect(secondRequest).toBeDefined();
       const payload = secondRequest!.json;
 
+      expect(payload.model).toBe("gpt-test-1");
       expect(payload.input.at(-1)!.content![0]!.text).toBe("second input");
       const assistantEntry = payload.input.find(
         (entry: { role: string }) => entry.role === "assistant",
@@ -148,7 +150,7 @@ describe("Codex", () => {
     }
   });
 
-  repeatedRunTest("resumes thread by id", async () => {
+  multiProcessTest("resumes thread by id", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [
