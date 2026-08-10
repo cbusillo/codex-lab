@@ -8,7 +8,10 @@ the bounded private-dogfood group.
 
 - An Apple Silicon Mac running macOS 13 or newer. Confirm `uname -m` prints
   `arm64`, and use `sw_vers -productVersion` to record the macOS version.
-- Python 3, `curl`, and `tar`, which are present on a normal macOS install.
+- Python 3.10 or newer, plus `curl` and `tar`. Confirm with
+  `python3 --version`; install a current Python from python.org or Homebrew if
+  `python3` is missing or older. A stock macOS install does not guarantee a
+  compatible Python runtime.
 - The official ChatGPT app installed in `/Applications` or `~/Applications`.
   Codex Lab accepts only the unmodified app signed by OpenAI team `2DC432GLL2`;
   it does not patch or redistribute that app.
@@ -43,10 +46,14 @@ run_codex_lab_installer() (
   python3 "$installer_dir/scripts/install_codex_lab.py" "$@"
 )
 
-verify_codex_lab_provenance() {
+verify_codex_lab_provenance() (
   expected_release_sha="$1"
+  expected_app_path="${2:-$HOME/Applications/Codex Lab.app}"
+  expected_version="${3:-0.1.0}"
   codex-lab debug provenance --json | \
-    EXPECTED_RELEASE_SHA="$expected_release_sha" python3 -c '
+    EXPECTED_RELEASE_SHA="$expected_release_sha" \
+    EXPECTED_APP_PATH="$expected_app_path" \
+    EXPECTED_VERSION="$expected_version" python3 -c '
 import json
 import os
 import re
@@ -58,6 +65,7 @@ if re.fullmatch(r"[0-9a-f]{40}", expected) is None:
     raise SystemExit("expected release SHA is not 40 lowercase hexadecimal characters")
 provenance = json.load(sys.stdin)
 expected_fields = {
+    "version": os.environ["EXPECTED_VERSION"],
     "source_commit": expected,
     "dirty_state": "clean",
     "build_profile": "release",
@@ -66,17 +74,21 @@ expected_fields = {
 for field, value in expected_fields.items():
     if provenance.get(field) != value:
         raise SystemExit(f"installed {field} does not match: {provenance.get(field)!r}")
-app = (Path.home() / "Applications" / "Codex Lab.app").resolve()
+app = Path(os.environ["EXPECTED_APP_PATH"]).resolve()
 executable = Path(provenance.get("executable_path", "")).resolve()
 if app not in executable.parents:
     raise SystemExit("installed executable_path is outside Codex Lab.app")
 print("installed provenance matches the release contract")
 '
-}
+)
 ```
 
 Re-paste both helper functions in each new Terminal session before using later
 status, rollback, or reinstall command blocks.
+
+The helper deliberately removes the downloaded installer source after every
+command, so each later `--status`, rollback, or uninstall invocation downloads
+the same immutable archive again and requires network access.
 
 Install the pinned candidate:
 
@@ -118,6 +130,16 @@ The installer status must name `codex-lab-v0.1.0-lab.2`. Structured provenance
 must report `dirty_state` as `clean`, `build_profile` as `release`,
 `build_channel` as `lab`, and an `executable_path` inside the installed
 `Codex Lab.app`.
+
+Known version-surface limitation
+[#515](https://github.com/cbusillo/codex-lab/issues/515): `codex-lab exec` may
+print `OpenAI Codex v0.0.0` in its startup banner. Treat that banner as a known
+display bug only when `codex-lab --version` reports version `0.1.0`, installer
+status names the expected release tag, and structured provenance matches the
+release contract. The semantic version is shared by `lab.1` and `lab.2`; only
+installer status and the provenance `source_commit` distinguish those releases.
+Stop and report a release blocker if any authoritative tag or provenance check
+disagrees.
 
 The release handoff must supply the exact 40-character release SHA next to this
 guide. A committed guide cannot name the future merge commit that contains
@@ -161,6 +183,32 @@ rate or usage limit and whether saved API keys are fallback-only.
 After signing in, `codex-lab login status` must confirm authentication without
 printing or sharing the underlying credential.
 
+Known account-pool limitation
+[#519](https://github.com/cbusillo/codex-lab/issues/519): an inactive account
+with terminally expired, reused, or revoked refresh credentials can currently
+interfere with a healthy active account when automatic rate-limit switching is
+enabled. Before the canary, inspect Connected Accounts and repair any account
+that already requires reauthentication. Apply the mitigation below if startup
+says the access token could not be refreshed because the refresh token has
+expired, was already used, or was revoked, followed by “Please log out and sign
+in again.” Internal diagnostics may identify those terminal failures as
+`refresh_token_expired`, `refresh_token_reused`, or
+`refresh_token_invalidated`. Keep the healthy account selected and disable
+automatic account switching in `/settings`, or launch the bounded CLI canary
+with:
+
+```sh
+codex-lab -c auto_switch_accounts_on_rate_limit=false
+```
+
+This workaround does not delete stored accounts and does not prevent manual
+account selection. The `-c` override applies only to that process; disabling the
+setting through `/settings` persists across the restart/resume step. Record
+which mitigation was used and treat automatic switching as a known limitation;
+do not repeatedly retry a terminally invalid account. A generic model-API 401,
+`token_expired`, or an ambiguous network error is not by itself proof that an
+account requires reauthentication.
+
 Never paste tokens, API keys, account email addresses, usage details, or the
 contents of `auth.json` into an issue or dogfood report.
 
@@ -175,12 +223,19 @@ boundary you understand. Use a disposable test repository for the canary and
 review its diff before keeping changes.
 
 Use `/model` for the primary Codex model and `/settings` for third-party-agent
-configuration. Known limitation [#581](https://github.com/cbusillo/codex-lab/issues/581):
-some discovered Antigravity/Gemini selectors can be advertised in a malformed
-form and fail before the provider starts. A preflight failure, empty result, or
-permission denial is not external-agent evidence; report the exact selector and
-diagnostic without credentials, and use another already configured valid
-selector for this canary.
+configuration. Two external-agent limitations remain relevant to the canary:
+
+- [#581](https://github.com/cbusillo/codex-lab/issues/581): some discovered
+  Antigravity/Gemini selectors can be advertised in a malformed form and fail
+  before the provider starts.
+- [#577](https://github.com/cbusillo/codex-lab/issues/577): a required
+  read-only command permission denial can surface as completed empty output
+  instead of an explicit orchestration failure.
+
+A preflight failure, permission denial, or completed zero-line result is not
+external-agent evidence. Report the exact selector and bounded diagnostic
+without credentials, and use another already configured valid selector for the
+canary. Do not grant unrestricted write access to obtain a review result.
 
 ## Restart and resume
 
@@ -225,7 +280,11 @@ private repository contents.
 - [ ] Install `codex-lab-v0.1.0-lab.2` with the no-checkout command and confirm
       installer status plus structured provenance.
 - [ ] Authenticate, confirm existing accounts are preserved, add or select a
-      second account if available, and verify intentional account switching.
+      second account if available, and verify intentional account switching. If
+      #519 applies, keep the healthy account active, use manual selection, and
+      record whether `/settings` or the session-only `-c` override was used.
+      Treat automatic switching as a known limitation rather than repeatedly
+      refreshing a terminally invalid account.
 - [ ] Launch with understood permissions and record the selected sandbox and
       approval policy.
 - [ ] Complete one real turn that changes a harmless file, then inspect the
@@ -238,13 +297,32 @@ private repository contents.
       displayed reason; only `passed` is a green canary result.
 - [ ] Observe the `Background Review` cell in the turn transcript and wait for
       completed, failed, cancelled, superseded, or skipped. Record the reasoned
-      summary or finding count; only completed with a visible summary is a green
-      canary result. Background Review may finish after the turn's response; if
-      nothing is visible yet, report only that no run was observable at that
-      point and keep waiting rather than calling it skipped.
+      summary or finding count. A successful headline may report completion, no
+      findings, one finding, or multiple findings. Confirm the detail is terminal
+      `completed` rather than relying on the headline alone. Any completed run
+      with visible detail is a green canary result, including zero findings.
+      Background Review may finish after the turn's response; if nothing is
+      visible yet, report only that no run was observable at that point and keep
+      waiting rather than calling it skipped.
 - [ ] Exit, restart the supervisor, and resume the same thread.
 - [ ] Roll back to `codex-lab-v0.1.0-lab.1`, verify exact provenance and health,
       and optionally reinstall `codex-lab-v0.1.0-lab.2`.
+
+## Leave the private dogfood program
+
+After completing the canary and any requested rollback evidence, remove the
+recorded Codex Lab installation through the same reviewed installer:
+
+```sh
+installer_commit=20aa06fffeb0bd8b2e6ca99ac0626bdcb04d5c3b
+run_codex_lab_installer "$installer_commit" --uninstall
+```
+
+Uninstall removes the recorded app, shim, managed engine, installer state, and
+Codex Lab supervisor, and restores a prior managed engine when one was recorded.
+It intentionally preserves `~/.codex-lab`, including authentication and session
+state. Do not delete that directory without separately reviewing what private
+state must be retained or securely removed.
 
 ## Report a failure safely
 
