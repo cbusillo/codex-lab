@@ -297,14 +297,13 @@ private repository contents.
       displayed reason; only `passed` is a green canary result.
 - [ ] Observe the `Background Review` cell in the turn transcript and wait for
       completed, failed, cancelled, superseded, or skipped. Record the reasoned
-      summary or finding count. A successful result may render as `Background
-      Review completed`, `Background Review found no findings`, `Background
-      Review found 1 finding`, or `Background Review found N findings`; confirm
-      the detail is terminal `completed` rather than relying on the headline
-      alone. Any completed run with visible detail is a green canary result,
-      including zero findings. Background Review may finish after the turn's
-      response; if nothing is visible yet, report only that no run was observable
-      at that point and keep waiting rather than calling it skipped.
+      summary or finding count. A successful headline may report completion, no
+      findings, one finding, or multiple findings. Confirm the detail is terminal
+      `completed` rather than relying on the headline alone. Any completed run
+      with visible detail is a green canary result, including zero findings.
+      Background Review may finish after the turn's response; if nothing is
+      visible yet, report only that no run was observable at that point and keep
+      waiting rather than calling it skipped.
 - [ ] Exit, restart the supervisor, and resume the same thread.
 - [ ] Roll back to `codex-lab-v0.1.0-lab.1`, verify exact provenance and health,
       and optionally reinstall `codex-lab-v0.1.0-lab.2`.
