@@ -72,6 +72,13 @@
         }
       ]
     },
+    "AccountHealth": {
+      "enum": [
+        "ok",
+        "reauthRequired"
+      ],
+      "type": "string"
+    },
     "AccountListEntry": {
       "properties": {
         "accountId": {
@@ -86,6 +93,14 @@
             "integer",
             "null"
           ]
+        },
+        "health": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccountHealth"
+            }
+          ],
+          "default": "ok"
         },
         "isActive": {
           "type": "boolean"

@@ -234,10 +234,23 @@ pub struct RemoveAccountResponse {
 pub struct AccountListEntry {
     pub account_id: String,
     pub auth_mode: AuthMode,
+    #[serde(default)]
+    pub health: AccountHealth,
     pub label: Option<String>,
     pub created_at: Option<i64>,
     pub last_used_at: Option<i64>,
     pub is_active: bool,
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum AccountHealth {
+    #[default]
+    Ok,
+    #[serde(other)]
+    ReauthRequired,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

@@ -769,6 +769,7 @@ fn write_divergent_chatgpt_accounts(home: &TempDir) -> anyhow::Result<DivergentC
             last_refresh: Some(chrono::Utc::now()),
             created_at: None,
             last_used_at: None,
+            health: codex_login::AccountHealth::Ok,
         },
         StoredAccount {
             id: candidate_id.clone(),
@@ -782,6 +783,7 @@ fn write_divergent_chatgpt_accounts(home: &TempDir) -> anyhow::Result<DivergentC
             last_refresh: Some(chrono::Utc::now()),
             created_at: None,
             last_used_at: None,
+            health: codex_login::AccountHealth::Ok,
         },
     ];
     std::fs::write(

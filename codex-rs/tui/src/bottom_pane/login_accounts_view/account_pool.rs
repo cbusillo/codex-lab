@@ -1,3 +1,4 @@
+use codex_app_server_protocol::AccountHealth as ApiAccountHealth;
 use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
@@ -72,6 +73,7 @@ pub(super) fn current_auth_account_row(
         label,
         detail: Some(format!("{storage} - not in switching pool")),
         mode: auth_mode_to_api(mode),
+        health: ApiAccountHealth::Ok,
         is_active: true,
         is_pooled: false,
     }

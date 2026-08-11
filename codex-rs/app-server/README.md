@@ -2165,6 +2165,8 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 ### API Overview
 
 - `account/read` — fetch current account info; optionally refresh tokens.
+- `account/list` — list every stored account without network validation. Each entry reports `health` as `ok` or `reauthRequired`; unhealthy entries remain visible for repair.
+- `account/switchActive` — activate a healthy stored account. Accounts with `reauthRequired` must sign in again instead.
 - `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`).
 - `account/login/completed` (notify) — emitted when a login attempt finishes (success or error).
 - `account/login/cancel` — cancel a pending managed ChatGPT login by `loginId`.

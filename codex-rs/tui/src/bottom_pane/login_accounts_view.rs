@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
+use codex_app_server_protocol::AccountHealth as ApiAccountHealth;
 use codex_app_server_protocol::AccountListEntry;
 use codex_app_server_protocol::AuthMode as ApiAuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
@@ -15,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::style::Modifier;
 use ratatui::style::Style;
+use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Block;
@@ -75,6 +77,7 @@ struct AccountRow {
     label: String,
     detail: Option<String>,
     mode: ApiAuthMode,
+    health: ApiAccountHealth,
     is_active: bool,
     is_pooled: bool,
 }
@@ -212,6 +215,11 @@ impl LoginAccountsView {
         let Some(account) = self.selected_account() else {
             return;
         };
+        if account.health == ApiAccountHealth::ReauthRequired {
+            self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
+            self.finish(ViewCompletion::Accepted);
+            return;
+        }
         if account.is_active || !account.activation_supported() {
             return;
         }
@@ -1003,6 +1011,10 @@ impl AccountRow {
             label,
             detail,
             mode: auth_mode_to_api(mode),
+            health: match account.health {
+                codex_login::AccountHealth::Ok => ApiAccountHealth::Ok,
+                codex_login::AccountHealth::ReauthRequired => ApiAccountHealth::ReauthRequired,
+            },
             is_active,
             is_pooled: true,
         }
@@ -1017,13 +1029,15 @@ impl AccountRow {
             label,
             detail,
             mode: entry.auth_mode,
+            health: entry.health,
             is_active: entry.is_active,
             is_pooled: true,
         }
     }
 
     fn activation_supported(&self) -> bool {
-        self.is_pooled
+        self.health == ApiAccountHealth::Ok
+            && self.is_pooled
             && matches!(
                 self.mode,
                 ApiAuthMode::ApiKey | ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens
@@ -1041,6 +1055,10 @@ impl AccountRow {
                     .add_modifier(Modifier::BOLD),
             ));
         }
+        if self.health == ApiAccountHealth::ReauthRequired {
+            spans.push(" ".into());
+            spans.push("(sign-in required)".red().bold());
+        }
         if let Some(detail) = &self.detail {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -1048,7 +1066,7 @@ impl AccountRow {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        if !self.is_active && !self.activation_supported() {
+        if self.health == ApiAccountHealth::Ok && !self.is_active && !self.activation_supported() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 "activation unavailable",

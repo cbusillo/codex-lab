@@ -34,6 +34,20 @@ const ACCOUNTS_LOCK_FILE_NAME: &str = ".auth_accounts.lock";
 pub(crate) const ACCOUNTS_FILE_VERSION: u32 = 1;
 static CATALOG_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountHealth {
+    #[default]
+    Ok,
+    ReauthRequired,
+}
+
+impl AccountHealth {
+    pub fn is_ok(&self) -> bool {
+        *self == Self::Ok
+    }
+}
+
 struct CatalogWriteGuard {
     _process_guard: MutexGuard<'static, ()>,
     lock_file: File,
@@ -87,6 +101,9 @@ pub struct StoredAccount {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<DateTime<Utc>>,
+
+    #[serde(default, skip_serializing_if = "AccountHealth::is_ok")]
+    pub health: AccountHealth,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize)]
@@ -486,7 +503,11 @@ fn upsert_account(
 }
 
 fn select_fallback_active_account(data: &mut AccountsFile) {
-    if let Some(account) = data.accounts.first_mut() {
+    if let Some(account) = data
+        .accounts
+        .iter_mut()
+        .find(|account| account.health.is_ok())
+    {
         data.active_account_id = Some(account.id.clone());
         touch_account(account, /*used*/ true);
     } else {
@@ -635,6 +656,17 @@ fn update_stored_account_from_auth(
     Ok(())
 }
 
+fn stored_account_auth_matches(
+    account: &StoredAccount,
+    expected: &AuthDotJson,
+) -> io::Result<bool> {
+    let stored = auth_from_stored_account(account)?;
+    if account.mode.has_chatgpt_account() && expected.resolved_mode().has_chatgpt_account() {
+        return Ok(stored.tokens == expected.tokens && stored.last_refresh == expected.last_refresh);
+    }
+    Ok(stored == *expected)
+}
+
 pub(crate) fn update_catalog_account_from_auth(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
@@ -698,6 +730,34 @@ pub(crate) fn compare_and_swap_catalog_account_auth(
         }
         return Err(err);
     }
+    Ok(true)
+}
+
+pub(crate) fn mark_account_reauth_required_if_auth_matches(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    catalog_id: Option<&str>,
+    expected: &AuthDotJson,
+) -> io::Result<bool> {
+    let _guard = acquire_catalog_write_guard(codex_home)?;
+    let mut data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
+    let target_id = catalog_id.or(data.active_account_id.as_deref());
+    let account_index = target_id.and_then(|target_id| {
+        data.accounts
+            .iter()
+            .position(|account| account.id == target_id)
+    });
+    let Some(account_index) = account_index else {
+        return Ok(false);
+    };
+    if !stored_account_auth_matches(&data.accounts[account_index], expected)? {
+        return Ok(false);
+    }
+    if data.accounts[account_index].health == AccountHealth::ReauthRequired {
+        return Ok(true);
+    }
+    data.accounts[account_index].health = AccountHealth::ReauthRequired;
+    write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
     Ok(true)
 }
 
@@ -819,6 +879,11 @@ fn commit_stored_active_account(
         .iter()
         .position(|account| account.id == account_id)
         .ok_or_else(|| io::Error::other(format!("account with id {account_id} was not found")))?;
+    if data.accounts[account_index].health == AccountHealth::ReauthRequired {
+        return Err(io::Error::other(format!(
+            "account with id {account_id} requires sign-in"
+        )));
+    }
     let auth = auth_from_stored_account(&data.accounts[account_index])?;
 
     save_auth(
@@ -950,6 +1015,7 @@ pub fn upsert_api_key_account(
         last_refresh: None,
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     };
 
     let (mut data, mut stored) = upsert_account(data, new_account);
@@ -992,6 +1058,7 @@ pub(crate) fn insert_api_key_account_if_missing(
         last_refresh: None,
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     };
     touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
@@ -1007,6 +1074,51 @@ pub fn upsert_chatgpt_account(
     label: Option<String>,
     make_active: bool,
 ) -> io::Result<StoredAccount> {
+    upsert_chatgpt_account_with_health_update(
+        codex_home,
+        auth_credentials_store_mode,
+        tokens,
+        last_refresh,
+        label,
+        make_active,
+        AccountHealthUpdate::Preserve,
+    )
+}
+
+pub(crate) fn upsert_chatgpt_account_after_login(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    tokens: TokenData,
+    last_refresh: DateTime<Utc>,
+    label: Option<String>,
+    make_active: bool,
+) -> io::Result<StoredAccount> {
+    upsert_chatgpt_account_with_health_update(
+        codex_home,
+        auth_credentials_store_mode,
+        tokens,
+        last_refresh,
+        label,
+        make_active,
+        AccountHealthUpdate::ClearReauthRequired,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum AccountHealthUpdate {
+    Preserve,
+    ClearReauthRequired,
+}
+
+fn upsert_chatgpt_account_with_health_update(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    tokens: TokenData,
+    last_refresh: DateTime<Utc>,
+    label: Option<String>,
+    make_active: bool,
+    health_update: AccountHealthUpdate,
+) -> io::Result<StoredAccount> {
     let _guard = acquire_catalog_write_guard(codex_home)?;
     let data = read_accounts_file(codex_home, auth_credentials_store_mode)?;
 
@@ -1019,9 +1131,17 @@ pub fn upsert_chatgpt_account(
         last_refresh: Some(last_refresh),
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     };
 
     let (mut data, mut stored) = upsert_account(data, new_account);
+
+    if matches!(health_update, AccountHealthUpdate::ClearReauthRequired)
+        && let Some(account) = data.accounts.iter_mut().find(|acc| acc.id == stored.id)
+    {
+        account.health = AccountHealth::Ok;
+        stored = account.clone();
+    }
 
     if make_active {
         data.active_account_id = Some(stored.id.clone());
@@ -1061,6 +1181,7 @@ pub fn upsert_inactive_chatgpt_account(
         last_refresh: Some(last_refresh),
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     };
     let (data, stored) = upsert_account(data, new_account);
     write_accounts_file(codex_home, auth_credentials_store_mode, &data)?;
@@ -1094,6 +1215,7 @@ pub(crate) fn insert_chatgpt_account_if_missing(
         last_refresh: Some(last_refresh),
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     };
     touch_account(&mut account, /*used*/ false);
     data.accounts.push(account.clone());
