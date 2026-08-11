@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
@@ -14,6 +15,7 @@ use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxPermissions;
 use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::ProjectValidationSkipReason;
@@ -22,6 +24,12 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use tokio_util::sync::CancellationToken;
 
 use super::Session;
+use super::cargo_validation_cache::CargoValidationCacheLease;
+use super::cargo_validation_cache_key::CargoValidationCacheKey;
+use super::cargo_validation_cache_key::cargo_toolchain_allows_success_suppression;
+use super::cargo_validation_cache_key::cargo_validation_environment;
+use super::cargo_validation_cache_key::environment_value;
+use super::cargo_validation_probe::resolve_cargo_toolchain_identity;
 use super::cargo_validation_provider::classify_cargo_output;
 use super::cargo_validation_provider::render_cargo_output;
 use super::project_validation_coordinator::ProjectValidationSuccessKey;
@@ -87,6 +95,7 @@ struct ValidationCommandPlan {
     cwd: AbsolutePathBuf,
     execution_cwd: AbsolutePathBuf,
     _execution_cwd_guard: Option<tempfile::TempDir>,
+    cargo_toolchain: Option<String>,
     timeout_ms: u64,
     changed_file_count: Option<u32>,
 }
@@ -187,10 +196,7 @@ pub(crate) async fn run_project_validation(
         &turn_context.config.permissions.shell_environment_policy,
         Some(sess.thread_id),
     );
-    let search_path = env
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
-        .map(|(_, value)| OsString::from(value));
+    let search_path = environment_value(&env, "PATH").map(OsString::from);
     if let Some(command) = project_command.as_ref()
         && which::which_in(&command[0], search_path.as_ref(), cwd.as_ref()).is_err()
     {
@@ -283,7 +289,7 @@ pub(crate) async fn run_project_validation(
         ));
     }
 
-    let plan = if let Some(configured) = configured_project_command {
+    let mut plan = if let Some(configured) = configured_project_command {
         let Some(command) = project_command else {
             return ProjectValidationRun::Completed(completed_event(
                 turn_context,
@@ -301,6 +307,7 @@ pub(crate) async fn run_project_validation(
             cwd: cwd.clone(),
             execution_cwd: cwd.clone(),
             _execution_cwd_guard: None,
+            cargo_toolchain: None,
             timeout_ms: configured.timeout_ms,
             changed_file_count: None,
         }
@@ -424,9 +431,51 @@ pub(crate) async fn run_project_validation(
         }
         automatic_validation_plan(automatic)
     };
+    let env = if plan.kind == ValidationCommandKind::Cargo {
+        cargo_validation_environment(env)
+    } else {
+        env
+    };
 
-    let successful_validation_key =
-        cargo_validation_success_key(&cwd, lease_root.as_ref(), &plan, &cancellation_token).await;
+    let cargo_toolchain_identity = if plan.kind == ValidationCommandKind::Cargo {
+        match resolve_cargo_toolchain_identity(
+            turn_context,
+            plan.cargo_toolchain.as_deref(),
+            &plan.command,
+            &plan.execution_cwd,
+            &plan.cwd,
+            &env,
+            &cancellation_token,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(%error, "cargo validation toolchain probe failed; using ephemeral target");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if cancellation_token.is_cancelled() {
+        return ProjectValidationRun::Cancelled(cancelled_event(
+            turn_context,
+            plan.command,
+            Some(plan.cwd),
+            plan.changed_file_count,
+        ));
+    }
+
+    let successful_validation_key = cargo_validation_success_key(
+        &cwd,
+        lease_root.as_ref(),
+        &plan,
+        cargo_toolchain_identity.as_deref(),
+        &env,
+        &cancellation_token,
+    )
+    .await;
     if matches!(attempt, ProjectValidationAttempt::Initial { .. })
         && let Some(key) = successful_validation_key.as_ref()
         && sess
@@ -462,6 +511,69 @@ pub(crate) async fn run_project_validation(
         None
     };
 
+    let cargo_cache = if plan.kind == ValidationCommandKind::Cargo
+        && persistent_cargo_validation_cache_allowed(&turn_context.permission_profile)
+        && let Some(toolchain_identity) = cargo_toolchain_identity.as_deref()
+    {
+        let repository_root = lease_root
+            .clone()
+            .or_else(|| project_validation_repo_root(&cwd));
+        let Some(repository_root) = repository_root else {
+            return ProjectValidationRun::Completed(completed_event(
+                turn_context,
+                plan.command,
+                Some(plan.cwd),
+                ProjectValidationStatus::InfrastructureFailure,
+                /*exit_code*/ None,
+                "cargo validation cache requires a repository root".to_string(),
+                Duration::ZERO,
+            ));
+        };
+        let checkout_root =
+            project_validation_repo_root(&cwd).unwrap_or_else(|| repository_root.clone());
+        match prepare_cargo_validation_cache(
+            &turn_context.config.codex_home,
+            &repository_root,
+            &checkout_root,
+            toolchain_identity,
+            &mut plan,
+            &env,
+            &cancellation_token,
+        )
+        .await
+        {
+            Ok(Some(cache)) => Some(cache),
+            Ok(None) if cancellation_token.is_cancelled() => {
+                return ProjectValidationRun::Cancelled(cancelled_event(
+                    turn_context,
+                    plan.command,
+                    Some(plan.cwd),
+                    plan.changed_file_count,
+                ));
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "cargo validation cache preparation failed; using ephemeral target");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut workspace_roots = turn_context.config.effective_workspace_roots();
+    if let Some(cache) = cargo_cache.as_ref()
+        && !workspace_roots.contains(cache.target_dir())
+    {
+        workspace_roots.push(cache.target_dir().clone());
+    }
+    let validation_permission_profile = cargo_validation_permission_profile(
+        &turn_context.permission_profile,
+        &plan.cwd,
+        cargo_cache
+            .as_ref()
+            .map(CargoValidationCacheLease::target_dir),
+    );
     let params = ExecParams {
         command: plan.command.clone(),
         cwd: plan.execution_cwd.clone(),
@@ -487,14 +599,18 @@ pub(crate) async fn run_project_validation(
     };
     let result = process_exec_tool_call(
         params,
-        &turn_context.permission_profile,
+        &validation_permission_profile,
         &plan.cwd,
-        &turn_context.config.effective_workspace_roots(),
+        &workspace_roots,
         &turn_context.config.codex_linux_sandbox_exe,
         turn_context.config.features.use_legacy_landlock(),
         /*stdout_stream*/ None,
     )
     .await;
+
+    if let Some(cache) = cargo_cache {
+        cache.finish();
+    }
 
     if cancellation_token.is_cancelled() {
         return ProjectValidationRun::Cancelled(cancelled_event(
@@ -659,6 +775,7 @@ fn automatic_validation_plan(command: AutomaticValidationCommand) -> ValidationC
         cwd: command.cwd,
         execution_cwd,
         _execution_cwd_guard: command.execution_cwd_guard,
+        cargo_toolchain: command.cargo_toolchain,
         timeout_ms: command.timeout_ms,
         changed_file_count: Some(command.changed_file_count),
     }
@@ -748,11 +865,17 @@ async fn cargo_validation_success_key(
     cwd: &AbsolutePathBuf,
     lease_root: Option<&PathBuf>,
     plan: &ValidationCommandPlan,
+    cargo_toolchain_identity: Option<&str>,
+    environment: &HashMap<String, String>,
     cancellation_token: &CancellationToken,
 ) -> Option<ProjectValidationSuccessKey> {
     if plan.kind != ValidationCommandKind::Cargo {
         return None;
     }
+    if !cargo_toolchain_allows_success_suppression(plan.cargo_toolchain.as_deref(), environment) {
+        return None;
+    }
+    let cargo_toolchain_identity = cargo_toolchain_identity?;
     let checkout_root = project_validation_repo_root(cwd)?;
     let fingerprint = tokio::select! {
         _ = cancellation_token.cancelled() => return None,
@@ -764,31 +887,67 @@ async fn cargo_validation_success_key(
         .strip_prefix(&checkout_root)
         .unwrap_or(plan.cwd.as_ref())
         .to_path_buf();
+    let repository_root = lease_root.cloned().unwrap_or_else(|| checkout_root.clone());
+    let cache_key = CargoValidationCacheKey::for_command(
+        &repository_root,
+        &checkout_root,
+        cargo_toolchain_identity,
+        &plan.command,
+        environment,
+    )
+    .ok()?;
+    let command = vec![cache_key.semantic_id().to_string()];
     Some(ProjectValidationSuccessKey::new(
-        lease_root.cloned().unwrap_or(checkout_root),
+        repository_root,
         validation_scope,
         fingerprint.head_commit,
         fingerprint.worktree_diff,
-        cargo_validation_cache_command(&plan.command),
+        command,
     ))
 }
 
-fn cargo_validation_cache_command(command: &[String]) -> Vec<String> {
-    let mut command = command.to_vec();
-    for (flag, replacement) in [
-        ("--manifest-path", "Cargo.toml"),
-        ("--target-dir", "target"),
-    ] {
-        if let Some(value_index) = command
-            .iter()
-            .position(|argument| argument == flag)
-            .and_then(|index| index.checked_add(1))
-            && let Some(value) = command.get_mut(value_index)
-        {
-            *value = replacement.to_string();
-        }
-    }
-    command
+async fn prepare_cargo_validation_cache(
+    codex_home: &AbsolutePathBuf,
+    repository_root: &Path,
+    checkout_root: &Path,
+    cargo_toolchain_identity: &str,
+    plan: &mut ValidationCommandPlan,
+    environment: &HashMap<String, String>,
+    cancellation: &CancellationToken,
+) -> io::Result<Option<CargoValidationCacheLease>> {
+    let key = CargoValidationCacheKey::for_command(
+        repository_root,
+        checkout_root,
+        cargo_toolchain_identity,
+        &plan.command,
+        environment,
+    )?;
+    let Some(cache) = CargoValidationCacheLease::acquire(
+        codex_home,
+        repository_root,
+        checkout_root,
+        key,
+        cancellation,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let target_dir = cache.target_dir().as_path().to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cargo validation cache target path must be valid UTF-8",
+        )
+    })?;
+    let target_index = plan
+        .command
+        .iter()
+        .position(|argument| argument == "--target-dir")
+        .and_then(|index| index.checked_add(1))
+        .filter(|index| *index < plan.command.len())
+        .ok_or_else(|| io::Error::other("cargo validation command has no target directory"))?;
+    plan.command[target_index] = target_dir.to_string();
+    Ok(Some(cache))
 }
 
 async fn initial_attempt_worktree_unchanged(
@@ -935,6 +1094,37 @@ fn configuration_error(
         message.into(),
         Duration::ZERO,
     )
+}
+
+fn persistent_cargo_validation_cache_allowed(permission_profile: &PermissionProfile) -> bool {
+    !matches!(permission_profile, PermissionProfile::External { .. })
+}
+
+fn cargo_validation_permission_profile(
+    permission_profile: &PermissionProfile,
+    sandbox_cwd: &AbsolutePathBuf,
+    cache_target: Option<&AbsolutePathBuf>,
+) -> PermissionProfile {
+    let Some(cache_target) = cache_target else {
+        return permission_profile.clone();
+    };
+    match permission_profile {
+        PermissionProfile::Managed {
+            file_system,
+            network,
+        } => {
+            let file_system = file_system
+                .to_sandbox_policy()
+                .with_additional_writable_roots(
+                    sandbox_cwd.as_path(),
+                    std::slice::from_ref(cache_target),
+                );
+            PermissionProfile::from_runtime_permissions(&file_system, *network)
+        }
+        PermissionProfile::Disabled | PermissionProfile::External { .. } => {
+            permission_profile.clone()
+        }
+    }
 }
 
 fn completed_from_output(

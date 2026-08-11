@@ -984,6 +984,10 @@ fn build_cargo_command(
                 format!("failed to resolve isolated cargo validation directory: {error}"),
             )
         })?;
+    let cargo_toolchain = toolchain_file
+        .as_ref()
+        .map(|toolchain| format!("{}\n{}", toolchain.name, toolchain.contents))
+        .unwrap_or_else(|| "ambient toolchain".to_string());
     if let Some(toolchain_file) = toolchain_file {
         std::fs::write(
             execution_cwd_guard.path().join(toolchain_file.name),
@@ -1060,6 +1064,7 @@ fn build_cargo_command(
         cwd,
         execution_cwd: Some(execution_cwd),
         execution_cwd_guard: Some(execution_cwd_guard),
+        cargo_toolchain: Some(cargo_toolchain),
         timeout_ms: config.timeout_ms,
         changed_file_count,
     })
