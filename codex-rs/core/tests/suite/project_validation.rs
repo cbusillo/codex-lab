@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
@@ -18,6 +19,7 @@ use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -46,6 +48,7 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::StreamingSseServer;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -221,8 +224,36 @@ async fn build_cargo_provider_codex(
     provider_command: String,
     timeout_ms: u64,
 ) -> Result<TestCodex> {
+    build_cargo_provider_codex_with_environment(
+        server,
+        cwd,
+        provider_command,
+        timeout_ms,
+        HashMap::new(),
+    )
+    .await
+}
+
+async fn build_cargo_provider_codex_with_environment(
+    server: &MockServer,
+    cwd: &Path,
+    provider_command: String,
+    timeout_ms: u64,
+    shell_environment_set: HashMap<String, String>,
+) -> Result<TestCodex> {
+    let mut builder =
+        cargo_provider_codex_builder(cwd, provider_command, timeout_ms, shell_environment_set)?;
+    builder.build(server).await
+}
+
+fn cargo_provider_codex_builder(
+    cwd: &Path,
+    provider_command: String,
+    timeout_ms: u64,
+    shell_environment_set: HashMap<String, String>,
+) -> Result<TestCodexBuilder> {
     let cwd = AbsolutePathBuf::try_from(cwd.to_path_buf())?;
-    let mut builder = test_codex().with_config(move |config| {
+    Ok(test_codex().with_config(move |config| {
         config.cwd = cwd.clone();
         config.validation.groups.functional = true;
         config.validation.providers.cargo = CargoValidationProviderConfig {
@@ -231,8 +262,8 @@ async fn build_cargo_provider_codex(
             ..CargoValidationProviderConfig::default()
         };
         config.validation.providers.shellcheck.enabled = false;
-    });
-    builder.build(server).await
+        config.permissions.shell_environment_policy.r#set = shell_environment_set;
+    }))
 }
 
 fn write_executable(path: &Path, contents: &str) -> Result<()> {
@@ -1870,6 +1901,16 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
     init_git_repo(repo.path())?;
     let provider = tempdir()?;
     let fake_cargo = provider.path().join("cargo");
+    let user_home = std::env::var_os("HOME").context("test user home should be available")?;
+    let codex_home = Arc::new(
+        tempfile::Builder::new()
+            .prefix("codex-lab-cargo-cache-")
+            .tempdir_in(Path::new(&user_home))?,
+    );
+    let probe_side_effect_dir = tempfile::tempdir_in(Path::new(&user_home))?;
+    let probe_side_effect = probe_side_effect_dir
+        .path()
+        .join("toolchain-probe-side-effect");
     let canonical_repo = dunce::canonicalize(repo.path())?;
     write_executable(
         &fake_cargo,
@@ -1877,6 +1918,11 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
             concat!(
                 "#!/bin/sh\n",
                 "set -eu\n",
+                "if [ \"${{1:-}}\" = '-Vv' ]; then\n",
+                "  if touch '{probe_side_effect}'; then exit 79; fi\n",
+                "  printf 'cargo 1.95.0 (fixture)\\n'\n",
+                "  exit 0\n",
+                "fi\n",
                 "manifest=''\n",
                 "target_dir=''\n",
                 "while [ \"$#\" -gt 0 ]; do\n",
@@ -1889,14 +1935,14 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
                 "test \"$manifest\" = '{manifest}' || exit 71\n",
                 "case \"$PWD\" in '{repo}'|'{repo}'/*) exit 64 ;; esac\n",
                 "test \"${{target_dir##*/}}\" = 'target' || exit 72\n",
-                "target_parent=${{target_dir%/target}}\n",
-                "test \"$(cd \"$target_parent\" && pwd -P)\" = \"$(pwd -P)\" || exit 72\n",
+                "case \"$target_dir\" in '{repo}'|'{repo}'/*) exit 72 ;; esac\n",
                 "grep -Fq 'channel = \"1.95.0\"' \"$PWD/rust-toolchain.toml\" || exit 73\n",
                 "if [ \"$(uname -s)\" = 'Darwin' ] && [ \"${{CODEX_SANDBOX:-}}\" != 'seatbelt' ]; then exit 70; fi\n",
                 "mkdir -p \"$target_dir\" || exit 75\n",
                 "printf allowed > \"$target_dir/probe\" || exit 76\n",
             ),
             manifest = canonical_repo.join("Cargo.toml").display(),
+            probe_side_effect = probe_side_effect.display(),
             repo = canonical_repo.display(),
         ),
     )?;
@@ -1914,16 +1960,17 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
         ],
     )
     .await;
-    let test = build_cargo_provider_codex(
-        &server,
+    let mut builder = cargo_provider_codex_builder(
         repo.path(),
         fake_cargo
             .to_str()
             .context("fake cargo path should be UTF-8")?
             .to_string(),
         /*timeout_ms*/ 5_000,
-    )
-    .await?;
+        HashMap::new(),
+    )?
+    .with_home(Arc::clone(&codex_home));
+    let test = builder.build(&server).await?;
 
     submit_user_input_with_permission_profile(
         &test.codex,
@@ -1944,6 +1991,10 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
         validation_events[0].output,
     );
     assert_eq!(validation_events[0].output, "cargo check passed");
+    assert!(
+        !probe_side_effect.exists(),
+        "the toolchain probe must not write outside the validation sandbox"
+    );
     let target_dir = validation_events[0]
         .command
         .iter()
@@ -1951,7 +2002,110 @@ async fn automatic_cargo_provider_runs_in_workspace_write_sandbox() -> Result<()
         .and_then(|index| validation_events[0].command.get(index + 1))
         .context("cargo validation command should include a target directory")?;
     assert!(!Path::new(target_dir).starts_with(&canonical_repo));
-    assert!(!Path::new(target_dir).exists());
+    assert!(
+        Path::new(target_dir).starts_with(
+            test.config
+                .codex_home
+                .join("cache/cargo-validation")
+                .as_path()
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(Path::new(target_dir).join("probe"))?,
+        "allowed"
+    );
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_keeps_ephemeral_target_for_external_sandbox() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    init_git_repo(repo.path())?;
+    let provider = tempdir()?;
+    let fake_cargo = provider.path().join("cargo");
+    write_executable(
+        &fake_cargo,
+        concat!(
+            "#!/bin/sh\n",
+            "set -eu\n",
+            "if [ \"${1:-}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\n",
+            "target_dir=''\n",
+            "while [ \"$#\" -gt 0 ]; do\n",
+            "  case \"$1\" in\n",
+            "    --target-dir) target_dir=$2; shift 2 ;;\n",
+            "    *) shift ;;\n",
+            "  esac\n",
+            "done\n",
+            "mkdir -p \"$target_dir\"\n",
+            "printf external > \"$target_dir/external\"\n",
+        ),
+    )?;
+    let patch = "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn value() {}\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-cargo-external-1"),
+                ev_apply_patch_custom_tool_call("cargo-external-patch", patch),
+                ev_completed("resp-cargo-external-1"),
+            ]),
+            sse_completed("resp-cargo-external-2"),
+        ],
+    )
+    .await;
+    let test = build_cargo_provider_codex(
+        &server,
+        repo.path(),
+        fake_cargo
+            .to_str()
+            .context("fake cargo path should be UTF-8")?
+            .to_string(),
+        /*timeout_ms*/ 5_000,
+    )
+    .await?;
+
+    submit_user_input_with_permission_profile(
+        &test.codex,
+        &test,
+        "add the Rust fixture",
+        PermissionProfile::External {
+            network: NetworkSandboxPolicy::Restricted,
+        },
+    )
+    .await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 1);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::Passed,
+        "exit code {:?}: {}",
+        validation_events[0].exit_code,
+        validation_events[0].output,
+    );
+    let target_dir = validation_events[0]
+        .command
+        .iter()
+        .position(|argument| argument == "--target-dir")
+        .and_then(|index| validation_events[0].command.get(index + 1))
+        .context("cargo validation command should include a target directory")?;
+    assert!(
+        !Path::new(target_dir).starts_with(
+            test.config
+                .codex_home
+                .join("cache/cargo-validation")
+                .as_path()
+        )
+    );
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }
@@ -1976,7 +2130,10 @@ async fn automatic_cargo_provider_skips_tool_use_when_dirty_worktree_is_unchange
     let fake_cargo = provider.path().join("cargo");
     write_executable(
         &fake_cargo,
-        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        &format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\ntouch '{}'\n",
+            marker.display()
+        ),
     )?;
     let server = start_mock_server().await;
     let response_mock = responses::mount_sse_sequence(
@@ -2024,7 +2181,8 @@ async fn automatic_cargo_provider_skips_tool_use_when_dirty_worktree_is_unchange
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automatic_cargo_provider_runs_one_json_diagnostic_correction_cycle() -> Result<()> {
+async fn automatic_cargo_provider_preserves_diagnostics_when_cache_maintenance_fails() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let repo = tempdir()?;
@@ -2048,9 +2206,11 @@ async fn automatic_cargo_provider_runs_one_json_diagnostic_correction_cycle() ->
             concat!(
                 "#!/bin/sh\n",
                 "set -eu\n",
+                "if [ \"${{1:-}}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\n",
                 "if [ \"$8\" != '--manifest-path' ] || [ \"$9\" != '{manifest}' ]; then exit 64; fi\n",
                 "case \"$PWD\" in '{repo}'|'{repo}'/*) exit 64 ;; esac\n",
                 "grep -Fq 'channel = \"1.95.0\"' \"$PWD/rust-toolchain.toml\" || exit 64\n",
+                "mkdir -p \"$(dirname \"${{11}}\")/last-used\"\n",
                 "count=0\n",
                 "if [ -f '{count}' ]; then count=$(cat '{count}'); fi\n",
                 "count=$((count + 1))\n",
@@ -2128,15 +2288,19 @@ async fn automatic_cargo_provider_runs_one_json_diagnostic_correction_cycle() ->
         ProjectValidationStatus::Passed
     );
     assert_eq!(initial_validation[1].output, "cargo check passed");
-    for validation in &initial_validation {
-        let target_dir = validation
-            .command
-            .iter()
-            .position(|argument| argument == "--target-dir")
-            .and_then(|index| validation.command.get(index + 1))
-            .context("cargo validation command should include a target directory")?;
-        assert!(!Path::new(target_dir).exists());
-    }
+    let target_dirs = initial_validation
+        .iter()
+        .map(|validation| {
+            validation
+                .command
+                .iter()
+                .position(|argument| argument == "--target-dir")
+                .and_then(|index| validation.command.get(index + 1))
+                .context("cargo validation command should include a target directory")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(target_dirs[0], target_dirs[1]);
+    assert!(Path::new(target_dirs[0]).exists());
     assert_eq!(std::fs::read_to_string(&count)?, "2");
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
@@ -2231,6 +2395,113 @@ async fn automatic_cargo_provider_ignores_repository_rustc_wrapper() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_does_not_invoke_configured_rustc_wrappers() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::create_dir_all(repo.path().join("src"))?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("Cargo.lock"),
+        "# This file is automatically @generated by Cargo.\nversion = 4\n\n[[package]]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn value() -> u8 { 1 }\n",
+    )?;
+    init_git_repo(repo.path())?;
+
+    let wrappers = tempdir()?;
+    let cargo_home = tempdir()?;
+    let wrapper_marker = wrappers.path().join("rustc-wrapper-ran");
+    let workspace_wrapper_marker = wrappers.path().join("rustc-workspace-wrapper-ran");
+    let wrapper = wrappers.path().join("rustc-wrapper");
+    let workspace_wrapper = wrappers.path().join("rustc-workspace-wrapper");
+    write_executable(
+        &wrapper,
+        &format!("#!/bin/sh\ntouch '{}'\nexit 91\n", wrapper_marker.display()),
+    )?;
+    write_executable(
+        &workspace_wrapper,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nexit 92\n",
+            workspace_wrapper_marker.display()
+        ),
+    )?;
+    std::fs::write(
+        cargo_home.path().join("config.toml"),
+        format!(
+            "[build]\nrustc-wrapper = '{}'\nrustc-workspace-wrapper = '{}'\n",
+            wrapper.display(),
+            workspace_wrapper.display(),
+        ),
+    )?;
+
+    let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-pub fn value() -> u8 { 1 }\n+pub fn value() -> u8 { 2 }\n*** End Patch\n";
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-cargo-environment-wrapper-1"),
+                ev_apply_patch_custom_tool_call("cargo-environment-wrapper-patch", patch),
+                ev_completed("resp-cargo-environment-wrapper-1"),
+            ]),
+            sse_completed("resp-cargo-environment-wrapper-2"),
+        ],
+    )
+    .await;
+    let test = build_cargo_provider_codex_with_environment(
+        &server,
+        repo.path(),
+        "cargo".to_string(),
+        /*timeout_ms*/ 30_000,
+        HashMap::from([
+            (
+                "CARGO_HOME".to_string(),
+                cargo_home.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "RUSTC_WRAPPER".to_string(),
+                wrapper.to_string_lossy().into_owned(),
+            ),
+            (
+                "RUSTC_WORKSPACE_WRAPPER".to_string(),
+                workspace_wrapper.to_string_lossy().into_owned(),
+            ),
+        ]),
+    )
+    .await?;
+
+    submit_user_input_with_permission_profile(
+        &test.codex,
+        &test,
+        "update the Rust fixture",
+        PermissionProfile::workspace_write(),
+    )
+    .await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+    let validation = validation_events(&events);
+
+    assert_eq!(validation.len(), 1);
+    assert_eq!(
+        validation[0].status,
+        ProjectValidationStatus::Passed,
+        "exit code {:?}: {}",
+        validation[0].exit_code,
+        validation[0].output,
+    );
+    assert_eq!(validation[0].output, "cargo check passed");
+    assert!(!wrapper_marker.exists());
+    assert!(!workspace_wrapper_marker.exists());
+    assert_eq!(response_mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_cargo_provider_rejects_repository_cargo_symlink() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2303,7 +2574,24 @@ async fn automatic_cargo_provider_reports_timeout_without_correction() -> Result
     init_git_repo(repo.path())?;
     let provider = tempdir()?;
     let fake_cargo = provider.path().join("cargo");
-    write_executable(&fake_cargo, "#!/bin/sh\nsleep 2\n")?;
+    write_executable(
+        &fake_cargo,
+        concat!(
+            "#!/bin/sh\n",
+            "set -eu\n",
+            "if [ \"${1:-}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\n",
+            "target_dir=''\n",
+            "while [ \"$#\" -gt 0 ]; do\n",
+            "  case \"$1\" in\n",
+            "    --target-dir) target_dir=$2; shift 2 ;;\n",
+            "    *) shift ;;\n",
+            "  esac\n",
+            "done\n",
+            "mkdir -p \"$target_dir\"\n",
+            "printf partial > \"$target_dir/partial-artifact\"\n",
+            "sleep 5\n",
+        ),
+    )?;
     let patch = "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn value() {}\n*** End Patch\n";
     let server = start_mock_server().await;
     let response_mock = responses::mount_sse_sequence(
@@ -2325,7 +2613,7 @@ async fn automatic_cargo_provider_reports_timeout_without_correction() -> Result
             .to_str()
             .context("fake cargo path should be UTF-8")?
             .to_string(),
-        /*timeout_ms*/ 50,
+        /*timeout_ms*/ 1_000,
     )
     .await?;
 
@@ -2338,18 +2626,32 @@ async fn automatic_cargo_provider_reports_timeout_without_correction() -> Result
         validation_events[0].status,
         ProjectValidationStatus::TimedOut
     );
+    let target_dir = validation_events[0]
+        .command
+        .iter()
+        .position(|argument| argument == "--target-dir")
+        .and_then(|index| validation_events[0].command.get(index + 1))
+        .context("cargo validation command should include a target directory")?;
+    assert_eq!(
+        std::fs::read_to_string(Path::new(target_dir).join("partial-artifact"))?,
+        "partial"
+    );
     assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn automatic_cargo_provider_deduplicates_successful_fingerprint() -> Result<()> {
+async fn automatic_cargo_provider_separates_linked_worktree_cache_and_success() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let repo = tempdir()?;
     std::fs::write(
         repo.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
     )?;
     init_git_repo(repo.path())?;
     let linked_worktree_parent = tempdir()?;
@@ -2367,7 +2669,7 @@ async fn automatic_cargo_provider_deduplicates_successful_fingerprint() -> Resul
     write_executable(
         &fake_cargo,
         &format!(
-            "#!/bin/sh\ncount=0\nif [ -f '{count}' ]; then count=$(cat '{count}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\n",
+            "#!/bin/sh\nif [ \"${{1:-}}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\ncount=0\nif [ -f '{count}' ]; then count=$(cat '{count}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\n",
             count = count.display(),
         ),
     )?;
@@ -2422,15 +2724,19 @@ async fn automatic_cargo_provider_deduplicates_successful_fingerprint() -> Resul
     let second_events = collect_events_until_terminal(&linked).await?;
     let second_validation = validation_events(&second_events);
     assert_eq!(second_validation.len(), 1);
-    assert_eq!(
-        second_validation[0].status,
-        ProjectValidationStatus::Skipped
-    );
-    assert_eq!(
-        second_validation[0].skip_reason,
-        Some(ProjectValidationSkipReason::UnchangedFingerprint)
-    );
-    assert_eq!(std::fs::read_to_string(count)?, "1");
+    assert_eq!(second_validation[0].status, ProjectValidationStatus::Passed);
+    let first_target = validation_events(&first_events)[0]
+        .command
+        .windows(2)
+        .find_map(|arguments| (arguments[0] == "--target-dir").then_some(&arguments[1]))
+        .context("first validation should include a target directory")?;
+    let second_target = second_validation[0]
+        .command
+        .windows(2)
+        .find_map(|arguments| (arguments[0] == "--target-dir").then_some(&arguments[1]))
+        .context("second validation should include a target directory")?;
+    assert_ne!(first_target, second_target);
+    assert_eq!(std::fs::read_to_string(count)?, "2");
     assert_eq!(response_mock.requests().len(), 4);
     run_git(
         repo.path(),

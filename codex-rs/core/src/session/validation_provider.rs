@@ -29,6 +29,7 @@ pub(crate) struct AutomaticValidationCommand {
     pub(crate) cwd: AbsolutePathBuf,
     pub(crate) execution_cwd: Option<AbsolutePathBuf>,
     pub(crate) execution_cwd_guard: Option<tempfile::TempDir>,
+    pub(crate) cargo_toolchain: Option<String>,
     pub(crate) timeout_ms: u64,
     pub(crate) changed_file_count: u32,
 }
@@ -256,6 +257,7 @@ fn build_shellcheck_command(
         cwd,
         execution_cwd: None,
         execution_cwd_guard: None,
+        cargo_toolchain: None,
         timeout_ms: config.timeout_ms,
         changed_file_count,
     })

@@ -215,6 +215,9 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod apps_context;
 mod background_auto_review;
+mod cargo_validation_cache;
+mod cargo_validation_cache_key;
+mod cargo_validation_probe;
 pub(crate) mod cargo_validation_provider;
 mod code_mode_warning;
 mod config_lock;
