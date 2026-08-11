@@ -71,6 +71,7 @@ pub use auth_account_import::AuthAccountImportSource;
 pub use auth_account_import::ImportedAuthAccount;
 pub use auth_account_import::SkippedAuthAccountImport;
 pub use auth_account_import::import_auth_accounts_from_auth_homes;
+pub use auth_accounts::AccountHealth;
 pub use auth_accounts::StoredAccount;
 pub use auth_accounts::activate_account;
 pub use auth_accounts::auth_for_account;

@@ -1,3 +1,4 @@
+use codex_login::AccountHealth;
 use codex_login::StoredAccount;
 use codex_login::token_data::TokenData;
 use codex_login::token_data::parse_chatgpt_jwt_claims;
@@ -17,6 +18,7 @@ fn stored_account(mode: AuthMode) -> StoredAccount {
         last_refresh: None,
         created_at: None,
         last_used_at: None,
+        health: AccountHealth::Ok,
     }
 }
 

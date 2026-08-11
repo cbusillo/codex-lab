@@ -4,6 +4,7 @@ use super::*;
 use crate::auth_mode::auth_mode_to_api;
 use crate::external_auth::ExternalAuthBridge;
 use chrono::DateTime;
+use codex_app_server_protocol::AccountHealth;
 use codex_login::PreviousAuthHandling;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 
@@ -880,6 +881,11 @@ impl AccountRequestProcessor {
         )
         .map_err(|err| internal_error(format!("failed to read stored account: {err}")))?
         .ok_or_else(|| invalid_request(format!("stored account not found: {account_id}")))?;
+        if account.health == codex_login::AccountHealth::ReauthRequired {
+            return Err(invalid_request(format!(
+                "stored account requires sign-in: {account_id}"
+            )));
+        }
         if let Some(message) = self.stored_account_policy_error(&account) {
             return Err(invalid_request(message));
         }
@@ -893,6 +899,9 @@ impl AccountRequestProcessor {
         )
         .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?;
         for account in accounts {
+            if !account.health.is_ok() {
+                continue;
+            }
             if self.stored_account_policy_error(&account).is_some() {
                 continue;
             }
@@ -957,6 +966,10 @@ impl AccountRequestProcessor {
             is_active: active_account_id.as_deref() == Some(account.id.as_str()),
             account_id: account.id,
             auth_mode: auth_mode_to_api(account.mode),
+            health: match account.health {
+                codex_login::AccountHealth::Ok => AccountHealth::Ok,
+                codex_login::AccountHealth::ReauthRequired => AccountHealth::ReauthRequired,
+            },
             label: account.label,
             created_at: account.created_at.map(|timestamp| timestamp.timestamp()),
             last_used_at: account.last_used_at.map(|timestamp| timestamp.timestamp()),

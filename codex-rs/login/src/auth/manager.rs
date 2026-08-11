@@ -59,6 +59,7 @@ use crate::auth::util::try_parse_error_message;
 use crate::auth_accounts::remove_account_matching_credentials;
 use crate::auth_accounts::upsert_api_key_account;
 use crate::auth_accounts::upsert_chatgpt_account;
+use crate::auth_accounts::upsert_chatgpt_account_after_login;
 use crate::default_client::create_client;
 use crate::default_client::create_default_auth_client;
 use crate::outbound_proxy::AuthRouteConfig;
@@ -1215,6 +1216,7 @@ fn upsert_login_account_with_activation(
     auth: &AuthDotJson,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     make_active: bool,
+    update: LoginAccountUpdate,
 ) -> std::io::Result<()> {
     if auth_credentials_store_mode != AuthCredentialsStoreMode::File {
         return Ok(());
@@ -1234,7 +1236,11 @@ fn upsert_login_account_with_activation(
         }
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
             if let Some(tokens) = auth.tokens.as_ref() {
-                upsert_chatgpt_account(
+                let upsert = match update {
+                    LoginAccountUpdate::SuccessfulLogin => upsert_chatgpt_account_after_login,
+                    LoginAccountUpdate::TokenRefresh => upsert_chatgpt_account,
+                };
+                upsert(
                     codex_home,
                     auth_credentials_store_mode,
                     tokens.clone(),
@@ -1253,6 +1259,12 @@ fn upsert_login_account_with_activation(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum LoginAccountUpdate {
+    SuccessfulLogin,
+    TokenRefresh,
+}
+
 pub(crate) fn upsert_login_account(
     codex_home: &Path,
     auth: &AuthDotJson,
@@ -1263,6 +1275,7 @@ pub(crate) fn upsert_login_account(
         auth,
         auth_credentials_store_mode,
         /*make_active*/ true,
+        LoginAccountUpdate::SuccessfulLogin,
     )
 }
 
@@ -1286,6 +1299,7 @@ fn update_login_account_best_effort(
         auth,
         auth_credentials_store_mode,
         /*make_active*/ false,
+        LoginAccountUpdate::TokenRefresh,
     ) {
         tracing::warn!("failed to update stored login account after token refresh: {err}");
     }
@@ -2935,6 +2949,22 @@ impl AuthManager {
         };
         if let Err(RefreshTokenError::Permanent(error)) = &result {
             self.record_permanent_refresh_failure_if_unchanged(&attempted_auth, error);
+            if matches!(
+                error.reason,
+                RefreshTokenFailedReason::Expired
+                    | RefreshTokenFailedReason::Exhausted
+                    | RefreshTokenFailedReason::Revoked
+            ) && let Some(expected_auth) = attempted_auth.get_current_auth_json()
+                && let Err(mark_error) =
+                    crate::auth_accounts::mark_account_reauth_required_if_auth_matches(
+                        &self.codex_home,
+                        self.auth_credentials_store_mode,
+                        self.catalog_account_id.as_deref(),
+                        &expected_auth,
+                    )
+            {
+                tracing::warn!("failed to mark account as requiring sign-in: {mark_error}");
+            }
         }
         result
     }

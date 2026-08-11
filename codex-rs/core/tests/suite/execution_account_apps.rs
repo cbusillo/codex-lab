@@ -248,6 +248,7 @@ fn write_accounts(home: &TempDir) -> anyhow::Result<Accounts> {
             last_refresh: Some(chrono::Utc::now()),
             created_at: None,
             last_used_at: None,
+            health: codex_login::AccountHealth::Ok,
         },
         StoredAccount {
             id: EXECUTION_STORED_ACCOUNT_ID.to_string(),
@@ -258,6 +259,7 @@ fn write_accounts(home: &TempDir) -> anyhow::Result<Accounts> {
             last_refresh: Some(chrono::Utc::now()),
             created_at: None,
             last_used_at: None,
+            health: codex_login::AccountHealth::Ok,
         },
     ];
     std::fs::write(

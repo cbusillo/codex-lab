@@ -3,6 +3,7 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::terminal_hyperlinks::strip_osc8;
 use assert_matches::assert_matches;
+use codex_app_server_protocol::AccountHealth;
 use codex_app_server_protocol::AccountListEntry;
 use codex_app_server_protocol::AuthMode as AppServerAuthMode;
 use codex_protocol::auth::AuthMode as CoreAuthMode;
@@ -191,6 +192,7 @@ fn account_list_entry(
     AccountListEntry {
         account_id: account_id.to_string(),
         auth_mode,
+        health: AccountHealth::Ok,
         label: Some(label.to_string()),
         created_at: None,
         last_used_at: None,
@@ -230,6 +232,32 @@ fn loaded_account_list_enter_switches_server_account() {
         Ok(AppEvent::SwitchAuthAccount { selection })
             if selection.account_id == "api" && selection.label == "API key"
     );
+}
+
+#[test]
+fn unhealthy_account_renders_repair_state_and_enter_starts_login() {
+    let (tx, mut rx) = app_event_sender_with_rx();
+    let mut unhealthy = account_list_entry(
+        "chatgpt",
+        AppServerAuthMode::Chatgpt,
+        "ChatGPT",
+        /*is_active*/ false,
+    );
+    unhealthy.health = AccountHealth::ReauthRequired;
+    let mut view =
+        LoginAccountsView::new_with_loaded_accounts(tx, vec![unhealthy], /*feedback*/ None);
+    let area = Rect::new(0, 0, 70, view.desired_height(/*width*/ 70));
+    let mut buf = Buffer::empty(area);
+    view.render(area, &mut buf);
+    insta::assert_snapshot!(
+        "unhealthy_account_requires_sign_in",
+        render_snapshot(&buf, area)
+    );
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(view.is_complete());
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAddAccount));
 }
 
 #[test]

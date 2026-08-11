@@ -411,6 +411,10 @@ impl ExecutionAccountLease {
         )
         .ok()
         .flatten()?;
+        if !account.health.is_ok() {
+            warn!(account_id, "execution account requires sign-in");
+            return None;
+        }
         let use_control_auth_manager = control_account_id == Some(account_id)
             && control_auth_manager
                 .auth_cached()

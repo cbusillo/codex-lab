@@ -398,6 +398,123 @@ fn upsert_chatgpt_dedupes_by_account_id_and_email() {
 }
 
 #[test]
+fn only_successful_login_upsert_clears_reauth_required() {
+    let temp = TempDir::new().expect("tempdir");
+    let tokens = make_chatgpt_tokens(Some("acct-reauth"), Some("user@example.com"));
+    let stored = upsert_chatgpt_account(
+        temp.path(),
+        tokens.clone(),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store account");
+    let (_, expected_auth) =
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &stored.id)
+            .expect("load account auth");
+    assert!(
+        super::mark_account_reauth_required_if_auth_matches(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            Some(&stored.id),
+            &expected_auth,
+        )
+        .expect("mark account")
+    );
+
+    let synced = upsert_chatgpt_account(
+        temp.path(),
+        tokens.clone(),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("sync account");
+    assert_eq!(synced.health, AccountHealth::ReauthRequired);
+    let repaired = super::upsert_chatgpt_account_after_login(
+        temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        tokens,
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("record successful login");
+    assert_eq!(repaired.id, stored.id);
+    assert_eq!(repaired.health, AccountHealth::Ok);
+}
+
+#[test]
+fn terminal_mark_ignores_chatgpt_api_key_metadata_but_rejects_stale_tokens() {
+    let temp = TempDir::new().expect("tempdir");
+    let stored = upsert_chatgpt_account(
+        temp.path(),
+        make_chatgpt_tokens(Some("acct-reauth"), Some("user@example.com")),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("store account");
+    let (_, mut expected_auth) =
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &stored.id)
+            .expect("load account auth");
+    expected_auth.openai_api_key = Some("ephemeral-login-key".to_string());
+    assert!(
+        super::mark_account_reauth_required_if_auth_matches(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            Some(&stored.id),
+            &expected_auth,
+        )
+        .expect("mark account")
+    );
+
+    let repaired = super::upsert_chatgpt_account_after_login(
+        temp.path(),
+        TEST_AUTH_CREDENTIALS_STORE_MODE,
+        stored.tokens.expect("stored tokens"),
+        Utc::now(),
+        /*label*/ None,
+        /*make_active*/ false,
+    )
+    .expect("repair account");
+    let (_, mut stale_auth) =
+        auth_for_account(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE, &repaired.id)
+            .expect("load repaired auth");
+    stale_auth.tokens.as_mut().expect("tokens").refresh_token = "stale-refresh-token".to_string();
+    assert!(
+        !super::mark_account_reauth_required_if_auth_matches(
+            temp.path(),
+            TEST_AUTH_CREDENTIALS_STORE_MODE,
+            Some(&repaired.id),
+            &stale_auth,
+        )
+        .expect("reject stale mark")
+    );
+    assert_eq!(
+        find_account(temp.path(), &repaired.id)
+            .expect("read account")
+            .expect("account")
+            .health,
+        AccountHealth::Ok
+    );
+}
+
+#[test]
+fn account_health_defaults_to_ok_for_legacy_catalog_entries() {
+    let temp = TempDir::new().expect("tempdir");
+    std::fs::write(
+        temp.path().join(ACCOUNTS_FILE_NAME),
+        r#"{"version":1,"accounts":[{"id":"api-key:legacy","mode":"apikey","openai_api_key":"sk-legacy"}]}"#,
+    )
+    .expect("write legacy account catalog");
+
+    let accounts = list_accounts(temp.path()).expect("read legacy account catalog");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].health, AccountHealth::Ok);
+}
+
+#[test]
 fn find_chatgpt_account_by_tokens_finds_matching_non_active_account() {
     let temp = TempDir::new().expect("tempdir");
     upsert_api_key_account(
@@ -1271,6 +1388,7 @@ fn recovers_from_trailing_json_documents_by_keeping_latest_accounts_file() {
             last_refresh: None,
             created_at: None,
             last_used_at: None,
+            health: AccountHealth::Ok,
         }],
     };
     let second = AccountsFile {
@@ -1285,6 +1403,7 @@ fn recovers_from_trailing_json_documents_by_keeping_latest_accounts_file() {
             last_refresh: None,
             created_at: None,
             last_used_at: None,
+            health: AccountHealth::Ok,
         }],
     };
 

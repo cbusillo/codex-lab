@@ -281,11 +281,13 @@ fn select_account_id(
 
     let mut chatgpt_accounts: Vec<&StoredAccount> = accounts
         .iter()
+        .filter(|account| account.health.is_ok())
         .filter(|account| account.mode.has_chatgpt_account())
         .filter(|account| account_has_credentials(account))
         .collect();
     let mut api_key_accounts: Vec<&StoredAccount> = accounts
         .iter()
+        .filter(|account| account.health.is_ok())
         .filter(|account| account.mode == AuthMode::ApiKey)
         .filter(|account| account_has_credentials(account))
         .collect();
@@ -454,6 +456,25 @@ mod tests {
         .id
     }
 
+    fn set_account_health(codex_home: &Path, account_id: &str, health: &str) {
+        let path = codex_home.join("auth_accounts.json");
+        let mut catalog: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read account catalog"))
+                .expect("parse account catalog");
+        let account = catalog["accounts"]
+            .as_array_mut()
+            .expect("accounts array")
+            .iter_mut()
+            .find(|account| account["id"] == account_id)
+            .expect("catalog account");
+        account["health"] = serde_json::Value::String(health.to_string());
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&catalog).expect("serialize account catalog"),
+        )
+        .expect("write account catalog");
+    }
+
     fn upsert_claim_only_chatgpt(codex_home: &Path, account_id: &str) -> String {
         let mut tokens = token_data(account_id, "user@example.com");
         tokens.account_id = None;
@@ -557,6 +578,42 @@ mod tests {
         .expect("select");
 
         assert_eq!(selected, Some(faster));
+    }
+
+    #[test]
+    fn preferred_selection_excludes_reauth_required_account() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let now = Utc::now();
+        let first = upsert_chatgpt(temp.path(), "first");
+        let second = upsert_chatgpt(temp.path(), "second");
+        let (unhealthy, healthy) = if first < second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        set_account_health(temp.path(), &unhealthy, "reauth_required");
+        codex_login::set_active_account_id(
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            Some(healthy.clone()),
+        )
+        .expect("set healthy active account");
+
+        let selected = super::select_preferred_account_id(
+            temp.path(),
+            temp.path(),
+            AuthCredentialsStoreMode::File,
+            /*allow_api_key_fallback*/ false,
+            now,
+        )
+        .expect("select preferred account");
+
+        assert_eq!(selected, Some(healthy.clone()));
+        assert_eq!(
+            codex_login::get_active_account_id(temp.path(), AuthCredentialsStoreMode::File,)
+                .expect("read active account"),
+            Some(healthy)
+        );
     }
 
     #[test]

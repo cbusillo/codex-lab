@@ -3,6 +3,9 @@ use std::time::Duration;
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
+use base64::Engine;
+use chrono::Utc;
+use codex_app_server_protocol::AccountHealth;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -14,6 +17,8 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SwitchActiveAccountResponse;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::TokenData;
+use codex_login::token_data::IdTokenInfo;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tempfile::TempDir;
@@ -53,6 +58,49 @@ async fn list_accounts_returns_server_owned_catalog() -> Result<()> {
     assert_eq!(second_entry.auth_mode, AuthMode::ApiKey);
     assert_eq!(second_entry.label.as_deref(), Some("second"));
     assert!(second_entry.is_active);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unhealthy_account_is_listed_but_cannot_replace_healthy_active_account() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let healthy = add_api_key_account(&codex_home, "sk-healthy", "healthy")?;
+    let unhealthy = add_chatgpt_account(&codex_home, "expired")?;
+    activate_account(&codex_home, &healthy.id)?;
+    set_account_health(&codex_home, &unhealthy.id, "reauth_required")?;
+    let mut app_server = initialized_app_server(&codex_home).await?;
+
+    let response: ListAccountsResponse =
+        jsonrpc_response(&mut app_server, "account/list", /*params*/ None).await?;
+    let unhealthy_entry = response
+        .accounts
+        .iter()
+        .find(|entry| entry.account_id == unhealthy.id)
+        .expect("unhealthy account should remain listed");
+    assert_eq!(unhealthy_entry.health, AccountHealth::ReauthRequired);
+    assert!(!unhealthy_entry.is_active);
+
+    let error = jsonrpc_error(
+        &mut app_server,
+        "account/switchActive",
+        Some(json!({ "accountId": unhealthy.id })),
+    )
+    .await?;
+    assert_eq!(
+        error.error.message,
+        format!("stored account requires sign-in: {}", unhealthy.id)
+    );
+    assert_eq!(
+        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File,)?,
+        Some(healthy.id)
+    );
+    let auth = codex_login::load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )?
+    .expect("healthy account should remain materialized");
+    assert_eq!(auth.openai_api_key.as_deref(), Some("sk-healthy"));
     Ok(())
 }
 
@@ -260,6 +308,56 @@ fn add_api_key_account(
         Some(label.to_string()),
         /*make_active*/ false,
     )?)
+}
+
+fn add_chatgpt_account(
+    codex_home: &TempDir,
+    account_id: &str,
+) -> Result<codex_login::StoredAccount> {
+    let encode = |value: &serde_json::Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(value).expect("serialize JWT segment"))
+    };
+    let raw_jwt = format!(
+        "{}.{}.signature",
+        encode(&json!({"alg": "none", "typ": "JWT"})),
+        encode(&json!({
+            "email": format!("{account_id}@example.com"),
+            "https://api.openai.com/auth": { "chatgpt_account_id": account_id }
+        }))
+    );
+    Ok(codex_login::upsert_chatgpt_account(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        TokenData {
+            id_token: IdTokenInfo {
+                email: Some(format!("{account_id}@example.com")),
+                chatgpt_account_id: Some(account_id.to_string()),
+                raw_jwt,
+                ..Default::default()
+            },
+            access_token: format!("access-{account_id}"),
+            refresh_token: format!("refresh-{account_id}"),
+            account_id: Some(account_id.to_string()),
+        },
+        Utc::now(),
+        Some(account_id.to_string()),
+        /*make_active*/ false,
+    )?)
+}
+
+fn set_account_health(codex_home: &TempDir, account_id: &str, health: &str) -> Result<()> {
+    let path = codex_home.path().join("auth_accounts.json");
+    let mut catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let account = catalog["accounts"]
+        .as_array_mut()
+        .expect("accounts array")
+        .iter_mut()
+        .find(|account| account["id"] == account_id)
+        .expect("catalog account");
+    account["health"] = serde_json::Value::String(health.to_string());
+    std::fs::write(path, serde_json::to_vec_pretty(&catalog)?)?;
+    Ok(())
 }
 
 fn activate_account(codex_home: &TempDir, account_id: &str) -> Result<()> {
