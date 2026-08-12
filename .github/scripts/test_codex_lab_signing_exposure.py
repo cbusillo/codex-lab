@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Bound the Codex Lab signing-key exposure documented as gate #343.
+"""Bound the Codex Lab signing-key exposure documented as gate #614.
 
-The empty-password signing keychain cannot be fixed from the workflows: it needs
-an operator to move the Developer ID key into a password-protected keychain and
-to give release signing its own runner. These tests do the part that *is* code:
-they stop the blast radius from growing silently, and they stop the documented
-gate from being deleted while the exposure is still real.
+The shared login signing keychain cannot be isolated from the workflows: it
+needs an operator to move the Developer ID key into a dedicated keychain and to
+give release signing its own runner. These tests do the part that *is* code:
+they prevent embedded keychain-password assumptions, stop the blast radius from
+growing silently, and keep the documented gate visible while the exposure is
+still real.
 
 See the "Signing Key Exposure" section of .github/workflows/README.md.
 """
@@ -19,12 +20,15 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOWS = ROOT / ".github/workflows"
 README = WORKFLOWS / "README.md"
 SIGNING_RUNNER_LABEL = "codex-lab-app"
-# Anything that unlocks a keychain or drives a signing identity.
+# Anything that drives a signing identity.
 SIGNING_MARKERS = (
-    re.compile(r"security\s+unlock-keychain"),
     re.compile(r"security\s+find-identity"),
     re.compile(r"Developer ID Application"),
     re.compile(r"macos-signing/sign_macos_code\.sh"),
+)
+KEYCHAIN_PASSWORD_MARKERS = (
+    re.compile(r"security\s+unlock-keychain"),
+    re.compile(r"security\s+create-keychain"),
 )
 TRIGGER_BLOCK = re.compile(r"^on:\n(?P<triggers>(?:[ \t].*\n|\n)*)", re.MULTILINE)
 
@@ -49,6 +53,15 @@ def signs_code(contents: str) -> bool:
 
 
 class SigningExposureBoundaryTest(unittest.TestCase):
+    def test_no_workflow_embeds_keychain_password_operations(self) -> None:
+        for path in workflow_paths():
+            contents = path.read_text()
+            with self.subTest(workflow=path.name):
+                self.assertFalse(
+                    any(marker.search(contents) for marker in KEYCHAIN_PASSWORD_MARKERS),
+                    f"{path.name} embeds a keychain password operation",
+                )
+
     def test_no_pull_request_triggered_workflow_signs_code(self) -> None:
         for path in workflow_paths():
             contents = path.read_text()
@@ -58,7 +71,7 @@ class SigningExposureBoundaryTest(unittest.TestCase):
                 self.assertFalse(
                     signs_code(contents),
                     f"{path.name} is pull-request triggered and signs code; "
-                    "gate #343 assumes signing stays off the PR path",
+                    "gate #614 assumes signing stays off the PR path",
                 )
 
     def test_codex_lab_release_is_not_pull_request_triggered(self) -> None:
@@ -91,16 +104,20 @@ class SigningExposureGateDocumentedTest(unittest.TestCase):
         # The gate is prose, so match it with the hard wrapping collapsed.
         self.readme = " ".join(README.read_text().split())
 
-    def test_the_empty_password_unlock_is_still_what_we_documented(self) -> None:
-        # If this fails, the keychain handling changed: revisit the gate below
-        # rather than updating this assertion.
+    def test_release_requires_an_already_unlocked_keychain(self) -> None:
+        self.assertNotIn("security unlock-keychain", self.release)
         self.assertIn(
-            'security unlock-keychain -p "" "$signing_keychain"', self.release
+            'security show-keychain-info "$signing_keychain"', self.release
+        )
+        self.assertIn("Signing keychain is unavailable or locked", self.release)
+        self.assertIn(
+            'security set-keychain-settings -lut 21600 "$signing_keychain"',
+            self.release,
         )
 
     def test_the_gate_is_documented(self) -> None:
         self.assertIn("Signing Key Exposure", self.readme)
-        self.assertIn("codex-lab/issues/343", self.readme)
+        self.assertIn("codex-lab/issues/614", self.readme)
 
     def test_the_gate_names_both_required_operator_actions(self) -> None:
         self.assertIn("dedicated signing keychain", self.readme)

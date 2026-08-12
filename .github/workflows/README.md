@@ -228,45 +228,48 @@ codex-lab-vX.Y.Z
 codex-lab-vX.Y.Z-lab.N
 ```
 
-## Signing Key Exposure: Open Operational Gate (#343)
+## Signing Key Exposure: Open Operational Gate (#614)
 
 This is a known, unresolved exposure. It is documented here instead of being
 papered over with a code change that would not actually close it.
 
-`codex-lab-release.yml` signs the managed engine with
+`codex-lab-release.yml` requires the trusted runner login keychain to be
+already unlocked before it signs the managed engine:
 
 ```shell
-security unlock-keychain -p "" "$HOME/Library/Keychains/login.keychain-db"
+security show-keychain-info "$HOME/Library/Keychains/login.keychain-db"
 ```
 
 The Developer ID Application key therefore lives in the runner user's login
-keychain behind an **empty password**. `codex-lab-app.yml` is pull-request
-triggered and runs on the *same* `[self-hosted, macOS, ARM64, codex-lab-app]`
-runner and the same user account. Every PR build executes repository-authored
-code on that host -- `build.rs`, `scripts/build_codex_lab_app.py`,
+keychain, whose password is intentionally not embedded in the workflow.
+`codex-lab-app.yml` is pull-request triggered and runs on the _same_
+`[self-hosted, macOS, ARM64, codex-lab-app]` runner and the same user account.
+Every PR build executes repository-authored code on that host -- `build.rs`,
+`scripts/build_codex_lab_app.py`,
 `scripts/codex_lab_package/smoke.py`, Cargo build scripts of any dependency.
-Any of them can run the same one-line unlock and sign arbitrary bytes with the
-Codex Lab Developer ID.
+While the interactive runner session keeps the login keychain unlocked, any of
+them can sign arbitrary bytes with the Codex Lab Developer ID.
 
 `codex-lab-app.yml` is restricted to branches in this repository
 (`github.event.pull_request.head.repo.full_name == github.repository`), so this
 is not open to public forks. It is still a full compromise path for anyone who
 can push a branch here, and it is not mitigated by anything in the workflows.
 
-No code-only fix closes it. The exposure comes from *one host, one user account,
-one unlocked keychain* shared between an untrusted-input build and a signing
-operation. Closing it requires an operator action, not a workflow edit:
+No code-only fix closes it. The exposure comes from _one host, one user account,
+one unlocked keychain_ shared between an untrusted-input build and a signing
+operation. Closing it requires operator actions, not another workflow-only edit:
 
 1. Move the Developer ID key out of the login keychain into a dedicated signing
-   keychain with a real password supplied as a repository secret, **and**
+   keychain with credentials supplied only to the release job, **and**
 2. Give the release signing job its own runner label so PR builds never execute
    on the host that holds the signing keychain.
 
 Until both land, treat the Codex Lab signing identity as reachable by anyone
 with push access. Track this on
-[cbusillo/codex-lab#343](https://github.com/cbusillo/codex-lab/issues/343).
+[cbusillo/codex-lab#614](https://github.com/cbusillo/codex-lab/issues/614).
 
 `.github/scripts/test_codex_lab_signing_exposure.py` keeps the gate honest: it
 fails if signing spreads to a pull-request-triggered workflow, if the release
-workflow gains a pull-request trigger, or if this section disappears while the
-empty-password unlock is still in the tree.
+workflow gains a pull-request trigger, if a keychain-password assumption enters
+the workflow, or if this section disappears while the shared-runner exposure
+remains.
