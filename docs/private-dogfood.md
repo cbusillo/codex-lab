@@ -93,8 +93,8 @@ the same immutable archive again and requires network access.
 Install the pinned candidate:
 
 ```sh
-installer_commit=20aa06fffeb0bd8b2e6ca99ac0626bdcb04d5c3b
-release_tag=codex-lab-v0.1.0-lab.2
+installer_commit=902f6ddd7a797ce432c6e635552b854dd53ce00a
+release_tag=codex-lab-v0.1.0-lab.4
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$release_tag" \
   --force
@@ -118,7 +118,7 @@ Add `~/.local/bin` to `PATH` if Terminal cannot find `codex-lab`.
 Run all of these before dogfooding:
 
 ```sh
-installer_commit=20aa06fffeb0bd8b2e6ca99ac0626bdcb04d5c3b
+installer_commit=902f6ddd7a797ce432c6e635552b854dd53ce00a
 run_codex_lab_installer "$installer_commit" --status
 codex-lab --version
 codex-lab debug provenance --json
@@ -126,17 +126,17 @@ codex-lab doctor
 launchctl print "gui/$(id -u)/dev.everycode.codex-lab.app-server.v1"
 ```
 
-The installer status must name `codex-lab-v0.1.0-lab.2`. Structured provenance
-must report `dirty_state` as `clean`, `build_profile` as `release`,
-`build_channel` as `lab`, and an `executable_path` inside the installed
-`Codex Lab.app`.
+The installer status must name `codex-lab-v0.1.0-lab.4` and bundle version
+`41`. Structured provenance must report `dirty_state` as `clean`,
+`build_profile` as `release`, `build_channel` as `lab`, and an
+`executable_path` inside the installed `Codex Lab.app`.
 
 Known version-surface limitation
 [#515](https://github.com/cbusillo/codex-lab/issues/515): `codex-lab exec` may
 print `OpenAI Codex v0.0.0` in its startup banner. Treat that banner as a known
 display bug only when `codex-lab --version` reports version `0.1.0`, installer
 status names the expected release tag, and structured provenance matches the
-release contract. The semantic version is shared by `lab.1` and `lab.2`; only
+release contract. The semantic version is shared by `lab.3` and `lab.4`; only
 installer status and the provenance `source_commit` distinguish those releases.
 Stop and report a release blocker if any authoritative tag or provenance check
 disagrees.
@@ -215,12 +215,13 @@ contents of `auth.json` into an issue or dogfood report.
 ## Permissions and providers
 
 Use `/permissions` to inspect or change what Codex may do. The
-`danger-full-access` sandbox and `never` approval policy can let the model run
-commands and change files without another prompt. The
+`danger-full-access` sandbox and `never` approval policy (no approval prompts)
+can let the model run commands and change files without another prompt. The
 `--dangerously-bypass-approvals-and-sandbox` option (YOLO mode) removes both
 controls and is appropriate only inside an external sandbox whose recovery
-boundary you understand. Use a disposable test repository for the canary and
-review its diff before keeping changes.
+boundary you understand. For the canary, use the least privilege compatible
+with the participant's selected real task, start from a clean worktree or other
+understood recovery point, and review the resulting diff before keeping changes.
 
 Use `/model` for the primary Codex model and `/settings` for third-party-agent
 configuration. One external-agent selector limitation remains relevant to the
@@ -260,29 +261,31 @@ Roll back through the same transactional installer path to the exact supported
 prior release:
 
 ```sh
-installer_commit=20aa06fffeb0bd8b2e6ca99ac0626bdcb04d5c3b
-rollback_tag=codex-lab-v0.1.0-lab.1
+installer_commit=902f6ddd7a797ce432c6e635552b854dd53ce00a
+rollback_tag=codex-lab-v0.1.0-lab.3
 run_codex_lab_installer "$installer_commit" \
   --release-tag "$rollback_tag" \
   --force
 run_codex_lab_installer "$installer_commit" --status
-verify_codex_lab_provenance a65d78ad29fbe0994a5de25a7d521cfb90047a45
+verify_codex_lab_provenance c7f8a50f1564371e4472d00b685189697bf30c7c
 ```
 
 Reinstall the candidate with the install command above. After either change,
 confirm the supervisor is healthy and that status and provenance agree. After
-rollback, status must name `codex-lab-v0.1.0-lab.1` and provenance
-`source_commit` must equal `a65d78ad29fbe0994a5de25a7d521cfb90047a45`.
+rollback, status must name `codex-lab-v0.1.0-lab.3` and provenance
+`source_commit` must equal `c7f8a50f1564371e4472d00b685189697bf30c7c`.
 A failure must leave the prior app, shim, engine binaries, installer state, and
 supervisor usable; if it does not, stop and report a release blocker.
 
 ## Bounded second-user canary
 
-Use a disposable Git repository with no secrets. Record pass/fail and bounded
-metadata for each item; do not include prompt, response, token, account, or
-private repository contents.
+Use one genuine, bounded task the participant already needs to complete in a
+real repository. Do not use Codex Lab to work on Codex Lab, and do not invent a
+task only for the canary. Record pass/fail and bounded metadata for each item;
+do not include prompt, response, token, account, business context, or private
+repository contents.
 
-- [ ] Install `codex-lab-v0.1.0-lab.2` with the no-checkout command and confirm
+- [ ] Install `codex-lab-v0.1.0-lab.4` with the no-checkout command and confirm
       installer status plus structured provenance.
 - [ ] Authenticate, confirm existing accounts are preserved, add or select a
       second account if available, and verify intentional account switching. If
@@ -292,8 +295,9 @@ private repository contents.
       refreshing a terminally invalid account.
 - [ ] Launch with understood permissions and record the selected sandbox and
       approval policy.
-- [ ] Complete one real turn that changes a harmless file, then inspect the
-      resulting diff.
+- [ ] Complete one meaningful code-changing turn for the selected real task,
+      then inspect the resulting diff without copying proprietary content into
+      the canary report.
 - [ ] Complete one bounded operation with an installed third-party agent and
       record its exact selector plus a non-empty terminal result.
 - [ ] Observe an `Automatic Validation` cell in the turn transcript with one
@@ -310,8 +314,8 @@ private repository contents.
       visible yet, report only that no run was observable at that point and keep
       waiting rather than calling it skipped.
 - [ ] Exit, restart the supervisor, and resume the same thread.
-- [ ] Roll back to `codex-lab-v0.1.0-lab.1`, verify exact provenance and health,
-      and optionally reinstall `codex-lab-v0.1.0-lab.2`.
+- [ ] Roll back to `codex-lab-v0.1.0-lab.3`, verify exact provenance and health,
+      and optionally reinstall `codex-lab-v0.1.0-lab.4`.
 
 ## Leave the private dogfood program
 
@@ -319,7 +323,7 @@ After completing the canary and any requested rollback evidence, remove the
 recorded Codex Lab installation through the same reviewed installer:
 
 ```sh
-installer_commit=20aa06fffeb0bd8b2e6ca99ac0626bdcb04d5c3b
+installer_commit=902f6ddd7a797ce432c6e635552b854dd53ce00a
 run_codex_lab_installer "$installer_commit" --uninstall
 ```
 
