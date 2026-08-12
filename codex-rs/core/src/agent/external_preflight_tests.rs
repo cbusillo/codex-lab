@@ -333,7 +333,7 @@ async fn antigravity_catalog_is_scoped_and_deterministic() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn old_antigravity_cli_degrades_to_provider_defaults() {
+async fn old_antigravity_cli_without_read_only_flags_is_rejected() {
     clear_capability_cache();
     let temp_dir = TempDir::new().expect("tempdir");
     let backend = shell_backend(
@@ -361,21 +361,20 @@ exit 2
     assert!(!capabilities.supports_model_selection);
     assert!(!capabilities.supports_effort_selection);
     assert!(capabilities.failure.is_none());
-    let provenance = preflight_external_agent_backend(
+    let error = preflight_external_agent_backend(
         Some("antigravity"),
         &backend,
         temp_dir.path(),
         /*is_read_only*/ true,
     )
     .await
-    .expect("provider-default Antigravity launch should survive an old CLI");
+    .expect_err("read-only Antigravity launch should require sandbox support");
     assert_eq!(
-        provenance.capability_source,
-        ExternalAgentCapabilitySource::LocalCli
-    );
-    assert_eq!(
-        provenance.capability_freshness,
-        Some(ExternalAgentCapabilityFreshness::Cached)
+        error,
+        ExternalAgentFailureDetail::new(
+            ExternalAgentFailureKind::UnsupportedMode,
+            "installed Antigravity CLI does not report required read-only flag `--sandbox`",
+        )
     );
 }
 
