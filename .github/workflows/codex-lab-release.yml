@@ -386,7 +386,10 @@ jobs:
           cp "$CODEX_LAB_BIN" "$engine_path"
           cp "$CODE_MODE_HOST_BIN" "$code_mode_host_path"
           chmod 0755 "$engine_path" "$code_mode_host_path"
-          security unlock-keychain -p "" "$signing_keychain"
+          if ! security show-keychain-info "$signing_keychain" >/dev/null; then
+            echo "::error::Signing keychain is unavailable or locked; verify the path and unlock it in the trusted runner login session before dispatching the release workflow."
+            exit 1
+          fi
           security set-keychain-settings -lut 21600 "$signing_keychain"
           security find-identity -v -p codesigning | grep -F "$signing_identity"
           .github/scripts/macos-signing/sign_macos_code.sh \
