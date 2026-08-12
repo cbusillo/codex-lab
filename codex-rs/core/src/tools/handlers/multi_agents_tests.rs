@@ -2773,17 +2773,29 @@ async fn multi_agent_v2_wait_agent_returns_when_all_children_are_already_termina
         .get_thread(agent_id)
         .await
         .expect("child thread should exist");
-    let status = tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            let status = session.services.agent_control.get_status(agent_id).await;
-            if status != AgentStatus::PendingInit {
-                break status;
+    let mut status_rx = session
+        .services
+        .agent_control
+        .subscribe_status(agent_id)
+        .await
+        .expect("worker status subscription should succeed");
+    let status = if matches!(status_rx.borrow().clone(), AgentStatus::PendingInit) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if status_rx.changed().await.is_err() {
+                    break session.services.agent_control.get_status(agent_id).await;
+                }
+                let status = status_rx.borrow().clone();
+                if status != AgentStatus::PendingInit {
+                    break status;
+                }
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("worker should leave pending initialization");
+        })
+        .await
+        .expect("worker should leave pending initialization")
+    } else {
+        status_rx.borrow().clone()
+    };
     let child_turn = child_thread.session.new_default_turn().await;
     if !crate::agent::status::is_final(&status) {
         child_thread

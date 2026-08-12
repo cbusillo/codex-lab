@@ -408,7 +408,11 @@ async fn antigravity_preflight_records_cli_version() {
   exit 0
 fi
 if [ "$1" = "models" ]; then
-  echo "Gemini 3.1 Pro"
+  echo "gemini-3.1-pro"
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo 'Usage: agy --sandbox --dangerously-skip-permissions --mode plan'
   exit 0
 fi
 exit 2
@@ -500,6 +504,10 @@ if [ "$1" = "--version" ]; then
 fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   echo '{"loggedIn":true,"authMethod":"test"}'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo 'Usage: fake-claude --model <model> --effort <level>'
   exit 0
 fi
 if [ "$1" = "-p" ]; then
