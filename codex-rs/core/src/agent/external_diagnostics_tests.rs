@@ -15,6 +15,16 @@ fn classifies_provider_failure_text() {
         ExternalAgentFailureKind::UnsupportedMode
     );
     assert_eq!(
+        classify_provider_failure_text(
+            "a tool required the command permission that headless mode cannot prompt for, so it was auto-denied"
+        ),
+        ExternalAgentFailureKind::PermissionDenied
+    );
+    assert_eq!(
+        classify_provider_failure_text("sh: ./tool: Permission denied"),
+        ExternalAgentFailureKind::ProviderFailed
+    );
+    assert_eq!(
         classify_provider_failure_text("provider exited with status 1"),
         ExternalAgentFailureKind::ProviderFailed
     );

@@ -16,6 +16,7 @@ pub enum ExternalAgentFailureKind {
     CommandMissing,
     AuthenticationRequired,
     QuotaOrRateLimited,
+    PermissionDenied,
     UnsupportedMode,
     TimedOut,
     MalformedOutput,
@@ -30,6 +31,7 @@ impl ExternalAgentFailureKind {
             Self::CommandMissing => "command_missing",
             Self::AuthenticationRequired => "authentication_required",
             Self::QuotaOrRateLimited => "quota_or_rate_limited",
+            Self::PermissionDenied => "permission_denied",
             Self::UnsupportedMode => "unsupported_mode",
             Self::TimedOut => "timed_out",
             Self::MalformedOutput => "malformed_output",
@@ -254,6 +256,14 @@ pub(crate) fn classify_provider_failure_text(text: &str) -> ExternalAgentFailure
         "waiting for authentication",
     ]) {
         return ExternalAgentFailureKind::AuthenticationRequired;
+    }
+    if contains_any(&[
+        "permission that headless mode cannot prompt for",
+        "auto-denied",
+        "user denied permission to run command",
+        "soft-denying tool confirmation",
+    ]) {
+        return ExternalAgentFailureKind::PermissionDenied;
     }
     if contains_any(&[
         "unknown command",

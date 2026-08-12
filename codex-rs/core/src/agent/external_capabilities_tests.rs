@@ -36,7 +36,7 @@ fn antigravity_capabilities_produce_provider_qualified_selectors() {
         Some("1.1.9".to_string()),
         b"gemini-3.6-flash-high\ngemini-3.1-pro-low\n",
         /*models_truncated*/ false,
-        b"--model Model\n--effort low|medium|high\n",
+        b"--model Model\n--effort low|medium|high\n--sandbox\n--mode\n--dangerously-skip-permissions\n",
         /*help_truncated*/ false,
     );
 
@@ -60,6 +60,47 @@ fn antigravity_capabilities_produce_provider_qualified_selectors() {
         ["low", "medium", "high"].map(str::to_string)
     );
     assert_eq!(capabilities.source, ExternalAgentCapabilitySource::LocalCli);
+}
+
+#[test]
+fn antigravity_read_only_requires_safety_flags() {
+    let capabilities = antigravity_capabilities(
+        Some("1.1.9".to_string()),
+        b"gemini-3.6-flash-high\n",
+        /*models_truncated*/ false,
+        b"--model Model\n--effort low|medium|high\n",
+        /*help_truncated*/ false,
+    );
+
+    let mut backend = backend(&[]);
+    backend.launch_family = Some("antigravity".to_string());
+    let error =
+        validate_requested_capabilities(&backend, &[], /*is_read_only*/ true, &capabilities)
+            .expect_err("missing AGY sandbox flags should fail read-only preflight");
+
+    assert_eq!(error.kind, ExternalAgentFailureKind::UnsupportedMode);
+    assert!(error.to_string().contains("--sandbox"));
+}
+
+#[test]
+fn antigravity_read_only_preserves_probe_failure_diagnostic() {
+    let capabilities = ExternalAgentCapabilities::conservative(
+        "antigravity",
+        Some("1.1.9".to_string()),
+        ExternalAgentFailureDetail::new(
+            ExternalAgentFailureKind::MalformedOutput,
+            "Antigravity returned malformed model output",
+        ),
+    );
+    let mut backend = backend(&[]);
+    backend.launch_family = Some("antigravity".to_string());
+
+    let error =
+        validate_requested_capabilities(&backend, &[], /*is_read_only*/ true, &capabilities)
+            .expect_err("probe failure should win over missing safety flags");
+
+    assert_eq!(error.kind, ExternalAgentFailureKind::MalformedOutput);
+    assert!(error.to_string().contains("malformed model output"));
 }
 
 #[test]

@@ -7223,6 +7223,7 @@
         "commandMissing",
         "authenticationRequired",
         "quotaOrRateLimited",
+        "permissionDenied",
         "unsupportedMode",
         "timedOut",
         "malformedOutput",

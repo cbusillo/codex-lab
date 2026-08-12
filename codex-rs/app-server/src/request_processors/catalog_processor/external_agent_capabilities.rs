@@ -498,6 +498,9 @@ fn map_failure(detail: &codex_core::ExternalAgentFailureDetail) -> ExternalAgent
         codex_core::ExternalAgentFailureKind::QuotaOrRateLimited => {
             ExternalAgentCapabilityFailureKind::QuotaOrRateLimited
         }
+        codex_core::ExternalAgentFailureKind::PermissionDenied => {
+            ExternalAgentCapabilityFailureKind::PermissionDenied
+        }
         codex_core::ExternalAgentFailureKind::UnsupportedMode => {
             ExternalAgentCapabilityFailureKind::UnsupportedMode
         }

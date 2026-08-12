@@ -4944,6 +4944,11 @@ fn external_agent_capability_failure_kind_uses_stable_wire_names() {
             .expect("failure kind should serialize"),
         serde_json::json!("authenticationRequired")
     );
+    assert_eq!(
+        serde_json::to_value(ExternalAgentCapabilityFailureKind::PermissionDenied)
+            .expect("failure kind should serialize"),
+        serde_json::json!("permissionDenied")
+    );
 }
 
 #[test]

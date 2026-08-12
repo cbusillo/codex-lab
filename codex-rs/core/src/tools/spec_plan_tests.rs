@@ -82,6 +82,16 @@ async fn discovered_external_selector_is_advertised_without_user_roles() {
             cli_version: Some("1.1.10".to_string()),
             supports_model_selection: true,
             supports_effort_selection: true,
+            supported_flags: [
+                "--model",
+                "--effort",
+                "--sandbox",
+                "--mode",
+                "--dangerously-skip-permissions",
+            ]
+            .map(str::to_string)
+            .into_iter()
+            .collect(),
             models: vec![
                 crate::agent::external_capabilities::ExternalAgentModelCapability {
                     selector: selector.to_string(),
