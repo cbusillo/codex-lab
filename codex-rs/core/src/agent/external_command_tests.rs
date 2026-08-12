@@ -33,6 +33,7 @@ fn test_launch(
         is_read_only,
         preflight_completed: false,
         resolved_command: None,
+        claude_stream_json_enabled: false,
         hide_provider_metadata: false,
     }
 }
@@ -154,6 +155,7 @@ async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
         is_read_only: false,
         preflight_completed: false,
         resolved_command: None,
+        claude_stream_json_enabled: false,
         hide_provider_metadata: false,
     };
 
@@ -262,15 +264,264 @@ fn third_party_cli_families_use_prompt_flag() {
             },
             /*is_read_only*/ false,
         );
+        let mut launch = launch;
+        launch.claude_stream_json_enabled = launch_family == "claude";
 
         let invocation = build_external_agent_invocation(&launch, "inspect this repo")
             .expect("third-party invocation should build");
 
         let mut expected_args = mode_args;
+        if launch_family == "claude" {
+            expected_args.extend([
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]);
+        }
         expected_args.extend(["-p".to_string(), "inspect this repo".to_string()]);
         assert_eq!(invocation.command, PathBuf::from(command));
         assert_eq!(invocation.args, expected_args, "family {launch_family}");
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_stream_json_preserves_assistant_result_without_transport_events() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let fixture = include_str!("fixtures/claude_stream/assistant_success.jsonl");
+    let script_path = temp_dir.path().join("claude-stream.sh");
+    tokio::fs::write(&script_path, format!("cat <<'EOF'\n{fixture}\nEOF\n"))
+        .await
+        .expect("fake Claude stream should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let response = run_external_agent_inner(&launch)
+        .await
+        .expect("structured Claude success should complete");
+
+    assert_eq!(response.status, ExternalAgentResponseStatus::Completed);
+    assert_eq!(
+        response.final_message.as_deref(),
+        Some("Repository inspection complete.")
+    );
+    assert_eq!(
+        response.quota_diagnostic,
+        Some(ExternalAgentQuotaDiagnostic {
+            status: "allowed".to_string(),
+            window: "five_hour".to_string(),
+            resets_at: Some(1_783_830_000),
+            overage_state: "rejected".to_string(),
+            overage_reason: Some("org_level_disabled_until".to_string()),
+            is_using_overage: false,
+        })
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_stream_quota_rejection_outranks_contradictory_result_prose() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let fixture = include_str!("fixtures/claude_stream/five_hour_rejected.jsonl");
+    let script_path = temp_dir.path().join("claude-stream.sh");
+    tokio::fs::write(
+        &script_path,
+        format!("cat <<'EOF'\n{fixture}\nEOF\nexit 1\n"),
+    )
+    .await
+    .expect("fake Claude stream should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("structured quota rejection should fail");
+
+    assert_eq!(
+        err.detail.kind,
+        ExternalAgentFailureKind::QuotaOrRateLimited
+    );
+    assert_eq!(
+        err.detail.quota_diagnostic,
+        Some(ExternalAgentQuotaDiagnostic {
+            status: "rejected".to_string(),
+            window: "five_hour".to_string(),
+            resets_at: Some(1_783_830_000),
+            overage_state: "rejected".to_string(),
+            overage_reason: Some("org_level_disabled_until".to_string()),
+            is_using_overage: false,
+        })
+    );
+    assert!(err.to_string().contains("five_hour window"));
+    assert!(!err.to_string().contains("monthly spend limit"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_malformed_stream_returns_bounded_diagnostic_without_transport_output() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let fixture = include_str!("fixtures/claude_stream/malformed.jsonl");
+    let script_path = temp_dir.path().join("claude-stream.sh");
+    tokio::fs::write(
+        &script_path,
+        format!("cat <<'EOF'\n{fixture}\nEOF\nexit 1\n"),
+    )
+    .await
+    .expect("fake Claude stream should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("malformed stream should fail without transport output");
+
+    assert_eq!(err.detail.kind, ExternalAgentFailureKind::ProviderFailed);
+    assert!(err.to_string().contains("usable stream-json response"));
+    assert!(!err.to_string().contains("rate_limit_event"));
+    assert_eq!(err.detail.quota_diagnostic, None);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn generic_429_does_not_infer_structured_quota_details() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-429.sh");
+    tokio::fs::write(
+        &script_path,
+        "printf 'HTTP 429: This request would exceed your account rate limit.\\n'\nexit 1\n",
+    )
+    .await
+    .expect("fake Claude CLI should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("generic 429 should fail");
+
+    assert_eq!(
+        err.detail.kind,
+        ExternalAgentFailureKind::QuotaOrRateLimited
+    );
+    assert_eq!(err.detail.quota_diagnostic, None);
+    assert!(err.to_string().contains("HTTP 429"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_stream_mode_preserves_generic_429_stderr_classification() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-429.sh");
+    tokio::fs::write(
+        &script_path,
+        "printf 'HTTP 429: This request would exceed your account rate limit.\\n' >&2\nexit 1\n",
+    )
+    .await
+    .expect("fake Claude CLI should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("generic 429 should remain classifiable in stream mode");
+
+    assert_eq!(
+        err.detail.kind,
+        ExternalAgentFailureKind::QuotaOrRateLimited
+    );
+    assert_eq!(err.detail.quota_diagnostic, None);
+    assert!(err.to_string().contains("HTTP 429"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_claude_stream_stops_the_external_command() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-stream.sh");
+    tokio::fs::write(
+        &script_path,
+        "printf '%s\\n' '{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"rateLimitType\":\"five_hour\",\"overageStatus\":\"available\",\"isUsingOverage\":false}}'\nsleep 30\n",
+    )
+    .await
+    .expect("fake Claude stream should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+    let cancellation_token = launch.cancellation_token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancellation_token.cancel();
+    });
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("cancelling Claude stream should stop the command");
+
+    assert!(err.to_string().contains("external agent cancelled"));
 }
 
 #[test]

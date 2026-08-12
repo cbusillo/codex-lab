@@ -1,8 +1,10 @@
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::claude_stream::parse_claude_stream_json;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentFailureKind;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
 use crate::agent::external_diagnostics::classify_provider_failure_text;
 use crate::agent::external_diagnostics::redact_external_agent_status;
 #[cfg(all(test, unix))]
@@ -64,6 +66,7 @@ pub(crate) struct ExternalAgentLaunch {
     pub(crate) is_read_only: bool,
     pub(crate) preflight_completed: bool,
     pub(crate) resolved_command: Option<PathBuf>,
+    pub(crate) claude_stream_json_enabled: bool,
     pub(crate) hide_provider_metadata: bool,
 }
 
@@ -85,6 +88,8 @@ struct ExternalAgentRequest {
 struct ExternalAgentResponse {
     status: ExternalAgentResponseStatus,
     final_message: Option<String>,
+    #[serde(skip)]
+    quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -170,9 +175,10 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
     match result {
         Ok(response) if response.status == ExternalAgentResponseStatus::Completed => {
             let final_message = response.final_message.unwrap_or_default();
-            control.update_external_agent_status(
+            control.update_external_agent_status_with_quota(
                 thread_id,
                 AgentStatus::Completed(Some(final_message.clone())),
+                response.quota_diagnostic,
             );
             control
                 .persist_external_agent_run_finished(thread_id, "completed")
@@ -184,10 +190,16 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 .final_message
                 .filter(|message| !message.is_empty())
                 .unwrap_or_else(|| "external agent failed".to_string());
-            let failure = ExternalAgentFailureDetail::new(
-                classify_provider_failure_text(&message),
-                message.clone(),
-            );
+            let failure = response
+                .quota_diagnostic
+                .filter(ExternalAgentQuotaDiagnostic::is_rejected)
+                .map(ExternalAgentFailureDetail::from_quota_diagnostic)
+                .unwrap_or_else(|| {
+                    ExternalAgentFailureDetail::new(
+                        classify_provider_failure_text(&message),
+                        message.clone(),
+                    )
+                });
             let parent_message =
                 external_agent_parent_failure_message(&launch, &failure, message.as_str());
             control.update_external_agent_failure(
@@ -413,8 +425,52 @@ async fn run_external_agent_inner(
         },
     };
 
+    let claude_stream = if launch.claude_stream_json_enabled {
+        parse_claude_stream_json(&output.stdout)
+    } else {
+        None
+    };
+
+    if let Some(quota_diagnostic) = claude_stream
+        .as_ref()
+        .and_then(|stream| stream.quota_diagnostic.clone())
+        .filter(ExternalAgentQuotaDiagnostic::is_rejected)
+        .filter(|_| {
+            !output.status.success()
+                || !claude_stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.has_result)
+        })
+    {
+        return Err(ExternalAgentRunError::from_detail(
+            ExternalAgentFailureDetail::from_quota_diagnostic(quota_diagnostic),
+        ));
+    }
+
     if !output.status.success() {
-        let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
+        if let Some(stream) = claude_stream
+            && stream.is_error == Some(true)
+            && let Some(final_message) = stream
+                .final_message
+                .as_deref()
+                .map(bound_external_agent_message)
+        {
+            return Ok(ExternalAgentResponse {
+                status: ExternalAgentResponseStatus::Failed,
+                final_message: Some(final_message),
+                quota_diagnostic: stream.quota_diagnostic,
+            });
+        }
+        let diagnostic = if launch.claude_stream_json_enabled {
+            let stderr = bounded_preflight_output(&[], &output.stderr);
+            if stderr.is_empty() {
+                "Claude Code did not emit a usable stream-json response".to_string()
+            } else {
+                format!("Claude Code did not emit a usable stream-json response: {stderr}")
+            }
+        } else {
+            bounded_preflight_output(&output.stdout, &output.stderr)
+        };
         let reason = if diagnostic.is_empty() {
             format!("external agent exited with {}", output.status)
         } else {
@@ -453,9 +509,42 @@ async fn run_external_agent_inner(
                     .as_deref()
                     .map(bound_external_agent_message);
             }
+            response.quota_diagnostic = None;
             Ok(response)
         }
         ExternalCommandProtocol::RawCli => {
+            if let Some(stream) = claude_stream {
+                let final_message = stream
+                    .final_message
+                    .as_deref()
+                    .map(bound_external_agent_message);
+                if stream.is_error == Some(true) {
+                    return Ok(ExternalAgentResponse {
+                        status: ExternalAgentResponseStatus::Failed,
+                        final_message,
+                        quota_diagnostic: stream.quota_diagnostic,
+                    });
+                }
+                if let Some(final_message) = final_message {
+                    return Ok(ExternalAgentResponse {
+                        status: ExternalAgentResponseStatus::Completed,
+                        final_message: Some(final_message),
+                        quota_diagnostic: stream.quota_diagnostic,
+                    });
+                }
+                if stream.has_result {
+                    return Err(ExternalAgentRunError::new(
+                        ExternalAgentFailureKind::EmptyOutput,
+                        anyhow::anyhow!("external agent completed without output"),
+                    ));
+                }
+            }
+            if launch.claude_stream_json_enabled {
+                return Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::MalformedOutput,
+                    anyhow::anyhow!("Claude Code did not emit a usable stream-json response"),
+                ));
+            }
             let final_message = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if final_message.is_empty() {
                 let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
@@ -481,6 +570,7 @@ async fn run_external_agent_inner(
             Ok(ExternalAgentResponse {
                 status: ExternalAgentResponseStatus::Completed,
                 final_message: Some(bound_external_agent_message(&final_message)),
+                quota_diagnostic: None,
             })
         }
     }
@@ -599,6 +689,13 @@ fn build_external_agent_invocation(
     );
     if launch.backend.protocol == ExternalCommandProtocol::RawCli {
         let launch_family = launch.backend.launch_family.as_deref();
+        if launch.claude_stream_json_enabled {
+            args.extend([
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]);
+        }
         if launch_family == Some("antigravity") {
             args.push("--add-dir".to_string());
             args.push(launch.cwd.display().to_string());

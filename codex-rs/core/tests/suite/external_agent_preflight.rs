@@ -1103,6 +1103,122 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let fixture = include_str!("../../src/agent/fixtures/claude_stream/five_hour_rejected.jsonl");
+    let script = format!(
+        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'Claude Code 2.1.220\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"auth\" ] && [ \"${{2:-}}\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"--help\" ]; then printf '%s\\n' '--model <model>' '--verbose' '--output-format <format>'; exit 0; fi\ncat <<'EOF'\n{fixture}\nEOF\nexit 1\n"
+    );
+    let mut backend = stub_cli(&stub_dir, "fake-claude.sh", &script);
+    backend.launch_family = Some("claude".to_string());
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments()?,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-wait"),
+            ev_function_call_with_namespace(
+                WAIT_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "wait_agent",
+                &serde_json::to_string(&json!({ "timeout_ms": 5_000 }))?,
+            ),
+            ev_completed("resp-wait"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, WAIT_CALL_ID) && !body_contains(request, LIST_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-list"),
+            ev_function_call_with_namespace(
+                LIST_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "list_agents",
+                "{}",
+            ),
+            ev_completed("resp-list"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, LIST_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_external_role(backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(LIST_CALL_ID);
+    let listed = serde_json::from_str::<Value>(
+        output_item["output"]
+            .as_str()
+            .expect("list_agents output string"),
+    )?;
+    let agent = listed["agents"]
+        .as_array()
+        .and_then(|agents| {
+            agents
+                .iter()
+                .find(|agent| agent["agent_name"] == "/root/external_probe")
+        })
+        .expect("external agent should be listed");
+
+    assert_eq!(
+        agent["agent_status"]["errored"].as_str(),
+        Some(
+            "External agent rate limit status rejected: five_hour window; resets at 2026-07-12T04:20:00+00:00; paid overage rejected (reason: org_level_disabled_until); using paid overage: false."
+        )
+    );
+    assert_eq!(agent["failure"]["kind"], "quota_or_rate_limited");
+    assert_eq!(
+        agent["quota_diagnostic"],
+        json!({
+            "status": "rejected",
+            "window": "five_hour",
+            "resets_at": 1_783_830_000,
+            "overage_state": "rejected",
+            "overage_reason": "org_level_disabled_until",
+            "is_using_overage": false,
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_external_agent_rejects_followup_without_cancellation() -> Result<()> {
     let stub_dir = TempDir::new()?;
     let release = stub_dir.path().join("release.txt");
