@@ -120,6 +120,22 @@ fn google_intent_aliases_resolve_to_antigravity() {
 }
 
 #[test]
+fn antigravity_read_only_runs_noninteractively_inside_plan_sandbox() {
+    let spec = agent_model_spec("antigravity").expect("antigravity selector should resolve");
+
+    assert_eq!(
+        spec.read_only_args,
+        &[
+            "--sandbox",
+            "--dangerously-skip-permissions",
+            "--mode",
+            "plan",
+        ]
+    );
+    assert_eq!(spec.write_args, &["--dangerously-skip-permissions"]);
+}
+
+#[test]
 fn natural_language_aliases_resolve_to_their_canonical_agent() {
     for (alias, expected_slug) in natural_language_agent_aliases() {
         let spec = agent_model_spec(expected_slug).expect("canonical agent should exist");

@@ -750,6 +750,62 @@ async fn raw_cli_empty_output_is_classified() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn raw_cli_empty_output_preserves_stderr_diagnostic() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let diagnostic = "jetski: no output produced — a tool required the command permission that headless mode cannot prompt for, so it was auto-denied";
+    let launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: "/bin/sh".to_string(),
+            protocol: ExternalCommandProtocol::RawCli,
+            args: vec!["-c".to_string(), format!("printf '%s' {diagnostic:?} >&2")],
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("stderr-only success should fail the external agent");
+
+    assert_eq!(err.detail.kind, ExternalAgentFailureKind::PermissionDenied);
+    assert_eq!(
+        err.to_string(),
+        format!("external agent completed without output: {diagnostic}")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn raw_cli_empty_output_with_benign_stderr_stays_empty_output() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let diagnostic = "warning: telemetry is unavailable";
+    let launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: "/bin/sh".to_string(),
+            protocol: ExternalCommandProtocol::RawCli,
+            args: vec!["-c".to_string(), format!("printf '%s' {diagnostic:?} >&2")],
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("stderr-only success should fail the external agent");
+
+    assert_eq!(err.detail.kind, ExternalAgentFailureKind::EmptyOutput);
+    assert_eq!(
+        err.to_string(),
+        format!("external agent completed without output: {diagnostic}")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn malformed_json_output_is_classified() {
     let temp_dir = TempDir::new().expect("tempdir");
     let launch = test_launch(

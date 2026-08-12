@@ -494,6 +494,7 @@ fn failure_status_label(kind: ExternalAgentCapabilityFailureKind) -> Option<&'st
         ExternalAgentCapabilityFailureKind::ProviderFailed => Some("provider failed"),
         ExternalAgentCapabilityFailureKind::UnsupportedMode => Some("unsupported mode"),
         ExternalAgentCapabilityFailureKind::QuotaOrRateLimited => Some("rate limited"),
+        ExternalAgentCapabilityFailureKind::PermissionDenied => Some("permission denied"),
         ExternalAgentCapabilityFailureKind::CommandMissing
         | ExternalAgentCapabilityFailureKind::AuthenticationRequired => None,
     }

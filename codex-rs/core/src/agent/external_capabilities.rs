@@ -75,6 +75,8 @@ pub struct ExternalAgentCapabilities {
     pub cli_version: Option<String>,
     pub supports_model_selection: bool,
     pub supports_effort_selection: bool,
+    #[serde(skip)]
+    pub supported_flags: HashSet<String>,
     pub models: Vec<ExternalAgentModelCapability>,
     pub effort_levels: Vec<String>,
     pub source: ExternalAgentCapabilitySource,
@@ -94,6 +96,7 @@ impl ExternalAgentCapabilities {
             cli_version,
             supports_model_selection: false,
             supports_effort_selection: false,
+            supported_flags: HashSet::new(),
             models: Vec::new(),
             effort_levels: Vec::new(),
             source: ExternalAgentCapabilitySource::ConservativeFallback,
@@ -109,6 +112,7 @@ impl ExternalAgentCapabilities {
             cli_version,
             supports_model_selection: false,
             supports_effort_selection: false,
+            supported_flags: HashSet::new(),
             models: Vec::new(),
             effort_levels: Vec::new(),
             source: ExternalAgentCapabilitySource::NotProbed,
@@ -389,6 +393,11 @@ pub(super) fn claude_capabilities(
 
     let supports_model_selection = help_supports_flag(help_output, "--model");
     let supports_effort_selection = help_supports_flag(help_output, "--effort");
+    let supported_flags = ["--model", "--effort"]
+        .into_iter()
+        .filter(|flag| help_supports_flag(help_output, flag))
+        .map(str::to_string)
+        .collect();
     let models = agent_model_specs()
         .iter()
         .filter(|spec| spec.family == "claude")
@@ -410,6 +419,7 @@ pub(super) fn claude_capabilities(
         cli_version,
         supports_model_selection,
         supports_effort_selection,
+        supported_flags,
         models,
         effort_levels: if supports_effort_selection {
             ["low", "medium", "high", "xhigh", "max"]
@@ -451,6 +461,17 @@ pub(super) fn antigravity_capabilities(
     };
     let supports_model_selection = help_supports_flag(help_output, "--model");
     let supports_effort_selection = help_supports_flag(help_output, "--effort");
+    let supported_flags = [
+        "--model",
+        "--effort",
+        "--sandbox",
+        "--mode",
+        "--dangerously-skip-permissions",
+    ]
+    .into_iter()
+    .filter(|flag| help_supports_flag(help_output, flag))
+    .map(str::to_string)
+    .collect();
     let models = model_names
         .into_iter()
         .map(|model| ExternalAgentModelCapability {
@@ -465,6 +486,7 @@ pub(super) fn antigravity_capabilities(
         cli_version,
         supports_model_selection,
         supports_effort_selection,
+        supported_flags,
         models,
         effort_levels: if supports_effort_selection {
             ["low", "medium", "high"].map(str::to_string).to_vec()
@@ -494,9 +516,6 @@ pub(super) fn validate_requested_capabilities(
     let requested_model = requested_flag_value(&args, "--model");
     let requested_effort = requested_flag_value(&args, "--effort");
 
-    if requested_model.is_none() && requested_effort.is_none() {
-        return Ok(());
-    }
     if let Some(failure) = capabilities.failure.as_ref() {
         return Err(ExternalAgentFailureDetail::new(
             failure.kind,
@@ -505,6 +524,23 @@ pub(super) fn validate_requested_capabilities(
                 capabilities.cli_family, failure
             ),
         ));
+    }
+
+    if is_read_only && backend.launch_family.as_deref() == Some("antigravity") {
+        for required_flag in ["--sandbox", "--mode", "--dangerously-skip-permissions"] {
+            if !capabilities.supported_flags.contains(required_flag) {
+                return Err(ExternalAgentFailureDetail::new(
+                    ExternalAgentFailureKind::UnsupportedMode,
+                    format!(
+                        "installed Antigravity CLI does not report required read-only flag `{required_flag}`"
+                    ),
+                ));
+            }
+        }
+    }
+
+    if requested_model.is_none() && requested_effort.is_none() {
+        return Ok(());
     }
 
     if let Some(model) = requested_model {

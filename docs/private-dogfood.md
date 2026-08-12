@@ -223,14 +223,19 @@ boundary you understand. Use a disposable test repository for the canary and
 review its diff before keeping changes.
 
 Use `/model` for the primary Codex model and `/settings` for third-party-agent
-configuration. Two external-agent limitations remain relevant to the canary:
+configuration. One external-agent selector limitation remains relevant to the
+canary:
 
 - [#581](https://github.com/cbusillo/codex-lab/issues/581): some discovered
   Antigravity/Gemini selectors can be advertised in a malformed form and fail
   before the provider starts.
-- [#577](https://github.com/cbusillo/codex-lab/issues/577): a required
-  read-only command permission denial can surface as completed empty output
-  instead of an explicit orchestration failure.
+
+The built-in Antigravity read-only selector runs AGY in `plan` mode with AGY's
+own sandbox enabled. Tool confirmations are approved noninteractively only
+inside that sandbox, allowing repository inspection commands without granting a
+write-capable agent session. If AGY still denies a required tool, Codex Lab
+reports `permission_denied` with the bounded provider diagnostic instead of a
+completed empty result.
 
 A preflight failure, permission denial, or completed zero-line result is not
 external-agent evidence. Report the exact selector and bounded diagnostic

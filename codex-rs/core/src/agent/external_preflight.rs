@@ -397,6 +397,7 @@ fn capability_failure_is_fatal(kind: ExternalAgentFailureKind) -> bool {
         ExternalAgentFailureKind::CommandMissing
             | ExternalAgentFailureKind::AuthenticationRequired
             | ExternalAgentFailureKind::QuotaOrRateLimited
+            | ExternalAgentFailureKind::PermissionDenied
             | ExternalAgentFailureKind::TimedOut
             | ExternalAgentFailureKind::LaunchFailed
             | ExternalAgentFailureKind::ProviderFailed

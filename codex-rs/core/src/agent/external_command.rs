@@ -458,10 +458,25 @@ async fn run_external_agent_inner(
         ExternalCommandProtocol::RawCli => {
             let final_message = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if final_message.is_empty() {
-                return Err(ExternalAgentRunError::new(
-                    ExternalAgentFailureKind::EmptyOutput,
-                    anyhow::anyhow!("external agent completed without output"),
-                ));
+                let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
+                let (kind, message) = if diagnostic.is_empty() {
+                    (
+                        ExternalAgentFailureKind::EmptyOutput,
+                        "external agent completed without output".to_string(),
+                    )
+                } else {
+                    let kind = match classify_provider_failure_text(&diagnostic) {
+                        ExternalAgentFailureKind::ProviderFailed => {
+                            ExternalAgentFailureKind::EmptyOutput
+                        }
+                        kind => kind,
+                    };
+                    (
+                        kind,
+                        format!("external agent completed without output: {diagnostic}"),
+                    )
+                };
+                return Err(ExternalAgentRunError::new(kind, anyhow::anyhow!(message)));
             }
             Ok(ExternalAgentResponse {
                 status: ExternalAgentResponseStatus::Completed,

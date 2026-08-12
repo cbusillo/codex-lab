@@ -143,6 +143,7 @@ pub enum ExternalAgentCapabilityFailureKind {
     CommandMissing,
     AuthenticationRequired,
     QuotaOrRateLimited,
+    PermissionDenied,
     UnsupportedMode,
     TimedOut,
     MalformedOutput,

@@ -39,7 +39,12 @@ const CLAUDE_FABLE_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS
 const CLAUDE_FABLE_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const CLAUDE_HAIKU_READ_ONLY: &[&str] = &["--allowedTools", CLAUDE_ALLOWED_TOOLS];
 const CLAUDE_HAIKU_WRITE: &[&str] = &["--dangerously-skip-permissions"];
-const ANTIGRAVITY_READ_ONLY: &[&str] = &[];
+const ANTIGRAVITY_READ_ONLY: &[&str] = &[
+    "--sandbox",
+    "--dangerously-skip-permissions",
+    "--mode",
+    "plan",
+];
 const ANTIGRAVITY_WRITE: &[&str] = &["--dangerously-skip-permissions"];
 const COPILOT_READ_ONLY: &[&str] = &["--autopilot", "--allow-all-tools", "--no-ask-user", "-s"];
 const COPILOT_WRITE: &[&str] = &["--autopilot", "--yolo", "--no-ask-user", "-s"];
