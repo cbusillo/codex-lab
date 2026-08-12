@@ -101,7 +101,7 @@ for arg in "$@"; do
       exit 0
       ;;
     models)
-      printf '%s\n' 'gemini-3-pro' 'gemini-3-flash'
+      printf '%s\n' 'Available models' '| gemini-3-pro | Gemini 3 Pro |' '- gemini-3-flash (default)'
       exit 0
       ;;
     --help)
@@ -158,10 +158,10 @@ exit 0
     assert_eq!(provider.install, ExternalAgentInstallState::Installed);
     assert_eq!(provider.auth, ExternalAgentAuthState::Authenticated);
     assert!(provider.selectors.iter().any(|selector| {
-        selector.selector == "antigravity-gemini-3-pro" && selector.discovered
+        selector.selector == "antigravity-gemini-3-pro" && selector.discovered && selector.enabled
     }));
     assert!(provider.selectors.iter().any(|selector| {
-        selector.selector == "antigravity-gemini-3-flash" && selector.discovered
+        selector.selector == "antigravity-gemini-3-flash" && selector.discovered && selector.enabled
     }));
 
     Ok(())

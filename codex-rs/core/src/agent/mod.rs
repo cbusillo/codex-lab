@@ -1,4 +1,5 @@
 pub(crate) mod agent_resolver;
+mod antigravity_models;
 pub(crate) mod control;
 pub(crate) mod external_capabilities;
 pub(crate) mod external_command;

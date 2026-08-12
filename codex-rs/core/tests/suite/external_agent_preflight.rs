@@ -119,9 +119,7 @@ fn builder_with_named_external_role(
 
 fn builder_for_dynamic_external_selector(
     backend: ExternalCommandAgentBackendConfig,
-    selector: &str,
 ) -> TestCodexBuilder {
-    let selector = selector.to_string();
     test_codex().with_config(move |config| {
         config
             .features
@@ -140,13 +138,6 @@ fn builder_for_dynamic_external_selector(
             AgentRoleConfig {
                 description: Some("Antigravity test backend".to_string()),
                 backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
-                ..Default::default()
-            },
-        );
-        config.agent_selector_overrides.insert(
-            selector,
-            AgentSelectorToml {
-                enabled: Some(true),
                 ..Default::default()
             },
         );
@@ -813,6 +804,51 @@ exit 2
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_antigravity_selector_is_rejected_before_launch_without_substitution() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let launched = stub_dir.path().join("launched");
+    let mut backend = stub_cli(
+        &stub_dir,
+        "fake-agy.sh",
+        &format!(
+            r#"if [ "$1" = "--version" ]; then
+  echo "1.1.9"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo "gemini-3.6-flash-high"
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  echo '--effort low|medium|high'
+  exit 0
+fi
+touch '{}'
+exit 0
+"#,
+            launched.display()
+        ),
+    );
+    backend.launch_family = Some("antigravity".to_string());
+
+    let output = spawn_agent_output_with_selector(
+        backend,
+        "antigravity",
+        Some("antigravity-gemini-missing"),
+        /*model*/ None,
+    )
+    .await?;
+
+    assert!(output.contains("Antigravity selector `antigravity-gemini-missing`"));
+    assert!(output.contains("Rule:"));
+    assert!(output.contains("Remediation:"));
+    assert!(output.contains("no provider or model was substituted"));
+    assert!(!launched.exists());
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discovered_antigravity_selector_routes_before_preflight_and_launches_exactly() -> Result<()>
@@ -909,7 +945,7 @@ printf 'external provider replied\n'
     )
     .await;
 
-    let mut builder = builder_for_dynamic_external_selector(backend, selector);
+    let mut builder = builder_for_dynamic_external_selector(backend);
     let test = builder.build(&server).await?;
     test.submit_turn(PROMPT).await?;
 

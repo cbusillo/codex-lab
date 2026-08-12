@@ -104,7 +104,30 @@ fn antigravity_read_only_preserves_probe_failure_diagnostic() {
 }
 
 #[test]
-fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
+fn antigravity_models_normalize_decorations_and_reject_unbounded_results() {
+    let normalized = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"Available models\n| gemini-3.1-pro | Gemini 3.1 Pro |\n- gemini-3.6-flash (default)\n\x1b[32mgemini-3.6-flash\x1b[0m\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+    assert_eq!(
+        normalized.models,
+        vec![
+            ExternalAgentModelCapability {
+                selector: "antigravity-gemini-3.1-pro".to_string(),
+                model: "gemini-3.1-pro".to_string(),
+                explicit_only: false,
+            },
+            ExternalAgentModelCapability {
+                selector: "antigravity-gemini-3.6-flash".to_string(),
+                model: "gemini-3.6-flash".to_string(),
+                explicit_only: false,
+            },
+        ]
+    );
+
     let malformed = antigravity_capabilities(
         /*cli_version*/ None,
         b"Gemini 3.1 Pro\n",
@@ -117,6 +140,13 @@ fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
         Some(ExternalAgentFailureKind::MalformedOutput)
     );
     assert!(malformed.models.is_empty());
+    assert!(malformed.failure.as_ref().is_some_and(|failure| {
+        failure.message.as_deref().is_some_and(|message| {
+            message.contains("Antigravity selector `antigravity-Gemini 3.1 Pro`")
+                && message.contains("rule:")
+                && message.contains("Remediation:")
+        })
+    }));
 
     let leading_dash = antigravity_capabilities(
         /*cli_version*/ None,
@@ -147,6 +177,220 @@ fn malformed_and_unbounded_antigravity_models_fail_conservatively() {
         Some(ExternalAgentFailureKind::MalformedOutput)
     );
     assert!(oversized.models.is_empty());
+}
+
+#[test]
+fn antigravity_models_parse_markdown_and_box_tables_without_advertising_headers() {
+    let markdown = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"| Tier | Description |\n| --- | --- |\n| gemini-3.1-pro | Gemini 3.1 Pro |\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+    let box_table = antigravity_capabilities(
+        /*cli_version*/ None,
+        "┌──────────────────┬───────────────┐\n│ Model            │ Description   │\n├──────────────────┼───────────────┤\n│ gemini-3.6-flash │ Gemini Flash  │\n└──────────────────┴───────────────┘\n"
+            .as_bytes(),
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        markdown
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3.1-pro"]
+    );
+    assert_eq!(
+        box_table
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3.6-flash"]
+    );
+}
+
+#[test]
+fn antigravity_models_parse_ascii_grid_tables_without_dropping_rows() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"+----------------+---------------+\n| Model          | Description   |\n+----------------+---------------+\n| gemini-3-pro   | Gemini 3 Pro  |\n| gemini-3-flash | Gemini Flash  |\n+----------------+---------------+\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3-pro", "gemini-3-flash"]
+    );
+}
+
+#[test]
+fn antigravity_models_do_not_corrupt_non_csi_escape_sequences() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"\x1b(Bgemini-3.1-pro\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(capabilities.models.len(), 1);
+    assert_eq!(capabilities.models[0].model, "gemini-3.1-pro");
+}
+
+#[test]
+fn antigravity_models_strip_osc_and_dcs_sequences() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"\x1b]8;;https://example.com\x1b\\gemini-3.1-pro\x1b]8;;\x07\n\x1bPmetadata\x1b\\gemini-3.6-flash\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3.1-pro", "gemini-3.6-flash"]
+    );
+    assert!(capabilities.failure.is_none());
+}
+
+#[test]
+fn antigravity_model_heading_only_output_is_empty() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"Available models:\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::EmptyOutput)
+    );
+}
+
+#[test]
+fn active_catalog_age_is_fresh_through_the_ttl_boundary() {
+    assert!(active_catalog_age_is_fresh(CAPABILITY_CACHE_TTL));
+    assert!(!active_catalog_age_is_fresh(
+        CAPABILITY_CACHE_TTL + Duration::from_nanos(1)
+    ));
+}
+
+#[test]
+fn antigravity_models_reject_single_token_status_noise() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"Loading...\nError:\nLoading\nDone\nUnauthenticated\nNone\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities.failure.as_ref().map(|failure| failure.kind),
+        Some(ExternalAgentFailureKind::MalformedOutput)
+    );
+    assert!(capabilities.models.is_empty());
+}
+
+#[test]
+fn antigravity_models_do_not_drop_plain_models_before_dividers() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"gemini-3.1-pro\n---\ngemini-3.6-flash\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3.1-pro", "gemini-3.6-flash"]
+    );
+}
+
+#[test]
+fn antigravity_models_do_not_treat_data_rows_before_dividers_as_headers() {
+    let capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"gemini-3-pro   | Gemini 3 Pro\ngemini-3-flash | Gemini Flash\n--------------------------------\n",
+        /*models_truncated*/ false,
+        b"--model\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3-pro", "gemini-3-flash"]
+    );
+}
+
+#[test]
+fn antigravity_catalog_requires_launchable_model_selection() {
+    clear_capability_cache();
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let mut backend = backend(&[]);
+    backend.command = "catalog-requires-model-selection".to_string();
+    backend.launch_family = Some("antigravity".to_string());
+    let mut capabilities = antigravity_capabilities(
+        /*cli_version*/ None,
+        b"gemini-3.1-pro\n",
+        /*models_truncated*/ false,
+        b"--effort high\n",
+        /*help_truncated*/ false,
+    );
+
+    capabilities.supports_model_selection = true;
+    record_active_capability_catalog(&backend, workspace.path(), &capabilities);
+    assert_eq!(
+        discovered_antigravity_selectors(&backend, workspace.path()).len(),
+        1
+    );
+
+    capabilities.supports_model_selection = false;
+    record_active_capability_catalog(&backend, workspace.path(), &capabilities);
+    assert!(discovered_antigravity_selectors(&backend, workspace.path()).is_empty());
+
+    capabilities.supports_model_selection = true;
+    capabilities.failure = None;
+    record_active_capability_catalog(&backend, workspace.path(), &capabilities);
+    assert_eq!(
+        discovered_antigravity_selectors(&backend, workspace.path()).len(),
+        1
+    );
+
+    capabilities.failure = Some(ExternalAgentFailureDetail::new(
+        ExternalAgentFailureKind::MalformedOutput,
+        "failed discovery",
+    ));
+    record_active_capability_catalog(&backend, workspace.path(), &capabilities);
+    assert!(discovered_antigravity_selectors(&backend, workspace.path()).is_empty());
 }
 
 #[test]

@@ -222,3 +222,23 @@ async fn enabled_model_selector_can_use_disabled_provider_base() {
     );
     assert!(crate::agent::role::resolve_role_config_owned(&config, "antigravity").is_none());
 }
+
+#[tokio::test]
+async fn stale_configured_antigravity_selector_does_not_block_other_spawns() {
+    let (_home, mut config) = test_config().await;
+    config.agent_selector_overrides.insert(
+        "antigravity".to_string(),
+        AgentSelectorToml {
+            model: Some("Gemini 3 Pro".to_string()),
+            effort: Some("high".to_string()),
+            ..Default::default()
+        },
+    );
+
+    install_configured_provider_selectors(&mut config)
+        .expect("stale Antigravity defaults should be skipped");
+    assert!(
+        crate::agent::role::resolve_role_config_owned(&config, "antigravity-Gemini 3 Pro")
+            .is_none()
+    );
+}

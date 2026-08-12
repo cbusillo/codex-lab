@@ -61,6 +61,11 @@ async fn handle_spawn_agent(
     if let Some(role_name) = requested_role_name
         && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
     {
+        if let Some(rejection) =
+            crate::agent::role::antigravity_selector_rejection(&turn.config, role_name)
+        {
+            return Err(FunctionCallError::RespondToModel(rejection));
+        }
         return Err(FunctionCallError::RespondToModel(format!(
             "agent_type `{role_name}` is disabled by configuration"
         )));
