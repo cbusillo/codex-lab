@@ -85,6 +85,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_summary: Option<ReasoningSummary>,
     pub personality: Option<Personality>,
     pub collaboration_mode: CollaborationMode,
+    pub automatic_validation_enabled: bool,
     pub session_source: SessionSource,
     pub session_provenance: Option<SessionProvenance>,
     pub history_mode: ThreadHistoryMode,

@@ -173,6 +173,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
     });
     let (desired_state_tx, _desired_state_rx) = watch::channel(RemoteControlDesiredState::Unknown);
     let desired_state_tx = Arc::new(desired_state_tx);
+    let (_reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     let mut websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
             remote_control_url: TEST_REMOTE_CONTROL_URL.to_string(),
@@ -193,6 +194,7 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
         },
         CancellationToken::new(),
         desired_state_tx.clone(),
+        reconnect_rx,
     );
 
     for (name, stored_preference) in cases {
@@ -408,11 +410,14 @@ pub(super) fn remote_control_handle_with_current_enrollment(
             next_refresh_at: None,
         },
     )));
+    let (reconnect_tx, _reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     RemoteControlHandle {
         policy: RemoteControlPolicy::Allowed,
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         desired_state_persistence_lock: Arc::new(Semaphore::new(1)),
+        reconnect_tx,
+        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url: remote_control_url.to_string(),
@@ -1623,6 +1628,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     codex_app_server_protocol::ClientResponsePayload::Initialize(
                         codex_app_server_protocol::InitializeResponse {
                             user_agent: "codex-test-agent".to_string(),
+                            server_build: None,
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),

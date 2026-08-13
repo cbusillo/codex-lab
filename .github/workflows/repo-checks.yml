@@ -115,6 +115,9 @@ jobs:
           CONVERGENCE_LINT_REQUIRED: "1"
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
 
+      - name: Test macOS signing helpers
+        run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_*.py'
+
       - name: Test Codex exec harness
         run: python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'
 

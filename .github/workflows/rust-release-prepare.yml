@@ -19,7 +19,7 @@ jobs:
     environment:
       name: rust-release-prepare
       deployment: false
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -35,7 +35,7 @@ jobs:
 
           client_version="99.99.99"
           terminal_info="github-actions"
-          user_agent="codex_cli_rs/99.99.99 (Linux $(uname -r); $(uname -m)) ${terminal_info}"
+          user_agent="codex_cli_rs/99.99.99 (macOS $(sw_vers -productVersion); $(uname -m)) ${terminal_info}"
           base_url="${OPENAI_BASE_URL:-https://chatgpt.com/backend-api/codex}"
 
           headers=(

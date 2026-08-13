@@ -329,6 +329,10 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
     };
     let forked_from_id = session_meta.as_ref().and_then(|meta| meta.forked_from_id);
     let parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
+    let session_provenance = session_meta
+        .as_ref()
+        .and_then(|meta| meta.session_provenance.clone())
+        .or_else(|| metadata.session_provenance.clone());
     let history_mode = session_meta
         .as_ref()
         .map(|meta| meta.history_mode)
@@ -336,6 +340,7 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
     let name = thread_name_from_metadata(store, &metadata, history_mode).await;
     let mut thread = stored_thread_from_state_metadata(store, metadata, parent_thread_id);
     thread.forked_from_id = forked_from_id;
+    thread.session_provenance = session_provenance;
     thread.history_mode = history_mode;
     thread.name = name;
     Ok(thread)
@@ -383,6 +388,7 @@ pub(super) fn stored_thread_from_state_metadata(
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
         source: parse_session_source(&metadata.source),
+        session_provenance: metadata.session_provenance,
         history_mode: metadata.history_mode,
         thread_source: metadata.thread_source,
         agent_nickname: metadata.agent_nickname,
@@ -481,6 +487,7 @@ fn stored_thread_from_meta_line(
         cwd: meta_line.meta.cwd,
         cli_version: meta_line.meta.cli_version,
         source: meta_line.meta.source,
+        session_provenance: meta_line.meta.session_provenance,
         history_mode: meta_line.meta.history_mode,
         thread_source: meta_line.meta.thread_source,
         agent_nickname: meta_line.meta.agent_nickname,

@@ -1,0 +1,86 @@
+name: rust-ci-full-windows
+
+on:
+  workflow_call:
+
+concurrency:
+  group: rust-ci-full-windows::${{ github.workflow }}::${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  argument_comment_lint_prebuilt:
+    uses: ./.github/workflows/rust-ci-full-argument-comment-lint.yml
+    with:
+      platform_name: Windows
+      runner: windows-2025
+      target: x86_64-pc-windows-msvc
+    secrets: inherit
+
+  lint_build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            profile: dev
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            profile: dev
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            profile: release
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            profile: release
+    uses: ./.github/workflows/rust-ci-full-lint-build.yml
+    with:
+      runner: ${{ matrix.runner }}
+      target: ${{ matrix.target }}
+      profile: ${{ matrix.profile }}
+
+  tests_windows_x64:
+    name: Tests — windows-2025 - x86_64-pc-windows-msvc
+    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
+    with:
+      runner: windows-2025
+      target: x86_64-pc-windows-msvc
+      profile: ci-test
+      artifact_id: windows-x64
+      # 8 threads oversubscribes the 4-vCPU hosted Windows x64 runner: process
+      # spawn-heavy suites time out at the 60s per-test limit under that load.
+      test_threads: 4
+    secrets: inherit
+
+  tests_windows_arm64:
+    name: Tests — windows-11-arm - aarch64-pc-windows-msvc
+    uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
+    with:
+      runner: windows-11-arm
+      target: aarch64-pc-windows-msvc
+      profile: ci-test
+      artifact_id: windows-arm64
+      # Match the hosted runner's 4-vCPU capacity to avoid process-heavy test
+      # timeouts from oversubscription, as on the Windows x64 lane above.
+      test_threads: 4
+    secrets: inherit
+
+  results:
+    name: Full Windows Rust CI results
+    needs:
+      - argument_comment_lint_prebuilt
+      - lint_build
+      - tests_windows_x64
+      - tests_windows_arm64
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py

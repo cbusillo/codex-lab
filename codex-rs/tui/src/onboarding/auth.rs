@@ -884,6 +884,7 @@ impl AuthModeWidget {
                         app_brand: None,
                         codex_streamlined_login: false,
                         use_hosted_login_success_page: false,
+                        preserve_existing_account: false,
                     },
                 })
                 .await
@@ -1080,6 +1081,7 @@ mod tests {
             config_warnings: Vec::new(),
             session_source: serde_json::from_value(serde_json::json!("cli"))
                 .expect("cli session source should deserialize"),
+            session_provenance: None,
             enable_codex_api_key_env: false,
             client_name: "test".to_string(),
             client_version: "test".to_string(),

@@ -895,7 +895,7 @@ pub struct Config {
     /// keyring: Use an OS-specific keyring service.
     ///          Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
     ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
-    /// file: CODEX_HOME/.credentials.json
+    /// file: CODEX_LAB_HOME/.credentials.json
     ///       This file will be readable to Codex and other applications running as the same user.
     /// auto (default): keyring if available, otherwise file.
     pub mcp_oauth_credentials_store_mode: OAuthCredentialsStoreMode,
@@ -954,17 +954,21 @@ pub struct Config {
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
 
-    /// Directory containing all Codex state (defaults to `~/.codex` but can be
-    /// overridden by the `CODEX_HOME` environment variable).
+    /// Directory containing all Codex Lab state (defaults to `~/.codex-lab` but can be
+    /// overridden by the `CODEX_LAB_HOME` environment variable).
     pub codex_home: AbsolutePathBuf,
+
+    /// Directory used for auth credential storage for this invocation. Defaults
+    /// to `codex_home`, but may point at an auth profile home.
+    pub auth_home: AbsolutePathBuf,
 
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
 
-    /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
+    /// Directory where Codex writes log files (defaults to `$CODEX_LAB_HOME/log`).
     pub log_dir: PathBuf,
 
-    /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+    /// Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.
     pub history: History,
 
     /// When true, session is not persisted on disk. Default to `false`
@@ -1404,7 +1408,7 @@ pub struct TerminalResizeReflowConfig {
 
 impl AuthManagerConfig for Config {
     fn codex_home(&self) -> PathBuf {
-        self.codex_home.to_path_buf()
+        self.auth_home.to_path_buf()
     }
 
     fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
@@ -1439,6 +1443,7 @@ impl AuthManagerConfig for Config {
 #[derive(Clone, Default)]
 pub struct ConfigBuilder {
     codex_home: Option<PathBuf>,
+    auth_home: Option<PathBuf>,
     cli_overrides: Option<Vec<(String, TomlValue)>>,
     harness_overrides: Option<ConfigOverrides>,
     loader_overrides: Option<LoaderOverrides>,
@@ -1451,6 +1456,11 @@ pub struct ConfigBuilder {
 impl ConfigBuilder {
     pub fn codex_home(mut self, codex_home: PathBuf) -> Self {
         self.codex_home = Some(codex_home);
+        self
+    }
+
+    pub fn auth_home(mut self, auth_home: PathBuf) -> Self {
+        self.auth_home = Some(auth_home);
         self
     }
 
@@ -1500,6 +1510,7 @@ impl ConfigBuilder {
     async fn build_inner(self) -> std::io::Result<Config> {
         let Self {
             codex_home,
+            auth_home,
             cli_overrides,
             harness_overrides,
             loader_overrides,
@@ -1511,6 +1522,10 @@ impl ConfigBuilder {
         let codex_home = match codex_home {
             Some(codex_home) => AbsolutePathBuf::from_absolute_path(codex_home)?,
             None => find_codex_home()?,
+        };
+        let auth_home = match auth_home {
+            Some(auth_home) => AbsolutePathBuf::from_absolute_path(auth_home)?,
+            None => codex_home.clone(),
         };
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
@@ -1560,14 +1575,16 @@ impl ConfigBuilder {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, err));
             }
         };
-        Config::load_config_with_layer_stack(
+        let mut config = Config::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             config_toml,
             harness_overrides,
             codex_home,
             config_layer_stack,
         )
-        .await
+        .await?;
+        config.auth_home = auth_home;
+        Ok(config)
     }
 
     #[cfg(test)]
@@ -1897,7 +1914,7 @@ impl Config {
             .map(AbsolutePathBuf::try_from)
             .transpose()?;
 
-        Self::load_config_with_layer_stack(
+        let mut config = Self::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             cfg,
             ConfigOverrides {
@@ -1908,7 +1925,9 @@ impl Config {
             refreshed_config.codex_home.clone(),
             config_layer_stack,
         )
-        .await
+        .await?;
+        config.auth_home = refreshed_config.auth_home.clone();
+        Ok(config)
     }
 
     /// This is the preferred way to create an instance of [Config].
@@ -3439,6 +3458,7 @@ impl Config {
             workspace_roots: workspace_roots_override,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
+        let auth_home = codex_home.clone();
 
         if bypass_hook_trust {
             startup_warnings.push(
@@ -4339,6 +4359,7 @@ impl Config {
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,
+            auth_home,
             sqlite: codex_state::SqliteConfig::from_sqlite_home(sqlite_home),
             log_dir,
             config_layer_stack,
@@ -4808,12 +4829,12 @@ fn normalize_guardian_policy_config(value: Option<&str>) -> Option<String> {
 }
 
 /// Returns the path to the Codex configuration directory, which can be
-/// specified by the `CODEX_HOME` environment variable. If not set, defaults to
-/// `~/.codex`.
+/// specified by the `CODEX_LAB_HOME` environment variable. If not set, defaults to
+/// `~/.codex-lab`.
 ///
-/// - If `CODEX_HOME` is set, the value must exist and be a directory. The
+/// - If `CODEX_LAB_HOME` is set, the value must exist and be a directory. The
 ///   value will be canonicalized and this function will Err otherwise.
-/// - If `CODEX_HOME` is not set, this function does not verify that the
+/// - If `CODEX_LAB_HOME` is not set, this function does not verify that the
 ///   directory exists.
 pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     codex_utils_home_dir::find_codex_home()

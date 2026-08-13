@@ -6,6 +6,7 @@ use codex_exec::ThreadEvent;
 fn project_validation_event_omits_absent_optional_fields() {
     let value = serde_json::to_value(ThreadEvent::ProjectValidationCompleted(
         ProjectValidationCompletedEvent {
+            turn_id: "turn-1".to_string(),
             item_id: None,
             command: vec!["just".to_string(), "test".to_string()],
             command_truncated: false,
@@ -30,6 +31,7 @@ fn project_validation_event_omits_absent_optional_fields() {
 fn project_validation_event_preserves_item_id() {
     let value = serde_json::to_value(ThreadEvent::ProjectValidationCompleted(
         ProjectValidationCompletedEvent {
+            turn_id: "turn-1".to_string(),
             item_id: Some("validation-item".to_string()),
             command: Vec::new(),
             command_truncated: false,

@@ -33,8 +33,11 @@ fn prompt_for_answers_with(
         "\n[request_user_input for thread {}, turn {}]",
         params.thread_id, params.turn_id
     )?;
-    if !params.is_blocking {
-        writeln!(output, "This request is non-blocking.")?;
+    if let Some(auto_resolution_ms) = params.auto_resolution_ms {
+        writeln!(
+            output,
+            "The app-server may auto-resolve this request after {auto_resolution_ms} ms."
+        )?;
     }
 
     let mut answers = HashMap::new();

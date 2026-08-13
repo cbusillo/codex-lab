@@ -272,6 +272,7 @@ pub(crate) struct RemoteControlWebsocket {
     desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
     desired_state_rx: watch::Receiver<RemoteControlDesiredState>,
     desired_state_persistence_lock: Arc<Semaphore>,
+    reconnect_rx: mpsc::Receiver<u64>,
 }
 
 pub(crate) struct RemoteControlWebsocketConfig {
@@ -303,6 +304,7 @@ enum ConnectionEndReason {
     Shutdown,
     Disabled,
     EnabledWatchClosed,
+    ReconnectRequested,
     ConnectionWorkerStopped,
 }
 
@@ -405,6 +407,7 @@ impl RemoteControlWebsocket {
         channels: RemoteControlChannels,
         shutdown_token: CancellationToken,
         desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
+        reconnect_rx: mpsc::Receiver<u64>,
     ) -> Self {
         let shutdown_token = shutdown_token.child_token();
         let (server_event_tx, server_event_rx) = mpsc::channel(super::CHANNEL_CAPACITY);
@@ -445,7 +448,13 @@ impl RemoteControlWebsocket {
             desired_state_tx,
             desired_state_rx,
             desired_state_persistence_lock: channels.desired_state_persistence_lock,
+            reconnect_rx,
         }
+    }
+
+    fn consume_pending_reconnect_requests(&mut self) {
+        while self.reconnect_rx.try_recv().is_ok() {}
+        self.reconnect_attempt = 0;
     }
 
     #[expect(
@@ -505,6 +514,7 @@ impl RemoteControlWebsocket {
                 );
                 break;
             }
+            self.consume_pending_reconnect_requests();
 
             let status = self.status_publisher.status();
             info!(
@@ -533,6 +543,12 @@ impl RemoteControlWebsocket {
             let connection_end_reason = self
                 .run_connection(websocket_connection, shutdown_token)
                 .await;
+            if matches!(
+                connection_end_reason,
+                ConnectionEndReason::ReconnectRequested
+            ) {
+                self.consume_pending_reconnect_requests();
+            }
             let status = self.status_publisher.status();
             info!(
                 remote_control_url = %self.remote_control_url,
@@ -830,7 +846,7 @@ impl RemoteControlWebsocket {
     }
 
     async fn run_connection(
-        &self,
+        &mut self,
         websocket_connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
         shutdown_token: CancellationToken,
     ) -> ConnectionEndReason {
@@ -856,6 +872,13 @@ impl RemoteControlWebsocket {
         let mut desired_state_rx = self.desired_state_rx.clone();
         let connection_end_reason = tokio::select! {
             _ = shutdown_token.cancelled() => ConnectionEndReason::Shutdown,
+            reconnect = self.reconnect_rx.recv() => {
+                if reconnect.is_some() {
+                    ConnectionEndReason::ReconnectRequested
+                } else {
+                    ConnectionEndReason::ConnectionWorkerStopped
+                }
+            }
             changed = desired_state_rx.wait_for(|state| !state.is_enabled()) => {
                 if changed.is_ok() {
                     self.status_publisher
@@ -2531,6 +2554,7 @@ mod tests {
             watch::channel(RemoteControlDesiredState::Enabled {
                 persistence_preference: None,
             });
+        let (_reconnect_tx, reconnect_rx) = mpsc::channel(1);
         let websocket_task = tokio::spawn({
             let shutdown_token = shutdown_token.clone();
             async move {
@@ -2552,6 +2576,7 @@ mod tests {
                     },
                     shutdown_token,
                     Arc::new(desired_state_tx),
+                    reconnect_rx,
                 )
                 .run(/*app_server_client_name_rx*/ None)
                 .await

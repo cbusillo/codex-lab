@@ -743,6 +743,8 @@ pub struct StoredThread {
     pub cli_version: String,
     /// Runtime source for the thread.
     pub source: SessionSource,
+    /// Optional external launch provenance supplied by an orchestrator.
+    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.

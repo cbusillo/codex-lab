@@ -887,44 +887,7 @@ async fn migration_keeps_late_completions_for_surviving_turns_across_rollback() 
     );
     let legacy_items = read_rollout(&path)
         .into_iter()
-        .filter_map(|line| match line.item {
-            RolloutItem::SessionMeta(item) => {
-                Some(codex_protocol::protocol::RolloutItem::SessionMeta(item))
-            }
-            RolloutItem::ResponseItem(item) => Some(
-                codex_protocol::protocol::RolloutItem::ResponseItem(item.into_item()),
-            ),
-            RolloutItem::InterAgentCommunication(item) => {
-                Some(codex_protocol::protocol::RolloutItem::InterAgentCommunication(item))
-            }
-            RolloutItem::InterAgentCommunicationMetadata { trigger_turn } => Some(
-                codex_protocol::protocol::RolloutItem::InterAgentCommunicationMetadata {
-                    trigger_turn,
-                },
-            ),
-            RolloutItem::Compacted(item) => Some(codex_protocol::protocol::RolloutItem::Compacted(
-                codex_protocol::protocol::CompactedItem {
-                    message: item.message,
-                    replacement_history: item
-                        .replacement_history
-                        .map(|items| items.into_iter().map(|item| item.into_item()).collect()),
-                    window_number: item.window_number,
-                    first_window_id: item.first_window_id,
-                    previous_window_id: item.previous_window_id,
-                    window_id: item.window_id,
-                },
-            )),
-            RolloutItem::TurnContext(item) => {
-                Some(codex_protocol::protocol::RolloutItem::TurnContext(item))
-            }
-            RolloutItem::WorldState(item) => {
-                Some(codex_protocol::protocol::RolloutItem::WorldState(item))
-            }
-            RolloutItem::SecurityRiskScore(_) => None,
-            RolloutItem::EventMsg(item) => {
-                Some(codex_protocol::protocol::RolloutItem::EventMsg(item))
-            }
-        })
+        .map(|line| line.item)
         .collect::<Vec<_>>();
     let legacy_turns = build_turns_from_rollout_items(&legacy_items);
     let store = indexed_store(home.path()).await;

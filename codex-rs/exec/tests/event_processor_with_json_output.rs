@@ -14,6 +14,8 @@ use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus as ApiMcpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus as ApiPatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind as ApiPatchChangeKind;
+use codex_app_server_protocol::ProjectValidationCompletedNotification;
+use codex_app_server_protocol::ProjectValidationStatus as ApiProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
@@ -63,6 +65,8 @@ use codex_exec::McpToolCallItemResult;
 use codex_exec::McpToolCallStatus;
 use codex_exec::PatchApplyStatus;
 use codex_exec::PatchChangeKind;
+use codex_exec::ProjectValidationCompletedEvent;
+use codex_exec::ProjectValidationStatus;
 use codex_exec::ReasoningItem;
 use codex_exec::ThreadErrorEvent;
 use codex_exec::ThreadEvent;
@@ -115,6 +119,7 @@ fn session_configured_produces_thread_started_event() {
         parent_thread_id: None,
         thread_source: None,
         thread_name: None,
+        history_mode: Default::default(),
         model: "codex-mini-latest".to_string(),
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
@@ -160,6 +165,52 @@ fn turn_started_emits_turn_started_event() {
         collected,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnStarted(TurnStartedEvent {})],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
+fn project_validation_completed_emits_validation_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(
+        ServerNotification::ProjectValidationCompleted(ProjectValidationCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: Some("validation-1".to_string()),
+            command: vec!["just".to_string(), "test".to_string()],
+            command_truncated: false,
+            cwd: Some(test_path_buf("/tmp/project").abs()),
+            status: ApiProjectValidationStatus::Passed,
+            skip_reason: None,
+            changed_file_count: Some(2),
+            exit_code: Some(0),
+            output: "ok".to_string(),
+            output_truncated: false,
+            duration_ms: 12,
+        }),
+    );
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ProjectValidationCompleted(
+                ProjectValidationCompletedEvent {
+                    turn_id: "turn-1".to_string(),
+                    item_id: Some("validation-1".to_string()),
+                    command: vec!["just".to_string(), "test".to_string()],
+                    command_truncated: false,
+                    cwd: Some(test_path_buf("/tmp/project").abs()),
+                    status: ProjectValidationStatus::Passed,
+                    skip_reason: None,
+                    changed_file_count: Some(2),
+                    exit_code: Some(0),
+                    output: "ok".to_string(),
+                    output_truncated: false,
+                    duration_ms: 12,
+                }
+            )],
             status: CodexStatus::Running,
         }
     );

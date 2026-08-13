@@ -1,0 +1,128 @@
+name: sdk-integration
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
+  typescript-sdk-integration:
+    needs: authorize_self_hosted
+    runs-on: macos-codex-lab
+    timeout-minutes: 120
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Prepare Bazel CI
+        id: prepare_bazel
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: aarch64-apple-darwin
+          cache-scope: sdk-integration
+
+      - name: Build codex and its code-mode host with Bazel
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./.github/scripts/run-bazel-ci.sh \
+            --remote-download-toplevel \
+            -- \
+            build \
+            "--build_metadata=COMMIT_SHA=${GITHUB_SHA}" \
+            --build_metadata=TAG_job=sdk-integration \
+            -- \
+            //codex-rs/cli:codex \
+            //codex-rs/code-mode-host:codex-code-mode-host
+
+          bazel_output_path() {
+            local target="$1"
+            local cquery_output
+            cquery_output="$(
+              ./.github/scripts/run-bazel-ci.sh \
+                -- \
+                cquery \
+                --output=files \
+                -- \
+                "$target" \
+              | grep -E '^(/|bazel-out/)'
+            )"
+            output_count="$(printf '%s\n' "${cquery_output}" | sed '/^$/d' | wc -l | tr -d ' ')"
+            if [[ "${output_count}" != "1" ]]; then
+              echo "Expected exactly one Bazel output path for ${target}; found ${output_count}." >&2
+              return 1
+            fi
+            if [[ "${cquery_output}" = /* ]]; then
+              printf '%s\n' "${cquery_output}"
+            else
+              printf '%s\n' "${GITHUB_WORKSPACE}/${cquery_output}"
+            fi
+          }
+
+          codex_bazel_output_path="$(bazel_output_path //codex-rs/cli:codex)"
+          host_bazel_output_path="$(bazel_output_path //codex-rs/code-mode-host:codex-code-mode-host)"
+
+          install_dir="${GITHUB_WORKSPACE}/.tmp/sdk-ci"
+          python3 .github/scripts/stage_sdk_bazel_binaries.py \
+            --codex-source "${codex_bazel_output_path}" \
+            --host-source "${host_bazel_output_path}" \
+            --destination "${install_dir}" \
+            --expected-architecture arm64
+          echo "CODEX_EXEC_PATH=${install_dir}/codex" >> "$GITHUB_ENV"
+
+      - name: Warm up Bazel-built codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${CODEX_EXEC_PATH}" --version
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK packages
+        run: pnpm -r --filter ./sdk/typescript run build
+
+      - name: Exercise staged code-mode host discovery
+        env:
+          CODEX_SDK_CODE_MODE_HOST_SMOKE: "1"
+        run: pnpm --dir sdk/typescript exec jest tests/codeModeHost.test.ts --runInBand
+
+      - name: Lint SDK packages
+        run: pnpm -r --filter ./sdk/typescript run lint
+
+      - name: Test SDK packages
+        run: pnpm -r --filter ./sdk/typescript run test
+
+      - name: Save bazel repository cache
+        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

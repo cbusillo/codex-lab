@@ -101,6 +101,7 @@ mod persisted_resume_approval_policy_tests {
         RolloutItem::TurnContext(TurnContextItem {
             turn_id: Some(turn_id.to_string()),
             cwd: cwd(),
+            environments: None,
             workspace_roots: None,
             current_date: None,
             timezone: None,
@@ -825,6 +826,7 @@ mod thread_processor_behavior_tests {
             supports_standalone_web_search: false,
         };
         let config_manager = ConfigManager::new(
+            temp_dir.path().to_path_buf(),
             temp_dir.path().to_path_buf(),
             Vec::new(),
             LoaderOverrides::default(),

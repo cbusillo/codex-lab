@@ -188,13 +188,7 @@ impl App {
                 tui.frame_requester().schedule_frame();
             }
             AppEvent::ResumeSessionByIdOrName(id_or_name) => {
-                match crate::lookup_session_target_with_app_server(
-                    app_server,
-                    &self.config,
-                    &id_or_name,
-                )
-                .await?
-                {
+                match crate::lookup_session_target_with_app_server(app_server, &id_or_name).await? {
                     Some(target_session) => {
                         return self
                             .resume_target_session(tui, app_server, target_session)
@@ -2193,6 +2187,64 @@ impl App {
             }
             AppEvent::OpenSkillsList => {
                 self.chat_widget.open_skills_list();
+            }
+            AppEvent::OpenAgentsSettings => {
+                self.open_agents_settings(app_server).await;
+            }
+            AppEvent::RefreshAgentCapabilities => {
+                self.refresh_agent_capabilities(app_server).await;
+            }
+            AppEvent::CancelAgentCapabilitiesRefresh => {
+                self.cancel_agent_capabilities_refresh(app_server).await;
+            }
+            AppEvent::CloseAgentsSettings => {
+                self.close_agents_settings(app_server).await;
+            }
+            AppEvent::OpenAgentSelectorModelPicker {
+                selector,
+                models,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_model_picker(selector, models, current);
+            }
+            AppEvent::OpenAgentSelectorEffortPicker {
+                selector,
+                efforts,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_effort_picker(selector, efforts, current);
+            }
+            AppEvent::SetAgentSelectorEnabled { selector, enabled } => {
+                self.update_agent_selector_enabled(app_server, &selector, enabled)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorModel { selector, model } => {
+                self.update_agent_selector_model(app_server, selector, model)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorEffort { selector, effort } => {
+                self.update_agent_selector_effort(app_server, selector, effort)
+                    .await;
+            }
+            AppEvent::FetchAutoReviewSummary { thread_id, run_id } => {
+                self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
+            }
+            AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            } => {
+                self.pending_auto_review_summary_fetches
+                    .remove(&(thread_id, run_id.clone()));
+                if self.primary_thread_id.is_none() || self.primary_thread_id == Some(thread_id) {
+                    self.enqueue_primary_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                } else {
+                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                }
             }
             AppEvent::OpenManageSkillsPopup => {
                 self.chat_widget.open_manage_skills_popup();

@@ -53,11 +53,12 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutItem as ProtocolRolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::RolloutItem;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::read_session_meta_line;
@@ -144,13 +145,7 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     );
     let mut session_meta = read_session_meta_line(&original_path).await?;
     session_meta.meta.multi_agent_version = Some(MultiAgentVersion::V1);
-    append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
-        &original_path,
-        &RolloutItem::SessionMeta(session_meta),
-    )
-    .await?;
+    append_rollout_item_to_path(&original_path, &RolloutItem::SessionMeta(session_meta)).await?;
     let original_contents = std::fs::read_to_string(&original_path)?;
 
     let mut mcp = TestAppServer::builder()
@@ -972,8 +967,6 @@ async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
     let source_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
     let unfinished_turn_id = "unfinished-turn";
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         &source_path,
         &RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: unfinished_turn_id.to_string(),
@@ -985,8 +978,6 @@ async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
     )
     .await?;
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         &source_path,
         &RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
             message: "Unfinished user message".to_string(),
@@ -1268,13 +1259,7 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
             time_to_first_token_ms: None,
         })),
     ] {
-        append_rollout_item_to_path(
-            codex_home.path(),
-            codex_rollout::RolloutCompressionMode::Disabled,
-            source_path.as_path(),
-            &item,
-        )
-        .await?;
+        append_rollout_item_to_path(source_path.as_path(), &item).await?;
     }
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1389,15 +1374,18 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     let source_path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &source_thread_id);
     let source_id = ThreadId::from_string(source_thread_id.as_str())?;
     let user_response_item = |id: &str| {
-        RolloutItem::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: format!("{id} model input"),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        })
+        RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: format!("{id} model input"),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        )
     };
     let completed_user_item = |id: &str, completed_at_ms| {
         RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -1416,8 +1404,6 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         }))
     };
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         source_path.as_path(),
         &RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: "active-turn".to_string(),
@@ -1428,16 +1414,8 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         })),
     )
     .await?;
+    append_rollout_item_to_path(source_path.as_path(), &user_response_item("before-fork")).await?;
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
-        source_path.as_path(),
-        &user_response_item("before-fork"),
-    )
-    .await?;
-    append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         source_path.as_path(),
         &completed_user_item("before-fork", /*completed_at_ms*/ 1),
     )
@@ -1504,14 +1482,14 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(matches!(
         child_rollout.first(),
         Some(RolloutLine {
-            item: RolloutItem::SessionMeta(_),
+            item: ProtocolRolloutItem::SessionMeta(_),
             ..
         })
     ));
     assert!(matches!(
         child_rollout.get(1),
         Some(RolloutLine {
-            item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+            item: ProtocolRolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
             ..
         })
     ));
@@ -1521,7 +1499,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             matches!(
                 line,
                 RolloutLine {
-                    item: RolloutItem::ResponseItem(
+                    item: ProtocolRolloutItem::ResponseItem(
                         codex_protocol::models::ResponseItem::Message {
                             role,
                             content,
@@ -1543,7 +1521,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             matches!(
                 line,
                 RolloutLine {
-                    item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
+                    item: ProtocolRolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
                     ..
                 } if aborted.turn_id.as_deref() == Some("active-turn")
             )
@@ -1551,23 +1529,13 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .expect("forked rollout should persist the active turn abort event");
     assert!(interruption_marker_index < turn_aborted_index);
 
+    append_rollout_item_to_path(source_path.as_path(), &user_response_item("after-fork")).await?;
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
-        source_path.as_path(),
-        &user_response_item("after-fork"),
-    )
-    .await?;
-    append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         source_path.as_path(),
         &completed_user_item("after-fork", /*completed_at_ms*/ 2),
     )
     .await?;
     append_rollout_item_to_path(
-        codex_home.path(),
-        codex_rollout::RolloutCompressionMode::Disabled,
         source_path.as_path(),
         &RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "active-turn".to_string(),

@@ -374,9 +374,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def require_upstream_repository(repository: str | None) -> None:
+    """Fail closed unless this runs in the repository that owns the R2 bucket."""
+
+    if repository != REPOSITORY:
+        raise PublishError(
+            f"refusing to publish {REPOSITORY} release assets from "
+            f"{repository or '<unset GITHUB_REPOSITORY>'}"
+        )
+
+
 def main() -> int:
-    args = parse_args()
     try:
+        require_upstream_repository(os.environ.get("GITHUB_REPOSITORY"))
+        args = parse_args()
         endpoint = os.environ.get("AWS_ENDPOINT_URL")
         if not os.environ.get("GH_TOKEN"):
             raise PublishError("GH_TOKEN is required")

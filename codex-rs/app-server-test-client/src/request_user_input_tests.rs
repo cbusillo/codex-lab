@@ -74,7 +74,7 @@ fn collects_option_and_free_form_answers() {
         String::from_utf8(output).unwrap(),
         concat!(
             "\n[request_user_input for thread thread-1, turn turn-1]\n",
-            "This request is non-blocking.\n",
+            "The app-server may auto-resolve this request after 60000 ms.\n",
             "\nTarget: Which target?\n",
             "  1. Core - Inspect core\n",
             "  2. TUI - Inspect TUI\n",

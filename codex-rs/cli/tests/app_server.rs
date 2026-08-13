@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use app_test_support::AppServerJsonInvocation;
 use app_test_support::app_server_json_shutdown_event;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
@@ -35,7 +36,8 @@ foo = "bar"
 #[test]
 fn app_server_emits_json_info_events() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let event = app_server_json_shutdown_event("codex", &["app-server"], codex_home.path())?;
+    let event =
+        app_server_json_shutdown_event(AppServerJsonInvocation::CodexCli, codex_home.path())?;
 
     assert_eq!(
         event,

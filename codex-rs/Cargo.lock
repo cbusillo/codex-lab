@@ -2610,6 +2610,7 @@ dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-cli",
  "codex-utils-path",
+ "codex-version",
  "codex-windows-sandbox",
  "crossterm",
  "futures",

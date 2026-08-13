@@ -718,6 +718,32 @@ impl ThreadManager {
         }
     }
 
+    pub async fn rebind_loaded_threads_after_account_removal(&self, removed_account_id: &str) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in threads {
+            let rebound = thread
+                .session
+                .services
+                .execution_account
+                .rebind_after_account_removal(removed_account_id)
+                .await;
+            if rebound && !thread.session_source.is_internal() {
+                thread
+                    .session
+                    .services
+                    .model_client
+                    .invalidate_cached_websocket_session();
+            }
+        }
+    }
+
     pub fn skills_service(&self) -> Arc<HostSkillsService> {
         self.state.skills_service.clone()
     }
@@ -2084,9 +2110,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     let rollout_items = history.get_rollout_items();
     let mut builder = ThreadHistoryBuilder::new();
     for item in rollout_items {
-        if let Some(item) = crate::rollout_compat::protocol_rollout_item(item) {
-            builder.handle_rollout_item(&item);
-        }
+        builder.handle_rollout_item(item);
     }
     let active_turn_id = builder.active_turn_id_if_explicit();
     if builder.has_active_turn() && active_turn_id.is_some() {

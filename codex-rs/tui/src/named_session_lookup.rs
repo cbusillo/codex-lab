@@ -280,6 +280,7 @@ impl<'a> NamedSessionCandidates<'a> {
                     section_id: None,
                     parent_thread_id: None,
                     ancestor_thread_id: None,
+                    descendant_of_thread_id: None,
                     cwd: None,
                     use_state_db_only: self.mode == SessionNameLookupMode::StateDbOnly,
                     search_term: self.search_term.map(str::to_string),

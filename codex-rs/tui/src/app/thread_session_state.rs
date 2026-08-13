@@ -431,6 +431,7 @@ mod tests {
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

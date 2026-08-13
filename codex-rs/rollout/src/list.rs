@@ -28,6 +28,7 @@ use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::user_message_preview;
@@ -69,6 +70,8 @@ pub struct ThreadItem {
     pub git_origin_url: Option<String>,
     /// Session source from session metadata.
     pub source: Option<SessionSource>,
+    /// Structured launch provenance from session metadata.
+    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Immediate control/spawn parent thread id from session metadata.
@@ -108,6 +111,7 @@ struct HeadTailSummary {
     git_sha: Option<String>,
     git_origin_url: Option<String>,
     source: Option<SessionSource>,
+    session_provenance: Option<SessionProvenance>,
     history_mode: ThreadHistoryMode,
     parent_thread_id: Option<ThreadId>,
     agent_nickname: Option<String>,
@@ -816,6 +820,7 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
+            session_provenance,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -840,6 +845,7 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
+            session_provenance,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -1137,6 +1143,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::SessionMeta(session_meta_line) => {
                 if !summary.saw_session_meta {
                     summary.source = Some(session_meta_line.meta.source.clone());
+                    summary.session_provenance = session_meta_line.meta.session_provenance.clone();
                     summary.history_mode = session_meta_line.meta.history_mode;
                     summary.parent_thread_id = session_meta_line.meta.parent_thread_id;
                     summary.agent_nickname = session_meta_line.meta.agent_nickname.clone();

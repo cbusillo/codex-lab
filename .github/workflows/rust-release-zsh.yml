@@ -14,8 +14,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   metadata:
-    runs-on: ubuntu-latest
+    needs: authorize_self_hosted
+    runs-on: macos-26
     outputs:
       release_tag: ${{ steps.release_tag.outputs.release_tag }}
 
@@ -48,59 +53,6 @@ jobs:
             exit 1
           fi
 
-  linux:
-    name: Build zsh (Linux) - ${{ matrix.variant }} - ${{ matrix.target }}
-    needs: metadata
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    container:
-      image: ${{ matrix.image }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            variant: ubuntu-24.04
-            image: ubuntu:24.04
-            archive_name: codex-zsh-x86_64-unknown-linux-musl.tar.gz
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            variant: ubuntu-24.04
-            image: arm64v8/ubuntu:24.04
-            archive_name: codex-zsh-aarch64-unknown-linux-musl.tar.gz
-
-    steps:
-      - name: Install build prerequisites
-        shell: bash
-        run: |
-          set -euo pipefail
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            autoconf \
-            bison \
-            build-essential \
-            ca-certificates \
-            gettext \
-            git \
-            libncursesw5-dev
-
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Build, smoke-test, and stage zsh artifact
-        shell: bash
-        run: |
-          "${GITHUB_WORKSPACE}/.github/scripts/build-zsh-release-artifact.sh" \
-            "dist/zsh/${{ matrix.target }}/${{ matrix.archive_name }}"
-
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: codex-zsh-${{ matrix.target }}
-          path: dist/zsh/${{ matrix.target }}/*
-
   darwin:
     name: Build zsh (macOS) - ${{ matrix.variant }} - ${{ matrix.target }}
     needs: metadata
@@ -111,11 +63,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-large
-            target: x86_64-apple-darwin
-            variant: macos-15
-            archive_name: codex-zsh-x86_64-apple-darwin.tar.gz
-          - runner: macos-15-xlarge
+          - runner: macos-codex-lab
             target: aarch64-apple-darwin
             variant: macos-15
             archive_name: codex-zsh-aarch64-apple-darwin.tar.gz
@@ -147,9 +95,8 @@ jobs:
   publish-release:
     needs:
       - metadata
-      - linux
       - darwin
-    runs-on: ubuntu-latest
+    runs-on: macos-26
     permissions:
       contents: write
       actions: read

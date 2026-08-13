@@ -216,6 +216,7 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         parent_thread_id: None,
         thread_source: None,
         thread_name: None,
+        history_mode: Default::default(),
         model: "gpt-5.4".to_string(),
         model_provider_id: config.model_provider_id.clone(),
         service_tier: None,

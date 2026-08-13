@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicBool;
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
@@ -1009,6 +1010,63 @@ pub(crate) enum AppEvent {
 
     /// Open the skills list popup.
     OpenSkillsList,
+
+    /// Open third-party agent install/status settings from the general settings menu.
+    OpenAgentsSettings,
+
+    /// Refresh bounded local external-agent capabilities in the background.
+    RefreshAgentCapabilities,
+
+    /// Cancel the active external-agent capability refresh while keeping settings open.
+    CancelAgentCapabilitiesRefresh,
+
+    /// Cancel the active external-agent capability refresh and close Agents settings.
+    CloseAgentsSettings,
+
+    /// Open the provider-default model picker for an external selector.
+    OpenAgentSelectorModelPicker {
+        selector: String,
+        models: Vec<String>,
+        current: Option<String>,
+    },
+
+    /// Open the provider-default effort picker for an external selector.
+    OpenAgentSelectorEffortPicker {
+        selector: String,
+        efforts: Vec<String>,
+        current: Option<String>,
+    },
+
+    /// Persist an explicit enablement override for an agent selector.
+    SetAgentSelectorEnabled {
+        selector: String,
+        enabled: bool,
+    },
+
+    /// Persist or clear the provider-default model for an external selector.
+    SetAgentSelectorModel {
+        selector: String,
+        model: Option<String>,
+    },
+
+    /// Persist or clear the default effort for an external selector.
+    SetAgentSelectorEffort {
+        selector: String,
+        effort: Option<String>,
+    },
+
+    /// Fetch the persisted summary for a terminal background auto-review run.
+    FetchAutoReviewSummary {
+        thread_id: ThreadId,
+        run_id: String,
+    },
+
+    /// Persisted auto-review summary response routed back to its thread.
+    AutoReviewSummaryLoaded {
+        thread_id: ThreadId,
+        run_id: String,
+        result: Result<AutoReviewSummaryReadResponse, String>,
+    },
 
     /// Open the skills enable/disable picker.
     OpenManageSkillsPopup,

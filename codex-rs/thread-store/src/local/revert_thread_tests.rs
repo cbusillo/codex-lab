@@ -155,6 +155,7 @@ async fn create_paginated_thread(store: &LocalThreadStore, thread_id: ThreadId) 
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

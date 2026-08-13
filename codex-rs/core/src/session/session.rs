@@ -250,6 +250,11 @@ impl SessionConfiguration {
             reasoning_summary: self.model_reasoning_summary,
             personality: self.personality,
             collaboration_mode: self.collaboration_mode.clone(),
+            automatic_validation_enabled: self
+                .original_config_do_not_use
+                .validation
+                .groups
+                .functional,
             session_source: self.session_source.clone(),
             session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,

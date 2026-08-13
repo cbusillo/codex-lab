@@ -137,6 +137,10 @@ impl App {
                 );
                 return;
             }
+            ServerNotification::ExternalAgentCapabilitiesUpdated(notification) => {
+                self.handle_agent_capabilities_updated(notification.clone());
+                return;
+            }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {
                 let should_report_completion =
                     app_server_client.consume_external_agent_config_import_completion();

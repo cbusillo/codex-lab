@@ -279,6 +279,22 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         ThreadItem::ContextCompaction { .. } => {
             vec!["context compacted".dim().into()]
         }
+        ThreadItem::ProjectValidation { status, .. } => {
+            let status = match status {
+                codex_app_server_protocol::ProjectValidationStatus::Passed => "passed",
+                codex_app_server_protocol::ProjectValidationStatus::ActionableFailure => "failed",
+                codex_app_server_protocol::ProjectValidationStatus::ConfigurationError => {
+                    "configuration error"
+                }
+                codex_app_server_protocol::ProjectValidationStatus::TimedOut => "timed out",
+                codex_app_server_protocol::ProjectValidationStatus::InfrastructureFailure => {
+                    "infrastructure failure"
+                }
+                codex_app_server_protocol::ProjectValidationStatus::Cancelled => "cancelled",
+                codex_app_server_protocol::ProjectValidationStatus::Skipped => "skipped",
+            };
+            vec![format!("automatic validation: {status}").dim().into()]
+        }
         ThreadItem::UserMessage { .. }
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }

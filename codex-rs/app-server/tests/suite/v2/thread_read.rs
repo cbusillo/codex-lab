@@ -538,7 +538,6 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
             default_model_provider_id: "mock_provider".to_string(),
-            rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
         },
         Some(state_db),
     );
@@ -1595,7 +1594,6 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             codex_home: codex_home.path().to_path_buf(),
             sqlite,
             default_model_provider_id: "mock_provider".to_string(),
-            rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
         },
         Some(state_db),
     );

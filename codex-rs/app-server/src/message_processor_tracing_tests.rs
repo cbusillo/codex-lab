@@ -236,6 +236,7 @@ async fn build_test_processor(
     let auth_manager =
         AuthManager::shared_from_config(config.as_ref(), /*enable_codex_api_key_env*/ false).await;
     let config_manager = ConfigManager::new(
+        config.auth_home.to_path_buf(),
         config.codex_home.to_path_buf(),
         Vec::new(),
         LoaderOverrides::default(),

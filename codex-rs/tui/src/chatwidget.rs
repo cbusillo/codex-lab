@@ -375,6 +375,7 @@ use self::skills::collect_tool_mentions;
 use self::skills::find_app_mentions;
 use self::skills::find_skill_mentions_with_tool_mentions;
 use self::skills::is_app_mentionable;
+mod agents_settings;
 mod plugin_catalog;
 mod plugins;
 use self::plugins::PluginInstallAuthFlowState;
@@ -405,6 +406,7 @@ mod rendering;
 mod replay;
 mod review;
 mod review_popups;
+use self::review::BackgroundAutoReviewSnapshot;
 use self::review::ReviewState;
 #[cfg(test)]
 pub(crate) use self::review_popups::show_review_commit_picker_with_entries;

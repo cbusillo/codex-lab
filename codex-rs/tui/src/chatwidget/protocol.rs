@@ -188,6 +188,14 @@ impl ChatWidget {
                     notification.action,
                 );
             }
+            ServerNotification::ProjectValidationCompleted(notification) => {
+                self.add_to_history(history_cell::new_project_validation_notification_cell(
+                    &notification,
+                ));
+            }
+            ServerNotification::BackgroundAutoReviewStatusChanged(notification) => {
+                self.on_background_auto_review_status_changed(notification);
+            }
             ServerNotification::ThreadClosed(_) => {
                 if !from_replay {
                     self.on_shutdown_complete();
@@ -213,6 +221,7 @@ impl ChatWidget {
             | ServerNotification::EnvironmentConnected(_)
             | ServerNotification::EnvironmentDisconnected(_)
             | ServerNotification::RemoteControlStatusChanged(_)
+            | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
             | ServerNotification::ExternalAgentConfigImportProgress(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::FsChanged(_)

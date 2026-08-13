@@ -36,6 +36,7 @@ pub use remote_control::RemoteControlDisabledByRequirements;
 pub use remote_control::RemoteControlEnableError;
 pub use remote_control::RemoteControlHandle;
 pub use remote_control::RemoteControlPolicy;
+pub use remote_control::RemoteControlReconnectUnavailable;
 pub use remote_control::RemoteControlStartConfig;
 pub use remote_control::RemoteControlStartupMode;
 pub use remote_control::RemoteControlUnavailable;
@@ -371,6 +372,7 @@ mod tests {
             result: Box::new(ClientResponsePayload::Initialize(
                 codex_app_server_protocol::InitializeResponse {
                     user_agent: "codex-test-agent".to_string(),
+                    server_build: None,
                     codex_home,
                     platform_family: "unix".to_string(),
                     platform_os: "linux".to_string(),

@@ -71,6 +71,12 @@ pub(super) fn server_notification_thread_target(
             Some(notification.thread_id.as_str())
         }
         ServerNotification::TurnStarted(notification) => Some(notification.thread_id.as_str()),
+        ServerNotification::ProjectValidationCompleted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::BackgroundAutoReviewStatusChanged(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::HookStarted(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::TurnCompleted(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::HookCompleted(notification) => Some(notification.thread_id.as_str()),
@@ -172,6 +178,7 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)
         | ServerNotification::RemoteControlStatusChanged(_)
+        | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
         | ServerNotification::ExternalAgentConfigImportProgress(_)
         | ServerNotification::ExternalAgentConfigImportCompleted(_)
         | ServerNotification::DeprecationNotice(_)

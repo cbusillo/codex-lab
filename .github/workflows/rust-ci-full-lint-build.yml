@@ -1,0 +1,257 @@
+name: rust-ci-full-lint-build
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+
+jobs:
+  lint_build:
+    name: Lint/Build — ${{ inputs.runner }} - ${{ inputs.target }}${{ inputs.profile == 'release' && ' (release)' || '' }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      # Speed up repeated builds across CI runs by caching compiled objects.
+      # Keep Windows on its native Cargo cache path.
+      USE_SCCACHE: ${{ startsWith(inputs.runner, 'windows') && 'false' || 'true' }}
+      CARGO_INCREMENTAL: "0"
+      SCCACHE_CACHE_SIZE: 10G
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - id: setup_ci
+        uses: ./.github/actions/setup-ci
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v apt-get >/dev/null 2>&1; then
+            if [[ "$(id -u)" -eq 0 ]]; then
+              apt_prefix=()
+            elif sudo -n true 2>/dev/null; then
+              apt_prefix=(sudo)
+            else
+              echo "No passwordless sudo; assuming Linux runner dependencies are preinstalled."
+              exit 0
+            fi
+            "${apt_prefix[@]}" apt-get update -y
+            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          fi
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ inputs.target }}
+          components: clippy
+
+      - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
+        name: Use hermetic Cargo home (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Compute lockfile hash
+        id: lockhash
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "hash=$(shasum -a 256 Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(shasum -a 256 rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # Explicit cache restore: split cargo home vs target, so we can
+      # avoid caching the large target dir on the gnu-dev job.
+      - name: Restore cargo home cache
+        id: cache_cargo_home_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ github.workspace }}/.cargo-home/bin/
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          restore-keys: |
+            cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-
+
+      # Install and restore sccache cache
+      - name: Install sccache
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+
+      - name: Enable sccache wrapper
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        shell: bash
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
+        id: cache_sccache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-
+            sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-
+
+      - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
+        name: Prepare APT cache directories (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
+          sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
+
+      - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
+        name: Restore APT cache (musl)
+        id: cache_apt_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            /var/cache/apt
+          key: apt-${{ inputs.runner }}-${{ inputs.target }}-v1
+      - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
+        name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+
+      - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
+        name: Install musl build tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          TARGET: ${{ inputs.target }}
+          APT_UPDATE_ARGS: -o Acquire::Retries=3
+          APT_INSTALL_ARGS: --no-install-recommends
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - if: ${{ !contains(inputs.target, 'windows') }}
+        name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+          # Full CI only compiles and tests this repository; it publishes no
+          # artifacts. Read the exact-version V8 inputs from the repository
+          # that builds them. rust-release.yml intentionally keeps the
+          # fail-closed default so fork releases cannot redistribute V8 blobs
+          # published by another repository.
+          artifact-repository: openai/codex
+
+      - name: Install cargo-chef
+        if: ${{ inputs.profile == 'release' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: cargo-chef
+          version: 0.1.71
+
+      - name: Pre-warm dependency cache (cargo-chef)
+        if: ${{ inputs.profile == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RECIPE="${RUNNER_TEMP}/chef-recipe.json"
+          cargo chef prepare --recipe-path "$RECIPE"
+          cargo chef cook --recipe-path "$RECIPE" --target ${{ inputs.target }} --release
+
+      - name: cargo clippy
+        run: cargo clippy --target ${{ inputs.target }} --tests --profile ${{ inputs.profile }} --timings -- -D warnings
+
+      - name: Upload Cargo timings (clippy)
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-rust-ci-clippy-${{ inputs.target }}-${{ inputs.profile }}
+          path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      # Save caches explicitly; make non-fatal so cache packaging
+      # never fails the overall job. Only save when key wasn't hit.
+      - name: Save cargo home cache
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ${{ github.workspace }}/.cargo-home/bin/
+            ${{ github.workspace }}/.cargo-home/registry/index/
+            ${{ github.workspace }}/.cargo-home/registry/cache/
+            ${{ github.workspace }}/.cargo-home/git/db/
+          key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+
+      - name: sccache stats
+        if: always() && env.USE_SCCACHE == 'true'
+        continue-on-error: true
+        run: sccache --show-stats || true
+
+      - name: sccache summary
+        if: always() && env.USE_SCCACHE == 'true'
+        shell: bash
+        run: |
+          {
+            echo "### sccache stats — ${{ inputs.target }} (${{ inputs.profile }})";
+            echo;
+            echo '```';
+            sccache --show-stats || true;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save APT cache (musl)
+        if: always() && !cancelled() && (inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            /var/cache/apt
+          key: apt-${{ inputs.runner }}-${{ inputs.target }}-v1

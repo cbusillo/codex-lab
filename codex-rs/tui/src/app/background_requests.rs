@@ -35,6 +35,8 @@ const THREAD_USAGE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 65);
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 15);
+const AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(/*secs*/ 15);
 const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
@@ -68,6 +70,68 @@ impl App {
                     .get(thread_id)
                     .is_none_or(|entry| !entry.is_closed)
         })
+    }
+
+    pub(super) fn try_claim_auto_review_summary_fetch(
+        &mut self,
+        thread_id: ThreadId,
+        run_id: &str,
+    ) -> bool {
+        self.pending_auto_review_summary_fetches
+            .insert((thread_id, run_id.to_string()))
+    }
+
+    pub(super) fn spawn_auto_review_summary_fetch(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        run_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT,
+                fetch_auto_review_summary(request_handle, thread_id),
+            )
+            .await
+            .map_err(|_| "review/summary/read timed out in TUI".to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+            app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn fetch_latest_auto_review_summary(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT,
+                fetch_auto_review_summary(request_handle, thread_id),
+            )
+            .await
+            .map_err(|_| "review/summary/read timed out in TUI".to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+            let run_id = result
+                .as_ref()
+                .ok()
+                .and_then(latest_terminal_background_auto_review_run_id)
+                .map(str::to_string)
+                .unwrap_or_default();
+            app_event_tx.send(AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            });
+        });
     }
 
     /// Spawns a background task to fetch account rate limits and deliver the
@@ -895,6 +959,36 @@ pub(super) async fn fetch_skills_list(
         })
         .await
         .wrap_err("skills/list failed in TUI")
+}
+
+pub(super) async fn fetch_auto_review_summary(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<AutoReviewSummaryReadResponse> {
+    let request_id = RequestId::String(format!("auto-review-summary-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::AutoReviewSummaryRead {
+            request_id,
+            params: AutoReviewSummaryReadParams {
+                thread_id: thread_id.to_string(),
+            },
+        })
+        .await
+        .wrap_err("review/summary/read failed in TUI")
+}
+
+fn latest_terminal_background_auto_review_run_id(
+    response: &AutoReviewSummaryReadResponse,
+) -> Option<&str> {
+    response
+        .current
+        .iter()
+        .chain(response.latest.iter())
+        .find(|summary| {
+            summary.source == codex_app_server_protocol::AutoReviewRunSource::Background
+                && background_auto_review_status_has_summary(summary.status)
+        })
+        .map(|summary| summary.run_id.as_str())
 }
 
 pub(super) async fn fetch_connectors_list(

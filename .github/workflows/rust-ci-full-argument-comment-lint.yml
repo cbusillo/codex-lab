@@ -1,0 +1,96 @@
+name: rust-ci-full-argument-comment-lint
+
+on:
+  workflow_call:
+    inputs:
+      platform_name:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+    secrets:
+      BUILDBUDDY_API_KEY:
+        required: false
+
+jobs:
+  argument_comment_lint_prebuilt:
+    name: Argument comment lint - ${{ inputs.platform_name }}
+    runs-on: ${{ inputs.runner }}
+    # BuildBuddy-backed and Windows-local Bazel runs can exceed 60 minutes on a
+    # cold cache. The Unix no-key fallback remains bounded by the same limit.
+    timeout-minutes: 90
+    environment:
+      name: bazel
+      deployment: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bazel-ci
+        with:
+          target: ${{ runner.os }}
+      - name: Install Linux sandbox build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+      - name: Restore Cargo dependency cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: argument-comment-workspace-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
+          restore-keys: |
+            argument-comment-workspace-${{ runner.os }}-
+      - name: Configure rusty_v8 artifact overrides
+        if: ${{ runner.os != 'Windows' }}
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+          artifact-repository: openai/codex
+      - name: Run argument comment lint on codex-rs
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]; then
+            echo "::notice::BuildBuddy is unavailable; using the packaged Cargo/Dylint runner instead of a local full Bazel build"
+            rustup toolchain install nightly-2025-09-18 \
+              --profile minimal \
+              --component llvm-tools-preview \
+              --component rustc-dev \
+              --component rust-src \
+              --no-self-update
+            # The packaged Dylint library is ABI-coupled to this nightly. Cargo
+            # still fails if a dependency actually uses unsupported language
+            # features, but newer rust-version metadata alone must not block it.
+            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version
+            exit 0
+          fi
+
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            ./.github/scripts/run-argument-comment-lint-bazel.sh \
+              --config=argument-comment-lint \
+              --platforms=//:local_windows \
+              "--build_metadata=COMMIT_SHA=${GITHUB_SHA}"
+          else
+            bazel_targets=()
+            while IFS= read -r target; do
+              bazel_targets+=("${target}")
+            done < <(./tools/argument-comment-lint/list-bazel-targets.sh)
+            ./.github/scripts/run-bazel-ci.sh \
+              -- \
+              build \
+              --config=argument-comment-lint \
+              "--build_metadata=COMMIT_SHA=${GITHUB_SHA}" \
+              -- \
+              "${bazel_targets[@]}"
+          fi
