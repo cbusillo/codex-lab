@@ -67,7 +67,7 @@ EXPECTED_POLICY = ConvergencePolicy(
     ),
     contracts_path="upstream/convergence-contracts.md",
     evidence_root="upstream/openai-codex",
-    plan_issue="https://github.com/cbusillo/codex-lab/issues/428",
+    plan_issue="https://github.com/cbusillo/codex-lab/issues/230",
 )
 
 
