@@ -99,7 +99,7 @@ fn normalize_model_line(line: &str) -> Option<String> {
         .unwrap_or(line)
         .trim();
     let line = line.trim_matches(['|', '│']).trim();
-    let line = line.split(['|', '│']).next().unwrap_or(line).trim();
+    let line = line.split(['|', '│', '\t']).next().unwrap_or(line).trim();
     let line = line
         .split_once("  ")
         .map_or(line, |(candidate, _)| candidate);

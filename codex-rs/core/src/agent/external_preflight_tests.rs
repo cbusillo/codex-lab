@@ -200,13 +200,13 @@ async fn current_antigravity_capabilities_are_discovered_and_cached() {
         &format!(
             r#"if [ "$1" = "--version" ]; then
   echo version >> '{}'
-  echo "1.1.9"
+  echo "1.1.12"
   exit 0
 fi
 if [ "$1" = "models" ]; then
   echo models >> '{}'
-  echo 'gemini-3.6-flash-high'
-  echo 'gemini-3.1-pro-low'
+  printf '%s\t%s\n' 'gemini-3.6-flash-high' 'Gemini 3.6 Flash (High)'
+  printf '%s\t%s\n' 'gemini-3.1-pro-low' 'Gemini 3.1 Pro (Low)'
   exit 0
 fi
 if [ "$1" = "--help" ]; then

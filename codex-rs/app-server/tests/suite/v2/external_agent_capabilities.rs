@@ -97,11 +97,12 @@ async fn capabilities_refresh_notifies_with_discovered_antigravity_models() -> R
 for arg in "$@"; do
   case "$arg" in
     --version)
-      echo "agy 1.2.3"
+      echo "agy 1.1.12"
       exit 0
       ;;
     models)
-      printf '%s\n' 'Available models' '| gemini-3-pro | Gemini 3 Pro |' '- gemini-3-flash (default)'
+      printf '%s\t%s\n' 'gemini-3-pro' 'Gemini 3 Pro'
+      printf '%s\t%s\n' 'gemini-3-flash' 'Gemini 3 Flash'
       exit 0
       ;;
     --help)
