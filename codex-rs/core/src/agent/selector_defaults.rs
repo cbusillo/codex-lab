@@ -52,6 +52,12 @@ pub(crate) fn install_configured_provider_selectors(config: &mut Config) -> Resu
             || looks_like_antigravity_selector(&effective_selector))
             && (defaults.model.is_some() || defaults.effort.is_some())
         {
+            if let Some(rejection) =
+                crate::agent::role::antigravity_selector_rejection(config, &effective_selector)
+            {
+                tracing::warn!("{rejection}");
+                continue;
+            }
             crate::agent::role::install_configured_antigravity_role(
                 config,
                 &effective_selector,
@@ -80,6 +86,11 @@ pub(crate) fn install_selected_provider_defaults(
 ) -> Result<bool, String> {
     let effort = resolve_effort(config, selector, explicit_effort);
     if selector == "antigravity" || looks_like_antigravity_selector(selector) {
+        if let Some(rejection) =
+            crate::agent::role::antigravity_selector_rejection(config, selector)
+        {
+            return Err(rejection);
+        }
         crate::agent::role::install_dynamic_antigravity_role(config, selector, effort.as_deref())?;
         return Ok(true);
     }

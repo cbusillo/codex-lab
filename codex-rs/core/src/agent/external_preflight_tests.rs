@@ -1,7 +1,6 @@
 use super::*;
 use crate::agent::external_capabilities::ExternalAgentCapabilityFreshness;
 use crate::agent::external_capabilities::ExternalAgentCapabilitySource;
-use crate::agent::external_capabilities::clear_active_capability_catalog;
 use crate::agent::external_capabilities::clear_capability_cache;
 use crate::agent::external_capabilities::discovered_antigravity_selectors;
 use pretty_assertions::assert_eq;
@@ -305,7 +304,6 @@ exit 2
 #[tokio::test]
 async fn antigravity_catalog_is_scoped_and_deterministic() {
     clear_capability_cache();
-    clear_active_capability_catalog();
     let temp_dir = TempDir::new().expect("tempdir");
     let first = shell_backend(
         &temp_dir,

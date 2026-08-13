@@ -1,3 +1,6 @@
+use super::antigravity_models::MAX_DISCOVERED_MODELS;
+pub(crate) use super::antigravity_models::is_valid_antigravity_model_name;
+use super::antigravity_models::parse_antigravity_models;
 use super::external_diagnostics::ExternalAgentFailureDetail;
 use super::external_diagnostics::ExternalAgentFailureKind;
 use crate::config::ExternalCommandAgentBackendConfig;
@@ -18,9 +21,7 @@ use std::time::UNIX_EPOCH;
 const CAPABILITY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const FAILED_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAX_CAPABILITY_CACHE_ENTRIES: usize = 32;
-const MAX_DISCOVERED_MODELS: usize = 32;
 const MAX_ACTIVE_CAPABILITY_CATALOGS: usize = 32;
-const MAX_MODEL_NAME_BYTES: usize = 128;
 
 /// Identifies where an external-agent capability report came from.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -260,7 +261,18 @@ pub(crate) fn record_active_capability_catalog(
     workspace: &Path,
     capabilities: &ExternalAgentCapabilities,
 ) {
-    if capabilities.cli_family != "antigravity" {
+    let key = (
+        backend.command.trim().to_string(),
+        workspace.display().to_string(),
+    );
+    if capabilities.cli_family != "antigravity"
+        || !capabilities.supports_model_selection
+        || capabilities.failure.is_some()
+    {
+        ACTIVE_CAPABILITY_CATALOG
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
         return;
     }
     let mut models = capabilities.models.clone();
@@ -269,12 +281,14 @@ pub(crate) fn record_active_capability_catalog(
     let mut catalog = ACTIVE_CAPABILITY_CATALOG
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let key = (
-        backend.command.trim().to_string(),
-        workspace.display().to_string(),
-    );
-    if catalog.len() >= MAX_ACTIVE_CAPABILITY_CATALOGS && !catalog.contains_key(&key) {
-        catalog.pop_first();
+    if catalog.len() >= MAX_ACTIVE_CAPABILITY_CATALOGS
+        && !catalog.contains_key(&key)
+        && let Some(oldest_key) = catalog
+            .iter()
+            .min_by_key(|(_, entry)| entry.recorded_at)
+            .map(|(key, _)| key.clone())
+    {
+        catalog.remove(&oldest_key);
     }
     catalog.insert(
         key,
@@ -285,48 +299,32 @@ pub(crate) fn record_active_capability_catalog(
     );
 }
 
-#[cfg(test)]
-pub(crate) fn clear_active_capability_catalog() {
-    ACTIVE_CAPABILITY_CATALOG
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
-}
-
 pub fn discovered_antigravity_selectors(
     backend: &ExternalCommandAgentBackendConfig,
     workspace: &Path,
 ) -> Vec<ExternalAgentModelCapability> {
-    let mut catalog = ACTIVE_CAPABILITY_CATALOG
+    let catalog = ACTIVE_CAPABILITY_CATALOG
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let key = (
         backend.command.trim().to_string(),
         workspace.display().to_string(),
     );
-    let Some(entry) = catalog.get(&key) else {
-        return Vec::new();
-    };
-    if entry.recorded_at.elapsed() > CAPABILITY_CACHE_TTL {
-        catalog.remove(&key);
-        return Vec::new();
-    }
-    entry.models.clone()
+    catalog
+        .get(&key)
+        .filter(|entry| active_catalog_age_is_fresh(entry.recorded_at.elapsed()))
+        .map(|entry| entry.models.clone())
+        .unwrap_or_default()
+}
+
+fn active_catalog_age_is_fresh(age: Duration) -> bool {
+    age <= CAPABILITY_CACHE_TTL
 }
 
 pub(crate) fn looks_like_antigravity_selector(selector: &str) -> bool {
     selector
         .strip_prefix("antigravity-")
         .is_some_and(|model| !model.is_empty())
-}
-
-pub(crate) fn is_valid_antigravity_model_name(model: &str) -> bool {
-    !model.is_empty()
-        && !model.starts_with('-')
-        && model.len() <= MAX_MODEL_NAME_BYTES
-        && model
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-_.:/+".contains(character))
 }
 
 pub(super) fn cached_capabilities(
@@ -589,44 +587,6 @@ pub(super) fn validate_requested_capabilities(
     }
 
     Ok(())
-}
-
-fn parse_antigravity_models(output: &[u8]) -> Result<Vec<String>, ExternalAgentFailureDetail> {
-    let output = String::from_utf8_lossy(output);
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-
-    for line in output
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-    {
-        if !is_valid_antigravity_model_name(line) {
-            return Err(ExternalAgentFailureDetail::new(
-                ExternalAgentFailureKind::MalformedOutput,
-                "Antigravity returned a malformed model identifier",
-            ));
-        }
-        if seen.insert(line.to_ascii_lowercase()) {
-            models.push(line.to_string());
-        }
-        if models.len() > MAX_DISCOVERED_MODELS {
-            return Err(ExternalAgentFailureDetail::new(
-                ExternalAgentFailureKind::MalformedOutput,
-                format!(
-                    "Antigravity returned more than {MAX_DISCOVERED_MODELS} models; refusing the unbounded result"
-                ),
-            ));
-        }
-    }
-
-    if models.is_empty() {
-        return Err(ExternalAgentFailureDetail::new(
-            ExternalAgentFailureKind::EmptyOutput,
-            "Antigravity returned no available models",
-        ));
-    }
-    Ok(models)
 }
 
 fn help_supports_flag(output: &[u8], flag: &str) -> bool {

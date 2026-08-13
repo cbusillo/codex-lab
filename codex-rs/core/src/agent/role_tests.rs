@@ -673,12 +673,52 @@ async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
 }
 
 #[tokio::test]
-async fn discovered_antigravity_selectors_require_explicit_enablement() {
+async fn discovered_antigravity_selectors_enable_from_the_active_catalog() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let selector = "antigravity-gemini-3.6-flash-high";
 
     assert!(super::agent_selector_enabled(&config, "antigravity"));
     assert!(!super::agent_selector_enabled(&config, selector));
+
+    let backend = super::external_agent_backend_for_selector(&config, "antigravity")
+        .expect("Antigravity backend");
+    crate::agent::external_capabilities::record_active_capability_catalog(
+        &backend,
+        config.cwd.as_path(),
+        &crate::agent::external_capabilities::ExternalAgentCapabilities {
+            cli_family: "antigravity".to_string(),
+            cli_version: None,
+            supports_model_selection: true,
+            supports_effort_selection: false,
+            supported_flags: Default::default(),
+            models: vec![
+                crate::agent::external_capabilities::ExternalAgentModelCapability {
+                    selector: selector.to_string(),
+                    model: "gemini-3.6-flash-high".to_string(),
+                    explicit_only: false,
+                },
+            ],
+            effort_levels: Vec::new(),
+            source: crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
+            freshness: crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
+            observed_at_unix_seconds: 0,
+            failure: None,
+        },
+    );
+    assert!(super::agent_selector_enabled(&config, selector));
+
+    config.agent_selector_overrides.insert(
+        "antigravity".to_string(),
+        codex_config::config_toml::AgentSelectorToml {
+            enabled: Some(false),
+            ..Default::default()
+        },
+    );
+    assert!(!super::agent_selector_enabled(&config, selector));
+    assert_eq!(
+        super::antigravity_selector_rejection(&config, selector),
+        None
+    );
 
     config.agent_selector_overrides.insert(
         selector.to_string(),
