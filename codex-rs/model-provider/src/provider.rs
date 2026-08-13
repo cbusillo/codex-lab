@@ -504,11 +504,8 @@ mod tests {
         }
     }
 
-    /// Per-test codex home. A PID-derived directory is shared by every test in
-    /// the binary, so concurrent model-catalog caches collide; keep each test
-    /// on its own temp dir instead.
-    fn test_codex_home() -> tempfile::TempDir {
-        tempfile::tempdir().expect("temp codex home should be creatable")
+    fn test_codex_home() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("codex-model-provider-test-{}", std::process::id()))
     }
 
     fn provider_for(base_url: String) -> ModelProviderInfo {
@@ -840,11 +837,8 @@ mod tests {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
-        let codex_home = test_codex_home();
-        let manager = provider.models_manager(
-            codex_home.path().to_path_buf(),
-            /*config_model_catalog*/ None,
-        );
+        let manager =
+            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
         let uncached_manager =
             provider.models_manager_without_cache(/*config_model_catalog*/ None);
 
@@ -921,9 +915,8 @@ mod tests {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
-        let codex_home = test_codex_home();
         let manager = provider.models_manager(
-            codex_home.path().to_path_buf(),
+            test_codex_home(),
             Some(ModelsResponse {
                 models: vec![configured_model],
             }),
@@ -974,11 +967,8 @@ mod tests {
             )),
         );
 
-        let codex_home = test_codex_home();
-        let manager = provider.models_manager(
-            codex_home.path().to_path_buf(),
-            /*config_model_catalog*/ None,
-        );
+        let manager =
+            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
         let catalog = manager
             .raw_model_catalog(
                 RefreshStrategy::Online,
@@ -991,37 +981,6 @@ mod tests {
                 .models
                 .iter()
                 .any(|model| model.slug == "provider-model")
-        );
-    }
-
-    #[tokio::test]
-    async fn configured_provider_can_keep_openai_account_state_with_provider_bearer_token() {
-        let mut provider_info = provider_for("https://example.test/v1".to_string());
-        provider_info.experimental_bearer_token = Some("provider-token".to_string());
-        provider_info.requires_openai_auth = true;
-        let provider = create_model_provider(
-            provider_info,
-            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
-                "control-token",
-            ))),
-        );
-
-        assert_eq!(
-            provider.account_state(),
-            Ok(ProviderAccountState {
-                account: Some(ProviderAccount::ApiKey),
-                requires_openai_auth: true,
-            })
-        );
-        assert_eq!(
-            provider
-                .api_auth()
-                .await
-                .expect("provider auth should resolve")
-                .to_auth_headers()
-                .get(http::header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer provider-token")
         );
     }
 }

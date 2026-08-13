@@ -218,8 +218,7 @@ fn changing_primary_environment_updates_model_context_and_persisted_state() -> R
     assert_eq!(
         current_world_state
             .snapshot()
-            .merge_patch_from(&previous_world_state.snapshot())
-            .map(serde_json::Value::Object),
+            .merge_patch_from(&previous_world_state.snapshot()),
         Some(json!({
             "environments": {
                 "environments": {

@@ -5,8 +5,11 @@
 // the TUI or the tracing stack).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
+mod account_switching;
+pub mod account_usage;
 mod apply_patch;
 mod apps;
+mod browser;
 mod client;
 mod client_common;
 mod realtime_context;
@@ -53,6 +56,7 @@ mod environment_selection;
 pub mod exec;
 pub mod exec_env;
 mod exec_policy;
+mod execution_account;
 #[cfg(test)]
 mod git_info_tests;
 mod guardian;
@@ -66,6 +70,8 @@ mod mcp_tool_exposure;
 mod network_policy_decision;
 pub use mcp::McpManager;
 mod original_image_detail;
+mod review_persistence;
+mod rollout_compat;
 pub use codex_mcp::CodexAppsToolsCache;
 pub use codex_mcp::SandboxState;
 mod mcp_openai_file;
@@ -89,9 +95,11 @@ pub(crate) mod mentions {
 }
 mod sandbox_tags;
 pub mod sandboxing;
+mod session_models_manager;
 mod session_prefix;
 mod session_startup_prewarm;
-mod skills;
+pub mod skills;
+pub(crate) use skills::injection;
 pub(crate) use skills::maybe_emit_implicit_skill_invocation;
 pub(crate) use skills::skills_load_input_from_config;
 mod stream_events_utils;
@@ -100,6 +108,11 @@ mod unified_exec;
 pub mod windows_sandbox;
 pub use client::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
 pub use codex_protocol::config_types::ModelProviderAuthInfo;
+pub use codex_thread_store::DEFAULT_RETENTION_PREVIEW_LIMIT;
+pub use codex_thread_store::MAX_RETENTION_PREVIEW_LIMIT;
+pub use codex_thread_store::RetentionDisposition;
+pub use codex_thread_store::RetentionPreviewPage;
+pub use codex_thread_store::RetentionPreviewParams;
 mod event_mapping;
 pub use codex_prompts as review_prompts;
 mod thread_manager;

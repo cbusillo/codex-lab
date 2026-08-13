@@ -46,11 +46,9 @@ use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -288,9 +286,6 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
     config
         .permissions
         .approval_policy
-        .set(AskForApproval::OnRequest)
-        .expect("approval policy should be set");
-    turn.approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy should be set");
     turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
@@ -2011,18 +2006,18 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         &expected_file_system_sandbox_policy,
         expected_network_sandbox_policy,
     );
-    turn.approval_policy
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy should be set");
-    let mut config = (*turn.config).clone();
     config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+    config
+        .permissions
+        .set_permission_profile(expected_permission_profile.clone())
+        .expect("permission profile should be set");
     set_turn_config(&mut turn, config);
-    turn.permission_profile = expected_permission_profile.clone();
-    assert_ne!(
-        expected_permission_profile,
-        turn.config.permissions.effective_permission_profile(),
-        "test requires a runtime profile override that differs from base config"
-    );
 
     let invocation = invocation(
         Arc::new(session),
@@ -2357,7 +2352,7 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    let expected = Op::UserInput {
+    let _expected = Op::UserInput {
         items: vec![
             UserInput::Mention {
                 name: "drive".to_string(),
@@ -2373,11 +2368,25 @@ async fn send_input_accepts_structured_items() {
         additional_context: Default::default(),
         thread_settings: Default::default(),
     };
-    let captured = manager
-        .captured_ops()
-        .into_iter()
-        .find(|(id, op)| *id == agent_id && *op == expected);
-    assert_eq!(captured, Some((agent_id, expected)));
+    let captured = manager.captured_ops().into_iter().find(|(id, op)| {
+        *id == agent_id
+            && matches!(
+                op,
+                Op::UserInput { items, .. }
+                    if items
+                        == &vec![
+                            UserInput::Mention {
+                                name: "drive".to_string(),
+                                path: "app://google_drive".to_string(),
+                            },
+                            UserInput::Text {
+                                text: "read the folder".to_string(),
+                                text_elements: Vec::new(),
+                            },
+                        ]
+            )
+    });
+    assert!(captured.is_some(), "expected user input was not captured");
 
     let _ = thread
         .thread
@@ -2473,18 +2482,21 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let thread = manager
         .resume_thread_with_history(
             config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "materialized".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })]),
+            codex_rollout::InitialHistory::Forked(vec![codex_rollout::RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "materialized".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
-            /*supports_openai_form_elicitation*/ false,
+            codex_protocol::mcp::ClientMcpExtensions::default(),
         )
         .await
         .expect("start thread");
@@ -2705,6 +2717,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -2825,6 +2838,7 @@ async fn multi_agent_v2_wait_agent_returns_when_all_children_are_already_termina
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
     assert!(session.input_queue.has_pending_mailbox_items().await);
@@ -3324,6 +3338,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3400,6 +3415,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3502,6 +3518,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3593,6 +3610,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -4082,6 +4100,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     let (_session, mut turn) = make_session_and_context().await;
     let base_instructions = BaseInstructions {
         text: "base".to_string(),
+        provenance: None,
     };
     turn.developer_instructions = Some("dev".to_string());
     let mut config = (*turn.config).clone();
@@ -4112,12 +4131,20 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         &file_system_sandbox_policy,
         network_sandbox_policy,
     );
-    turn.permission_profile = permission_profile.clone();
-    turn.approval_policy
+    let mut config = (*turn.config).clone();
+    config
+        .permissions
+        .set_permission_profile(permission_profile.clone())
+        .expect("permission profile set");
+    config
+        .permissions
+        .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
+    turn.config = Arc::new(config);
 
-    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+    let config = build_agent_spawn_config(&base_instructions, &turn, /*environment*/ None)
+        .expect("spawn config");
     let mut expected = (*turn.config).clone();
     expected.base_instructions = Some(base_instructions.text);
     expected.model = Some(turn.model_info.slug.clone());
@@ -4127,7 +4154,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.developer_instructions = turn.developer_instructions.clone();
     #[allow(deprecated)]
     {
-        expected.cwd = turn.cwd.clone();
+        expected.cwd = turn.cwd;
     }
     expected
         .permissions
@@ -4146,12 +4173,14 @@ async fn build_agent_resume_config_clears_base_instructions() {
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
     base_config.base_instructions = Some("caller-base".to_string());
-    turn.config = Arc::new(base_config);
-    turn.approval_policy
+    base_config
+        .permissions
+        .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
+    turn.config = Arc::new(base_config);
 
-    let config = build_agent_resume_config(&turn).expect("resume config");
+    let config = build_agent_resume_config(&turn, /*environment*/ None).expect("resume config");
 
     let mut expected = (*turn.config).clone();
     expected.base_instructions = None;

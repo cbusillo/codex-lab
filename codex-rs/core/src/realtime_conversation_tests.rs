@@ -1,7 +1,5 @@
 use super::AGENT_FINAL_MESSAGE_PREFIX;
 use super::HANDOFF_STREAM_TRUNCATION_MARKER;
-use super::REALTIME_DELEGATION_INPUT_TOKEN_BUDGET;
-use super::REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET;
 use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
 use super::RealtimeStreamedItem;
@@ -9,7 +7,6 @@ use super::realtime_delegation_from_handoff;
 use super::realtime_request_headers;
 use super::realtime_text_from_handoff_request;
 use super::wrap_realtime_delegation_input;
-use crate::context::REALTIME_DELEGATION_RENDERED_TOKEN_CAP;
 use crate::context::RealtimeDelegationSource;
 use async_channel::bounded;
 use codex_api::RealtimeEventParser;
@@ -17,16 +14,11 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::CodexResponseHandoffMode;
 use codex_protocol::protocol::RealtimeHandoffRequested;
 use codex_protocol::protocol::RealtimeTranscriptEntry;
-use codex_utils_output_truncation::approx_token_count;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-
-/// The model-visible context rule this fragment has to satisfy: no single injected item may reach
-/// 10K approximate tokens.
-const REALTIME_ITEM_TOKEN_CEILING: usize = 10_000;
 
 #[test]
 fn prefers_handoff_input_transcript_over_active_transcript() {
@@ -153,120 +145,6 @@ fn wraps_realtime_delegation_input_with_xml_escaping_without_transcript() {
         ),
         "<realtime_delegation>\n  <input>use a &lt; b &amp;&amp; c &gt; d</input>\n</realtime_delegation>"
     );
-}
-
-#[test]
-fn bounds_transcript_tail_flush_delegation_input_and_transcript_delta() {
-    // Realtime transcripts grow with session length, so both halves of the fragment are bounded
-    // with the shared realtime token-budget helper before injection.
-    let rendered = wrap_realtime_delegation_input(
-        &"input ".repeat(200_000),
-        Some(&"delta ".repeat(200_000)),
-        RealtimeDelegationSource::TranscriptTailFlush,
-    );
-
-    assert!(
-        approx_token_count(&rendered)
-            <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET
-                + REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET
-                + 100,
-        "rendered delegation was {} tokens",
-        approx_token_count(&rendered)
-    );
-    assert!(rendered.contains("<source>transcript_tail_flush</source>"));
-}
-
-#[test]
-fn bounds_handoff_delegation_input() {
-    let rendered = wrap_realtime_delegation_input(
-        &"input ".repeat(200_000),
-        /*transcript_delta*/ None,
-        RealtimeDelegationSource::Handoff,
-    );
-
-    assert!(
-        approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100,
-        "rendered delegation was {} tokens",
-        approx_token_count(&rendered)
-    );
-}
-
-#[test]
-fn bounds_multibyte_delegation_input_without_splitting_characters() {
-    let rendered = wrap_realtime_delegation_input(
-        &"🙂".repeat(200_000),
-        /*transcript_delta*/ None,
-        RealtimeDelegationSource::Handoff,
-    );
-
-    assert!(rendered.is_char_boundary(rendered.len()));
-    assert!(approx_token_count(&rendered) <= REALTIME_DELEGATION_INPUT_TOKEN_BUDGET + 100);
-}
-
-/// The pre-escape token budgets are not the size the model sees. `&` renders as `&amp;`, so a
-/// transcript made entirely of XML metacharacters expands 5x on the way into history. Assert on
-/// the rendered fragment for every source, both halves, and every metacharacter.
-fn assert_rendered_delegation_is_bounded(rendered: &str) {
-    let rendered_tokens = approx_token_count(rendered);
-    assert!(
-        rendered_tokens <= REALTIME_DELEGATION_RENDERED_TOKEN_CAP,
-        "rendered delegation was {rendered_tokens} tokens"
-    );
-    assert!(
-        rendered_tokens < REALTIME_ITEM_TOKEN_CEILING,
-        "rendered delegation was {rendered_tokens} tokens, at or above the per-item ceiling"
-    );
-    assert!(rendered.is_char_boundary(rendered.len()));
-    assert!(rendered.starts_with("<realtime_delegation>"));
-    assert!(rendered.ends_with("</realtime_delegation>"));
-}
-
-#[test]
-fn bounds_rendered_handoff_delegation_made_entirely_of_xml_metacharacters() {
-    for metacharacter in ['&', '<', '>'] {
-        let rendered = wrap_realtime_delegation_input(
-            &metacharacter.to_string().repeat(200_000),
-            /*transcript_delta*/ None,
-            RealtimeDelegationSource::Handoff,
-        );
-
-        assert_rendered_delegation_is_bounded(&rendered);
-    }
-}
-
-#[test]
-fn bounds_rendered_transcript_tail_flush_delegation_made_entirely_of_xml_metacharacters() {
-    for metacharacter in ['&', '<', '>'] {
-        let text = metacharacter.to_string().repeat(200_000);
-        let rendered = wrap_realtime_delegation_input(
-            &text,
-            Some(&text),
-            RealtimeDelegationSource::TranscriptTailFlush,
-        );
-
-        assert_rendered_delegation_is_bounded(&rendered);
-        assert!(rendered.contains("<source>transcript_tail_flush</source>"));
-    }
-}
-
-#[test]
-fn bounds_rendered_delegation_mixing_multibyte_text_and_xml_metacharacters() {
-    let text = "🙂&<>".repeat(200_000);
-    let rendered = wrap_realtime_delegation_input(
-        &text,
-        Some(&text),
-        RealtimeDelegationSource::TranscriptTailFlush,
-    );
-
-    assert_rendered_delegation_is_bounded(&rendered);
-    // Truncating inside an entity would leave a `&` that no longer starts one.
-    for (index, _) in rendered.match_indices('&') {
-        let tail = &rendered[index..];
-        assert!(
-            tail.starts_with("&amp;") || tail.starts_with("&lt;") || tail.starts_with("&gt;"),
-            "rendered delegation truncated inside an XML entity at byte {index}"
-        );
-    }
 }
 
 #[tokio::test]

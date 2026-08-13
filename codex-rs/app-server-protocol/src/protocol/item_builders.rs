@@ -138,7 +138,10 @@ pub fn build_command_execution_end_item(payload: &ExecCommandEndEvent) -> Thread
     }
 }
 
-fn command_actions_for_path_uri(parsed_cmd: &[ParsedCommand], cwd: &PathUri) -> Vec<CommandAction> {
+pub(crate) fn command_actions_for_path_uri(
+    parsed_cmd: &[ParsedCommand],
+    cwd: &PathUri,
+) -> Vec<CommandAction> {
     parsed_cmd
         .iter()
         .cloned()

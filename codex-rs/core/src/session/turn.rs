@@ -3,14 +3,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::SkillInjections;
 use crate::account_switching::RateLimitSwitchState;
 use crate::agent::user_agent_intent::record_user_agent_intent;
-use crate::build_skill_injections;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
-use crate::collect_explicit_skill_mentions;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
@@ -32,7 +29,6 @@ use crate::injection::app_id_from_path;
 use crate::injection::tool_kind_for_path;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::mentions::build_connector_slug_counts;
-use crate::mentions::build_skill_name_counts;
 use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
@@ -40,6 +36,7 @@ use crate::plugins::build_plugin_injections;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
@@ -76,13 +73,14 @@ use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_core_plugins::PluginAuthContext;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
-use codex_core_skills::injection::InjectedHostSkillPrompts;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_history::CompactedItem;
+use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
 use codex_protocol::ResponseItemId;
@@ -104,19 +102,22 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
 use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
+use codex_skills::build_skill_name_counts;
+use codex_skills::collect_explicit_skill_mentions;
+use codex_skills_extension::HostSkillPrompts;
+use codex_skills_extension::InjectedHostSkillPrompts;
+use codex_thread_store::PersistContext;
 use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -679,7 +680,7 @@ async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizat
             .replace_all_images(INVALID_IMAGE_PLACEHOLDER)?;
         (
             source,
-            state.history.raw_items().to_vec(),
+            state.history.raw_items().cloned().map(Into::into).collect(),
             state.auto_compact_window_number(),
             state.auto_compact_window_ids(),
             state.history.world_state_baseline().cloned(),
@@ -760,6 +761,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
+                PersistContext::Standard,
             )
             .await;
         }
@@ -856,14 +858,10 @@ async fn required_mcp_servers_for_input(
     } else {
         HashMap::new()
     };
-    let skills_outcome = turn_context.turn_skills.snapshot.outcome();
-    let mentioned_skills = collect_explicit_skill_mentions(
-        user_input,
-        &skills_outcome.skills,
-        skills_outcome.path_addressable_skills(),
-        &skills_outcome.disabled_paths,
-        &connector_slug_counts,
-    );
+    let skills_snapshot = turn_context.skills_snapshot();
+    let skills_outcome = skills_snapshot.outcome();
+    let mentioned_skills =
+        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
     for skill in mentioned_skills {
         if let Some(dependencies) = skill.dependencies {
             required_servers.extend(
@@ -925,24 +923,21 @@ async fn build_skills_and_plugins(
                 .map(|connector_id| connector_id.0.clone()),
             connectors::accessible_connectors_from_mcp_tools(&mcp_tools),
         );
-        connectors::with_app_enabled_state(connectors, &turn_context.config)
+        codex_connectors::AppToolPolicyEvaluator::new(&turn_context.config.config_layer_stack)
+            .apply_app_enabled_state(connectors)
     } else {
         Vec::new()
     };
-    let skills_outcome = turn_context.turn_skills.snapshot.outcome();
+    let skills_snapshot = turn_context.skills_snapshot();
+    let skills_outcome = skills_snapshot.outcome();
     let connector_slug_counts = build_connector_slug_counts(&available_connectors);
     let extension_injection_items =
         build_extension_turn_input_items(sess, step_context, user_input, cancellation_token)
             .await?;
     let skill_name_counts_lower =
         build_skill_name_counts(&skills_outcome.skills, &skills_outcome.disabled_paths).1;
-    let mentioned_skills = collect_explicit_skill_mentions(
-        user_input,
-        &skills_outcome.skills,
-        skills_outcome.path_addressable_skills(),
-        &skills_outcome.disabled_paths,
-        &connector_slug_counts,
-    );
+    let mentioned_skills =
+        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
     maybe_prompt_and_install_mcp_dependencies(
         sess,
         turn_context,
@@ -955,27 +950,28 @@ async fn build_skills_and_plugins(
     let injected_host_skill_prompts = turn_context
         .extension_data
         .get::<InjectedHostSkillPrompts>();
-    let SkillInjections {
-        items: skill_injections,
+    let HostSkillPrompts {
+        fragments,
+        injected: injected_host_skills,
         warnings: skill_warnings,
-    } = build_skill_injections(
+    } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
+    crate::skills::emit_explicit_skill_invocations(
+        sess,
+        turn_context,
         &mentioned_skills,
-        Some(skills_outcome),
-        Some(&turn_context.session_telemetry),
-        &sess.services.analytics_events_client,
+        &injected_host_skills,
         tracking.clone(),
-    )
-    .await;
+    );
 
     for message in skill_warnings {
         sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
     }
 
-    let skill_items: Vec<ResponseItem> = skill_injections
-        .iter()
-        .map(|skill| ContextualUserFragment::into(crate::context::SkillInstructions::from(skill)))
-        .collect();
+    let skill_items = fragments
+        .into_iter()
+        .map(ContextualUserFragment::into_boxed_response_item)
+        .collect::<Vec<_>>();
     let skill_connector_ids = collect_explicit_app_ids_from_skill_items(
         &skill_items,
         &available_connectors,
@@ -1014,12 +1010,14 @@ async fn build_skills_and_plugins(
         }
     }
 
-    let mut injection_items: Vec<ResponseItem> = match injected_host_skill_prompts {
-        Some(injected_host_skill_prompts) => skill_injections
-            .iter()
-            .filter(|skill| !injected_host_skill_prompts.contains_path(&skill.path))
-            .map(|skill| {
-                ContextualUserFragment::into(crate::context::SkillInstructions::from(skill))
+    let mut injection_items = match injected_host_skill_prompts {
+        Some(injected_host_skill_prompts) => skill_items
+            .into_iter()
+            .zip(injected_host_skills.iter())
+            .filter_map(|(item, skill)| {
+                (!injected_host_skill_prompts
+                    .contains_path(&skill.path_to_skills_md.to_string_lossy()))
+                .then_some(item)
             })
             .collect(),
         None => skill_items,
@@ -1050,14 +1048,14 @@ async fn build_extension_turn_input_items(
         .environments
         .turn_environments()
         .enumerate()
-        .filter_map(|(index, environment)| {
+        .map(|(index, environment)| {
             // TODO(anp): Migrate extension turn-input environments to PathUri so foreign cwd
             // values are not omitted from extension context.
-            Some(TurnInputEnvironment {
+            TurnInputEnvironment {
                 environment_id: environment.environment_id.clone(),
-                cwd: environment.cwd().to_abs_path().ok()?.into_path_buf(),
+                cwd: environment.cwd().clone(),
                 is_primary: index == 0,
-            })
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1163,7 +1161,7 @@ async fn track_turn_resolved_config_analytics(
                 .service_tier
                 .as_deref()
                 .and_then(ServiceTier::from_request_value),
-            approval_policy: turn_context.approval_policy.value(),
+            approval_policy: turn_context.approval_policy(),
             approvals_reviewer: turn_context.config.approvals_reviewer,
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
             collaboration_mode: turn_context.mode,
@@ -1517,7 +1515,6 @@ async fn run_sampling_request(
     let base_instructions = sess.get_base_instructions().await;
 
     let tool_runtime = ToolCallRuntime::new(
-        Arc::clone(&router),
         Arc::clone(&sess),
         Arc::clone(&step_context),
         Arc::clone(&turn_diff_tracker),
@@ -1525,11 +1522,10 @@ async fn run_sampling_request(
     let mut _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
         &sess,
         Arc::clone(&step_context),
-        Arc::clone(&router),
         Arc::clone(&turn_diff_tracker),
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
-    let mut retries = 0;
+    let mut retries = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1570,7 +1566,7 @@ async fn run_sampling_request(
             if !budget_gate.authorize_request(
                 &mut prompt,
                 token_usage.as_ref(),
-                /*retry*/ retries > 0,
+                /*retry*/ retries.has_retried(),
             ) {
                 return Err(CodexErr::TurnAborted);
             }
@@ -1773,10 +1769,10 @@ pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
-    mcp: &codex_mcp::McpBinding,
+    mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
     prepared_recommendations: PreparedToolRecommendations,
-) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
+) -> CodexResult<(Vec<ToolInfo>, Arc<ToolRouter>)> {
     let all_mcp_tools = mcp.tools().to_vec();
     let connector_snapshot = mcp.config().connector_snapshot.clone();
 
@@ -1785,9 +1781,10 @@ pub(crate) async fn built_tools(
         apps_enabled.then(|| connectors::accessible_connectors_from_mcp_tools(&all_mcp_tools));
     let accessible_connectors_with_enabled_state =
         accessible_connectors.as_ref().map(|connectors| {
-            connectors::with_app_enabled_state(connectors.clone(), &turn_context.config)
+            codex_connectors::AppToolPolicyEvaluator::new(&turn_context.config.config_layer_stack)
+                .apply_app_enabled_state(connectors.clone())
         });
-    let connectors = if apps_enabled {
+    let _connectors = if apps_enabled {
         let connectors = codex_connectors::merge::merge_plugin_connectors_with_accessible(
             connector_snapshot
                 .connector_ids()
@@ -1795,10 +1792,10 @@ pub(crate) async fn built_tools(
                 .map(|connector_id| connector_id.0.clone()),
             accessible_connectors.clone().unwrap_or_default(),
         );
-        Some(connectors::with_app_enabled_state(
-            connectors,
-            &turn_context.config,
-        ))
+        Some(
+            codex_connectors::AppToolPolicyEvaluator::new(&turn_context.config.config_layer_stack)
+                .apply_app_enabled_state(connectors),
+        )
     } else {
         None
     };
@@ -1863,11 +1860,11 @@ pub(crate) async fn built_tools(
         turn_context,
         environments,
         mcp,
-        connectors.as_deref(),
+        turn_context.apps_enabled(),
         step_store,
         tool_suggest_candidates.as_ref(),
-    ));
-    (all_mcp_tools, tool_router)
+    )?);
+    Ok((all_mcp_tools, tool_router))
 }
 
 #[derive(Debug)]
@@ -2119,6 +2116,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::EnvironmentConnected(_)
         | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::ThreadGoalUpdated(_)
+        | EventMsg::ThreadQueueChanged(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::McpToolCallBegin(_)
@@ -2517,7 +2515,7 @@ async fn try_run_sampling_request(
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
-        approval_policy = turn_context.approval_policy.value(),
+        approval_policy = turn_context.approval_policy(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = turn_context.reasoning_effort,
         auth_mode = sess.services.execution_account.auth_manager().auth_mode(),
@@ -3065,15 +3063,6 @@ async fn try_run_sampling_request(
             tracker.get_unified_diff()
         };
         if let Some(unified_diff) = unified_diff {
-            let active_turn_state = {
-                let active_turn = sess.active_turn.lock().await;
-                active_turn
-                    .as_ref()
-                    .map(|active_turn| Arc::clone(&active_turn.turn_state))
-            };
-            if let Some(turn_state) = active_turn_state {
-                turn_state.lock().await.completed_turn_diff = Some(unified_diff.clone());
-            }
             let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
             sess.clone().send_event(&turn_context, msg).await;
         }

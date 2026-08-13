@@ -19,6 +19,8 @@ use codex_utils_plugins::PluginSkillRoot;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 
+pub(crate) use codex_core_skills::injection;
+
 #[derive(Debug, Default)]
 struct ImplicitSkillInvocations(Mutex<HashSet<String>>);
 

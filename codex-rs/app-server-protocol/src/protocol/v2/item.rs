@@ -91,6 +91,7 @@ impl From<CoreReviewDecision> for CommandExecutionApprovalDecision {
                 execpolicy_amendment: proposed_execpolicy_amendment.into(),
             },
             CoreReviewDecision::ApprovedForSession => Self::AcceptForSession,
+            CoreReviewDecision::ApprovedMcpPolicyAmendment => Self::Accept,
             CoreReviewDecision::NetworkPolicyAmendment {
                 network_policy_amendment,
             } => Self::ApplyNetworkPolicyAmendment {
@@ -948,6 +949,8 @@ impl From<CoreTurnItem> for ThreadItem {
                     status: image.status,
                     revised_prompt: image.revised_prompt,
                     result: image.result,
+                    transparent_background: None,
+                    failure: None,
                     saved_path: image.saved_path,
                 })
             }

@@ -42,11 +42,7 @@ pub static INTERACTIVE_SESSION_SOURCES: LazyLock<Vec<SessionSource>> = LazyLock:
 });
 
 pub use codex_protocol::protocol::SessionMeta;
-pub use compression::ROLLOUT_COMPRESSION_MIN_AGE;
-pub use compression::RolloutLease;
 pub use compression::RolloutLineReader;
-pub use compression::compressed_rollout_path;
-pub use compression::estimate_compressed_rollout_size;
 pub use compression::existing_rollout_path;
 pub use compression::open_rollout_line_reader;
 pub use compression::plain_rollout_path;
@@ -59,7 +55,6 @@ pub async fn materialize_rollout_for_reference(
     compression::materialize_rollout_for_append(path).await
 }
 pub use config::Config;
-pub use config::RolloutCompressionMode;
 pub use config::RolloutConfig;
 pub use config::RolloutConfigView;
 pub use list::Cursor;

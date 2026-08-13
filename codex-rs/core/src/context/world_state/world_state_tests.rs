@@ -414,7 +414,7 @@ fn snapshot_merge_patch_changes_and_removes_nested_values() {
     };
 
     assert_eq!(
-        current.merge_patch_from(&previous).map(Value::Object),
+        current.merge_patch_from(&previous),
         Some(json!({
             "kept": {"changed": "after", "removed": null},
             "removed_section": null,
@@ -423,7 +423,9 @@ fn snapshot_merge_patch_changes_and_removes_nested_values() {
     let patch = current
         .merge_patch_from(&previous)
         .expect("changed snapshots should produce a patch");
-    previous.apply_merge_patch(&patch);
+    previous
+        .apply_merge_patch(&patch)
+        .expect("generated merge patch should apply");
     assert_eq!(previous, current);
     assert_eq!(current.merge_patch_from(&current), None);
 }

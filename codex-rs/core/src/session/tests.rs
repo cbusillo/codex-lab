@@ -1730,6 +1730,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
             group: codex_config::MatcherGroup {
                 matcher: None,
                 hooks: vec![codex_config::HookHandlerConfig::Command {
+                    id: None,
                     command: "python3 /tmp/user.py".to_string(),
                     command_windows: None,
                     timeout_sec: Some(600),
@@ -3480,6 +3481,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         turn_id: Some(turn_context.sub_id.clone()),
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
+        environments: None,
         workspace_roots: None,
         current_date: turn_context.current_date.clone(),
         timezone: turn_context.timezone.clone(),
@@ -4189,6 +4191,7 @@ async fn set_rate_limits_retains_previous_credits() {
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -4298,6 +4301,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -4554,6 +4558,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -4846,6 +4851,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5296,6 +5302,7 @@ enabled = false
             description: None,
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
+            backend: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -5642,6 +5649,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5783,6 +5791,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -5841,6 +5850,24 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         },
         thread_id,
     );
+    let execution_account = crate::execution_account::ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&auth_manager),
+        crate::execution_account::ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.codex_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            keyring_backend_kind: config.auth_keyring_backend_kind(),
+            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+            auth_route_config: config.auth_route_config(),
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+            pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            persistence: crate::execution_account::ExecutionAccountLeasePersistence::Ephemeral,
+            start: crate::execution_account::ExecutionAccountStart::New,
+        },
+    )
+    .await;
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
@@ -5861,6 +5888,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: auth_manager.clone(),
+        execution_account,
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -6061,6 +6089,7 @@ async fn make_session_with_config_and_rx(
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -6175,6 +6204,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: session_source.clone(),
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -7028,6 +7058,7 @@ fn submission_dispatch_span_prefers_submission_trace_context() {
         submission_dispatch_span(&Submission {
             id: "sub-1".into(),
             op: Op::Interrupt,
+            client_user_message_id: None,
             parent_turn_id: None,
             root_turn_id: None,
             trace: Some(submission_trace),
@@ -7056,6 +7087,7 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
                 item_id: None,
             },
         }),
+        client_user_message_id: None,
         parent_turn_id: None,
         root_turn_id: None,
         trace: None,
@@ -7348,6 +7380,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
     let dispatch_span = submission_dispatch_span(&Submission {
         id: "sub-1".into(),
         op: Op::Interrupt,
+        client_user_message_id: None,
         parent_turn_id: None,
         root_turn_id: None,
         trace: Some(submission_trace.clone()),
@@ -7417,6 +7450,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -7528,6 +7562,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -7967,6 +8002,7 @@ where
         app_server_client_version: None,
         trusted_guardian_reviewer: false,
         session_source: SessionSource::Exec,
+        session_provenance: None,
         history_mode: Default::default(),
         forked_from_thread_id: None,
         parent_thread_id: None,
@@ -8024,6 +8060,24 @@ where
         },
         thread_id,
     );
+    let execution_account = crate::execution_account::ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&auth_manager),
+        crate::execution_account::ExecutionAccountOptions {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.codex_home.to_path_buf(),
+            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+            keyring_backend_kind: config.auth_keyring_backend_kind(),
+            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+            auth_route_config: config.auth_route_config(),
+            chatgpt_base_url: config.chatgpt_base_url.clone(),
+            allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+            pooling: crate::execution_account::ExecutionAccountPooling::Disabled,
+            persistence: crate::execution_account::ExecutionAccountLeasePersistence::Ephemeral,
+            start: crate::execution_account::ExecutionAccountStart::New,
+        },
+    )
+    .await;
     let services = SessionServices {
         mcp_runtime,
         mcp_handler_cache: Default::default(),
@@ -8044,6 +8098,7 @@ where
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
+        execution_account,
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -9931,6 +9986,7 @@ async fn attach_in_memory_thread_store(
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

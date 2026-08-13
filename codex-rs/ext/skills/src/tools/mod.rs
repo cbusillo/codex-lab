@@ -23,11 +23,9 @@ use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::default_namespace_description;
-use codex_utils_string::approx_token_count;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -314,23 +312,6 @@ fn serialized_len(value: &impl Serialize) -> Result<usize, FunctionCallError> {
     serde_json::to_vec(value)
         .map(|value| value.len())
         .map_err(|err| FunctionCallError::Fatal(err.to_string()))
-}
-
-fn serialized_fits_output_budget(
-    value: &impl Serialize,
-    truncation_policy: TruncationPolicy,
-    hard_cap_bytes: usize,
-) -> Result<bool, FunctionCallError> {
-    let serialized =
-        serde_json::to_string(value).map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-    if serialized.len() > hard_cap_bytes {
-        return Ok(false);
-    }
-
-    Ok(match truncation_policy {
-        TruncationPolicy::Bytes(limit) => serialized.len() <= limit,
-        TruncationPolicy::Tokens(limit) => approx_token_count(&serialized) <= limit,
-    })
 }
 
 fn skill_json_output<T: Serialize>(

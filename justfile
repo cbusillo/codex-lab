@@ -40,29 +40,6 @@ app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
-# Build the local Codex CLI and run every exec harness scenario.
-[no-cd]
-[unix]
-exec-harness-test:
-    eval "$({{ justfile_directory() }}/scripts/local/exec-harness-env.sh)" && \
-      cargo_manifest="{{ justfile_directory() }}/codex-rs/Cargo.toml" && \
-      target_dir="${CARGO_TARGET_DIR:-{{ justfile_directory() }}/codex-rs/target}" && \
-      cargo build --manifest-path "$cargo_manifest" -p codex-cli --bin codex && \
-      codex_bin="$target_dir/debug/codex" && \
-      if [ "$(uname -s)" = Linux ]; then \
-        cargo build --manifest-path "$cargo_manifest" -p codex-bwrap --bin bwrap && \
-        mkdir -p "$target_dir/debug/codex-resources" && \
-        cp "$target_dir/debug/bwrap" "$target_dir/debug/codex-resources/bwrap" && \
-        chmod 0755 "$target_dir/debug/codex-resources/bwrap"; \
-      fi && \
-      {{ python }} {{ justfile_directory() }}/tools/codex-exec-harness/run_all.py --codex-bin "$codex_bin" --output-root "$CODEX_EXEC_HARNESS_OUTPUT_ROOT" --report-json "$CODEX_EXEC_HARNESS_REPORT_JSON"
-
-# Remove rebuildable local build and harness artifacts. Defaults to a dry run.
-[no-cd]
-[unix]
-local-cleanup-space *args:
-    {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
-
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py
@@ -102,12 +79,11 @@ install:
 # there should be no need to add `--all-features`.
 [unix]
 test *args:
-    if printf '%s\n' "$@" | grep -Fxq 'codex-core'; then cargo build -p codex-cli -p codex-code-mode-host; fi
     RUST_MIN_STACK={{ rust_min_stack }} NEXTEST_PROFILE=local cargo nextest run --no-fail-fast "$@"
 
 [windows]
 test *args:
-    $testArgs = @($args | Select-Object -Skip 1); if ($testArgs -contains "codex-core") { cargo build -p codex-cli -p codex-code-mode-host; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }; $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @testArgs
+    $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
 
 # Run from the repository root so scripts that resolve paths from `cwd` see
 # the same layout they use in GitHub Actions.
@@ -197,7 +173,7 @@ write-config-schema:
 
 # Regenerate vendored app-server protocol schema artifacts.
 write-app-server-schema *args:
-    {{ python }} app-server-protocol/scripts/write_schema_fixtures.py {args}
+    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
 
 [no-cd]
 write-hooks-schema:

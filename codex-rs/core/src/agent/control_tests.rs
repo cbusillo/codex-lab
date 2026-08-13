@@ -237,6 +237,7 @@ async fn external_followup_rejection_preserves_running_state_and_provenance() {
             communication,
             AgentCommunicationContext::new(AgentCommunicationKind::Followup, parent_thread_id),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await
         .expect_err("external follow-up should be rejected");
@@ -252,6 +253,7 @@ async fn external_followup_rejection_preserves_running_state_and_provenance() {
             child_thread_id,
             text_input("please follow up"),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await
         .expect_err("external direct input should be rejected");

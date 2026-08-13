@@ -5,6 +5,7 @@
 
 use crate::context_manager::is_user_turn_boundary;
 use crate::event_mapping;
+use crate::rollout_compat::protocol_rollout_items;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_history::InitialHistory;
@@ -165,7 +166,8 @@ pub fn truncate_rollout_after_turn_id(
     mut items: Vec<RolloutItem>,
     last_turn_id: &str,
 ) -> CodexResult<Vec<RolloutItem>> {
-    let turns = build_turns_from_rollout_items(&items);
+    let protocol_items = protocol_rollout_items(&items);
+    let turns = build_turns_from_rollout_items(&protocol_items);
     let turn = turns
         .iter()
         .find(|turn| turn.id == last_turn_id)
@@ -223,7 +225,7 @@ pub fn truncate_rollout_before_turn_id(
 
     let Some(cut_index) = cut_index else {
         // Older rollouts can expose generated turn IDs without a TurnStarted item to fork at.
-        if build_turns_from_rollout_items(&items)
+        if build_turns_from_rollout_items(&protocol_rollout_items(&items))
             .iter()
             .any(|turn| turn.id == before_turn_id)
         {
@@ -241,7 +243,7 @@ pub fn truncate_rollout_before_turn_id(
     if items[cut_index + 1..]
         .iter()
         .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))))
-        && !build_turns_from_rollout_items(&items)
+        && !build_turns_from_rollout_items(&protocol_rollout_items(&items))
             .iter()
             .any(|turn| turn.id == before_turn_id)
     {

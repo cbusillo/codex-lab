@@ -106,10 +106,11 @@ impl ContextManager {
         world_state: &WorldState,
     ) -> (Vec<Box<dyn ContextualUserFragment>>, Option<WorldStateItem>) {
         let snapshot = world_state.snapshot();
+        let raw_items = self.raw_items().cloned().collect::<Vec<_>>();
         let fragments =
-            world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
+            world_state.render_history_diff(self.world_state_baseline.as_ref(), &raw_items);
         let rollout_item = self.world_state_baseline.as_ref().map_or_else(
-            || Some(WorldStateItem::full(snapshot.clone().into_object())),
+            || Some(WorldStateItem::full(snapshot.clone().into_value())),
             |previous| {
                 snapshot
                     .merge_patch_from(previous)
@@ -308,7 +309,7 @@ impl ContextManager {
         let mut user_images_cleared = false;
         let mut tool_images_cleared = false;
         for item in items.iter_mut() {
-            match item {
+            match &mut **item {
                 ResponseItem::Message { role, content, .. } if role == "user" => {
                     user_images_cleared |= replace_message_images(content, placeholder);
                 }

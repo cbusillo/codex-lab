@@ -11,6 +11,7 @@ use crate::current_time::TimeProvider;
 use crate::elicitation::ElicitationService;
 use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
+use crate::execution_account::ExecutionAccountLease;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
@@ -61,6 +62,8 @@ pub(crate) struct SessionServices {
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
     pub(crate) auth_manager: Arc<AuthManager>,
+    /// Account lease used for model-visible execution; control-plane auth remains separate.
+    pub(crate) execution_account: ExecutionAccountLease,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,

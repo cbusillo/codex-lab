@@ -44,4 +44,3 @@ Removed deferred tool namespaces:
 No deferred tool namespaces remain.
 </tools>
 07:message/user:inspect removed deferred tools
-08:message/developer:<apps_update>\nstate: unavailable\nApps are no longer available. Do not call tools from the `cod...

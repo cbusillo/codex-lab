@@ -15,7 +15,6 @@ pub(super) const REMOTE_CONTROL_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 pub(super) struct RemoteControlConnectionAuth {
     pub(super) auth_provider: SharedAuthProvider,
     pub(super) account_id: String,
-    pub(super) revision: u64,
 }
 
 impl RemoteControlConnectionAuth {
@@ -39,9 +38,8 @@ pub(super) async fn load_remote_control_auth(
     auth_manager: &Arc<AuthManager>,
 ) -> io::Result<RemoteControlConnectionAuth> {
     let mut reloaded = false;
-    let (auth, revision) = loop {
-        let (auth_opt, revision) = auth_manager.auth_with_revision().await;
-        let Some(auth) = auth_opt else {
+    let auth = loop {
+        let Some(auth) = auth_manager.auth().await else {
             if reloaded {
                 return Err(io::Error::new(
                     ErrorKind::PermissionDenied,
@@ -53,14 +51,14 @@ pub(super) async fn load_remote_control_auth(
             continue;
         };
         if !auth.uses_codex_backend() {
-            break (auth, revision);
+            break auth;
         }
         if auth.get_account_id().is_none() && !reloaded {
             auth_manager.reload().await;
             reloaded = true;
             continue;
         }
-        break (auth, revision);
+        break auth;
     };
 
     if !auth.uses_codex_backend() {
@@ -70,17 +68,14 @@ pub(super) async fn load_remote_control_auth(
         ));
     }
 
-    let account_id = auth.get_account_id().ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::WouldBlock,
-            "remote control enrollment is waiting for a ChatGPT account id",
-        )
-    })?;
-
     Ok(RemoteControlConnectionAuth {
         auth_provider: codex_model_provider::auth_provider_from_auth(&auth),
-        account_id,
-        revision,
+        account_id: auth.get_account_id().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::WouldBlock,
+                "remote control enrollment is waiting for a ChatGPT account id",
+            )
+        })?,
     })
 }
 
@@ -163,7 +158,6 @@ mod tests {
                 account_ids: provider_account_ids,
             }),
             account_id: account_id.to_string(),
-            revision: 0,
         }
     }
 

@@ -118,6 +118,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -647,7 +648,6 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
         .with_config(|config| {
-            config.agents_enabled = true;
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(
@@ -739,7 +739,7 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
         .collect::<serde_json::Result<Vec<_>>>()?
         .into_iter()
         .filter_map(|line| match line.item {
-            RolloutItem::WorldState(item) if !item.full => Some(Value::Object(item.state)),
+            RolloutItem::WorldState(item) if !item.full => Some(item.state),
             _ => None,
         })
         .find(|patch| {
@@ -1401,14 +1401,24 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
     Ok(())
 }
 
+#[test_case(false, "multi_agent_v1"; "v1")]
+#[test_case(true, "collaboration"; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deferred_executor_spawn_agent_inherits_ready_step_environments() -> Result<()> {
+async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
+    multi_agent_v2: bool,
+    namespace: &str,
+) -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let server = start_mock_server().await;
     let wait_call_id = "wait-for-spawn-environment";
     let spawn_call_id = "spawn-in-ready-environment";
     let message = "inspect the ready step environment";
-    let spawn_arguments = json!({ "message": message, "task_name": "worker" }).to_string();
+    let spawn_arguments = if multi_agent_v2 {
+        json!({ "message": message, "task_name": "worker" })
+    } else {
+        json!({ "message": message })
+    }
+    .to_string();
     let response_mock = mount_sse_sequence(
         &server,
         vec![
@@ -1425,7 +1435,7 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments() -> Res
                 ev_response_created("resp-spawn"),
                 ev_function_call_with_namespace(
                     spawn_call_id,
-                    "agents",
+                    namespace,
                     "spawn_agent",
                     &spawn_arguments,
                 ),
@@ -1446,11 +1456,15 @@ async fn deferred_executor_spawn_agent_inherits_ready_step_environments() -> Res
     .await;
     let mut builder = test_codex()
         .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
-        .with_config(|config| {
-            config.agents_enabled = true;
+        .with_config(move |config| {
             config.project_doc_max_bytes = 0;
             assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
             assert!(config.features.enable(Feature::Collab).is_ok());
+            if multi_agent_v2 {
+                assert!(config.features.enable(Feature::MultiAgentV2).is_ok());
+            } else {
+                assert!(config.features.disable(Feature::MultiAgentV2).is_ok());
+            }
         });
     let (attach_tx, attach_rx) = tokio::sync::oneshot::channel();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -2104,7 +2118,7 @@ async fn exec_command_routes_to_selected_remote_environment() -> Result<()> {
         &server,
         "call-multi-env",
         json!({
-            "shell": "bash",
+            "shell": "/bin/sh",
             "cmd": format!("cat {remote_marker_name}"),
             "login": false,
             "yield_time_ms": 1_000,
@@ -2381,7 +2395,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
                     "exec-call",
                     "exec_command",
                     &json!({
-                        "shell": "bash",
+                        "shell": "/bin/sh",
                         "cmd": command,
                         "login": false,
                         "yield_time_ms": 1_000,
@@ -2811,7 +2825,7 @@ async fn apply_patch_intercepted_exec_command_routes_to_selected_remote_environm
                     call_id,
                     "exec_command",
                     &serde_json::to_string(&json!({
-                        "shell": "bash",
+                        "shell": "/bin/sh",
                         "cmd": command,
                         "login": false,
                         "yield_time_ms": 5_000,

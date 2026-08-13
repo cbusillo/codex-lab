@@ -128,6 +128,7 @@ async fn forward_ops_preserves_submission_trace_context() {
     let submission = Submission {
         id: "sub-1".to_string(),
         op: Op::Interrupt,
+        client_user_message_id: None,
         trace: Some(codex_protocol::protocol::W3cTraceContext {
             traceparent: Some(
                 "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
@@ -178,6 +179,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
         run_codex_thread_interactive(
             config,
             Arc::clone(&parent_session.services.auth_manager),
+            Arc::clone(&parent_session.services.models_manager),
             parent_session,
             parent_ctx,
             parent_environments,
@@ -186,7 +188,6 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             /*initial_history*/ None,
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
-            codex_extension_api::ExtensionDataInit::default(),
         ),
     )
     .await

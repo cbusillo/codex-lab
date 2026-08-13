@@ -18,7 +18,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::test_codex_with_agents as test_codex;
+use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -26,7 +26,7 @@ use std::time::Duration;
 use test_case::test_case;
 use tokio::time::timeout;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
 fn rollout_budget() -> RolloutBudgetConfig {
     RolloutBudgetConfig {

@@ -177,7 +177,6 @@ enum McpCallEvent {
 }
 
 const REMOTE_MCP_ENVIRONMENT: &str = "remote";
-const REMOTE_MCP_WORKDIR: &str = "/tmp/codex-remote-env";
 
 pub(super) fn remote_aware_environment_id() -> String {
     if is_remote_test_environment() {
@@ -212,15 +211,11 @@ pub(super) fn remote_aware_stdio_server_bin() -> anyhow::Result<String> {
     copy_binary_to_remote_env(&container_name, Path::new(&bin), "test_stdio_server")
 }
 
-pub(super) fn remote_aware_stdio_server_cwd() -> Option<PathBuf> {
-    test_docker_container_name().map(|_| PathBuf::from(REMOTE_MCP_WORKDIR))
-}
-
 /// Builds a collision-resistant in-container path for copied test binaries.
 fn unique_remote_path(binary_name: &str) -> anyhow::Result<String> {
     let unique_suffix = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     Ok(format!(
-        "{REMOTE_MCP_WORKDIR}/{binary_name}-{}-{unique_suffix}",
+        "/tmp/codex-remote-env/{binary_name}-{}-{unique_suffix}",
         std::process::id()
     ))
 }
@@ -233,7 +228,13 @@ fn copy_binary_to_remote_env(
 ) -> anyhow::Result<String> {
     let remote_path = unique_remote_path(binary_name)?;
     let mkdir_output = StdCommand::new("docker")
-        .args(["exec", container_name, "mkdir", "-p", REMOTE_MCP_WORKDIR])
+        .args([
+            "exec",
+            container_name,
+            "mkdir",
+            "-p",
+            "/tmp/codex-remote-env",
+        ])
         .output()
         .context("create remote MCP test binary directory")?;
     ensure!(
@@ -279,7 +280,6 @@ fn copy_binary_to_remote_env(
 struct TestMcpServerOptions {
     environment_id: String,
     auth: McpServerAuth,
-    startup_timeout_sec: Duration,
     supports_parallel_tool_calls: bool,
     tool_timeout_sec: Option<Duration>,
 }
@@ -289,7 +289,6 @@ impl Default for TestMcpServerOptions {
         Self {
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             auth: McpServerAuth::default(),
-            startup_timeout_sec: Duration::from_secs(10),
             supports_parallel_tool_calls: false,
             tool_timeout_sec: None,
         }
@@ -301,12 +300,7 @@ fn stdio_transport(
     env: Option<HashMap<String, String>>,
     env_vars: Vec<McpServerEnvVar>,
 ) -> McpServerTransportConfig {
-    let remote_command_prefix = format!("{REMOTE_MCP_WORKDIR}/");
-    let cwd = command
-        .starts_with(&remote_command_prefix)
-        .then(remote_aware_stdio_server_cwd)
-        .flatten();
-    stdio_transport_with_cwd(command, env, env_vars, cwd)
+    stdio_transport_with_cwd(command, env, env_vars, /*cwd*/ None)
 }
 
 fn stdio_transport_with_cwd(
@@ -342,7 +336,7 @@ fn insert_mcp_server(
             supports_parallel_tool_calls: options.supports_parallel_tool_calls,
             omit_tools_from: None,
             disabled_reason: None,
-            startup_timeout_sec: Some(options.startup_timeout_sec),
+            startup_timeout_sec: Some(Duration::from_secs(10)),
             tool_timeout_sec: options.tool_timeout_sec,
             default_tools_approval_mode: None,
             enabled_tools: None,
@@ -982,8 +976,7 @@ async fn modern_mcp_pagination_preserves_valid_tools_and_rejects_oversized_curso
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apps_enabled_turn_omits_pending_optional_mcp_after_startup_timeout() -> anyhow::Result<()>
-{
+async fn apps_enabled_turn_skips_pending_optional_mcp_without_cached_tools() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -1019,10 +1012,7 @@ async fn apps_enabled_turn_omits_pending_optional_mcp_after_startup_timeout() ->
                     env_http_headers: None,
                     http_headers_helper: None,
                 },
-                TestMcpServerOptions {
-                    startup_timeout_sec: Duration::from_secs(1),
-                    ..Default::default()
-                },
+                TestMcpServerOptions::default(),
             );
         })
         .build_with_auto_env(&server)
@@ -1773,7 +1763,6 @@ async fn stdio_mcp_parallel_tool_calls_opt_in_runs_concurrently() -> anyhow::Res
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),
                     auth: Default::default(),
-                    startup_timeout_sec: Duration::from_secs(10),
                     supports_parallel_tool_calls: true,
                     tool_timeout_sec: Some(Duration::from_secs(2)),
                 },
@@ -3240,7 +3229,6 @@ async fn streamable_http_with_oauth_round_trip_impl() -> anyhow::Result<()> {
     // Phase 3: seed an isolated CODEX_HOME with fallback OAuth tokens for this
     // server so the test does not share credentials with other suite cases.
     let temp_home = Arc::new(tempdir()?);
-    let _codex_home_guard = EnvVarGuard::set("CODEX_LAB_HOME", temp_home.path().as_os_str());
     let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", temp_home.path().as_os_str());
     let unset_authorization_env_var = format!(
         "CODEX_TEST_UNSET_MCP_OAUTH_AUTHORIZATION_{}",

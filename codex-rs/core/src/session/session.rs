@@ -5,7 +5,13 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::session::turn_context::TurnEnvironmentConfig;
+use crate::session_models_manager::models_manager_for_execution_account;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
@@ -22,6 +28,7 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
@@ -110,6 +117,7 @@ pub(crate) struct SessionConfiguration {
     pub(super) trusted_guardian_reviewer: bool,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
+    pub(super) session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
     /// Immediate history source copied into this thread, when this thread was forked.
@@ -243,6 +251,7 @@ impl SessionConfiguration {
             personality: self.personality,
             collaboration_mode: self.collaboration_mode.clone(),
             session_source: self.session_source.clone(),
+            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             forked_from_thread_id: self.forked_from_thread_id,
             parent_thread_id: self.parent_thread_id,
@@ -656,6 +665,47 @@ impl Session {
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };
+        let execution_account = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&auth_manager),
+            ExecutionAccountOptions {
+                codex_home: config.codex_home.to_path_buf(),
+                auth_home: config.codex_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                keyring_backend_kind: config.auth_keyring_backend_kind(),
+                forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+                auth_route_config: config.auth_route_config(),
+                chatgpt_base_url: config.chatgpt_base_url.clone(),
+                allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+                pooling: if config.auto_switch_accounts_on_rate_limit
+                    && codex_login::auth::read_codex_api_key_from_env().is_none()
+                    && config.model_provider.requires_openai_auth
+                {
+                    ExecutionAccountPooling::Enabled
+                } else {
+                    ExecutionAccountPooling::Disabled
+                },
+                persistence: if config.ephemeral {
+                    ExecutionAccountLeasePersistence::Ephemeral
+                } else {
+                    ExecutionAccountLeasePersistence::Durable
+                },
+                start: match &initial_history {
+                    InitialHistory::New => ExecutionAccountStart::New,
+                    InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+                    InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+                    InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+                        source_thread_id: session_configuration.forked_from_thread_id,
+                    },
+                },
+            },
+        )
+        .await;
+        let models_manager = models_manager_for_execution_account(
+            &config,
+            execution_account.clone(),
+            models_manager,
+        );
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -739,6 +789,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            session_provenance: session_configuration.session_provenance.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
@@ -1224,6 +1275,7 @@ impl Session {
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
+                execution_account,
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1333,6 +1385,7 @@ impl Session {
                     parent_thread_id,
                     thread_source: session_configuration.thread_source.clone(),
                     thread_name: session_configuration.thread_name.clone(),
+                    history_mode: session_configuration.history_mode,
                     model: session_configuration.collaboration_mode.model().to_string(),
                     model_provider_id: config.model_provider_id.clone(),
                     service_tier: session_configuration.service_tier.clone(),

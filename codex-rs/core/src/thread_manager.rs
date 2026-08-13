@@ -58,6 +58,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -224,6 +225,7 @@ pub struct StartThreadOptions {
     pub initial_history: InitialHistory,
     pub history_mode: Option<ThreadHistoryMode>,
     pub session_source: Option<SessionSource>,
+    pub session_provenance: Option<SessionProvenance>,
     pub thread_source: Option<ThreadSource>,
     pub dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
     pub metrics_service_name: Option<String>,
@@ -241,6 +243,7 @@ impl StartThreadOptions {
             initial_history: InitialHistory::New,
             history_mode: None,
             session_source: None,
+            session_provenance: None,
             thread_source: None,
             dynamic_tools: Vec::new(),
             metrics_service_name: None,
@@ -346,6 +349,7 @@ pub(crate) struct ThreadManagerState {
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     session_source: SessionSource,
+    session_provenance: Option<SessionProvenance>,
     installation_id: String,
     analytics_events_client: Option<AnalyticsEventsClient>,
     // Captures submitted ops for testing purpose when test mode is enabled.
@@ -427,6 +431,43 @@ impl ThreadManager {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         external_time_provider: Option<Arc<dyn TimeProvider>>,
     ) -> Self {
+        Self::new_with_session_provenance(
+            config,
+            auth_manager,
+            models_manager,
+            codex_apps_tools_cache,
+            session_source,
+            /*session_provenance*/ None,
+            environment_manager,
+            extensions,
+            user_instructions_provider,
+            analytics_events_client,
+            thread_store,
+            agent_graph_store,
+            installation_id,
+            attestation_provider,
+            external_time_provider,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_session_provenance(
+        config: &Config,
+        auth_manager: Arc<AuthManager>,
+        models_manager: SharedModelsManager,
+        codex_apps_tools_cache: CodexAppsToolsCache,
+        session_source: SessionSource,
+        session_provenance: Option<SessionProvenance>,
+        environment_manager: Arc<EnvironmentManager>,
+        extensions: Arc<ExtensionRegistry<Config>>,
+        user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+        analytics_events_client: Option<AnalyticsEventsClient>,
+        thread_store: Arc<dyn ThreadStore>,
+        agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
+        installation_id: String,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        external_time_provider: Option<Arc<dyn TimeProvider>>,
+    ) -> Self {
         let codex_home = config.codex_home.clone();
         let restriction_product = session_source.restriction_product();
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
@@ -474,6 +515,7 @@ impl ThreadManager {
                 external_time_provider,
                 auth_manager,
                 session_source,
+                session_provenance,
                 installation_id,
                 analytics_events_client,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -623,6 +665,7 @@ impl ThreadManager {
                 external_time_provider: None,
                 auth_manager,
                 session_source: SessionSource::Exec,
+                session_provenance: None,
                 installation_id,
                 analytics_events_client: None,
                 ops_log: should_use_test_thread_manager_behavior()
@@ -638,6 +681,41 @@ impl ThreadManager {
 
     pub fn auth_manager(&self) -> Arc<AuthManager> {
         self.state.auth_manager.clone()
+    }
+
+    pub async fn reload_auth_for_loaded_threads(&self) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in &threads {
+            thread
+                .session
+                .services
+                .execution_account
+                .prepare_for_control_auth_reload()
+                .await;
+        }
+        self.state.auth_manager.reload().await;
+        for thread in threads {
+            thread
+                .session
+                .services
+                .execution_account
+                .reconcile_after_control_auth_reload()
+                .await;
+            if !thread.session_source.is_internal() {
+                thread
+                    .session
+                    .services
+                    .model_client
+                    .invalidate_cached_websocket_session();
+            }
+        }
     }
 
     pub fn skills_service(&self) -> Arc<HostSkillsService> {
@@ -1697,6 +1775,7 @@ impl ThreadManagerState {
             initial_history,
             history_mode,
             session_source,
+            session_provenance,
             thread_source,
             dynamic_tools,
             metrics_service_name,
@@ -1706,6 +1785,9 @@ impl ThreadManagerState {
             client_mcp_extensions,
         } = options;
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
+        let session_provenance = session_provenance
+            .or_else(|| initial_history.get_session_provenance())
+            .or_else(|| self.session_provenance.clone());
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(
                 self.environment_manager.as_ref(),
@@ -1785,6 +1867,7 @@ impl ThreadManagerState {
             requested_history_mode: history_mode,
             fork_persistence,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source: thread_source.clone(),
@@ -2001,7 +2084,9 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     let rollout_items = history.get_rollout_items();
     let mut builder = ThreadHistoryBuilder::new();
     for item in rollout_items {
-        builder.handle_rollout_item(item);
+        if let Some(item) = crate::rollout_compat::protocol_rollout_item(item) {
+            builder.handle_rollout_item(&item);
+        }
     }
     let active_turn_id = builder.active_turn_id_if_explicit();
     if builder.has_active_turn() && active_turn_id.is_some() {

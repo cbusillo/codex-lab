@@ -6,7 +6,6 @@ use crate::Features;
 use crate::FeaturesToml;
 use crate::Stage;
 use crate::feature_for_key;
-use crate::is_known_feature_key;
 use crate::unstable_features_warning_event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::WarningEvent;
@@ -75,18 +74,6 @@ fn default_enabled_features_are_stable() {
 }
 
 #[test]
-fn multi_agent_v2_is_enabled_by_default() {
-    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
-}
-
-#[test]
-fn multi_agent_v2_cannot_be_disabled() {
-    let mut features = Features::with_defaults();
-    features.disable(Feature::MultiAgentV2);
-    assert!(features.enabled(Feature::MultiAgentV2));
-}
-
-#[test]
 fn removed_apps_mcp_path_override_shapes_are_ignored() {
     let features = [
         toml::from_str::<FeaturesToml>("apps_mcp_path_override = true")
@@ -105,17 +92,6 @@ path = "/custom/mcp"
         features.map(|features| features.entries()),
         [BTreeMap::new(), BTreeMap::new()]
     );
-}
-
-#[test]
-fn removed_child_agents_md_is_accepted_without_enabling_anything() {
-    assert!(is_known_feature_key("child_agents_md"));
-
-    let mut features = Features::with_defaults();
-    let before = features.enabled_features();
-    features.apply_map(&BTreeMap::from([("child_agents_md".to_string(), true)]));
-
-    assert_eq!(features.enabled_features(), before);
 }
 
 #[test]

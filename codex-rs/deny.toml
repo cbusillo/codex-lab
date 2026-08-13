@@ -245,11 +245,6 @@ deny = [
         "codex-responses-api-proxy",
         # Temporary migration exceptions.
         "codex-app-server",
-        "codex-browser",
-        "codex-code-bridge-client",
-        "codex-code-bridge-service",
-        "codex-core",
-        "codex-ollama",
         "codex-otel",
         # Third-party crates that own their reqwest integration. These are not part of the
         # first-party migration count above.
@@ -258,7 +253,7 @@ deny = [
         "opentelemetry-otlp",
         "rmcp",
         "sentry",
-        "chromiumoxide",
+        "webrtc-sys-build",
     ], reason = "new direct reqwest dependencies must use codex-http-client; temporary wrappers track migration debt" },
 ]
 

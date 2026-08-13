@@ -53,16 +53,11 @@ impl SkillProvider for HostSkillProvider {
                     "host skill provider requires a host skills snapshot",
                 ));
             };
-            let Some(skill) = host_snapshot
-                .outcome()
-                .path_addressable_skills()
-                .iter()
-                .find(|skill| {
-                    let skill_path = skill.path_to_skills_md.to_string_lossy();
-                    skill_path == request.resource.as_str()
-                        || skill_path.replace('\\', "/") == request.resource.as_str()
-                })
-            else {
+            let Some(skill) = host_snapshot.outcome().skills.iter().find(|skill| {
+                let skill_path = skill.path_to_skills_md.to_string_lossy();
+                skill_path == request.resource.as_str()
+                    || skill_path.replace('\\', "/") == request.resource.as_str()
+            }) else {
                 return Err(SkillProviderError::new(format!(
                     "host skill resource is not loaded: {}",
                     request.resource.as_str()
@@ -121,21 +116,6 @@ fn catalog_from_outcome(outcome: &SkillLoadOutcome) -> SkillCatalog {
             if let Some(root_order) = root_order_by_path.get(root.as_path()) {
                 entry = entry.with_alias_root_order(*root_order);
             }
-        }
-        catalog.push_entry(entry);
-    }
-    let visible_paths = outcome
-        .skills
-        .iter()
-        .map(|skill| &skill.path_to_skills_md)
-        .collect::<std::collections::HashSet<_>>();
-    for (skill, enabled) in outcome.path_addressable_skills_with_enabled() {
-        if visible_paths.contains(&skill.path_to_skills_md) {
-            continue;
-        }
-        let mut entry = catalog_entry_from_skill(skill, enabled).hidden_from_prompt();
-        if let Some(root) = outcome.skill_root_for_path(&skill.path_to_skills_md) {
-            entry = entry.with_display_path_root(root.to_string_lossy().replace('\\', "/"));
         }
         catalog.push_entry(entry);
     }

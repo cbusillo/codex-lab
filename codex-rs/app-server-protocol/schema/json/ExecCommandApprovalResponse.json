@@ -66,7 +66,7 @@
           "type": "string"
         },
         {
-          "description": "User has approved this MCP tool call and wants to amend its policy so matching future calls are automatically approved across sessions.",
+          "description": "User has approved this MCP tool call and wants the corresponding MCP policy amendment persisted for future matching calls.",
           "enum": [
             "approved_mcp_policy_amendment"
           ],

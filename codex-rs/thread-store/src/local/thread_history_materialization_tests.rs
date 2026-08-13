@@ -109,7 +109,6 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
         cwd: codex_home.clone(),
         model_provider_id: "test-provider".to_string(),
         generate_memories: false,
-        rollout_compression_mode: codex_rollout::RolloutCompressionMode::Disabled,
     };
     let recorder = RolloutRecorder::new(
         &rollout_config,
@@ -2254,7 +2253,6 @@ async fn create_paginated_subagent_thread(
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
-            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

@@ -19,7 +19,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::EnvironmentConnectionEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::MAX_TURN_ENVIRONMENT_SELECTIONS;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -179,19 +178,7 @@ impl ThreadEnvironments {
         let previous = self.environments.load();
         let mut seen_environment_ids = HashSet::with_capacity(environments.len());
         let mut next = Vec::with_capacity(environments.len());
-        // Client requests are rejected above this cap at validation, but internal callers reach
-        // this store directly. Enforce the cap here too so the model-visible environment fragment
-        // can never be grown past its bound by a non-client path.
-        if environments.len() > MAX_TURN_ENVIRONMENT_SELECTIONS {
-            tracing::warn!(
-                "dropping turn environments beyond the maximum of {MAX_TURN_ENVIRONMENT_SELECTIONS} ({} selected)",
-                environments.len()
-            );
-        }
         for selected_environment in environments {
-            if next.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS {
-                break;
-            }
             if !seen_environment_ids.insert(selected_environment.environment_id.as_str()) {
                 continue;
             }

@@ -4061,6 +4061,32 @@ async fn runtime_config_resolves_terminal_resize_reflow_defaults_and_overrides()
 }
 
 #[tokio::test]
+async fn runtime_config_resolves_account_switching_defaults_and_overrides() {
+    let cfg = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load default config");
+
+    assert!(cfg.auto_switch_accounts_on_rate_limit);
+
+    let cfg = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            auto_switch_accounts_on_rate_limit: Some(false),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load overridden config");
+
+    assert!(!cfg.auto_switch_accounts_on_rate_limit);
+}
+
+#[tokio::test]
 async fn forced_chatgpt_workspace_id_empty_values_disable_runtime_restriction()
 -> std::io::Result<()> {
     let cases: Vec<(&str, &str, Option<Vec<&str>>)> = vec![
@@ -7707,6 +7733,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7744,6 +7771,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7774,6 +7802,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7836,12 +7865,14 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    backend: None,
                 },
             )]),
         }),
@@ -8846,6 +8877,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8855,6 +8887,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    backend: None,
                 },
             )]),
         }),
@@ -8892,12 +8925,14 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    backend: None,
                 },
             )]),
         }),
@@ -8932,12 +8967,14 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
@@ -8972,12 +9009,14 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    backend: None,
                 },
             )]),
         }),

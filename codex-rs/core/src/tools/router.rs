@@ -38,13 +38,15 @@ pub struct ToolCall {
 
 impl ToolCall {
     pub(crate) fn direct_source(&self) -> ToolCallSource {
-        if matches!(
-            self.tool_name.name.as_str(),
-            "spawn_agent" | "send_message" | "followup_task"
-        ) && self
-            .encrypted_function_args
-            .as_ref()
-            .is_none_or(Vec::is_empty)
+        if self.tool_name.namespace.as_deref() == Some("collaboration")
+            && matches!(
+                self.tool_name.name.as_str(),
+                "spawn_agent" | "send_message" | "followup_task"
+            )
+            && self
+                .encrypted_function_args
+                .as_ref()
+                .is_some_and(Vec::is_empty)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {

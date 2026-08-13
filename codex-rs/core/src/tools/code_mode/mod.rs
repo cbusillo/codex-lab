@@ -60,24 +60,6 @@ pub(crate) fn is_exec_tool_name(tool_name: &ToolName) -> bool {
     tool_name.is_default_namespace() && tool_name.name == PUBLIC_TOOL_NAME
 }
 
-pub(crate) fn direct_tool_recipient(tool_name: &ToolName) -> String {
-    match tool_name.namespace.as_deref() {
-        Some(namespace) => format!("functions.{namespace}.{}", tool_name.name),
-        None => format!("functions.{}", tool_name.name),
-    }
-}
-
-pub(crate) fn direct_model_only_error(tool_name: &ToolName) -> String {
-    let recipient = direct_tool_recipient(tool_name);
-    let display_name = match tool_name.namespace.as_deref() {
-        Some(namespace) => format!("{namespace}.{}", tool_name.name),
-        None => tool_name.name.clone(),
-    };
-    format!(
-        "`{display_name}` is a direct top-level tool and cannot run through `functions.exec`; call it directly with `to={recipient}`. Its `ALL_TOOLS` entry is capability metadata, not a `tools.*` method."
-    )
-}
-
 #[derive(Clone)]
 pub(crate) struct ExecContext {
     pub(super) session: Arc<Session>,

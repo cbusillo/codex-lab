@@ -44,36 +44,6 @@ pub(crate) fn app_scoped_key_path(app_id: &str, key_path: &str) -> String {
     format!("apps.{app_id}.{key_path}")
 }
 
-pub(crate) fn agent_selector_enabled_edit(selector: &str, enabled: bool) -> ConfigEdit {
-    let selector = escaped_agent_selector(selector);
-    replace_config_value(
-        format!("agents.selectors.\"{selector}\".enabled"),
-        serde_json::json!(enabled),
-    )
-}
-
-pub(crate) fn agent_selector_model_edit(selector: &str, model: Option<&str>) -> ConfigEdit {
-    let selector = escaped_agent_selector(selector);
-    let key_path = format!("agents.selectors.\"{selector}\".model");
-    match model {
-        Some(model) => replace_config_value(key_path, serde_json::json!(model)),
-        None => clear_config_value(key_path),
-    }
-}
-
-pub(crate) fn agent_selector_effort_edit(selector: &str, effort: Option<&str>) -> ConfigEdit {
-    let selector = escaped_agent_selector(selector);
-    let key_path = format!("agents.selectors.\"{selector}\".effort");
-    match effort {
-        Some(effort) => replace_config_value(key_path, serde_json::json!(effort)),
-        None => clear_config_value(key_path),
-    }
-}
-
-fn escaped_agent_selector(selector: &str) -> String {
-    selector.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub(crate) fn format_config_error(err: &impl Display) -> String {
     format!("{err:#}")
 }
@@ -204,20 +174,13 @@ pub(crate) async fn read_effective_config(
     request_handle: AppServerRequestHandle,
     cwd: String,
 ) -> Result<ConfigReadResponse> {
-    read_effective_config_at_cwd(request_handle, Some(cwd)).await
-}
-
-pub(crate) async fn read_effective_config_at_cwd(
-    request_handle: AppServerRequestHandle,
-    cwd: Option<String>,
-) -> Result<ConfigReadResponse> {
     let request_id = RequestId::String(format!("tui-config-read-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::ConfigRead {
             request_id,
             params: ConfigReadParams {
                 include_layers: false,
-                cwd,
+                cwd: Some(cwd),
             },
         })
         .await

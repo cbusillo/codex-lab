@@ -35,6 +35,12 @@ impl Default for ResponsesStreamRetryState {
     }
 }
 
+impl ResponsesStreamRetryState {
+    pub(crate) fn has_retried(&self) -> bool {
+        self.retries > 0
+    }
+}
+
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
 /// retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(

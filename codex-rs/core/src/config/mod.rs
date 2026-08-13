@@ -6,6 +6,7 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use codex_auto_review::AutoReviewBudget;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -21,6 +22,8 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::ValidationConfig;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
@@ -182,6 +185,47 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES: usize = 120_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS: u64 = 5 * 60 * 1_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS: u64 = 300_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS: usize = 20;
+
+fn resolve_background_auto_review_budget(
+    auto_review: Option<&AutoReviewToml>,
+) -> std::io::Result<AutoReviewBudget> {
+    let defaults = Config::default_background_auto_review_budget();
+    let max_elapsed_seconds = auto_review
+        .and_then(|config| config.background_max_elapsed_seconds)
+        .unwrap_or(defaults.max_elapsed_ms / 1_000);
+    let budget = AutoReviewBudget {
+        max_scope_bytes: auto_review
+            .and_then(|config| config.background_max_diff_bytes)
+            .unwrap_or(defaults.max_scope_bytes),
+        max_elapsed_ms: max_elapsed_seconds.checked_mul(1_000).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "[auto_review] background_max_elapsed_seconds is too large",
+            )
+        })?,
+        max_total_tokens: auto_review
+            .and_then(|config| config.background_max_total_tokens)
+            .unwrap_or(defaults.max_total_tokens),
+        max_output_bytes: auto_review
+            .and_then(|config| config.background_max_output_bytes)
+            .unwrap_or(defaults.max_output_bytes),
+        max_findings: auto_review
+            .and_then(|config| config.background_max_findings)
+            .unwrap_or(defaults.max_findings),
+    };
+    budget.validate().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid [auto_review] background budget: {err}"),
+        )
+    })?;
+    Ok(budget)
+}
 
 /// Compatibility-only config retained so legacy `ghost_snapshot` settings
 /// continue to load even though snapshots are no longer produced.
@@ -636,6 +680,9 @@ pub struct Config {
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
 
+    /// Effective hard limits for automatic background reviews.
+    pub background_auto_review_budget: AutoReviewBudget,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
@@ -669,6 +716,9 @@ pub struct Config {
     /// been escalated. This does not disable separate safety checks such as
     /// ARC.
     pub approvals_reviewer: ApprovalsReviewer,
+
+    /// Patch-local validation policy.
+    pub validation: ValidationConfig,
 
     /// enforce_residency means web traffic cannot be routed outside of a
     /// particular geography. HTTP clients should direct their requests
@@ -886,6 +936,9 @@ pub struct Config {
     /// Default reasoning effort for spawned subagents when the spawn call does not select one.
     pub agent_default_subagent_reasoning_effort: Option<ReasoningEffort>,
 
+    /// Explicit enablement and provider-native defaults keyed by agent selector.
+    pub agent_selector_overrides: BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+
     /// Whether to record a model-visible message when an agent turn is interrupted.
     pub agent_interrupt_message_enabled: bool,
 
@@ -973,6 +1026,14 @@ pub struct Config {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
+
+    /// Whether Codex may automatically switch saved accounts when the active
+    /// ChatGPT account is rate or usage limited.
+    pub auto_switch_accounts_on_rate_limit: bool,
+
+    /// Whether Codex may fall back to a saved API key account once all saved
+    /// ChatGPT accounts are rate or usage limited.
+    pub api_key_fallback_on_all_accounts_limited: bool,
 
     /// Whether Codex-owned clients should respect host system proxy settings.
     pub respect_system_proxy: bool,
@@ -1516,6 +1577,16 @@ impl ConfigBuilder {
 }
 
 impl Config {
+    pub fn default_background_auto_review_budget() -> AutoReviewBudget {
+        AutoReviewBudget {
+            max_scope_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES,
+            max_elapsed_ms: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS,
+            max_total_tokens: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS,
+            max_output_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES,
+            max_findings: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS,
+        }
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
@@ -2333,6 +2404,75 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+    /// Optional backend used instead of spawning an internal Codex thread.
+    pub backend: Option<AgentRoleBackendConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentRoleBackendConfig {
+    ExternalCommand(ExternalCommandAgentBackendConfig),
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
+pub enum ExternalCommandProtocol {
+    #[default]
+    Json,
+    RawCli,
+}
+
+impl From<codex_config::config_toml::ExternalCommandProtocolToml> for ExternalCommandProtocol {
+    fn from(toml: codex_config::config_toml::ExternalCommandProtocolToml) -> Self {
+        match toml {
+            codex_config::config_toml::ExternalCommandProtocolToml::Json => Self::Json,
+            codex_config::config_toml::ExternalCommandProtocolToml::RawCli => Self::RawCli,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCommandAgentBackendConfig {
+    pub command: String,
+    pub protocol: ExternalCommandProtocol,
+    pub args: Vec<String>,
+    pub args_read_only: Vec<String>,
+    pub args_write: Vec<String>,
+    pub env: std::collections::HashMap<String, String>,
+    pub timeout_ms: u64,
+    pub launch_family: Option<String>,
+}
+
+impl Default for ExternalCommandAgentBackendConfig {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            protocol: ExternalCommandProtocol::Json,
+            args: Vec::new(),
+            args_read_only: Vec::new(),
+            args_write: Vec::new(),
+            env: std::collections::HashMap::new(),
+            timeout_ms: 30_000,
+            launch_family: None,
+        }
+    }
+}
+
+impl AgentRoleBackendConfig {
+    pub(crate) fn from_toml(backend: codex_config::config_toml::AgentRoleBackendToml) -> Self {
+        match backend {
+            codex_config::config_toml::AgentRoleBackendToml::ExternalCommand(command) => {
+                Self::ExternalCommand(ExternalCommandAgentBackendConfig {
+                    command: command.command,
+                    protocol: command.protocol.into(),
+                    args: command.args.unwrap_or_default(),
+                    args_read_only: command.args_read_only.unwrap_or_default(),
+                    args_write: command.args_write.unwrap_or_default(),
+                    env: command.env.unwrap_or_default(),
+                    timeout_ms: command.timeout_ms.unwrap_or(30_000),
+                    launch_family: None,
+                })
+            }
+        }
+    }
 }
 
 fn resolve_tool_suggest_config(
@@ -3150,6 +3290,36 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
     Ok(())
 }
 
+fn validate_agent_selector_overrides(
+    overrides: &BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+) -> std::io::Result<()> {
+    for (selector, override_config) in overrides {
+        for (field, value) in [
+            ("model", override_config.model.as_deref()),
+            ("effort", override_config.effort.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            let valid = !value.is_empty()
+                && value.len() <= 128
+                && !value.starts_with('-')
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "-_.:/+".contains(character)
+                });
+            if !valid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.selectors.{selector}.{field} must be a non-empty provider value containing only letters, numbers, '-', '_', '.', ':', '/', or '+'"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
@@ -3698,6 +3868,12 @@ impl Config {
         let agent_roles =
             agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
                 .await?;
+        let agent_selector_overrides = cfg
+            .agents
+            .as_ref()
+            .map(|agents| agents.selectors.clone())
+            .unwrap_or_default();
+        validate_agent_selector_overrides(&agent_selector_overrides)?;
 
         let openai_base_url = cfg
             .openai_base_url
@@ -4066,6 +4242,9 @@ impl Config {
             model,
             service_tier,
             review_model,
+            background_auto_review_budget: resolve_background_auto_review_budget(
+                cfg.auto_review.as_ref(),
+            )?,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
@@ -4090,6 +4269,7 @@ impl Config {
             explicit_permission_profile_mode,
             custom_permission_profiles,
             approvals_reviewer: constrained_approvals_reviewer.value(),
+            validation: cfg.validation.unwrap_or_default(),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,
@@ -4140,6 +4320,7 @@ impl Config {
             agent_max_threads,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
+            agent_selector_overrides,
             agent_max_depth,
             agent_roles,
             max_goal_token_budget: cfg
@@ -4185,6 +4366,12 @@ impl Config {
             chatgpt_base_url: cfg
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            auto_switch_accounts_on_rate_limit: cfg
+                .auto_switch_accounts_on_rate_limit
+                .unwrap_or(true),
+            api_key_fallback_on_all_accounts_limited: cfg
+                .api_key_fallback_on_all_accounts_limited
+                .unwrap_or(false),
             respect_system_proxy,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             responses_api_metadata: cfg.responses_api_metadata.unwrap_or_default(),

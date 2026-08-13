@@ -1274,6 +1274,7 @@ mod tests {
             output_tokens: 10,
             reasoning_output_tokens: 0,
             total_tokens: 20,
+            codex_rollout_budget_units: None,
         };
 
         persistence.save_completed_with_freshness(

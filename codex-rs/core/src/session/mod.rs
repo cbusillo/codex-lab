@@ -117,6 +117,7 @@ use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RawResponseItemEvent;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -400,6 +401,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
+    pub(crate) session_provenance: Option<SessionProvenance>,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) thread_source: Option<ThreadSource>,
@@ -496,6 +498,7 @@ impl Session {
             requested_history_mode,
             fork_persistence,
             session_source,
+            session_provenance,
             forked_from_thread_id,
             parent_thread_id,
             thread_source,
@@ -708,6 +711,7 @@ impl Session {
             app_server_client_version: None,
             trusted_guardian_reviewer,
             session_source,
+            session_provenance,
             history_mode,
             forked_from_thread_id,
             parent_thread_id,
@@ -810,6 +814,7 @@ impl SessionIo {
         let sub = Submission {
             id: id.clone(),
             op,
+            client_user_message_id: None,
             trace,
             parent_turn_id,
             root_turn_id,
@@ -849,6 +854,7 @@ impl SessionIo {
                 mode,
                 reply: reply_tx,
             },
+            client_user_message_id: None,
             trace,
             parent_turn_id: None,
             root_turn_id: None,
@@ -870,6 +876,7 @@ impl SessionIo {
                 thread_settings,
                 reply: reply_tx,
             },
+            client_user_message_id: None,
             trace,
             parent_turn_id: None,
             root_turn_id: None,
@@ -1165,10 +1172,62 @@ impl Session {
         }
     }
 
-    #[cfg(test)]
     pub(crate) async fn codex_home(&self) -> AbsolutePathBuf {
         let state = self.state.lock().await;
         state.session_configuration.codex_home().clone()
+    }
+
+    pub(crate) async fn auto_switch_accounts_on_rate_limit(&self) -> bool {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .auto_switch_accounts_on_rate_limit
+    }
+
+    pub(crate) async fn ensure_mcp_manager_for_execution_account(
+        self: &Arc<Self>,
+        turn_context: &Arc<TurnContext>,
+    ) -> Arc<TurnContext> {
+        if self
+            .services
+            .execution_account
+            .models_manager_auth_matches(turn_context.auth_manager.as_deref())
+        {
+            return Arc::clone(turn_context);
+        }
+        self.refresh_turn_context_for_execution_account(turn_context)
+            .await
+    }
+
+    pub(crate) async fn prepare_model_visible_history(
+        &self,
+        _turn_context: &TurnContext,
+    ) -> ContextManager {
+        self.clone_history().await
+    }
+
+    pub(crate) async fn record_usage_limit_hint_for_active_account(
+        &self,
+        plan_type: Option<codex_protocol::account::PlanType>,
+        resets_at: Option<chrono::DateTime<Utc>>,
+        reached_type: Option<codex_protocol::protocol::RateLimitReachedType>,
+    ) {
+        let Some((account_id, fallback_plan)) = self.services.execution_account.usage_context()
+        else {
+            return;
+        };
+        let codex_home = self.codex_home().await;
+        if let Err(err) = crate::account_usage::record_usage_limit_hint(
+            codex_home.as_path(),
+            &account_id,
+            plan_type.or(fallback_plan),
+            resets_at,
+            Utc::now(),
+            reached_type,
+        ) {
+            warn!(?err, "failed to record account usage limit hint");
+        }
     }
 
     pub(crate) fn subscribe_elicitation_pause_state(&self) -> watch::Receiver<bool> {
@@ -3182,7 +3241,7 @@ impl Session {
         }
         .or_cancel(cancellation_token)
         .await?;
-        let tool_router = turn::built_tools(
+        let (_all_mcp_tools, tool_router) = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
             &environments,
@@ -3331,7 +3390,7 @@ impl Session {
             state.replace_annotated_history(items, reference_context_item.clone());
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
-                world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));
+                world_state_item = Some(WorldStateItem::full(snapshot.clone().into_value()));
                 state.history.set_world_state_baseline(snapshot);
             }
         }
@@ -3579,9 +3638,7 @@ impl Session {
                 });
             separate_developer_sections.push(
                 crate::context::TokenBudgetContext::new(
-                    session_source
-                        .get_agent_path()
-                        .unwrap_or_else(codex_protocol::AgentPath::root),
+                    self.thread_id,
                     auto_compact_window_ids.first_window_id,
                     auto_compact_window_ids.previous_window_id,
                     auto_compact_window_ids.window_id,
@@ -3768,7 +3825,7 @@ impl Session {
                 .set_world_state_baseline(snapshot.clone());
             (
                 context_items,
-                Some(WorldStateItem::full(snapshot.into_object())),
+                Some(WorldStateItem::full(snapshot.into_value())),
             )
         } else {
             let (world_state_items, world_state_item) = {

@@ -1,7 +1,6 @@
 //! Context fragments injected into model input.
 
 mod approved_command_prefix_saved;
-mod apps_availability_update;
 mod apps_instructions;
 mod auto_review_awareness;
 mod available_plugins_instructions;
@@ -41,12 +40,7 @@ pub(crate) mod world_state;
 
 pub(crate) use approved_command_prefix_saved::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
 pub(crate) use approved_command_prefix_saved::ApprovedCommandPrefixSaved;
-pub(crate) use apps_availability_update::APPS_UPDATE_CLOSE_TAG;
-pub(crate) use apps_availability_update::APPS_UPDATE_OPEN_TAG;
-pub(crate) use apps_availability_update::AppsAvailability;
-pub(crate) use apps_availability_update::AppsAvailabilityUpdate;
 pub(crate) use apps_instructions::AppsInstructions;
-pub(crate) use auto_review_awareness::AutoReviewAwareness;
 pub(crate) use auto_review_awareness::build_auto_review_awareness;
 pub(crate) use available_plugins_instructions::AvailablePluginsInstructions;
 pub(crate) use codex_context_fragments::AdditionalContextDeveloperFragment;
@@ -77,10 +71,6 @@ pub use permissions_instructions::ApprovalPromptContext;
 pub use permissions_instructions::PermissionsInstructions;
 pub(crate) use personality_spec_instructions::PersonalitySpecInstructions;
 pub(crate) use plugin_instructions::PluginInstructions;
-pub(crate) use project_validation_failure::ProjectValidationFailure;
-// The cap is enforced inside the fragment; only the delegation tests read it back.
-#[cfg(test)]
-pub(crate) use realtime_delegation::REALTIME_DELEGATION_RENDERED_TOKEN_CAP;
 pub(crate) use realtime_delegation::RealtimeDelegation;
 pub(crate) use realtime_delegation::RealtimeDelegationSource;
 pub(crate) use realtime_end_instructions::RealtimeEndInstructions;
@@ -94,7 +84,6 @@ pub(crate) use token_budget_context::ContextWindowGuidance;
 pub(crate) use token_budget_context::TokenBudgetContext;
 pub(crate) use token_budget_context::TokenBudgetRemainingContext;
 pub(crate) use token_budget_context::TokenBudgetReminder;
-pub(crate) use token_budget_context::join_thread_hint_content;
 pub(crate) use turn_aborted::TurnAborted;
 pub(crate) use user_instructions::UserInstructions;
 pub(crate) use user_shell_command::UserShellCommand;

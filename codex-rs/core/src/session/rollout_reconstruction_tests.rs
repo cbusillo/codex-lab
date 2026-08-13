@@ -190,7 +190,7 @@ async fn record_initial_history_restores_world_state_baseline() {
         .map(RolloutItem::ResponseItem)
         .collect::<Vec<_>>();
     world_state_items.push(RolloutItem::WorldState(WorldStateItem::full(
-        world_state.snapshot().into_object(),
+        world_state.snapshot().into_value(),
     )));
     let rollout_items =
         completed_user_turn_rollout(turn_context.to_turn_context_item(), world_state_items);
@@ -2029,7 +2029,7 @@ async fn legacy_turn_context_environments_seed_the_world_state_baseline() {
         ..turn_context.to_turn_context_item()
     };
     let rollout_items = vec![
-        RolloutItem::ResponseItem(user_message("turn 1 user")),
+        RolloutItem::ResponseItem(user_message("turn 1 user").into()),
         RolloutItem::TurnContext(previous_context_item),
     ];
 
@@ -2065,7 +2065,7 @@ async fn legacy_turn_context_without_environments_keeps_the_history_fallback() {
         ..turn_context.to_turn_context_item()
     };
     let rollout_items = vec![
-        RolloutItem::ResponseItem(user_message("turn 1 user")),
+        RolloutItem::ResponseItem(user_message("turn 1 user").into()),
         RolloutItem::TurnContext(previous_context_item),
     ];
 

@@ -31,7 +31,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
-use core_test_support::test_codex::test_codex_with_agents;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -139,7 +138,7 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         config,
         thread_manager,
         ..
-    } = test_codex_with_agents()
+    } = test_codex()
         .with_pre_build_hook(write_global_instructions)
         .with_config(|config| {
             config.model = Some("gpt-5.2".to_string());
@@ -190,13 +189,10 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
     };
     expected_tools_names.extend([
         "update_plan",
-        "auto_review_disposition",
-        "code_bridge",
-        "browser",
         "request_user_input",
         "apply_patch",
         "view_image",
-        "agents",
+        "tool_search",
         "web_search",
     ]);
     let body0 = req1.single_request().body_json();
@@ -724,22 +720,27 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     });
     let expected_permissions_msg = body1["input"][0].clone();
     let body1_input = body1["input"].as_array().expect("input array");
-    let expected_context_update_msg = body2["input"][body1_input.len()].clone();
+    let expected_settings_update_msg = body2["input"][body1_input.len()].clone();
     assert_eq!(
-        expected_context_update_msg["role"].as_str(),
+        expected_settings_update_msg["role"].as_str(),
         Some("developer")
     );
     assert!(
         request2.has_message_with_input_texts("developer", |texts| {
             texts.iter().any(|text| text.contains("<model_switch>"))
         }),
-        "expected model switch section after model override: {expected_context_update_msg:?}"
+        "expected model switch section after model override: {expected_settings_update_msg:?}"
     );
+    let expected_permissions_update_msg = body2["input"][body1_input.len() + 1].clone();
     assert_ne!(
-        expected_context_update_msg, expected_permissions_msg,
+        expected_permissions_update_msg, expected_permissions_msg,
         "expected updated permissions message after per-turn override"
     );
-    let expected_env_msg_2 = body2["input"][body1_input.len() + 1].clone();
+    assert_eq!(
+        expected_permissions_update_msg["role"].as_str(),
+        Some("developer")
+    );
+    let expected_env_msg_2 = body2["input"][body1_input.len() + 2].clone();
     assert_eq!(expected_env_msg_2["role"].as_str(), Some("user"));
     let env_text = expected_env_msg_2["content"][0]["text"]
         .as_str()
@@ -747,7 +748,8 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     let expected_cwd = new_cwd.path().display().to_string();
     assert_default_env_context(env_text, &expected_cwd);
     let mut expected_body2 = body1_input.to_vec();
-    expected_body2.push(expected_context_update_msg);
+    expected_body2.push(expected_settings_update_msg);
+    expected_body2.push(expected_permissions_update_msg);
     expected_body2.push(expected_env_msg_2);
     expected_body2.push(expected_user_message_2);
     assert_eq_without_metadata_or_item_ids(
@@ -1012,22 +1014,27 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     assert_eq_without_metadata_or_item_ids(body1["input"].clone(), expected_input_1);
 
     let body1_input = body1["input"].as_array().expect("input array");
-    let expected_context_update_msg = body2["input"][body1_input.len()].clone();
+    let expected_settings_update_msg = body2["input"][body1_input.len()].clone();
     assert_eq!(
-        expected_context_update_msg["role"].as_str(),
+        expected_settings_update_msg["role"].as_str(),
         Some("developer")
     );
     assert!(
         request2.has_message_with_input_texts("developer", |texts| {
             texts.iter().any(|text| text.contains("<model_switch>"))
         }),
-        "expected model switch section after model override: {expected_context_update_msg:?}"
+        "expected model switch section after model override: {expected_settings_update_msg:?}"
     );
+    let expected_permissions_update_msg = body2["input"][body1_input.len() + 1].clone();
     assert_ne!(
-        expected_context_update_msg, expected_permissions_msg,
+        expected_permissions_update_msg, expected_permissions_msg,
         "expected updated permissions message after policy change"
     );
-    let expected_env_update_msg = body2["input"][body1_input.len() + 1].clone();
+    assert_eq!(
+        expected_permissions_update_msg["role"].as_str(),
+        Some("developer")
+    );
+    let expected_env_update_msg = body2["input"][body1_input.len() + 2].clone();
     assert_eq!(expected_env_update_msg["role"].as_str(), Some("user"));
     let expected_env_update_text = expected_env_update_msg["content"][0]["text"]
         .as_str()
@@ -1044,7 +1051,8 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         expected_permissions_msg,
         expected_contextual_user_msg_1,
         expected_user_message_1,
-        expected_context_update_msg,
+        expected_settings_update_msg,
+        expected_permissions_update_msg,
         expected_env_update_msg,
         expected_user_message_2,
     ]);

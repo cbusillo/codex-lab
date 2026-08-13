@@ -7,7 +7,6 @@ use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::HookEventsToml;
 use codex_config::HookHandlerConfig;
 use codex_config::HookStateToml;
@@ -23,6 +22,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::ConfiguredHandler;
+use super::ConfiguredHandlerKind;
 use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
@@ -31,6 +31,7 @@ use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
 use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
+use codex_protocol::protocol::HookExecutionMode;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -98,10 +99,7 @@ pub(crate) fn discover_handlers(
             policy,
         );
 
-        for layer in config_layer_stack.get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ false,
-        ) {
+        for layer in config_layer_stack.layers_low_to_high() {
             let (hook_source, is_managed) = hook_metadata_for_config_layer_source(&layer.name);
             let policy_path = config_toml_source_path(layer);
             let policy_source = HookHandlerSource {
@@ -369,7 +367,8 @@ fn load_toml_hooks_from_layer(
 
 fn config_toml_source_path(layer: &ConfigLayerEntry) -> AbsolutePathBuf {
     match &layer.name {
-        ConfigLayerSource::System { file }
+        ConfigLayerSource::PackagedDefaults { file }
+        | ConfigLayerSource::System { file }
         | ConfigLayerSource::User { file, .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromFile { file } => file.clone(),
         ConfigLayerSource::Project { dot_codex_folder } => layer
@@ -588,6 +587,7 @@ fn append_matcher_groups(
                         is_managed: source.is_managed,
                         current_hash,
                         trust_status,
+                        execution_mode: HookExecutionMode::Sync,
                     });
                     if enabled
                         && (source.bypass_hook_trust
@@ -599,7 +599,6 @@ fn append_matcher_groups(
                         handlers.push(ConfiguredHandler {
                             event_name,
                             matcher: matcher.map(ToOwned::to_owned),
-                            command,
                             timeout_sec,
                             status_message,
                             additional_context_limit: AdditionalContextLimit::from_config(
@@ -608,7 +607,11 @@ fn append_matcher_groups(
                             source_path: source.path.clone(),
                             source: source.source,
                             display_order: *display_order,
-                            env: source.env.clone(),
+                            kind: ConfiguredHandlerKind::Command {
+                                command,
+                                env: source.env.clone(),
+                                r#async: false,
+                            },
                         });
                     }
                     *display_order += 1;
@@ -619,6 +622,10 @@ fn append_matcher_groups(
                 )),
                 HookHandlerConfig::Agent {} => warnings.push(format!(
                     "skipping agent hook in {}: agent hooks are not supported yet",
+                    source.path.display()
+                )),
+                HookHandlerConfig::McpTool { .. } => warnings.push(format!(
+                    "skipping MCP tool hook in {}: MCP tool hooks are not supported yet",
                     source.path.display()
                 )),
             }
@@ -706,7 +713,9 @@ fn hook_trusted_hash(is_managed: bool, state: Option<&HookStateToml>) -> Option<
 
 fn hook_metadata_for_config_layer_source(source: &ConfigLayerSource) -> (HookSource, bool) {
     match source {
-        ConfigLayerSource::System { .. } => (HookSource::System, true),
+        ConfigLayerSource::PackagedDefaults { .. } | ConfigLayerSource::System { .. } => {
+            (HookSource::System, true)
+        }
         ConfigLayerSource::User { .. } => (HookSource::User, false),
         ConfigLayerSource::Project { .. } => (HookSource::Project, false),
         ConfigLayerSource::Mdm { .. } => (HookSource::Mdm, true),
@@ -745,6 +754,7 @@ fn hook_source_for_requirement_source(source: Option<&RequirementSource>) -> Hoo
 
 #[cfg(test)]
 mod tests {
+    use super::ConfiguredHandlerKind;
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
@@ -985,14 +995,17 @@ mod tests {
             vec![ConfiguredHandler {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
-                command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
                 source_path: source_path.clone(),
                 source: hook_source(),
                 display_order: 0,
-                env: std::collections::HashMap::new(),
+                kind: ConfiguredHandlerKind::Command {
+                    command: "echo hello".to_string(),
+                    env: std::collections::HashMap::new(),
+                    r#async: false,
+                },
             }]
         );
     }
@@ -1021,14 +1034,17 @@ mod tests {
             vec![ConfiguredHandler {
                 event_name: HookEventName::PreToolUse,
                 matcher: Some("^Bash$".to_string()),
-                command: "echo hello".to_string(),
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
                 source_path: source_path.clone(),
                 source: hook_source(),
                 display_order: 0,
-                env: std::collections::HashMap::new(),
+                kind: ConfiguredHandlerKind::Command {
+                    command: "echo hello".to_string(),
+                    env: std::collections::HashMap::new(),
+                    r#async: false,
+                },
             }]
         );
     }
@@ -1297,11 +1313,16 @@ mod tests {
         assert_eq!(warnings, Vec::<String>::new());
         assert_eq!(handlers.len(), 1);
         assert_eq!(
-            handlers[0].command,
-            if cfg!(windows) {
-                "echo windows"
-            } else {
-                "echo unix"
+            handlers[0].kind,
+            ConfiguredHandlerKind::Command {
+                command: if cfg!(windows) {
+                    "echo windows"
+                } else {
+                    "echo unix"
+                }
+                .to_string(),
+                env: std::collections::HashMap::new(),
+                r#async: false,
             }
         );
     }

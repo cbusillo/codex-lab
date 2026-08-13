@@ -16,7 +16,6 @@ pub use transport::RemoteControlDisabledByRequirements;
 pub use transport::RemoteControlEnableError;
 pub use transport::RemoteControlHandle;
 pub use transport::RemoteControlPolicy;
-pub use transport::RemoteControlReconnectUnavailable;
 pub use transport::RemoteControlStartConfig;
 pub use transport::RemoteControlStartupMode;
 pub use transport::RemoteControlUnavailable;

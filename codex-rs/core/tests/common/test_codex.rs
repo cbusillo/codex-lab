@@ -313,6 +313,7 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    home_backed_auth_manager: bool,
 }
 
 impl TestCodexBuilder {
@@ -326,6 +327,11 @@ impl TestCodexBuilder {
 
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    pub fn with_home_backed_auth_manager(mut self) -> Self {
+        self.home_backed_auth_manager = true;
         self
     }
 
@@ -652,7 +658,14 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
+        let auth_manager = if self.home_backed_auth_manager {
+            codex_core::test_support::auth_manager_from_auth_with_home(
+                auth.clone(),
+                config.codex_home.to_path_buf(),
+            )
+        } else {
+            codex_core::test_support::auth_manager_from_auth(auth.clone())
+        };
         let models_manager = self
             .models_manager
             .clone()
@@ -1287,7 +1300,14 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        home_backed_auth_manager: false,
     }
+}
+
+pub fn test_codex_with_agents() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.agents_enabled = true;
+    })
 }
 
 #[cfg(test)]

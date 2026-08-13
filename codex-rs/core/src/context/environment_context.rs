@@ -1,6 +1,3 @@
-use crate::context::world_state::environment_limits::MAX_RENDERED_NETWORK_DOMAINS;
-use crate::context::world_state::environment_limits::MAX_RENDERED_WORKSPACE_ROOTS;
-use crate::context::world_state::environment_limits::bound_entries;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -44,13 +41,10 @@ impl FileSystemContext {
         let permission_profile = permission_profile
             .clone()
             .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
-        let workspace_roots = bound_entries(
-            workspace_roots
-                .iter()
-                .map(PathUri::inferred_native_path_string)
-                .collect(),
-            MAX_RENDERED_WORKSPACE_ROOTS,
-        );
+        let workspace_roots = workspace_roots
+            .iter()
+            .map(PathUri::inferred_native_path_string)
+            .collect();
         let permission_profile = match permission_profile {
             PermissionProfile::Managed { file_system, .. } => {
                 FileSystemPermissionProfileContext::Managed(ManagedFileSystemContext::from(
@@ -228,8 +222,8 @@ pub(crate) struct NetworkContext {
 impl NetworkContext {
     pub(crate) fn new(allowed_domains: Vec<String>, denied_domains: Vec<String>) -> Self {
         Self {
-            allowed_domains: bound_entries(allowed_domains, MAX_RENDERED_NETWORK_DOMAINS),
-            denied_domains: bound_entries(denied_domains, MAX_RENDERED_NETWORK_DOMAINS),
+            allowed_domains,
+            denied_domains,
         }
     }
 

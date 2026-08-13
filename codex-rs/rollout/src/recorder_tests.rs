@@ -191,6 +191,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             originator: "test".to_string(),
             cli_version: "test".to_string(),
             source: SessionSource::Cli,
+            session_provenance: None,
             thread_source: None,
             agent_path: None,
             agent_nickname: None,
@@ -1692,6 +1693,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
             workspace_roots: None,
+            environments: None,
             current_date: None,
             timezone: None,
             approval_policy: AskForApproval::Never,

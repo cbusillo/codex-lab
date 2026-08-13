@@ -38,9 +38,9 @@ use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
 use codex_features::Feature;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::PersistContext;
 
 use super::SessionTask;
-use super::SessionTaskContext;
 use super::SessionTaskResult;
 use super::background_review_budget::BackgroundReviewBudgetGate;
 
@@ -95,7 +95,7 @@ impl SessionTask for ReviewTask {
 
     async fn run(
         self: Arc<Self>,
-        session: Arc<SessionTaskContext>,
+        session: Arc<Session>,
         ctx: Arc<TurnContext>,
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
@@ -110,7 +110,7 @@ impl SessionTask for ReviewTask {
         .await
     }
 
-    async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
+    async fn abort(&self, session: Arc<Session>, ctx: Arc<TurnContext>) {
         let should_exit_review_mode = self
             .persistence
             .as_ref()
@@ -119,7 +119,7 @@ impl SessionTask for ReviewTask {
             let codex_home = session.codex_home().await;
             if let Some(interruption) = persistence.save_interrupted(codex_home) {
                 send_interrupted_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     interruption,
                 )
@@ -127,20 +127,19 @@ impl SessionTask for ReviewTask {
             }
         }
         if should_exit_review_mode {
-            exit_review_mode(session.clone_session(), /*review_output*/ None, ctx).await;
+            exit_review_mode(session, /*review_output*/ None, ctx).await;
         }
     }
 }
 
 async fn run_review_task(
     persistence: Option<ReviewPersistenceContext>,
-    session: Arc<SessionTaskContext>,
+    session: Arc<Session>,
     ctx: Arc<TurnContext>,
     input: Vec<TurnInput>,
     cancellation_token: CancellationToken,
 ) -> SessionTaskResult {
     session
-        .session
         .services
         .session_telemetry
         .counter("codex.task.review", /*inc*/ 1, &[]);
@@ -157,7 +156,7 @@ async fn run_review_task(
         let codex_home = session.codex_home().await;
         if persistence.save_running(codex_home) {
             send_background_auto_review_status(
-                session.clone_session(),
+                Arc::clone(&session),
                 persistence,
                 BackgroundAutoReviewStatus::Running,
                 /*error_summary*/ None,
@@ -244,12 +243,7 @@ async fn run_review_task(
         .as_ref()
         .is_none_or(ReviewPersistenceContext::is_manual);
     if should_exit_review_mode && (!cancelled || execution.output.is_some()) {
-        exit_review_mode(
-            session.clone_session(),
-            execution.output.clone(),
-            ctx.clone(),
-        )
-        .await;
+        exit_review_mode(Arc::clone(&session), execution.output.clone(), ctx.clone()).await;
     }
     if let Some(persistence) = persistence {
         if let Some(output) = execution.output.as_ref() {
@@ -266,7 +260,7 @@ async fn run_review_task(
                 execution.usage,
             ) {
                 send_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     BackgroundAutoReviewStatus::Completed,
                     /*error_summary*/ None,
@@ -288,7 +282,7 @@ async fn run_review_task(
                 execution.usage,
             ) {
                 send_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     BackgroundAutoReviewStatus::Cancelled,
                     Some(error_summary),
@@ -298,7 +292,7 @@ async fn run_review_task(
         } else if cancelled {
             if let Some(interruption) = persistence.save_interrupted(codex_home) {
                 send_interrupted_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     interruption,
                 )
@@ -312,7 +306,7 @@ async fn run_review_task(
                 execution.usage,
             ) {
                 send_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     BackgroundAutoReviewStatus::Failed,
                     Some(error_summary),
@@ -328,7 +322,7 @@ async fn run_review_task(
                 execution.usage,
             ) {
                 send_background_auto_review_status(
-                    session.clone_session(),
+                    Arc::clone(&session),
                     &persistence,
                     BackgroundAutoReviewStatus::Failed,
                     Some(error_summary),
@@ -386,7 +380,7 @@ async fn send_background_auto_review_status(
 }
 
 async fn start_review_conversation(
-    session: Arc<SessionTaskContext>,
+    session: Arc<Session>,
     ctx: Arc<TurnContext>,
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
@@ -431,21 +425,17 @@ async fn start_review_conversation(
         .clone()
         .unwrap_or_else(|| ctx.model_info.slug.clone());
     sub_agent_config.model = Some(model);
-    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
-    if let Some(budget_gate) = budget_gate.clone() {
-        thread_extension_init.insert(budget_gate);
-    }
     run_codex_thread_one_shot(
         sub_agent_config,
-        session.auth_manager(),
+        Arc::clone(&session.services.auth_manager),
+        Arc::clone(&session.services.models_manager),
         input,
-        session.clone_session(),
+        Arc::clone(&session),
         ctx.clone(),
         cancellation_token,
         SubAgentSource::Review,
         /*final_output_json_schema*/ None,
         /*initial_history*/ None,
-        thread_extension_init,
     )
     .await
     .map(|(session, io)| ReviewConversation {
@@ -457,7 +447,7 @@ async fn start_review_conversation(
 }
 
 async fn process_review_events(
-    session: Arc<SessionTaskContext>,
+    session: Arc<Session>,
     ctx: Arc<TurnContext>,
     review_conversation: &ReviewConversation,
 ) -> Option<String> {
@@ -466,10 +456,7 @@ async fn process_review_events(
         match event.clone().msg {
             EventMsg::AgentMessage(_) => {
                 if let Some(prev) = prev_agent_message.take() {
-                    session
-                        .clone_session()
-                        .send_event(ctx.as_ref(), prev.msg)
-                        .await;
+                    session.send_event(ctx.as_ref(), prev.msg).await;
                 }
                 prev_agent_message = Some(event);
             }
@@ -489,10 +476,7 @@ async fn process_review_events(
                 return None;
             }
             other => {
-                session
-                    .clone_session()
-                    .send_event(ctx.as_ref(), other)
-                    .await;
+                session.send_event(ctx.as_ref(), other).await;
             }
         }
     }
@@ -501,7 +485,7 @@ async fn process_review_events(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_review_conversation(
-    session: Arc<SessionTaskContext>,
+    session: Arc<Session>,
     ctx: Arc<TurnContext>,
     review_conversation: &ReviewConversation,
     persistence: Option<&ReviewPersistenceContext>,
@@ -911,7 +895,9 @@ pub(crate) async fn exit_review_mode(
     // Review turns can run before any regular user turn, so explicitly
     // materialize rollout persistence. Do this after emitting review output so
     // file creation + git metadata collection cannot delay client-facing items.
-    session.ensure_rollout_materialized().await;
+    session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
 }
 
 #[cfg(test)]

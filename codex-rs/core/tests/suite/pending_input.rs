@@ -497,7 +497,7 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     const WAIT_CALL_ID: &str = "wait-call";
     const INITIAL_PROMPT: &str = "wait for an agent";
     const STEER_PROMPT: &str = "stop waiting and continue";
-    const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+    const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
@@ -514,7 +514,6 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
-            config.agents_enabled = true;
             config
                 .features
                 .enable(Feature::MultiAgentV2)

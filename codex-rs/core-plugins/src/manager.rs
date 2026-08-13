@@ -260,6 +260,32 @@ pub struct PluginListBackgroundTaskOptions {
     pub remote_catalog_cache_refresh_scopes: BTreeSet<RemotePluginScope>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginAuthContext {
+    auth_mode: Option<AuthMode>,
+}
+
+impl PluginAuthContext {
+    pub fn from_auth(auth: Option<&CodexAuth>) -> Self {
+        Self {
+            auth_mode: auth.map(CodexAuth::api_auth_mode),
+        }
+    }
+
+    pub fn from_auth_mode(auth_mode: Option<AuthMode>) -> Self {
+        Self { auth_mode }
+    }
+
+    fn auth_mode(self) -> Option<AuthMode> {
+        self.auth_mode
+    }
+}
+
+pub struct PluginLoadSnapshot {
+    pub outcome: PluginLoadOutcome,
+    pub skill_snapshots: Option<SkillRootSnapshots<PluginSkillRoot>>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct NonCuratedCacheRefreshRequest {
     roots: Vec<AbsolutePathBuf>,
@@ -594,8 +620,23 @@ impl PluginsManager {
         }
     }
 
+    fn current_auth_context(&self) -> PluginAuthContext {
+        PluginAuthContext::from_auth_mode(self.auth_mode())
+    }
+
     fn remote_global_catalog_active(&self, config: &PluginsConfigInput) -> bool {
-        config.remote_plugin_enabled && self.auth_mode().is_some_and(AuthMode::uses_codex_backend)
+        self.remote_global_catalog_active_for_auth(config, self.current_auth_context())
+    }
+
+    fn remote_global_catalog_active_for_auth(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+    ) -> bool {
+        config.remote_plugin_enabled
+            && auth_context
+                .auth_mode()
+                .is_some_and(AuthMode::uses_codex_backend)
     }
 
     /// Starts the local curated marketplace sync when the remote catalog is unavailable.
@@ -632,6 +673,25 @@ impl PluginsManager {
 
     pub async fn plugins_for_config(&self, config: &PluginsConfigInput) -> PluginLoadOutcome {
         self.plugins_for_config_with_force_reload(config, /*force_reload*/ false)
+            .await
+    }
+
+    pub async fn plugins_for_config_with_auth_context(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+    ) -> PluginLoadOutcome {
+        self.plugin_snapshot_for_config_with_auth_context(config, auth_context)
+            .await
+            .outcome
+    }
+
+    pub async fn plugin_snapshot_for_config_with_auth_context(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+    ) -> PluginLoadSnapshot {
+        self.load_plugin_snapshot(config, auth_context, /*force_reload*/ false)
             .await
     }
 
@@ -672,26 +732,52 @@ impl PluginsManager {
         config: &PluginsConfigInput,
         force_reload: bool,
     ) -> PluginLoadOutcome {
+        self.load_plugin_snapshot(config, self.current_auth_context(), force_reload)
+            .await
+            .outcome
+    }
+
+    async fn load_plugin_snapshot(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+        force_reload: bool,
+    ) -> PluginLoadSnapshot {
         if !config.plugins_enabled {
-            return PluginLoadOutcome::default();
+            return PluginLoadSnapshot {
+                outcome: PluginLoadOutcome::default(),
+                skill_snapshots: None,
+            };
         }
 
-        let remote_global_catalog_active = self.remote_global_catalog_active(config);
+        let remote_global_catalog_active =
+            self.remote_global_catalog_active_for_auth(config, auth_context);
         let cache_key = PluginLoadCacheKey::from_config(
             config,
             self.codex_home.as_path(),
             remote_global_catalog_active,
         );
-        if !force_reload && let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
-            return self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id);
+        if !force_reload && let Some(cached) = self.cached_loaded_plugin_entry(&cache_key) {
+            return Self::resolve_loaded_plugins_for_auth(
+                cached,
+                auth_context,
+                &config.model_provider_id,
+            );
         }
 
         let Ok(_load_permit) = self.loaded_plugins_load_semaphore.acquire().await else {
             warn!("plugin load semaphore closed");
-            return PluginLoadOutcome::default();
+            return PluginLoadSnapshot {
+                outcome: PluginLoadOutcome::default(),
+                skill_snapshots: None,
+            };
         };
-        if !force_reload && let Some(plugins) = self.cached_loaded_plugins(&cache_key) {
-            return self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id);
+        if !force_reload && let Some(cached) = self.cached_loaded_plugin_entry(&cache_key) {
+            return Self::resolve_loaded_plugins_for_auth(
+                cached,
+                auth_context,
+                &config.model_provider_id,
+            );
         }
         let cache_generation = self.loaded_plugins_cache_generation();
         let plugin_skill_snapshots = new_plugin_skill_snapshots();
@@ -708,19 +794,28 @@ impl PluginsManager {
         log_plugin_load_errors(&plugins);
         self.cache_loaded_plugins_if_current(
             cache_generation,
-            cache_key,
+            cache_key.clone(),
             plugins.clone(),
-            plugin_skill_snapshots,
+            plugin_skill_snapshots.clone(),
         );
-        self.resolve_loaded_plugins_for_auth(plugins, &config.model_provider_id)
+        Self::resolve_loaded_plugins_for_auth(
+            LoadedPluginsCacheEntry {
+                key: cache_key,
+                plugins,
+                plugin_skill_snapshots,
+            },
+            auth_context,
+            &config.model_provider_id,
+        )
     }
 
     fn resolve_loaded_plugins_for_auth(
-        &self,
-        mut plugins: Vec<LoadedPlugin>,
+        cached: LoadedPluginsCacheEntry,
+        auth_context: PluginAuthContext,
         model_provider_id: &str,
-    ) -> PluginLoadOutcome {
-        let auth_mode = self.auth_mode();
+    ) -> PluginLoadSnapshot {
+        let auth_mode = auth_context.auth_mode();
+        let mut plugins = cached.plugins;
         let target_curated_marketplace = target_curated_marketplace(auth_mode, model_provider_id);
         plugins.retain(|plugin| {
             plugin_is_eligible_for_target_marketplace(
@@ -737,7 +832,10 @@ impl PluginsManager {
                 plugin_active,
             );
         }
-        PluginLoadOutcome::from_plugins(plugins)
+        PluginLoadSnapshot {
+            outcome: PluginLoadOutcome::from_plugins(plugins),
+            skill_snapshots: Some(cached.plugin_skill_snapshots),
+        }
     }
 
     pub fn clear_cache(&self) {
@@ -808,6 +906,7 @@ impl PluginsManager {
         .await
     }
 
+    #[cfg(test)]
     fn cached_loaded_plugins(&self, key: &PluginLoadCacheKey) -> Option<Vec<LoadedPlugin>> {
         self.loaded_plugins_cache
             .read()
@@ -816,6 +915,19 @@ impl PluginsManager {
             .as_ref()
             .filter(|cached| cached.key == *key)
             .map(|cached| cached.plugins.clone())
+    }
+
+    fn cached_loaded_plugin_entry(
+        &self,
+        key: &PluginLoadCacheKey,
+    ) -> Option<LoadedPluginsCacheEntry> {
+        self.loaded_plugins_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry
+            .as_ref()
+            .filter(|cached| cached.key == *key)
+            .cloned()
     }
 
     fn loaded_plugins_cache_generation(&self) -> u64 {

@@ -7,9 +7,6 @@ outputs:
   cargo-target-dir:
     description: Filesystem path used for Cargo's target directory.
     value: ${{ steps.configure_ci_build_paths.outputs.cargo-target-dir }}
-  cache-scope:
-    description: Stable cache namespace for this runner instance.
-    value: ${{ steps.configure_ci_build_paths.outputs.cache-scope }}
 
 runs:
   using: composite
@@ -25,46 +22,13 @@ runs:
     - name: Configure CI build root (Unix)
       if: runner.os != 'Windows'
       shell: bash
-      env:
-        RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        RUNNER_NAME_VALUE: ${{ runner.name }}
-        RUNNER_OS_NAME: ${{ runner.os }}
-      run: |
-        if [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" && "${RUNNER_OS_NAME}" == "macOS" ]]; then
-          ci_build_root="${RUNNER_TEMP}/codex-ci"
-        elif [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]; then
-          runner_slug="$(printf '%s' "${RUNNER_NAME_VALUE:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
-          runner_slug="${runner_slug#-}"
-          runner_slug="${runner_slug%-}"
-          [[ -n "$runner_slug" ]] || runner_slug="unnamed"
-          ci_build_root="$HOME/.cache/codex-ci/$runner_slug"
-        else
-          ci_build_root="$HOME/.cache/codex-ci"
-        fi
-        mkdir -p "${ci_build_root}"
-        echo "CI_BUILD_ROOT=${ci_build_root}" >> "$GITHUB_ENV"
+      run: echo "CI_BUILD_ROOT=$HOME/.cache/codex-ci" >> "$GITHUB_ENV"
 
     - name: Configure CI build paths
       id: configure_ci_build_paths
       shell: bash
-      env:
-        RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        RUNNER_NAME_VALUE: ${{ runner.name }}
-        RUNNER_OS_NAME: ${{ runner.os }}
       run: |
         set -euo pipefail
-        runner_slug="$(printf '%s' "${RUNNER_NAME_VALUE:-unnamed}" | tr -cs 'A-Za-z0-9._-' '-')"
-        runner_slug="${runner_slug#-}"
-        runner_slug="${runner_slug%-}"
-        [[ -n "$runner_slug" ]] || runner_slug="unnamed"
-        if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" ]]; then
-          cache_scope="self-hosted-$runner_slug"
-          runner_checksum="$(printf '%s' "$runner_slug" | cksum | awk '{ print $1 }')"
-        else
-          cache_scope="github-hosted"
-          runner_checksum=""
-        fi
-
         # setup-bazel passes output_base explicitly, so keep both it and the
         # user root under the shared build root. Keep these directory names tiny
         # on every platform so Windows Bazel paths do not overflow argv or
@@ -72,31 +36,9 @@ runs:
         bazel_output_base="$CI_BUILD_ROOT/o"
         bazel_output_user_root="$CI_BUILD_ROOT/b"
         bazel_repository_cache="$CI_BUILD_ROOT/bazel-repository-cache"
-        # Repository contents are keyed to this job and are never reused by a
-        # later run. Keep them under the runner-owned temporary directory so
-        # self-hosted Linux jobs cannot accumulate one persistent tree per run.
-        bazel_repo_contents_cache="$RUNNER_TEMP/bazel-repo-contents-cache"
+        bazel_repo_contents_cache="$CI_BUILD_ROOT/bazel-repo-contents-cache-$GITHUB_RUN_ID-$GITHUB_JOB"
         cargo_target_dir="$CI_BUILD_ROOT/cargo-target"
-        if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
-          # The Dev Drive is recreated for each Windows job and keeps temp paths
-          # short while avoiding antivirus overhead.
-          tmp="$CI_BUILD_ROOT/tmp"
-        elif [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" == "macOS" ]]; then
-          job_tmp="$RUNNER_TEMP/codex-ci-tmp"
-          short_tmp="/tmp/codex-ci-$runner_checksum"
-          mkdir -p "$job_tmp"
-          if [[ -e "$short_tmp" && ! -L "$short_tmp" ]]; then
-            echo "Refusing to replace non-symlink CI temp path: $short_tmp" >&2
-            exit 1
-          fi
-          ln -sfn "$job_tmp" "$short_tmp"
-          tmp="$short_tmp"
-        else
-          # Test extraction trees and other job-scoped files must not share the
-          # persistent Cargo/Bazel cache root. GitHub Runner clears RUNNER_TEMP
-          # between jobs, including after cancellation.
-          tmp="$RUNNER_TEMP/codex-ci-tmp"
-        fi
+        tmp="$CI_BUILD_ROOT/tmp"
 
         build_dirs=(
           "$bazel_output_base"
@@ -108,7 +50,6 @@ runs:
         )
         mkdir -p "${build_dirs[@]}"
         echo "bazel-output-base=$bazel_output_base" >> "$GITHUB_OUTPUT"
-        echo "cache-scope=$cache_scope" >> "$GITHUB_OUTPUT"
         echo "cargo-target-dir=$cargo_target_dir" >> "$GITHUB_OUTPUT"
 
         {
@@ -117,19 +58,8 @@ runs:
           echo "BAZEL_REPOSITORY_CACHE=$bazel_repository_cache"
           echo "BAZEL_REPO_CONTENTS_CACHE=$bazel_repo_contents_cache"
           echo "CARGO_TARGET_DIR=$cargo_target_dir"
-          echo "CI_CACHE_SCOPE=$cache_scope"
           echo "TEMP=$tmp"
           echo "TMP=$tmp"
-          echo "TMPDIR=$tmp"
-          if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" != "Windows" ]]; then
-            echo "SCCACHE_SERVER_PORT=$((20000 + runner_checksum % 10000))"
-            if [[ "$RUNNER_OS_NAME" == "macOS" ]]; then
-              sccache_socket_dir="$HOME/.cache/codex-sccache"
-              mkdir -p "$sccache_socket_dir"
-              chmod 700 "$sccache_socket_dir"
-              echo "SCCACHE_SERVER_UDS=$sccache_socket_dir/$runner_checksum.sock"
-            fi
-          fi
         } >> "$GITHUB_ENV"
 
     - name: Prefer the Git CLI for Cargo git dependencies
@@ -149,16 +79,11 @@ runs:
     - name: Make DotSlash available in PATH (Unix)
       if: runner.os != 'Windows'
       shell: bash
-      env:
-        RUNNER_ENVIRONMENT: ${{ runner.environment }}
       run: |
-        dotslash_path="$(command -v dotslash)"
         if [[ -w /usr/local/bin ]]; then
-          cp "${dotslash_path}" /usr/local/bin
-        elif [[ "${RUNNER_ENVIRONMENT}" == "github-hosted" ]]; then
-          sudo cp "${dotslash_path}" /usr/local/bin
+          cp "$(which dotslash)" /usr/local/bin
         else
-          echo "::notice::Skipping /usr/local/bin DotSlash copy on self-hosted runner without passwordless sudo"
+          sudo cp "$(which dotslash)" /usr/local/bin
         fi
 
     - name: Make DotSlash available in PATH (Windows)

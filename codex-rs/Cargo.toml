@@ -45,6 +45,7 @@ members = [
     "shell-escalation",
     "skills",
     "core",
+    "core-skills",
     "core-api",
     "core-plugins",
     "diagnostics",
@@ -197,6 +198,7 @@ codex-agent-extension = { path = "ext/agent" }
 codex-connectors-extension = { path = "ext/connectors" }
 codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
+codex-core-skills = { path = "core-skills" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }
 codex-diagnostics = { path = "diagnostics" }
@@ -265,7 +267,6 @@ codex-thread-store = { path = "thread-store" }
 codex-tools = { path = "tools" }
 codex-tui = { path = "tui" }
 codex-uds = { path = "uds" }
-codex-version = { path = "version" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
 codex-utils-audio = { path = "utils/audio" }
@@ -290,6 +291,7 @@ codex-utils-stream-parser = { path = "utils/stream-parser" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-template = { path = "utils/template" }
 codex-v8-poc = { path = "v8-poc" }
+codex-version = { path = "version" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
 core_test_support = { path = "core/tests/common" }
@@ -316,9 +318,9 @@ bitflags = "2.13.1"
 bm25 = "2.3.2"
 bytes = "1.10.1"
 chardetng = "0.1.17"
+chrono = "0.4.43"
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 chromiumoxide_types = "0.7"
-chrono = "0.4.43"
 clap = "4"
 clap_complete = "4"
 clatter = { version = "2.2.0", default-features = false, features = [
@@ -331,8 +333,8 @@ clatter = { version = "2.2.0", default-features = false, features = [
 ] }
 color-eyre = "0.6.3"
 constant_time_eq = "0.3.1"
-crc32fast = "1.5.0"
 crossbeam-channel = "0.5.15"
+crc32fast = "1.5.0"
 crypto_box = { version = "0.9.1", features = ["seal"] }
 crossterm = "0.29.0"
 ctor = "0.6.3"
@@ -348,8 +350,8 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
 flate2 = "1.1.8"
-futures = { version = "0.3", default-features = false }
 fs2 = "0.4"
+futures = { version = "0.3", default-features = false }
 gethostname = "1.1.0"
 gix = { version = "0.81.0", default-features = false, features = ["sha1"] }
 glob = "0.3"
@@ -587,11 +589,6 @@ strip = false
 # Balance parallel release code generation against binary size.
 codegen-units = 4
 
-[profile.ci-app]
-inherits = "release"
-codegen-units = 16
-lto = "off"
-
 [profile.profiling]
 inherits = "release"
 debug = "full"
@@ -603,34 +600,6 @@ strip = false
 debug = "limited"
 inherits = "test"
 opt-level = 0
-
-# Image resize and codec work is unusably slow unoptimized: at opt-level 0 the
-# image preparation tests exceed the 60s nextest limit on Windows CI. Optimize
-# the enabled image and compression crates; unspecified packages keep the
-# fast-compiling default.
-[profile.ci-test.package.image]
-opt-level = 2
-
-[profile.ci-test.package.png]
-opt-level = 2
-
-[profile.ci-test.package.fdeflate]
-opt-level = 2
-
-[profile.ci-test.package.flate2]
-opt-level = 2
-
-[profile.ci-test.package.miniz_oxide]
-opt-level = 2
-
-[profile.ci-test.package.zune-jpeg]
-opt-level = 2
-
-[profile.ci-test.package.image-webp]
-opt-level = 2
-
-[profile.ci-test.package.gif]
-opt-level = 2
 
 [patch.crates-io]
 # Uncomment to debug local changes.

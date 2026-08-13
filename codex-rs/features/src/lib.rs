@@ -179,8 +179,6 @@ pub enum Feature {
     Mcp20260728,
     /// Removed compatibility flag for the legacy Apps MCP path override.
     AppsMcpPathOverride,
-    /// Removed compatibility flag for the former child AGENTS.md guidance experiment.
-    ChildAgentsMd,
     /// Removed compatibility flag retained as a no-op now that tool_search is always enabled.
     ToolSearch,
     /// Removed compatibility flag. MCP tools are always deferred when tool_search is available.
@@ -432,9 +430,7 @@ impl Features {
     }
 
     pub fn disable(&mut self, f: Feature) -> &mut Self {
-        if f != Feature::MultiAgentV2 {
-            self.enabled.remove(&f);
-        }
+        self.enabled.remove(&f);
         self
     }
 
@@ -520,9 +516,6 @@ impl Features {
                     continue;
                 }
                 "tool_search" | "tool_search_always_defer_mcp_tools" | "apps_mcp_path_override" => {
-                    continue;
-                }
-                "child_agents_md" => {
                     continue;
                 }
                 "image_detail_original" | "resize_all_images" | "item_ids" => {
@@ -1083,7 +1076,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::MultiAgentMode,
@@ -1124,12 +1117,6 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::AppsMcpPathOverride,
         key: "apps_mcp_path_override",
-        stage: Stage::Removed,
-        default_enabled: false,
-    },
-    FeatureSpec {
-        id: Feature::ChildAgentsMd,
-        key: "child_agents_md",
         stage: Stage::Removed,
         default_enabled: false,
     },

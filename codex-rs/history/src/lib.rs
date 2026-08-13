@@ -342,6 +342,11 @@ impl InitialHistory {
         Some((meta.source.clone(), meta.thread_source.clone()))
     }
 
+    pub fn get_session_provenance(&self) -> Option<codex_protocol::protocol::SessionProvenance> {
+        self.get_session_meta()
+            .and_then(|meta| meta.session_provenance.clone())
+    }
+
     pub fn get_resumed_thread_source(&self) -> Option<ThreadSource> {
         self.get_resumed_session_meta()
             .and_then(|meta| meta.thread_source.clone())

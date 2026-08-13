@@ -36,6 +36,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeConversationListVoicesResponseEvent;
 use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::ReviewPersistence;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -472,6 +473,7 @@ pub async fn review(
     config: &Arc<Config>,
     sub_id: String,
     review_request: ReviewRequest,
+    persistence: Option<ReviewPersistence>,
 ) {
     let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
@@ -485,6 +487,7 @@ pub async fn review(
                 turn_context.clone(),
                 sub_id,
                 resolved,
+                persistence,
             )
             .await;
         }
@@ -649,8 +652,11 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
-                Op::Review { review_request } => {
-                    review(&sess, &config, sub.id.clone(), review_request).await;
+                Op::Review {
+                    review_request,
+                    persistence,
+                } => {
+                    review(&sess, &config, sub.id.clone(), review_request, persistence).await;
                     false
                 }
                 Op::ApproveGuardianDeniedAction { event } => {

@@ -90,10 +90,6 @@ const HANDOFF_OUT_QUEUE_CAPACITY: usize = 64;
 const OUTPUT_EVENTS_QUEUE_CAPACITY: usize = 256;
 const REALTIME_STARTUP_CONTEXT_TOKEN_BUDGET: usize = 5_300;
 const REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET: usize = 1_000;
-/// Budget for the `<input>` half of a `<realtime_delegation>` fragment.
-const REALTIME_DELEGATION_INPUT_TOKEN_BUDGET: usize = 2_000;
-/// Budget for the `<transcript_delta>` half of a `<realtime_delegation>` fragment.
-const REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET: usize = 2_000;
 const REALTIME_INITIAL_ITEMS_MAX_COUNT: usize = 128;
 const REALTIME_INITIAL_ITEMS_MAX_TOKENS: usize = 8_192;
 const REALTIME_MODE_INSTRUCTIONS_MAX_TOKENS: usize = 8_192;
@@ -1614,24 +1610,12 @@ fn realtime_delegation_from_handoff(handoff: &RealtimeHandoffRequested) -> Optio
     ))
 }
 
-/// Both realtime delegation paths (handoff and end-of-session transcript-tail flush) inject
-/// verbatim realtime transcript text into model-visible history. Transcript length grows with
-/// session duration, so bound each part with the shared realtime token-budget helper before the
-/// fragment is built.
 fn wrap_realtime_delegation_input(
     input: &str,
     transcript_delta: Option<&str>,
     source: RealtimeDelegationSource,
 ) -> String {
-    let input =
-        truncate_realtime_text_to_token_budget(input, REALTIME_DELEGATION_INPUT_TOKEN_BUDGET);
-    let transcript_delta = transcript_delta.map(|transcript_delta| {
-        truncate_realtime_text_to_token_budget(
-            transcript_delta,
-            REALTIME_DELEGATION_TRANSCRIPT_DELTA_TOKEN_BUDGET,
-        )
-    });
-    RealtimeDelegation::new(&input, transcript_delta.as_deref(), source).render()
+    RealtimeDelegation::new(input, transcript_delta, source).render()
 }
 
 fn realtime_api_key(auth: Option<&CodexAuth>, provider: &ModelProviderInfo) -> CodexResult<String> {

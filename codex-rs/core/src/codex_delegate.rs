@@ -95,6 +95,7 @@ pub(crate) async fn run_codex_thread_interactive(
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(subagent_source.clone()),
+        session_provenance: None,
         forked_from_thread_id,
         parent_thread_id: Some(parent_session.thread_id),
         thread_source: Some(ThreadSource::Subagent),
@@ -231,6 +232,7 @@ pub(crate) async fn run_codex_thread_one_shot(
                     .send(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
+                        client_user_message_id: None,
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,

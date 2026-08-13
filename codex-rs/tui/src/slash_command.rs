@@ -59,7 +59,6 @@ pub enum SlashCommand {
     Mcp,
     Apps,
     Plugins,
-    Login,
     Logout,
     Quit,
     Exit,
@@ -70,7 +69,6 @@ pub enum SlashCommand {
     Stop,
     Clear,
     Personality,
-    Settings,
     TestApproval,
     #[strum(serialize = "subagents")]
     MultiAgents,
@@ -122,7 +120,6 @@ impl SlashCommand {
                 "include current selection, open files, and other context from your IDE"
             }
             SlashCommand::Personality => "choose a communication style for Codex",
-            SlashCommand::Settings => "configure accounts and third-party agents",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
@@ -142,7 +139,6 @@ impl SlashCommand {
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
-            SlashCommand::Login => "choose the account for this session",
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
@@ -171,7 +167,6 @@ impl SlashCommand {
                 | SlashCommand::Mcp
                 | SlashCommand::Export
                 | SlashCommand::Raw
-                | SlashCommand::Login
                 | SlashCommand::Usage
                 | SlashCommand::Pets
                 | SlashCommand::Side
@@ -217,7 +212,6 @@ impl SlashCommand {
             | SlashCommand::Plan
             | SlashCommand::Clear
             | SlashCommand::Logout
-            | SlashCommand::Login
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
@@ -250,7 +244,6 @@ impl SlashCommand {
             | SlashCommand::Exit
             | SlashCommand::Side
             | SlashCommand::Btw => true,
-            SlashCommand::Settings => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Agent | SlashCommand::MultiAgents => true,

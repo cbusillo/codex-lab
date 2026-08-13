@@ -242,6 +242,7 @@ async fn apply_role_regenerates_model_instructions_when_personality_changes() {
                 description: None,
                 config_file: Some(role_path),
                 nickname_candidates: None,
+                backend: None,
             },
         );
         config.base_instructions = Some("inherited instructions".to_string());

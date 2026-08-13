@@ -45,42 +45,6 @@ use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
 use assert_matches::assert_matches;
 
-#[tokio::test]
-async fn pinned_candidate_warning_is_emitted_as_client_local_history_cell() -> Result<()> {
-    let codex_home = tempdir()?;
-    let mut config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .build()
-        .await?;
-    let warning = "Pinned Codex Lab candidate abc (clean) is older than local source def (clean).";
-    config.startup_warnings.push(warning.to_string());
-    assert!(
-        crate::app_server_config_warnings(&config).is_empty(),
-        "launcher-owned warning must not also arrive through embedded app-server notifications"
-    );
-    let (app_event_tx, mut app_event_rx) = unbounded_channel();
-    let app_event_tx = AppEventSender::new(app_event_tx);
-
-    emit_pinned_candidate_warning(&app_event_tx, &config);
-
-    let cell = match app_event_rx.try_recv() {
-        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
-        other => panic!("expected InsertHistoryCell event, got {other:?}"),
-    };
-    let rendered = cell
-        .display_lines(/*width*/ 120)
-        .into_iter()
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains(warning));
-    assert!(
-        app_event_rx.try_recv().is_err(),
-        "warning should be emitted exactly once"
-    );
-    Ok(())
-}
-
 use crate::app_command::AppCommand as Op;
 use crate::app_event::ConsolidationScrollbackReflow;
 use crate::diff_model::FileChange;
@@ -1945,9 +1909,10 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 app.attach_live_thread_for_selection(&mut app_server, child_thread_id)
                     .await?
             );
-            // The server reports both recorded versions as V2-capable in this fork, so even a
-            // V1-recorded child remains parent-owned and view-only after attachment.
-            assert!(app.agent_navigation.is_parent_owned(child_thread_id));
+            assert_eq!(
+                app.agent_navigation.is_parent_owned(child_thread_id),
+                multi_agent_version == MultiAgentVersion::V2
+            );
             child_thread_ids.push(child_thread_id);
         }
 
@@ -1974,7 +1939,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 is_closed: false,
             })
         );
-        assert!(app.agent_navigation.is_parent_owned(child_thread_ids[0]));
+        assert!(!app.agent_navigation.is_parent_owned(child_thread_ids[0]));
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -1982,14 +1947,11 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .await?;
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
-            .restore_user_message_to_composer("server capability stays view-only".into());
-        let draft = app.chat_widget.composer_text_with_pending();
+            .restore_user_message_to_composer("v1 remains writable".into());
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
         assert!(
-            !std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            std::iter::from_fn(|| app_event_rx.try_recv().ok())
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
@@ -2341,32 +2303,6 @@ async fn update_memory_settings_persists_and_updates_widget_config() -> Result<(
             && !memories.contains_key("no_memories_if_mcp_or_web_search"),
         "the TUI menu should not write the external-context memory setting"
     );
-    app_server.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn update_automatic_validation_persists_and_updates_widget_config() -> Result<()> {
-    let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
-    let codex_home = tempdir()?;
-    app.config.codex_home = codex_home.path().to_path_buf().abs();
-    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-
-    Box::pin(app.update_automatic_validation_enabled(&mut app_server, /*enabled*/ true)).await;
-
-    assert!(app.config.validation.groups.functional);
-    assert!(app.chat_widget.config_ref().validation.groups.functional);
-
-    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    let config_value = toml::from_str::<TomlValue>(&config)?;
-    let functional = config_value
-        .as_table()
-        .and_then(|table| table.get("validation"))
-        .and_then(TomlValue::as_table)
-        .and_then(|validation| validation.get("groups"))
-        .and_then(TomlValue::as_table)
-        .and_then(|groups| groups.get("functional"));
-    assert_eq!(functional, Some(&TomlValue::Boolean(true)));
     app_server.shutdown().await?;
     Ok(())
 }
@@ -3607,7 +3543,6 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 cwd: test_path_buf("/tmp/agent").abs(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
-                session_provenance: None,
                 can_accept_direct_input: None,
                 thread_source: None,
                 agent_nickname: Some("Robie".to_string()),
@@ -3706,7 +3641,6 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 cwd: test_path_buf("/tmp/agent").abs(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Unknown,
-                session_provenance: None,
                 can_accept_direct_input: None,
                 thread_source: None,
                 agent_nickname: Some("Robie".to_string()),
@@ -3772,7 +3706,6 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         cwd: test_path_buf("/tmp/read").abs(),
         cli_version: "0.0.0".to_string(),
         source: codex_app_server_protocol::SessionSource::Unknown,
-        session_provenance: None,
         can_accept_direct_input: None,
         thread_source: None,
         agent_nickname: None,
@@ -4892,8 +4825,6 @@ async fn make_test_app() -> App {
         feedback_audience: FeedbackAudience::External,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
-        arg0_paths: Arg0DispatchPaths::default(),
-        strict_config: false,
         pending_update_action: None,
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
@@ -4909,17 +4840,10 @@ async fn make_test_app() -> App {
         primary_session_configured: None,
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
-        pending_auto_review_summary_fetches: HashSet::new(),
         pending_startup_thread_start: false,
         rate_limit_hard_stop_generation: 0,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
-        pending_direct_login_add_account: None,
-        direct_login_add_account_attempt_id: 0,
-        pending_login_add_account_id: None,
-        completed_login_add_account_id: None,
-        pending_auth_profile_login: None,
-        agent_settings: Default::default(),
     }
 }
 
@@ -4974,8 +4898,6 @@ async fn make_test_app_with_channels() -> (
             feedback_audience: FeedbackAudience::External,
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             app_server_target: crate::AppServerTarget::Embedded,
-            arg0_paths: Arg0DispatchPaths::default(),
-            strict_config: false,
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
@@ -4991,17 +4913,10 @@ async fn make_test_app_with_channels() -> (
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
-            pending_auto_review_summary_fetches: HashSet::new(),
             pending_startup_thread_start: false,
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
-            pending_direct_login_add_account: None,
-            direct_login_add_account_attempt_id: 0,
-            pending_login_add_account_id: None,
-            completed_login_add_account_id: None,
-            pending_auth_profile_login: None,
-            agent_settings: Default::default(),
         },
         rx,
         op_rx,
@@ -6671,13 +6586,7 @@ async fn prompt_edit_forks_before_selected_prompt_and_preserves_source() -> Resu
                 time_to_first_token_ms: None,
             })),
         ] {
-            codex_rollout::append_rollout_item_to_path(
-                config.codex_home.as_path(),
-                codex_rollout::RolloutCompressionMode::Disabled,
-                &source_path,
-                &item,
-            )
-            .await?;
+            codex_rollout::append_rollout_item_to_path(&source_path, &item).await?;
         }
     }
 

@@ -54,7 +54,6 @@ use ratatui::text::Line;
 use std::time::Duration;
 use std::time::Instant;
 
-mod account_switch_settings_view;
 mod action_required_title;
 mod app_link_view;
 mod approval_overlay;
@@ -65,8 +64,6 @@ mod status_line_setup;
 mod status_line_style;
 mod status_surface_preview;
 mod title_setup;
-pub(crate) use account_switch_settings_view::ACCOUNT_SWITCH_SETTINGS_VIEW_ID;
-pub(crate) use account_switch_settings_view::AccountSwitchSettingsView;
 pub(crate) use action_required_title::ACTION_REQUIRED_PREVIEW_PREFIX;
 pub(crate) use action_required_title::build_action_required_title_text;
 pub(crate) use app_link_view::AppLinkElicitationTarget;
@@ -111,7 +108,6 @@ mod experimental_features_view;
 mod file_search_popup;
 mod footer;
 mod list_selection_view;
-mod login_accounts_view;
 mod memories_settings_view;
 mod mentions_v2;
 pub(crate) mod prompt_args;
@@ -132,11 +128,6 @@ pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
-pub(crate) use login_accounts_view::LOGIN_ADD_ACCOUNT_VIEW_ID;
-pub(crate) use login_accounts_view::LoginAccountsFeedback;
-pub(crate) use login_accounts_view::LoginAccountsView;
-pub(crate) use login_accounts_view::LoginAddAccountState;
-pub(crate) use login_accounts_view::LoginAddAccountView;
 pub(crate) use memories_settings_view::MemoriesSettingsView;
 use slash_commands::ServiceTierCommand;
 mod feedback_view;
@@ -1316,12 +1307,6 @@ impl BottomPane {
         true
     }
 
-    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
-        self.view_stack
-            .last()
-            .and_then(|view| view.active_login_add_account_id())
-    }
-
     /// Update the pending-input preview shown above the composer.
     pub(crate) fn set_pending_input_preview(
         &mut self,
@@ -1849,12 +1834,6 @@ impl BottomPane {
     /// the label several times while the visible thread settles.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
         if self.composer.set_active_agent_label(active_agent_label) {
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn set_background_review_label(&mut self, label: Option<String>) {
-        if self.composer.set_background_review_label(label) {
             self.request_redraw();
         }
     }

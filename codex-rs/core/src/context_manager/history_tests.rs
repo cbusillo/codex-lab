@@ -2645,7 +2645,12 @@ fn replace_all_images_replaces_tool_output_images() {
             Some(ImageSanitizationSource::Tool)
         );
         assert_eq!(
-            sanitized_texts(&history.raw_items()[1]),
+            sanitized_texts(
+                history
+                    .raw_items()
+                    .nth(1)
+                    .expect("tool output should be present")
+            ),
             vec!["before", "Image omitted"]
         );
         assert!(history.history_version() > version_before);
@@ -2666,7 +2671,12 @@ fn replace_all_images_replaces_user_images() {
         Some(ImageSanitizationSource::User)
     );
     assert_eq!(
-        sanitized_texts(&history.raw_items()[0]),
+        sanitized_texts(
+            history
+                .raw_items()
+                .next()
+                .expect("user image should be present")
+        ),
         vec!["look", "Image omitted"]
     );
 }
@@ -2686,10 +2696,10 @@ fn replace_all_images_clears_every_candidate_image_in_one_pass() {
         Some(ImageSanitizationSource::User)
     );
 
-    let raw_items = history.raw_items();
-    assert_eq!(sanitized_texts(&raw_items[0]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(&raw_items[2]), vec!["Image omitted"]);
+    let raw_items = history.raw_items().collect::<Vec<_>>();
+    assert_eq!(sanitized_texts(raw_items[0]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(raw_items[1]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(raw_items[2]), vec!["Image omitted"]);
 }
 
 #[test]
@@ -2705,9 +2715,9 @@ fn replace_all_images_reports_tool_source_when_no_user_image_is_cleared() {
         Some(ImageSanitizationSource::Tool)
     );
 
-    let raw_items = history.raw_items();
-    assert_eq!(sanitized_texts(&raw_items[1]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(&raw_items[2]), vec!["Image omitted"]);
+    let raw_items = history.raw_items().collect::<Vec<_>>();
+    assert_eq!(sanitized_texts(raw_items[1]), vec!["Image omitted"]);
+    assert_eq!(sanitized_texts(raw_items[2]), vec!["Image omitted"]);
 }
 
 #[test]

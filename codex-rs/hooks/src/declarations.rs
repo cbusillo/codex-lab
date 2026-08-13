@@ -62,9 +62,9 @@ pub(crate) fn hook_handler_id(handler: &codex_config::HookHandlerConfig) -> Opti
         codex_config::HookHandlerConfig::Command { id, command, .. } => {
             id.as_deref().filter(|_| !command.trim().is_empty())
         }
-        codex_config::HookHandlerConfig::Prompt {} | codex_config::HookHandlerConfig::Agent {} => {
-            None
-        }
+        codex_config::HookHandlerConfig::McpTool { .. }
+        | codex_config::HookHandlerConfig::Prompt {}
+        | codex_config::HookHandlerConfig::Agent {} => None,
     }
 }
 

@@ -358,6 +358,8 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
             payload: ToolRuntimePayload::SubAgentActivity(event),
         }),
         EventMsg::Error(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::Warning(_)
         | EventMsg::GuardianWarning(_)
         | EventMsg::SafetyBuffering(_)
@@ -412,8 +414,6 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::TurnAborted(_)
         | EventMsg::ShutdownComplete
         | EventMsg::EnteredReviewMode(_)
-        | EventMsg::BackgroundAutoReviewStatus(_)
-        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)
@@ -439,9 +439,10 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         EventMsg::ThreadRolledBack(_) => Some("thread_rolled_back"),
         EventMsg::Error(_) => Some("error"),
         EventMsg::Warning(_) => Some("warning"),
-        EventMsg::ProjectValidationCompleted(_) => Some("project_validation_completed"),
         EventMsg::ShutdownComplete => Some("shutdown_complete"),
         EventMsg::GuardianWarning(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::RealtimeConversationStarted(_)
         | EventMsg::RealtimeConversationRealtime(_)
@@ -492,7 +493,6 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::EnteredReviewMode(_)
-        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)

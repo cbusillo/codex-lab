@@ -5,21 +5,27 @@ expression: "format_labeled_requests_snapshot(\"Deferred namespaces appear after
 Scenario: Deferred namespaces appear after Apps recovers between sampling requests.
 
 ## Apps unavailable
-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
-02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:use an app after it recovers
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <tools>
+         Deferred tool namespaces:
+         - multi_agent_v1: Tools for spawning and managing sub-agents.
+         </tools>
+01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+02:message/user:use an app after it recovers
 
 ## Apps recovered
-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
-02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:use an app after it recovers
-05:function_call/request_user_input
-06:function_call_output:{"answers":{"continue":{"answers":["Yes (Recommended)"]}}}
-07:message/developer:<tools>
-Deferred tool namespaces:
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <tools>
+         Deferred tool namespaces:
+         - multi_agent_v1: Tools for spawning and managing sub-agents.
+         </tools>
+01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+02:message/user:use an app after it recovers
+03:function_call/request_user_input
+04:function_call_output:{"answers":{"continue":{"answers":["Yes (Recommended)"]}}}
+05:message/developer:<tools>
+Added deferred tool namespaces:
 - mcp__codex_apps__calendar: Plan events and manage your calendar.
 </tools>

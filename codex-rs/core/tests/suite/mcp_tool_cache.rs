@@ -38,7 +38,6 @@ use test_case::test_case;
 
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
-use super::rmcp_client::remote_aware_stdio_server_cwd;
 
 const SERVER_NAME: &str = "cached_rmcp";
 const NAMESPACE: &str = "mcp__cached_rmcp";
@@ -392,7 +391,6 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
 
     let responses_server = responses::start_mock_server().await;
     let command = remote_aware_stdio_server_bin()?;
-    let cwd = remote_aware_stdio_server_cwd();
     let environment_id = remote_aware_environment_id();
     let fixture = test_codex()
         .with_model_info_override("gpt-5.4", |model| model.supports_search_tool = false)
@@ -410,7 +408,6 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
                 SERVER_NAME.to_string(),
                 serde_json::from_value(json!({
                     "command": command,
-                    "cwd": cwd,
                     "environment_id": environment_id,
                     "env": {
                         "MCP_TEST_APP_ONLY_CWD_MARKER_FILE": app_only_cwd_marker_file,

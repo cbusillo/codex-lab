@@ -146,7 +146,7 @@ async fn assert_expired_token_refresh(with_headers_helper: bool) -> anyhow::Resu
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(["oauth_startup_child", "--exact", "--ignored", "--nocapture"])
-        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("CODEX_HOME", codex_home.path())
         .env(CHILD_SERVER_URL_ENV, server_url)
         .env("MCP_TEST_AMBIENT_SECRET", "must-not-reach-helper");
     if with_headers_helper {
@@ -184,7 +184,7 @@ async fn reports_auth_status_for_persisted_credentials() -> anyhow::Result<()> {
             "--ignored",
             "--nocapture",
         ])
-        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("CODEX_HOME", codex_home.path())
         .status()
         .await?;
 
@@ -216,7 +216,7 @@ async fn identifies_expired_unrefreshable_token_startup_error() -> anyhow::Resul
             "--ignored",
             "--nocapture",
         ])
-        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("CODEX_HOME", codex_home.path())
         .env(CHILD_SERVER_URL_ENV, format!("{}/mcp", server.uri()))
         .status()
         .await?;

@@ -32,10 +32,6 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
 use codex_app_server_protocol::ConfigWriteResponse;
-use codex_app_server_protocol::ExternalAgentCapabilitiesReadParams;
-use codex_app_server_protocol::ExternalAgentCapabilitiesReadResponse;
-use codex_app_server_protocol::ExternalAgentCapabilitiesRefreshCancelParams;
-use codex_app_server_protocol::ExternalAgentCapabilitiesRefreshCancelResponse;
 use codex_app_server_protocol::ExternalAgentConfigDetectParams;
 use codex_app_server_protocol::ExternalAgentConfigDetectResponse;
 use codex_app_server_protocol::ExternalAgentConfigImportParams;
@@ -45,7 +41,6 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
-use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -53,8 +48,6 @@ use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
-use codex_app_server_protocol::RemoveAccountParams;
-use codex_app_server_protocol::RemoveAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery;
 use codex_app_server_protocol::ReviewStartParams;
@@ -63,8 +56,6 @@ use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
-use codex_app_server_protocol::SwitchActiveAccountParams;
-use codex_app_server_protocol::SwitchActiveAccountResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionParams;
 use codex_app_server_protocol::ThreadApproveGuardianDeniedActionResponse;
@@ -537,31 +528,6 @@ impl AppServerSession {
             .request_typed(ClientRequest::ExternalAgentConfigDetect { request_id, params })
             .await
             .wrap_err("externalAgentConfig/detect failed during external agent import")
-    }
-
-    pub(crate) async fn external_agent_capabilities_read(
-        &mut self,
-        params: ExternalAgentCapabilitiesReadParams,
-    ) -> Result<ExternalAgentCapabilitiesReadResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::ExternalAgentCapabilitiesRead { request_id, params })
-            .await
-            .wrap_err("externalAgentCapability/read failed")
-    }
-
-    pub(crate) async fn external_agent_capabilities_refresh_cancel(
-        &mut self,
-        refresh_id: String,
-    ) -> Result<ExternalAgentCapabilitiesRefreshCancelResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::ExternalAgentCapabilitiesRefreshCancel {
-                request_id,
-                params: ExternalAgentCapabilitiesRefreshCancelParams { refresh_id },
-            })
-            .await
-            .wrap_err("externalAgentCapability/refresh/cancel failed")
     }
 
     pub(crate) async fn external_agent_config_import(
@@ -1332,44 +1298,6 @@ impl AppServerSession {
         Ok(())
     }
 
-    pub(crate) async fn switch_active_account(&mut self, account_id: String) -> Result<()> {
-        let request_id = self.next_request_id();
-        let _: SwitchActiveAccountResponse = self
-            .client
-            .request_typed(ClientRequest::SwitchActiveAccount {
-                request_id,
-                params: SwitchActiveAccountParams { account_id },
-            })
-            .await
-            .wrap_err("account/switchActive failed in TUI")?;
-        Ok(())
-    }
-
-    pub(crate) async fn list_accounts(&mut self) -> Result<ListAccountsResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::ListAccounts {
-                request_id,
-                params: None,
-            })
-            .await
-            .wrap_err("account/list failed in TUI")
-    }
-
-    pub(crate) async fn remove_account(
-        &mut self,
-        account_id: String,
-    ) -> Result<RemoveAccountResponse> {
-        let request_id = self.next_request_id();
-        self.client
-            .request_typed(ClientRequest::RemoveAccount {
-                request_id,
-                params: RemoveAccountParams { account_id },
-            })
-            .await
-            .wrap_err("account/remove failed in TUI")
-    }
-
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {
         let request_id = self.next_request_id();
         let _: ThreadUnsubscribeResponse = self
@@ -1525,19 +1453,6 @@ impl AppServerSession {
 
     pub(crate) async fn shutdown(self) -> std::io::Result<()> {
         self.client.shutdown().await
-    }
-
-    pub(crate) fn into_client(self) -> AppServerClient {
-        self.client
-    }
-
-    pub(crate) fn swap_client(&mut self, client: AppServerClient) -> AppServerClient {
-        let old_client = std::mem::replace(&mut self.client, client);
-        self.next_request_id = 1;
-        self.thread_settings_update_supported = true;
-        self.default_model = None;
-        self.available_models.clear();
-        old_client
     }
 
     pub(crate) fn request_handle(&self) -> AppServerRequestHandle {
@@ -1807,8 +1722,6 @@ fn thread_start_params_from_config(
         history_mode: (!config.ephemeral).then_some(ThreadHistoryMode::Paginated),
         session_start_source,
         thread_source: Some(ThreadSource::User),
-        session_provenance: crate::agent_session_env::session_provenance_from_agent_env()
-            .map(Into::into),
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
@@ -3190,7 +3103,6 @@ mod tests {
                 cwd: test_path_buf("/tmp/project").abs(),
                 cli_version: "0.0.0".to_string(),
                 source: codex_app_server_protocol::SessionSource::Cli,
-                session_provenance: None,
                 can_accept_direct_input: None,
                 thread_source: None,
                 agent_nickname: None,

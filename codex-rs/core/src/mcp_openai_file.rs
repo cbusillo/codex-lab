@@ -43,7 +43,7 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     let Some(arguments) = arguments_value.as_object() else {
         return Ok(Some(arguments_value));
     };
-    let auth = sess.services.execution_account.auth_manager().auth().await;
+    let auth = sess.services.auth_manager.auth().await;
     let mut rewritten_arguments = arguments.clone();
 
     for (field_name, optional_fields) in openai_file_input_optional_fields {
@@ -626,14 +626,9 @@ mod tests {
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
         let (mut session, turn_context) = make_session_and_context().await;
-        let auth_manager = crate::test_support::auth_manager_from_auth(
+        session.services.auth_manager = crate::test_support::auth_manager_from_auth(
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
         );
-        session.services.auth_manager = Arc::clone(&auth_manager);
-        session
-            .services
-            .execution_account
-            .replace_auth_manager_for_testing(auth_manager);
         let step_context = StepContext::for_test(Arc::new(turn_context));
         let error = rewrite_mcp_tool_arguments_for_openai_files(
             &session,

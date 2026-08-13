@@ -55,7 +55,11 @@ use crate::plan_tool::UpdatePlanArgs;
 use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
+use crate::turn_input::TurnInputMode;
+use crate::turn_input::TurnInputRequest;
+use crate::turn_input::TurnInputSubmission;
 use crate::user_input::UserInput;
+use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
@@ -66,6 +70,7 @@ use serde::de::Error as _;
 use serde_json::Value;
 use serde_with::serde_as;
 use strum_macros::Display;
+use tokio::sync::oneshot;
 use tracing::error;
 use ts_rs::TS;
 
@@ -193,7 +198,7 @@ impl GitSha {
 }
 
 /// Submission Queue Entry - requests from user
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Submission {
     /// Unique id for this Submission to correlate with Events
     pub id: String,
@@ -205,6 +210,8 @@ pub struct Submission {
     pub trace: Option<W3cTraceContext>,
     /// Core-provided ID of the parent turn that directly initiated this submission.
     pub parent_turn_id: Option<String>,
+    /// Core-provided ID of the top-level turn that causally initiated this submission.
+    pub root_turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -217,10 +224,13 @@ pub struct W3cTraceContext {
     pub tracestate: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct ConversationStartParams {
     /// Whether Codex response handoffs are managed through explicit client append calls.
     pub client_managed_handoffs: bool,
+    /// Whether a realtime V3 delegation produces an acknowledgement filler.
+    /// `None` preserves the Realtime API's default behavior.
+    pub delegation_ack_filler: Option<bool>,
     /// Whether to route any remaining transcript tail through Codex when the session ends.
     /// TODO: Remove this rollout knob once transcript-tail flushing is always enabled.
     pub flush_transcript_tail_on_session_end: bool,
@@ -241,6 +251,10 @@ pub struct ConversationStartParams {
     pub include_startup_context: bool,
     /// Complete role-bearing text items to include in the initial realtime session history.
     pub initial_items: Vec<ConversationTextParams>,
+    /// Developer instructions given to Codex when this realtime session starts.
+    pub realtime_start_instructions: Option<String>,
+    /// Developer instructions given to Codex when this realtime session ends.
+    pub realtime_end_instructions: Option<String>,
     pub prompt: Option<Option<String>>,
     pub realtime_session_id: Option<String>,
     pub transport: Option<ConversationStartTransport>,
@@ -539,7 +553,7 @@ pub struct AdditionalContextEntry {
 }
 
 /// Submission operation
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 #[non_exhaustive]
 pub enum Op {
@@ -568,6 +582,19 @@ pub enum Op {
 
     /// Request the list of voices supported by realtime conversation streams.
     RealtimeConversationListVoices,
+
+    /// Submit turn input using the requested routing behavior.
+    TurnInput {
+        request: Box<TurnInputRequest>,
+        mode: TurnInputMode,
+        reply: oneshot::Sender<crate::error::Result<TurnInputSubmission>>,
+    },
+
+    /// Resume an interrupted regular turn.
+    RecoverTurn {
+        thread_settings: ThreadSettingsOverrides,
+        reply: oneshot::Sender<crate::error::Result<TurnInputSubmission>>,
+    },
 
     /// User input, optionally with thread-settings overrides applied first.
     UserInput {
@@ -916,6 +943,8 @@ impl Op {
             Self::RealtimeConversationSpeech(_) => "realtime_conversation_speech",
             Self::RealtimeConversationClose => "realtime_conversation_close",
             Self::RealtimeConversationListVoices => "realtime_conversation_list_voices",
+            Self::TurnInput { .. } => "turn_input",
+            Self::RecoverTurn { .. } => "recover_turn",
             Self::UserInput { .. } => "user_input",
             Self::ThreadSettings { .. } => "thread_settings",
             Self::InterAgentCommunication { .. } => "inter_agent_communication",
@@ -1413,6 +1442,9 @@ pub enum EventMsg {
 
     /// Updated long-running goal metadata for the thread.
     ThreadGoalUpdated(ThreadGoalUpdatedEvent),
+
+    /// A durable thread-scoped user-message queue changed.
+    ThreadQueueChanged(ThreadQueueChangedEvent),
 
     /// Incremental MCP startup progress updates.
     McpStartupUpdate(McpStartupUpdateEvent),
@@ -2176,6 +2208,9 @@ pub struct TokenUsage {
     pub reasoning_output_tokens: i64,
     #[ts(type = "number")]
     pub total_tokens: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub codex_rollout_budget_units: Option<serde_json::Number>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -2639,6 +2674,12 @@ pub struct ImageGenerationEndEvent {
     #[ts(optional)]
     pub revised_prompt: Option<String>,
     pub result: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transparent_background: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub failure: Option<ImageGenerationFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub saved_path: Option<AbsolutePathBuf>,
@@ -3381,7 +3422,7 @@ impl WorldStateItem {
     }
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
 pub struct CompactedItem {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4308,6 +4349,13 @@ pub struct ThreadGoalUpdatedEvent {
     pub goal: ThreadGoal,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "protocol/")]
+pub struct ThreadQueueChangedEvent {
+    pub thread_id: ThreadId,
+}
+
 /// User's decision in response to an ExecApprovalRequest.
 // `Deserialize` is hand-written in `review_decision_compat` so the legacy
 // unit-form `"denied"` payload keeps working alongside the current
@@ -4329,6 +4377,10 @@ pub enum ReviewDecision {
     /// session-scoped approval cache to be automatically approved for the
     /// remainder of the session.
     ApprovedForSession,
+
+    /// User has approved this MCP tool call and wants the corresponding MCP
+    /// policy amendment persisted for future matching calls.
+    ApprovedMcpPolicyAmendment,
 
     /// User chose to persist a network policy rule (allow/deny) for future
     /// requests to the same host.
@@ -4370,6 +4422,7 @@ impl ReviewDecision {
             ReviewDecision::Approved => "approved",
             ReviewDecision::ApprovedExecpolicyAmendment { .. } => "approved_with_amendment",
             ReviewDecision::ApprovedForSession => "approved_for_session",
+            ReviewDecision::ApprovedMcpPolicyAmendment => "approved_mcp_policy_amendment",
             ReviewDecision::NetworkPolicyAmendment {
                 network_policy_amendment,
             } => match network_policy_amendment.action {
@@ -6667,6 +6720,7 @@ mod tests {
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 10,
+            codex_rollout_budget_units: None,
         });
 
         let info = TokenUsageInfo::new_or_append(&initial, &last, Some(128_000))
@@ -6689,6 +6743,7 @@ mod tests {
             output_tokens: 0,
             reasoning_output_tokens: 0,
             total_tokens: 10,
+            codex_rollout_budget_units: None,
         });
 
         let info =

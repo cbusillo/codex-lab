@@ -30,6 +30,7 @@ use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -106,6 +107,10 @@ pub(crate) async fn build_compaction_initial_context(
         }
         InitialContextInjection::DoNotInject => (Vec::new(), None),
     }
+}
+
+pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bool {
+    provider.supports_remote_compaction()
 }
 
 pub(crate) async fn run_inline_auto_compact_task(
@@ -249,9 +254,7 @@ async fn run_compact_task_inner_impl(
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
-    let mut history = sess
-        .prepare_model_visible_history(turn_context.as_ref())
-        .await;
+    let mut history = sess.clone_history().await;
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.model_info.truncation_policy.into(),
@@ -348,8 +351,9 @@ async fn run_compact_task_inner_impl(
 
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.annotated_items();
+    let history_items_for_message = history_snapshot.raw_items().cloned().collect::<Vec<_>>();
     let summary_suffix =
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
+        get_last_assistant_message_from_turn(&history_items_for_message).unwrap_or_default();
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(history_items);
 

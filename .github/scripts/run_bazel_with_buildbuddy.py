@@ -163,21 +163,12 @@ def bazel_args_with_remote_config(
     except ValueError:
         separator_idx = len(configured_args)
 
-    cache_options = [
-        ("BAZEL_REPO_CONTENTS_CACHE", "--repo_contents_cache="),
-        ("BAZEL_REPOSITORY_CACHE", "--repository_cache="),
-        ("BAZEL_DISK_CACHE", "--disk_cache="),
-    ]
-    if env.get("BAZEL_DISK_CACHE"):
-        cache_options.append(
-            (
-                "BAZEL_DISK_CACHE_GC_MAX_SIZE",
-                "--experimental_disk_cache_gc_max_size=",
-            )
-        )
     cache_args = [
         f"{option_prefix}{env[env_name]}"
-        for env_name, option_prefix in cache_options
+        for env_name, option_prefix in (
+            ("BAZEL_REPO_CONTENTS_CACHE", "--repo_contents_cache="),
+            ("BAZEL_REPOSITORY_CACHE", "--repository_cache="),
+        )
         if env.get(env_name)
         and not any(
             arg.startswith(option_prefix) for arg in configured_args[:separator_idx]

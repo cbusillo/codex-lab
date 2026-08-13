@@ -30,56 +30,15 @@ use wiremock::matchers::path;
 
 use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
-use mcp_test_support::ShellLoginPolicy;
 use mcp_test_support::create_apply_patch_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
 use mcp_test_support::create_mock_responses_server;
 use mcp_test_support::create_shell_command_sse_response;
-use mcp_test_support::format_with_current_shell_non_login;
+use mcp_test_support::format_with_current_shell;
 
 // Windows CI can spend tens of seconds in session startup before the first
 // mock model request is sent.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The approval test above relies on the mocked model asking for a profile-free
-/// shell. Guard the wiring so a regression is reported here instead of as a
-/// Windows-only startup timeout in the full integration test.
-#[test]
-fn shell_command_sse_response_forwards_the_requested_login_policy() {
-    for (policy, expected_login) in [
-        (ShellLoginPolicy::Login, true),
-        (ShellLoginPolicy::NonLogin, false),
-    ] {
-        let sse = create_shell_command_sse_response(
-            vec!["echo".to_string(), "hi".to_string()],
-            /*workdir*/ None,
-            Some(5_000),
-            policy,
-            "call1234",
-        )
-        .expect("build shell command SSE response");
-        let arguments = sse
-            .lines()
-            .filter_map(|line| line.strip_prefix("data: "))
-            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-            .find_map(|event| {
-                event
-                    .get("item")?
-                    .get("arguments")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-            .expect("shell_command function call arguments");
-        let arguments: serde_json::Value =
-            serde_json::from_str(&arguments).expect("arguments are JSON");
-
-        assert_eq!(
-            arguments.get("login"),
-            Some(&serde_json::Value::Bool(expected_login)),
-            "{policy:?} should request login={expected_login}"
-        );
-    }
-}
 
 /// Test that a shell command that is not on the "trusted" list triggers an
 /// elicitation request to the MCP and that sending the approval runs the
@@ -128,11 +87,8 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
             5_000,
         )
     };
-    // The mocked model requests a non-login shell, so the elicitation must show
-    // the profile-free argv (`-NoProfile` on Windows, `-c` instead of `-lc`).
-    let expected_shell_command = format_with_current_shell_non_login(&shlex::try_join(
-        shell_command.iter().map(String::as_str),
-    )?);
+    let expected_shell_command =
+        format_with_current_shell(&shlex::try_join(shell_command.iter().map(String::as_str))?);
 
     let McpHandle {
         process: mut mcp_process,
@@ -143,7 +99,6 @@ async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
             shell_command.clone(),
             Some(workdir_for_shell_function_call.path()),
             Some(timeout_ms),
-            ShellLoginPolicy::NonLogin,
             "call1234",
         )?,
         create_final_assistant_message_sse_response("File created!")?,

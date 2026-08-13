@@ -397,14 +397,16 @@ impl Session {
             match item {
                 RolloutItem::Compacted(_) => world_state_baseline = None,
                 RolloutItem::WorldState(world_state) if world_state.full => {
-                    world_state_baseline = Some(WorldStateSnapshot::from(&world_state.state));
+                    world_state_baseline = serde_json::from_value(world_state.state.clone()).ok();
                 }
                 RolloutItem::WorldState(world_state) => {
                     let Some(baseline) = world_state_baseline.as_mut() else {
                         tracing::warn!("ignored world-state patch without a full snapshot");
                         continue;
                     };
-                    baseline.apply_merge_patch(&world_state.state);
+                    if let Err(err) = baseline.apply_merge_patch(&world_state.state) {
+                        warn!("failed to apply persisted world state patch: {err}");
+                    }
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::ResponseItem(_)

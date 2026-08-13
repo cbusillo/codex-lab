@@ -6,8 +6,6 @@ use super::INSTALL_URL;
 use super::InstallerHttp;
 use super::InstallerResponse;
 use super::fetch_installer_script;
-use super::installer_shell_command;
-use super::run_installer_script;
 use super::update_modes_for_identities;
 use crate::RestartMode;
 use crate::UpdaterRefreshMode;
@@ -62,67 +60,6 @@ async fn installer_fetch_rejects_non_success_status() {
 
     assert!(error.to_string().contains("503"));
     assert_eq!(http.requested_urls(), vec![INSTALL_URL.to_string()]);
-}
-
-#[test]
-fn installer_shell_command_translates_codex_lab_home_for_child() {
-    let codex_lab_home = tempfile::tempdir().expect("temp codex lab home");
-    let command = installer_shell_command(codex_lab_home.path());
-
-    let envs = command
-        .as_std()
-        .get_envs()
-        .map(|(key, value)| {
-            (
-                key.to_string_lossy().into_owned(),
-                value.map(|value| value.to_string_lossy().into_owned()),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(envs.len(), 2);
-    assert!(envs.contains(&(
-        "CODEX_HOME".to_string(),
-        Some(codex_lab_home.path().to_string_lossy().into_owned()),
-    )));
-    assert!(envs.contains(&("CODE_HOME".to_string(), None)));
-}
-
-#[tokio::test]
-async fn installer_child_scopes_codex_home_and_drops_code_home() {
-    let codex_lab_home = tempfile::tempdir().expect("temp codex lab home");
-
-    let script = br#"
-set -eu
-printf '%s' "${CODEX_HOME-<unset>}" > "$CODEX_HOME/observed-codex-home"
-printf '%s' "${CODE_HOME-<unset>}" > "$CODEX_HOME/observed-code-home"
-"#;
-
-    run_installer_script(installer_shell_command(codex_lab_home.path()), script)
-        .await
-        .expect("installer script should succeed");
-
-    let observed = |name: &str| {
-        std::fs::read_to_string(codex_lab_home.path().join(name)).expect("observed env file")
-    };
-    let expected_home = codex_lab_home.path().to_string_lossy().into_owned();
-    assert_eq!(observed("observed-codex-home"), expected_home);
-    assert_eq!(observed("observed-code-home"), "<unset>");
-}
-
-#[tokio::test]
-async fn installer_script_failure_is_reported() {
-    let codex_lab_home = tempfile::tempdir().expect("temp codex lab home");
-
-    let error = run_installer_script(installer_shell_command(codex_lab_home.path()), b"exit 3\n")
-        .await
-        .expect_err("failing installer script should error");
-
-    assert!(
-        error
-            .to_string()
-            .contains("standalone Codex updater exited")
-    );
 }
 
 struct FakeInstallerHttp {

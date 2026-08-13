@@ -25,6 +25,7 @@ const VARIANTS: &[&str] = &[
     "approved",
     "approved_execpolicy_amendment",
     "approved_for_session",
+    "approved_mcp_policy_amendment",
     "network_policy_amendment",
     "denied",
     "timed_out",
@@ -71,6 +72,7 @@ impl<'de> Visitor<'de> for ReviewDecisionVisitor {
         match value {
             "approved" => Ok(ReviewDecision::Approved),
             "approved_for_session" => Ok(ReviewDecision::ApprovedForSession),
+            "approved_mcp_policy_amendment" => Ok(ReviewDecision::ApprovedMcpPolicyAmendment),
             // Legacy unit form, emitted before `Denied` carried a rejection.
             "denied" => Ok(ReviewDecision::denied(LEGACY_DENIED_REJECTION)),
             "timed_out" => Ok(ReviewDecision::TimedOut),
@@ -101,6 +103,10 @@ impl<'de> Visitor<'de> for ReviewDecisionVisitor {
             "approved_for_session" => {
                 map.next_value::<()>()?;
                 ReviewDecision::ApprovedForSession
+            }
+            "approved_mcp_policy_amendment" => {
+                map.next_value::<()>()?;
+                ReviewDecision::ApprovedMcpPolicyAmendment
             }
             "network_policy_amendment" => {
                 let payload = map.next_value::<NetworkPolicyAmendmentPayload>()?;

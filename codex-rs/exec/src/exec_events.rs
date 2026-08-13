@@ -31,9 +31,6 @@ pub enum ThreadEvent {
     /// Signals that an item has reached a terminal state—either success or failure.
     #[serde(rename = "item.completed")]
     ItemCompleted(ItemCompletedEvent),
-    /// A configured project validation command reached a terminal state.
-    #[serde(rename = "validation.completed")]
-    ProjectValidationCompleted(ProjectValidationCompletedEvent),
     /// Represents an unrecoverable error emitted directly by the event stream.
     #[serde(rename = "error")]
     Error(ThreadErrorEvent),
@@ -88,54 +85,6 @@ pub struct ItemCompletedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS)]
 pub struct ItemUpdatedEvent {
     pub item: ThreadItem,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectValidationStatus {
-    Passed,
-    ActionableFailure,
-    ConfigurationError,
-    TimedOut,
-    InfrastructureFailure,
-    Cancelled,
-    Skipped,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectValidationSkipReason {
-    ValidationDisabled,
-    NoChangedFiles,
-    NoApplicableProvider,
-    NonRootAgent,
-    UnchangedFingerprint,
-    UnsupportedEnvironment,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-pub struct ProjectValidationCompletedEvent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub item_id: Option<String>,
-    pub command: Vec<String>,
-    pub command_truncated: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub cwd: Option<String>,
-    pub status: ProjectValidationStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub skip_reason: Option<ProjectValidationSkipReason>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub changed_file_count: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub exit_code: Option<i32>,
-    pub output: String,
-    pub output_truncated: bool,
-    pub duration_ms: u64,
 }
 
 /// Fatal error emitted by the stream.

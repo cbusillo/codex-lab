@@ -757,6 +757,7 @@ async fn spawn_guardian_review_session(
     let (session, io) = Box::pin(run_codex_thread_interactive(
         spawn_config,
         parent_session.services.auth_manager.clone(),
+        parent_session.services.models_manager.clone(),
         Arc::clone(parent_session),
         Arc::clone(parent_context.turn()),
         parent_context.environments().clone(),
@@ -765,7 +766,6 @@ async fn spawn_guardian_review_session(
         initial_history,
         GitEnrichmentPolicy::Skip,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
-        codex_extension_api::ExtensionDataInit::default(),
     ))
     .await?;
 

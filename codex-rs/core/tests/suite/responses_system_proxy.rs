@@ -76,15 +76,6 @@ async fn regular_responses_turn_honors_respect_system_proxy() -> Result<()> {
         for &key in codex_network_proxy::PROXY_ENV_KEYS {
             command.env_remove(key);
         }
-        command.env("CODEX_TEST_ENVIRONMENT", "local");
-        for key in [
-            "CODEX_TEST_REMOTE_ENV",
-            "CODEX_TEST_REMOTE_ENV_CONTAINER_NAME",
-            "CODEX_TEST_REMOTE_EXEC_SERVER_PID",
-            "CODEX_TEST_REMOTE_EXEC_SERVER_URL",
-        ] {
-            command.env_remove(key);
-        }
         // Keep the test harness's loopback HTTP and WebSocket traffic out of the proxy. The fake
         // API origin is not covered, so the inference request must still traverse the proxy.
         command
@@ -121,7 +112,7 @@ async fn regular_responses_turn_honors_respect_system_proxy() -> Result<()> {
             .expect("test config should allow feature update");
         config.respect_system_proxy = true;
     });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("hello through the system proxy").await?;
 

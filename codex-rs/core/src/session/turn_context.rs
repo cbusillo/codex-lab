@@ -3,6 +3,7 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshotFile;
 use crate::tools::sandboxing::executor_windows_sandbox_level;
+use codex_core_plugins::PluginAuthContext;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::ResolvedPluginMetricsOperation;
 use codex_core_plugins::TrustedPluginRoots;
@@ -240,7 +241,7 @@ impl TurnContext {
             .session_telemetry
             .clone()
             .with_model(self.model_info.slug.as_str(), model_info.slug.as_str());
-        self.extension_data.insert(skills_snapshot.clone());
+        self.extension_data.insert(skills_snapshot);
         self.extension_data.insert(trusted_plugin_roots);
         Self {
             sub_id: self.sub_id.clone(),
@@ -270,8 +271,6 @@ impl TurnContext {
                 .clone(),
             multi_agent_version: self.multi_agent_version,
             personality: self.personality,
-            approval_policy: self.approval_policy.clone(),
-            permission_profile: self.permission_profile.clone(),
             network: self.network.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
             available_models: models_manager.try_list_models().unwrap_or_default(),
@@ -281,7 +280,6 @@ impl TurnContext {
             code_mode_available: self.code_mode_available,
             turn_metadata_state: Arc::clone(&self.turn_metadata_state),
             extension_data: Arc::clone(&self.extension_data),
-            turn_skills: TurnSkillsContext::new(skills_snapshot),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
             terminal_error: Arc::clone(&self.terminal_error),
             server_model_warning_emitted: AtomicBool::new(
@@ -1117,10 +1115,9 @@ impl Session {
                 .skills_service
                 .snapshot_for_config(&skills_input, fs)
                 .await;
-            let hooks = build_hooks_for_config(
+            let hooks = build_hooks_config(
                 turn_context.config.as_ref(),
                 self.services.plugins_manager.as_ref(),
-                PluginAuthContext::from_auth(execution_snapshot.auth.as_ref()),
                 turn_context.environments.single_local_environment(),
             )
             .await;
@@ -1145,6 +1142,7 @@ impl Session {
                 break (refreshed, hooks);
             }
         };
+        let hooks = self.hooks().reconfigured(hooks);
         self.services.hooks.store(Arc::new(hooks));
         let mut active_turn = self.active_turn.lock().await;
         if let Some(running_task) = active_turn

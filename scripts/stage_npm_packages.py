@@ -117,16 +117,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Retain temporary staging directories instead of deleting them.",
     )
-    parser.add_argument(
-        "--no-expand-packages",
-        action="store_true",
-        help=(
-            "Stage exactly the requested packages instead of expanding them into "
-            "their platform packages. Staging only the root wrapper needs no "
-            "native release artifacts, which keeps CI packaging checks "
-            "reproducible from the source tree."
-        ),
-    )
     return parser.parse_args()
 
 
@@ -146,14 +136,7 @@ def collect_native_component_sets(packages: list[str]) -> list[tuple[str, ...]]:
     return component_sets
 
 
-def expand_packages(packages: list[str], expand: bool = True) -> list[str]:
-    if not expand:
-        deduped: list[str] = []
-        for package in packages:
-            if package not in deduped:
-                deduped.append(package)
-        return deduped
-
+def expand_packages(packages: list[str]) -> list[str]:
     expanded: list[str] = []
     for package in packages:
         for expanded_package in PACKAGE_EXPANSIONS.get(package, [package]):
@@ -503,7 +486,7 @@ def main() -> int:
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
 
-    packages = expand_packages(list(args.packages), expand=not args.no_expand_packages)
+    packages = expand_packages(list(args.packages))
     native_component_sets = collect_native_component_sets(packages)
     print("Expanded packages: " + ", ".join(packages), flush=True)
     if native_component_sets:

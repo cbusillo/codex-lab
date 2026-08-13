@@ -48,7 +48,6 @@ impl App {
                                 cwd: None,
                                 use_state_db_only: true,
                                 search_term: None,
-                                descendant_of_thread_id: None,
                                 parent_thread_id: None,
                                 ancestor_thread_id: Some(root.to_string()),
                             },

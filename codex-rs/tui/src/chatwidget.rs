@@ -47,11 +47,6 @@ use crate::app_event::HistoryLookupResponse;
 use crate::app_server_approval_conversions::file_update_changes_to_display;
 use crate::approval_events::ApplyPatchApprovalRequestEvent;
 use crate::approval_events::ExecApprovalRequestEvent;
-use crate::bottom_pane::ACCOUNT_SWITCH_SETTINGS_VIEW_ID;
-use crate::bottom_pane::AccountSwitchSettingsView;
-use crate::bottom_pane::LOGIN_ADD_ACCOUNT_VIEW_ID;
-use crate::bottom_pane::LoginAddAccountState;
-use crate::bottom_pane::LoginAddAccountView;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::StatusSurfacePreviewData;
@@ -338,7 +333,6 @@ use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
-mod agents_settings;
 mod command_lifecycle;
 mod connectors;
 mod constructor;
@@ -411,7 +405,6 @@ mod rendering;
 mod replay;
 mod review;
 mod review_popups;
-use self::review::BackgroundAutoReviewSnapshot;
 use self::review::ReviewState;
 #[cfg(test)]
 pub(crate) use self::review_popups::show_review_commit_picker_with_entries;
@@ -1110,61 +1103,6 @@ impl ChatWidget {
             self.bottom_pane.list_keymap(),
         );
         self.bottom_pane.show_view(Box::new(view));
-    }
-
-    pub(crate) fn open_account_switch_settings_popup(&mut self) {
-        let view = AccountSwitchSettingsView::new(
-            self.config.auto_switch_accounts_on_rate_limit,
-            self.config.api_key_fallback_on_all_accounts_limited,
-            self.app_event_tx.clone(),
-            self.bottom_pane.list_keymap(),
-        );
-        self.bottom_pane.show_view(Box::new(view));
-    }
-
-    pub(crate) fn open_login_add_account_view(&mut self) {
-        let view = LoginAddAccountView::new_for_store_mode(
-            self.app_event_tx.clone(),
-            self.config.cli_auth_credentials_store_mode,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-    }
-
-    pub(crate) fn update_login_add_account_view(&mut self, state: LoginAddAccountState) -> bool {
-        if !self
-            .bottom_pane
-            .dismiss_active_view_if_id(LOGIN_ADD_ACCOUNT_VIEW_ID)
-        {
-            return false;
-        }
-        let view = LoginAddAccountView::with_state_for_store_mode(
-            self.app_event_tx.clone(),
-            state,
-            self.config.cli_auth_credentials_store_mode,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        true
-    }
-
-    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
-        self.bottom_pane.active_login_add_account_id()
-    }
-
-    pub(crate) fn dismiss_account_switch_settings_popup(&mut self) {
-        self.bottom_pane
-            .dismiss_active_view_if_id(ACCOUNT_SWITCH_SETTINGS_VIEW_ID);
-    }
-
-    pub(crate) fn set_auto_switch_accounts_on_rate_limit(&mut self, enabled: bool) {
-        self.config.auto_switch_accounts_on_rate_limit = enabled;
-    }
-
-    pub(crate) fn set_api_key_fallback_on_all_accounts_limited(&mut self, enabled: bool) {
-        self.config.api_key_fallback_on_all_accounts_limited = enabled;
-    }
-
-    pub(crate) fn set_automatic_validation_enabled(&mut self, enabled: bool) {
-        self.config.validation.groups.functional = enabled;
     }
 
     pub(crate) fn open_memories_enable_prompt(&mut self) {

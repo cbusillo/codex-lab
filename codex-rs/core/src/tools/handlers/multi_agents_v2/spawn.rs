@@ -69,9 +69,13 @@ async fn handle_spawn_agent(
     let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    let environment = step_context.environments.primary();
+    let mut config = build_agent_spawn_config(
+        &session.get_base_instructions().await,
+        turn.as_ref(),
+        environment,
+    )?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), environment)?;
     crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
         .map_err(FunctionCallError::RespondToModel)?;
     let explicit_role_name = requested_role_name.map(|role_name| {
@@ -141,7 +145,7 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), environment)?;
 
     let spawn_source = thread_spawn_source(
         session.thread_id,
@@ -181,6 +185,7 @@ async fn handle_spawn_agent(
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
                     parent_turn_id: Some(turn.sub_id.clone()),
+                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
                     environments: Some(step_context.environments.to_selections()),
                     external_agent_provider: routing.provider().cloned(),
                     external_agent_routing: Some(routing.summary()),

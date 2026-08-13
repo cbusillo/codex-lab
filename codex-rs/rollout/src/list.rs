@@ -28,7 +28,6 @@ use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::SessionMetaLine;
-use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::user_message_preview;
@@ -70,8 +69,6 @@ pub struct ThreadItem {
     pub git_origin_url: Option<String>,
     /// Session source from session metadata.
     pub source: Option<SessionSource>,
-    /// Structured launch provenance from session metadata.
-    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Immediate control/spawn parent thread id from session metadata.
@@ -111,7 +108,6 @@ struct HeadTailSummary {
     git_sha: Option<String>,
     git_origin_url: Option<String>,
     source: Option<SessionSource>,
-    session_provenance: Option<SessionProvenance>,
     history_mode: ThreadHistoryMode,
     parent_thread_id: Option<ThreadId>,
     agent_nickname: Option<String>,
@@ -185,7 +181,6 @@ impl Cursor {
 /// pagination.
 struct AnchorState {
     ts: OffsetDateTime,
-    id: Option<Uuid>,
     passed: bool,
 }
 
@@ -194,28 +189,20 @@ impl AnchorState {
         match anchor {
             Some(cursor) => Self {
                 ts: cursor.ts,
-                id: cursor
-                    .id
-                    .and_then(|id| Uuid::parse_str(&id.to_string()).ok()),
                 passed: false,
             },
             None => Self {
                 ts: OffsetDateTime::UNIX_EPOCH,
-                id: None,
                 passed: true,
             },
         }
     }
 
-    fn should_skip(&mut self, ts: OffsetDateTime, id: Uuid) -> bool {
+    fn should_skip(&mut self, ts: OffsetDateTime, _id: Uuid) -> bool {
         if self.passed {
             return false;
         }
-        let is_after_anchor = match self.id {
-            Some(anchor_id) => (ts, id) < (self.ts, anchor_id),
-            None => ts < self.ts,
-        };
-        if is_after_anchor {
+        if ts < self.ts {
             self.passed = true;
             false
         } else {
@@ -462,7 +449,6 @@ async fn traverse_directories_for_paths(
                 root,
                 page_size,
                 anchor,
-                sort_key,
                 allowed_sources,
                 provider_matcher,
                 cwd_filters,
@@ -498,7 +484,6 @@ async fn traverse_flat_paths(
                 root,
                 page_size,
                 anchor,
-                sort_key,
                 allowed_sources,
                 provider_matcher,
                 cwd_filters,
@@ -567,7 +552,6 @@ async fn traverse_directories_for_paths_updated(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    sort_key: ThreadSortKey,
     allowed_sources: &[SessionSource],
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
@@ -613,7 +597,7 @@ async fn traverse_directories_for_paths_updated(
     }
 
     let next = if more_matches_available {
-        build_next_cursor(&items, sort_key)
+        build_next_cursor(&items, ThreadSortKey::UpdatedAt)
     } else {
         None
     };
@@ -686,7 +670,6 @@ async fn traverse_flat_paths_updated(
     root: PathBuf,
     page_size: usize,
     anchor: Option<Cursor>,
-    sort_key: ThreadSortKey,
     allowed_sources: &[SessionSource],
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
@@ -732,7 +715,7 @@ async fn traverse_flat_paths_updated(
     }
 
     let next = if more_matches_available {
-        build_next_cursor(&items, sort_key)
+        build_next_cursor(&items, ThreadSortKey::UpdatedAt)
     } else {
         None
     };
@@ -833,7 +816,6 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
-            session_provenance,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -858,7 +840,6 @@ async fn build_thread_item(
             git_sha,
             git_origin_url,
             source,
-            session_provenance,
             history_mode,
             parent_thread_id,
             agent_nickname,
@@ -1156,7 +1137,6 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::SessionMeta(session_meta_line) => {
                 if !summary.saw_session_meta {
                     summary.source = Some(session_meta_line.meta.source.clone());
-                    summary.session_provenance = session_meta_line.meta.session_provenance.clone();
                     summary.history_mode = session_meta_line.meta.history_mode;
                     summary.parent_thread_id = session_meta_line.meta.parent_thread_id;
                     summary.agent_nickname = session_meta_line.meta.agent_nickname.clone();

@@ -146,7 +146,7 @@ pub struct OrchestratorFeatureToml {
     pub enabled: Option<bool>,
 }
 
-/// Base config deserialized from ~/.codex-lab/config.toml.
+/// Base config deserialized from ~/.codex/config.toml.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ConfigToml {
@@ -323,12 +323,12 @@ pub struct ConfigToml {
     pub history: Option<History>,
 
     /// Directory where Codex stores the SQLite state DB.
-    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`.
+    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
-    /// Defaults to `$CODEX_LAB_HOME/log`.
+    /// Defaults to `$CODEX_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
     /// Optional URI-based file opener. If set, citations to files in the model
@@ -352,11 +352,6 @@ pub struct ConfigToml {
     pub model_reasoning_summary: Option<ReasoningSummary>,
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,
-
-    /// Removed reasoning-summary override retained as a no-op for
-    /// compatibility. Model capabilities now come from the model catalog.
-    #[schemars(skip)]
-    pub model_supports_reasoning_summaries: Option<bool>,
 
     /// Optional path to a JSON model catalog (applied on startup only).
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
@@ -546,17 +541,10 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
-    /// Maximum diff size in bytes for automatic background reviews. Defaults
-    /// to 120000. Reviews whose diff exceeds this limit are recorded as
-    /// skipped rather than launched.
     pub background_max_diff_bytes: Option<usize>,
-    /// Maximum wall-clock runtime in seconds for automatic background reviews.
     pub background_max_elapsed_seconds: Option<u64>,
-    /// Maximum cumulative token usage for automatic background reviews.
     pub background_max_total_tokens: Option<u64>,
-    /// Maximum serialized reviewer output size in bytes.
     pub background_max_output_bytes: Option<usize>,
-    /// Maximum number of findings accepted from one background review.
     pub background_max_findings: Option<usize>,
 }
 

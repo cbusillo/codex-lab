@@ -1,8 +1,9 @@
 name: python-sdk-release
 
 on:
-  # Temporarily unreachable while the Linux-only runtime wheel build is paused.
-  workflow_call:
+  push:
+    tags:
+      - "python-v*"
 
 concurrency:
   group: ${{ github.workflow }}

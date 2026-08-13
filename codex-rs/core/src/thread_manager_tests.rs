@@ -277,6 +277,31 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         let descendant_thread_ids = self.descendant_thread_ids.clone();
         Box::pin(async move { Ok(descendant_thread_ids) })
     }
+
+    fn insert_external_agent_run(
+        &self,
+        _run: codex_agent_graph_store::ExternalAgentRunStart,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async { panic!("unexpected external agent run insert") })
+    }
+
+    fn finish_external_agent_run(
+        &self,
+        _child_thread_id: ThreadId,
+        _outcome: codex_agent_graph_store::ExternalAgentRunOutcome,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, ()> {
+        Box::pin(async { panic!("unexpected external agent run finish") })
+    }
+
+    fn list_external_agent_runs(
+        &self,
+        _parent_thread_id: ThreadId,
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Vec<codex_agent_graph_store::ExternalAgentRun>,
+    > {
+        Box::pin(async { panic!("unexpected external agent run listing") })
+    }
 }
 
 fn user_msg(text: &str) -> ResponseItem {

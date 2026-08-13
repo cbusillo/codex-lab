@@ -9,16 +9,6 @@ pub trait RolloutConfigView {
     fn cwd(&self) -> &Path;
     fn model_provider_id(&self) -> &str;
     fn generate_memories(&self) -> bool;
-    fn rollout_compression_mode(&self) -> RolloutCompressionMode {
-        RolloutCompressionMode::Disabled
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RolloutCompressionMode {
-    #[default]
-    Disabled,
-    Enabled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +18,6 @@ pub struct RolloutConfig {
     pub cwd: PathBuf,
     pub model_provider_id: String,
     pub generate_memories: bool,
-    pub rollout_compression_mode: RolloutCompressionMode,
 }
 
 pub type Config = RolloutConfig;
@@ -41,7 +30,6 @@ impl RolloutConfig {
             cwd: view.cwd().to_path_buf(),
             model_provider_id: view.model_provider_id().to_string(),
             generate_memories: view.generate_memories(),
-            rollout_compression_mode: view.rollout_compression_mode(),
         }
     }
 }
@@ -66,10 +54,6 @@ impl RolloutConfigView for RolloutConfig {
     fn generate_memories(&self) -> bool {
         self.generate_memories
     }
-
-    fn rollout_compression_mode(&self) -> RolloutCompressionMode {
-        self.rollout_compression_mode
-    }
 }
 
 impl<T: RolloutConfigView + ?Sized> RolloutConfigView for &T {
@@ -92,10 +76,6 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for &T {
     fn generate_memories(&self) -> bool {
         (*self).generate_memories()
     }
-
-    fn rollout_compression_mode(&self) -> RolloutCompressionMode {
-        (*self).rollout_compression_mode()
-    }
 }
 
 impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
@@ -117,9 +97,5 @@ impl<T: RolloutConfigView + ?Sized> RolloutConfigView for Arc<T> {
 
     fn generate_memories(&self) -> bool {
         self.as_ref().generate_memories()
-    }
-
-    fn rollout_compression_mode(&self) -> RolloutCompressionMode {
-        self.as_ref().rollout_compression_mode()
     }
 }

@@ -15,13 +15,13 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_rollout::RolloutItem;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -201,6 +201,15 @@ pub struct PrepareForkParams {
     pub boundary: ForkBoundary,
 }
 
+/// Parameters for reverting a paginated thread's durable history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertThreadParams {
+    /// Stable logical thread to revert.
+    pub thread_id: ThreadId,
+    /// First turn excluded from the retained history.
+    pub before_turn_id: String,
+}
+
 /// Frozen source history and model context for a reference-backed fork.
 #[derive(Debug)]
 pub struct PreparedFork {
@@ -353,9 +362,7 @@ pub const MAX_RETENTION_PREVIEW_LIMIT: usize = 100;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetentionPreviewParams {
-    /// Maximum number of active and archived rollouts to return together.
     pub limit: Option<usize>,
-    /// Opaque cursor returned by a previous preview call.
     pub cursor: Option<String>,
 }
 
@@ -736,8 +743,6 @@ pub struct StoredThread {
     pub cli_version: String,
     /// Runtime source for the thread.
     pub source: SessionSource,
-    /// Optional external launch provenance supplied by an orchestrator.
-    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.

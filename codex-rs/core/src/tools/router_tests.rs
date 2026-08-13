@@ -60,40 +60,6 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
-#[test]
-fn direct_source_redacts_plaintext_multi_agent_messages_in_any_namespace() {
-    for namespace in [Some("agents"), Some("collaboration"), None] {
-        for tool_name in ["spawn_agent", "send_message", "followup_task"] {
-            for encrypted_function_args in [None, Some(Vec::new())] {
-                let call = ToolCall {
-                    tool_name: ToolName::new(namespace.map(str::to_string), tool_name),
-                    call_id: "call-plaintext-message".to_string(),
-                    payload: ToolPayload::Function {
-                        arguments: json!({"message": "secret message"}).to_string(),
-                    },
-                    encrypted_function_args,
-                };
-
-                assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
-            }
-        }
-    }
-}
-
-#[test]
-fn direct_source_preserves_explicitly_encrypted_multi_agent_messages() {
-    let call = ToolCall {
-        tool_name: ToolName::namespaced("agents", "spawn_agent"),
-        call_id: "call-encrypted-message".to_string(),
-        payload: ToolPayload::Function {
-            arguments: json!({"message": "opaque"}).to_string(),
-        },
-        encrypted_function_args: Some(vec!["message".to_string()]),
-    };
-
-    assert_eq!(call.direct_source(), ToolCallSource::Direct);
-}
-
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,

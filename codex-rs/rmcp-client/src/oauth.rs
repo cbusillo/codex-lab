@@ -1026,6 +1026,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use codex_keyring_store::tests::MockKeyringStore;
+    use codex_secrets::LocalSecretsNamespace;
     use codex_secrets::compute_keyring_account_for_namespace;
     use keyring::Error as KeyringError;
     use pretty_assertions::assert_eq;

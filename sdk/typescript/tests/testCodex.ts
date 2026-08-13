@@ -77,11 +77,6 @@ function mergeTestConfig(
 
   return {
     ...mergedConfig,
-    // Keep repository and user skill catalogs out of SDK protocol assertions.
-    skills: mergedConfig?.skills ?? {
-      bundled: { enabled: false },
-      include_instructions: false,
-    },
     // Disable plugins in SDK integration tests so background curated-plugin
     // sync does not race temp CODEX_HOME cleanup.
     features:

@@ -14,18 +14,7 @@ use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_home);
-    Ok(cmd)
-}
-
-fn codex_command_with_legacy_homes(
-    codex_lab_home: &Path,
-    codex_home: &Path,
-    code_home: &Path,
-) -> Result<assert_cmd::Command> {
-    let mut cmd = codex_command(codex_lab_home)?;
     cmd.env("CODEX_HOME", codex_home);
-    cmd.env("CODE_HOME", code_home);
     Ok(cmd)
 }
 
@@ -80,26 +69,6 @@ async fn add_and_remove_server_updates_global_config() -> Result<()> {
 
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     assert!(servers.is_empty());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn add_uses_codex_lab_home_when_legacy_homes_are_set() -> Result<()> {
-    let codex_lab_home = TempDir::new()?;
-    let codex_home = TempDir::new()?;
-    let code_home = TempDir::new()?;
-
-    codex_command_with_legacy_homes(codex_lab_home.path(), codex_home.path(), code_home.path())?
-        .args(["mcp", "add", "docs", "--", "echo", "hello"])
-        .assert()
-        .success()
-        .stdout(contains("Added global MCP server 'docs'."));
-
-    let codex_lab_servers = load_global_mcp_servers(codex_lab_home.path()).await?;
-    assert!(codex_lab_servers.contains_key("docs"));
-    assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
-    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
 
     Ok(())
 }

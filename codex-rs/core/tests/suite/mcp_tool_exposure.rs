@@ -932,8 +932,12 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let initial_tools_state = initial_request
         .message_input_texts("developer")
         .into_iter()
-        .find(|text| text.contains("<tools>"));
-    assert_eq!(initial_tools_state, None);
+        .find(|text| text.contains("<tools>"))
+        .expect("initial request should contain tools world state");
+    assert!(
+        !initial_tools_state.contains(SEARCH_CALENDAR_NAMESPACE),
+        "Calendar namespace should not be advertised before recovery: {initial_tools_state}"
+    );
 
     release_apps_recovery
         .send(())
@@ -979,8 +983,8 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let recovered_tools_state = requests[1]
         .message_input_texts("developer")
         .into_iter()
-        .find(|text| text.contains("<tools>"))
-        .expect("recovered request should contain tools world state");
+        .find(|text| text.contains("Added deferred tool namespaces:"))
+        .expect("recovered request should contain a tools world-state delta");
     assert!(
         recovered_tools_state.contains(&format!(
             "- {SEARCH_CALENDAR_NAMESPACE}: Plan events and manage your calendar."

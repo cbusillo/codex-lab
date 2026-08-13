@@ -1771,7 +1771,7 @@ async fn invalid_image_bad_request_sanitizes_tool_image_and_retries() -> anyhow:
     .await;
 
     codex
-        .submit(disabled_user_turn(
+        .start_or_steer_turn(disabled_user_turn(
             &test,
             vec![UserInput::Text {
                 text: "please inspect the image".into(),

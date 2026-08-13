@@ -226,6 +226,7 @@ impl LunaSampler {
                 &Some(request.output_schema),
                 /*output_schema_strict*/ true,
             ),
+            max_output_tokens: None,
             client_metadata: Some(metadata),
         };
         let mut stream = self

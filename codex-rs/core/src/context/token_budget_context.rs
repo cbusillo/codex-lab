@@ -1,4 +1,6 @@
 use super::ContextualUserFragment;
+use super::world_state::PreviousSectionState;
+use super::world_state::WorldStateSection;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
@@ -117,6 +119,23 @@ impl ContextualUserFragment for TokenBudgetContext {
             lines.push(thread_hint.clone());
         }
         format!("\n{}\n", lines.join("\n"))
+    }
+}
+
+impl WorldStateSection for TokenBudgetContext {
+    const ID: &'static str = "context_window";
+    type Snapshot = ThreadId;
+
+    fn snapshot(&self) -> Self::Snapshot {
+        self.thread_id
+    }
+
+    fn render_diff(
+        &self,
+        previous: PreviousSectionState<'_, Self::Snapshot>,
+    ) -> Option<Box<dyn ContextualUserFragment>> {
+        matches!(previous, PreviousSectionState::Known(thread_id) if thread_id != &self.thread_id)
+            .then(|| Box::new(self.clone()) as Box<dyn ContextualUserFragment>)
     }
 }
 

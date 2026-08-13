@@ -11,7 +11,6 @@ use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_thread_store::PersistContext;
 use tracing::Instrument;
 use tracing::trace_span;
 
@@ -63,7 +62,7 @@ impl SessionTask for RegularTask {
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
-                run_hooks_and_record_inputs(&sess, &ctx, &input, PersistContext::Standard).await;
+                run_hooks_and_record_inputs(&sess, &ctx, &input).await;
                 return Ok(None);
             }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
@@ -73,18 +72,21 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
+        let mut run_state = crate::session::turn::RunTurnState::new();
         loop {
-            let last_agent_message = run_turn(
+            let result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
+                Arc::clone(&ctx.extension_data),
                 next_input,
+                &mut run_state,
                 prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
             .instrument(run_turn_span.clone())
             .await?;
             if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return Ok(last_agent_message);
+                return Ok(result.last_agent_message);
             }
             next_input = Vec::new();
         }

@@ -74,7 +74,6 @@ pub(crate) enum TaskKind {
 pub(crate) struct RunningTask {
     pub(crate) done: Arc<Notify>,
     pub(crate) kind: TaskKind,
-    pub(crate) background_review_trigger_eligible: bool,
     pub(crate) task: Arc<dyn AnySessionTask>,
     pub(crate) cancellation_token: CancellationToken,
     pub(crate) handle: AbortOnDropHandle<()>,
@@ -101,7 +100,6 @@ pub(crate) struct TurnState {
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
-    pub(crate) completed_turn_diff: Option<String>,
 }
 
 pub(crate) struct PendingRequestPermissions {

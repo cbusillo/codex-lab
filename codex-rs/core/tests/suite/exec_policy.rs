@@ -148,7 +148,7 @@ async fn granular_complex_forced_rm_denial_explains_why_the_command_was_rejected
 
     let server = start_mock_server().await;
     let mut builder = test_codex();
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
     let call_id = "forced-rm-denied";
     let args = json!({
         "command": COMPLEX_FORCED_RM_COMMAND,
@@ -212,7 +212,7 @@ async fn granular_complex_forced_rm_requests_approval_when_allowed() -> Result<(
 
     let server = start_mock_server().await;
     let mut builder = test_codex();
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
     let call_id = "forced-rm-approval";
     let args = json!({
         "command": COMPLEX_FORCED_RM_COMMAND,

@@ -16,16 +16,11 @@ pub(super) struct ThreadEventSnapshot {
     pub(super) input_state: Option<ThreadInputState>,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(super) enum ThreadBufferedEvent {
     Notification(Box<ServerNotification>),
     Request(Box<ServerRequest>),
     HistoryEntryResponse(HistoryLookupResponse),
-    AutoReviewSummaryLoaded {
-        run_id: String,
-        result: Box<Result<AutoReviewSummaryReadResponse, String>>,
-    },
     FeedbackSubmission(FeedbackThreadEvent),
 }
 
@@ -59,9 +54,7 @@ pub(super) struct ThreadEventStore {
 impl ThreadEventStore {
     pub(super) fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
         match event {
-            ThreadBufferedEvent::Request(_)
-            | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
-            | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+            ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
             ThreadBufferedEvent::Notification(notification) => matches!(
                 notification.as_ref(),
                 ServerNotification::HookStarted(_)
@@ -194,25 +187,6 @@ impl ThreadEventStore {
         }
     }
 
-    pub(super) fn push_auto_review_summary(
-        &mut self,
-        run_id: String,
-        result: Result<AutoReviewSummaryReadResponse, String>,
-    ) {
-        self.buffer
-            .push_back(ThreadBufferedEvent::AutoReviewSummaryLoaded {
-                run_id,
-                result: Box::new(result),
-            });
-        if self.buffer.len() > self.capacity
-            && let Some(removed) = self.buffer.pop_front()
-            && let ThreadBufferedEvent::Request(request) = &removed
-        {
-            self.pending_interactive_replay
-                .note_evicted_server_request(request);
-        }
-    }
-
     pub(super) fn pending_replay_requests(&self) -> Vec<ServerRequest> {
         self.buffer
             .iter()
@@ -227,7 +201,6 @@ impl ThreadEventStore {
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
-                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_) => None,
             })
             .collect()
@@ -257,7 +230,6 @@ impl ThreadEventStore {
                 },
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
-                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_) => None,
             })
             .or_else(|| {
@@ -285,7 +257,6 @@ impl ThreadEventStore {
                         .should_replay_snapshot_request(request.as_ref()),
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
-                    | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                     | ThreadBufferedEvent::FeedbackSubmission(_) => true,
                 })
                 .cloned()

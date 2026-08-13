@@ -1,8 +1,0 @@
-self-hosted-runner:
-  labels:
-    - codex-lab-app
-    - codex-lab-linux
-    - macos-26
-    - macos-codex-lab
-
-config-variables: null

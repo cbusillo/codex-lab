@@ -633,7 +633,6 @@ impl ChatComposer {
                 status_line_hyperlink_url: None,
                 status_line_enabled: false,
                 side_conversation_context_label: None,
-                background_review_label: None,
                 active_agent_label: None,
                 external_editor_key: default_keymap
                     .primary_hint(KeymapContext::Global, "open_external_editor"),
@@ -3728,10 +3727,7 @@ impl ChatComposer {
                 reasoning_down: self.footer.reasoning_down_key,
                 reasoning_up: self.footer.reasoning_up_key,
             },
-            active_agent_label: ambient_context_label(
-                self.footer.background_review_label.as_deref(),
-                self.footer.active_agent_label.as_deref(),
-            ),
+            active_agent_label: self.footer.active_agent_label.clone(),
         }
     }
 
@@ -4290,28 +4286,6 @@ impl ChatComposer {
         }
         self.footer.active_agent_label = active_agent_label;
         true
-    }
-
-    pub(crate) fn set_background_review_label(&mut self, label: Option<String>) -> bool {
-        if self.footer.background_review_label == label {
-            return false;
-        }
-        self.footer.background_review_label = label;
-        true
-    }
-}
-
-fn ambient_context_label(
-    background_review_label: Option<&str>,
-    active_agent_label: Option<&str>,
-) -> Option<String> {
-    match (background_review_label, active_agent_label) {
-        (Some(background_review_label), Some(active_agent_label)) => {
-            Some(format!("{background_review_label} · {active_agent_label}"))
-        }
-        (Some(background_review_label), None) => Some(background_review_label.to_string()),
-        (None, Some(active_agent_label)) => Some(active_agent_label.to_string()),
-        (None, None) => None,
     }
 }
 

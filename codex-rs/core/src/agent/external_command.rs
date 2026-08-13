@@ -49,7 +49,7 @@ const CODEX_LAB_CARGO_TARGET_SCOPE_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_SCOPE
 const CODEX_LAB_CARGO_TARGET_KEY_ENV_VAR: &str = "CODEX_LAB_CARGO_TARGET_KEY";
 const EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE: &str = "agent";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ExternalAgentLaunch {
     pub(crate) thread_id: ThreadId,
     pub(crate) parent_thread_id: ThreadId,
@@ -835,6 +835,7 @@ async fn send_completion_to_parent(
             communication,
             context,
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 }

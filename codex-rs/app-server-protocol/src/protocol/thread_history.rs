@@ -891,6 +891,8 @@ impl ThreadHistoryBuilder {
             status: String::new(),
             revised_prompt: None,
             result: String::new(),
+            transparent_background: None,
+            failure: None,
             saved_path: None,
         });
         self.upsert_item_in_current_turn(item);
@@ -902,6 +904,8 @@ impl ThreadHistoryBuilder {
             status: payload.status.clone(),
             revised_prompt: payload.revised_prompt.clone(),
             result: payload.result.clone(),
+            transparent_background: payload.transparent_background,
+            failure: payload.failure.clone(),
             saved_path: payload.saved_path.clone(),
         });
         self.upsert_item_in_current_turn(item);
@@ -2104,6 +2108,8 @@ mod tests {
                         status: "completed".to_string(),
                         revised_prompt: Some("A blue square".to_string()),
                         result: "cG5n".to_string(),
+                        transparent_background: None,
+                        failure: None,
                         saved_path: Some(saved_path.clone()),
                     },
                 )),
@@ -2134,6 +2140,8 @@ mod tests {
                 status: "completed".to_string(),
                 revised_prompt: Some("A blue square".to_string()),
                 result: "cG5n".to_string(),
+                transparent_background: None,
+                failure: None,
                 saved_path: Some(saved_path),
             })]
         );
@@ -2350,6 +2358,8 @@ mod tests {
                 status: "completed".into(),
                 revised_prompt: Some("final prompt".into()),
                 result: "Zm9v".into(),
+                transparent_background: None,
+                failure: None,
                 saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
             })),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
@@ -2389,6 +2399,8 @@ mod tests {
                         status: "completed".into(),
                         revised_prompt: Some("final prompt".into()),
                         result: "Zm9v".into(),
+                        transparent_background: None,
+                        failure: None,
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
                     }),
                 ],

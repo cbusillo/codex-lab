@@ -44,6 +44,7 @@ fn write_rollout_with_source_and_provider(
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source,
+                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,

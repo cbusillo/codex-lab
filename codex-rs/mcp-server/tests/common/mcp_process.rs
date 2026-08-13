@@ -64,7 +64,7 @@ impl McpProcess {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.env("CODEX_LAB_HOME", codex_home);
+        cmd.env("CODEX_HOME", codex_home);
         cmd.env("RUST_LOG", "debug");
 
         for (k, v) in env_overrides {
@@ -133,7 +133,7 @@ impl McpProcess {
 
         let initialized = self.read_jsonrpc_message().await?;
         let os_info = os_info::get();
-        let build_version = codex_version::wire_compatible_version();
+        let build_version = env!("CARGO_PKG_VERSION");
         let originator = codex_login::default_client::originator().value;
         let user_agent = format!(
             "{originator}/{build_version} ({} {}; {}) {} (elicitation test; 0.0.0)",

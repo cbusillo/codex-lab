@@ -104,14 +104,6 @@ fn detects_legacy_goal_context_fragment() {
 }
 
 #[test]
-fn detects_project_validation_failure_fragment() {
-    assert!(is_contextual_user_fragment(&ContentItem::InputText {
-        text: "<project_validation_failure>\nvalidation failed\n</project_validation_failure>"
-            .to_string(),
-    }));
-}
-
-#[test]
 fn does_not_hide_arbitrary_context_tags() {
     assert!(!is_contextual_user_fragment(&ContentItem::InputText {
         text: "<project_context>\nbody\n</project_context>".to_string(),

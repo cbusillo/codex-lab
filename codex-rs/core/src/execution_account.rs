@@ -29,19 +29,7 @@ use crate::account_switching::RateLimitSwitchState;
 #[path = "execution_account_persistence.rs"]
 mod persistence;
 
-#[cfg(test)]
-use persistence::LEASE_VERSION;
-#[cfg(test)]
-use persistence::LEGACY_LEASE_VERSION;
-#[cfg(test)]
-use persistence::PersistedExecutionAccountLease;
-#[cfg(test)]
-use persistence::lease_path;
-#[cfg(test)]
-use persistence::persist_lease;
 use persistence::persist_lease_record;
-#[cfg(test)]
-use persistence::read_persisted_lease;
 use persistence::read_persisted_lease_record;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -974,7 +962,3 @@ fn auth_managers_share_model_catalog(left: &AuthManager, right: &AuthManager) ->
         .zip(cache_identity(right))
         .is_some_and(|(left, right)| left == right)
 }
-
-#[cfg(test)]
-#[path = "execution_account_tests.rs"]
-mod tests;

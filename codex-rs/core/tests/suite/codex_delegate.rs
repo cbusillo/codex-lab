@@ -121,6 +121,7 @@ async fn codex_delegate_rejects_escalation_requests_when_parent_can_prompt() {
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .expect("submit review");
@@ -218,6 +219,7 @@ default_tools_approval_mode = "prompt"
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .expect("submit review");
@@ -315,6 +317,7 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await
         .expect("submit review");
