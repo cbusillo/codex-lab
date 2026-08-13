@@ -17,6 +17,19 @@ from pathlib import Path
 from typing import Any
 
 
+HARNESS_DIR = Path(__file__).resolve().parent
+if str(HARNESS_DIR) not in sys.path:
+    sys.path.insert(0, str(HARNESS_DIR))
+
+from terminal_outcome import (
+    TerminalOutcome,
+    model_failed,
+    passed,
+    policy_failed,
+    runner_failed,
+)
+
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = ROOT / ".tmp" / "codex-exec-harness"
 AUTO_REVIEW_SUMMARY_MAX_FINDINGS = 20
@@ -24,6 +37,7 @@ AUTO_REVIEW_SUMMARY_MAX_FIELD_BYTES = 240
 AUTO_REVIEW_SUMMARY_MAX_BYTES = 4096
 AUTO_REVIEW_SUMMARY_OMITTED_TEMPLATE = "... {count} more finding(s) omitted"
 ANCESTOR_GUIDANCE_FILENAMES = ("AGENTS.override.md", "AGENTS.md")
+TOOL_LOOP_CONSECUTIVE_FAILURE_LIMIT = 3
 
 
 class HarnessError(Exception):
@@ -377,6 +391,20 @@ def response_sse_body(response: dict[str, Any]) -> str:
         return str(response["sse"])
 
     chunks: list[str] = []
+    function_call = response.get("function_call")
+    if function_call is not None:
+        if not isinstance(function_call, dict):
+            raise HarnessError("responses_api function_call must be an object")
+        chunks.append(
+            sse_event(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "item": function_call,
+                },
+            )
+        )
+
     for event in response.get("events", []):
         if not isinstance(event, dict):
             raise HarnessError("responses_api events must be objects")
@@ -741,49 +769,116 @@ def run_codex(
     paths.home.mkdir(parents=True, exist_ok=True)
     paths.codex_home.mkdir(parents=True, exist_ok=True)
 
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    events: list[dict[str, Any]] = []
+    stdout_parse_errors = 0
+    tool_loop_detected = False
+    tool_loop_command: str | None = None
+    last_failed_command: str | None = None
+    failed_command_streak = 0
+    timed_out = False
+
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             command,
             cwd=paths.workspace,
             env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=int(scenario.get("timeout_seconds", 90)),
+            bufsize=1,
         )
-        stdout = completed.stdout
-        stderr = completed.stderr
-        returncode = completed.returncode
-        timed_out = False
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
-        if not stdout and (artifact_dir / "stdout.jsonl").is_file():
-            stdout = (artifact_dir / "stdout.jsonl").read_text(encoding="utf-8")
-        if not stderr and (artifact_dir / "stderr.log").is_file():
-            stderr = (artifact_dir / "stderr.log").read_text(encoding="utf-8")
-        stderr += f"\nharness: command timed out after {exc.timeout}s\n"
-        returncode = 124
-        timed_out = True
+    except OSError as error:
+        return {
+            "returncode": 1,
+            "events": [],
+            "stderr": str(error),
+            "launch_error": str(error),
+            "timed_out": False,
+            "stdout_parse_errors": 0,
+            "tool_loop_detected": False,
+            "tool_loop_command": None,
+        }
+
+    with proc:
+
+        def read_stdout() -> None:
+            nonlocal failed_command_streak
+            nonlocal last_failed_command
+            nonlocal stdout_parse_errors
+            nonlocal tool_loop_command
+            nonlocal tool_loop_detected
+            assert proc.stdout is not None
+            while True:
+                line = proc.stdout.readline()
+                if line == "":
+                    break
+                stdout_lines.append(line)
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    if line.endswith("\n"):
+                        stdout_parse_errors += 1
+                    event = {"unparsed": line.rstrip("\n")}
+                events.append(event)
+                if tool_loop_detected:
+                    continue
+                failed_commands = failed_commands_from_events([event])
+                failed_command = failed_commands[-1] if failed_commands else None
+                if failed_command is None:
+                    continue
+                if failed_command == last_failed_command:
+                    failed_command_streak += 1
+                else:
+                    last_failed_command = failed_command
+                    failed_command_streak = 1
+                if failed_command_streak >= TOOL_LOOP_CONSECUTIVE_FAILURE_LIMIT:
+                    tool_loop_detected = True
+                    tool_loop_command = failed_command
+                    proc.terminate()
+
+        def read_stderr() -> None:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                stderr_lines.append(line)
+
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            proc.wait(timeout=int(scenario.get("timeout_seconds", 90)))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+        if timed_out:
+            if not stdout and (artifact_dir / "stdout.jsonl").is_file():
+                stdout = (artifact_dir / "stdout.jsonl").read_text(encoding="utf-8")
+            if not stderr and (artifact_dir / "stderr.log").is_file():
+                stderr = (artifact_dir / "stderr.log").read_text(encoding="utf-8")
+            stderr += f"\nharness: command timed out after {int(scenario.get('timeout_seconds', 90))}s\n"
+        returncode = 124 if timed_out else proc.returncode
 
     save_text(artifact_dir / "stdout.jsonl", stdout)
     save_text(artifact_dir / "stderr.log", stderr)
-    events = []
-    for line in stdout.splitlines():
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            events.append({"unparsed": line})
 
     return {
         "returncode": returncode,
         "events": events,
         "stderr": stderr,
         "timed_out": timed_out,
+        "stdout_parse_errors": stdout_parse_errors,
+        "tool_loop_detected": tool_loop_detected,
+        "tool_loop_command": tool_loop_command,
     }
 
 
@@ -835,6 +930,89 @@ def commands_from_events(events: list[dict[str, Any]]) -> list[str]:
             if isinstance(command, str):
                 commands.append(command)
     return commands
+
+
+def failed_commands_from_events(events: list[dict[str, Any]]) -> list[str]:
+    commands: list[str] = []
+    for event in events:
+        msg = event.get("msg")
+        if isinstance(msg, dict) and msg.get("type") == "exec_command_end":
+            exit_code = msg.get("exit_code")
+            command = msg.get("command")
+            if isinstance(exit_code, int) and exit_code != 0:
+                if isinstance(command, list):
+                    commands.append(" ".join(str(part) for part in command))
+                elif isinstance(command, str):
+                    commands.append(command)
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "command_execution":
+            status = item.get("status")
+            exit_code = item.get("exit_code")
+            if status == "failed" or (isinstance(exit_code, int) and exit_code != 0):
+                command = item.get("command")
+                if isinstance(command, list):
+                    commands.append(" ".join(str(part) for part in command))
+                elif isinstance(command, str):
+                    commands.append(command)
+    return commands
+
+
+def agent_has_final_message(run: dict[str, Any]) -> bool:
+    agent_messages = run.get("agent_messages")
+    return isinstance(agent_messages, list) and bool(agent_messages)
+
+
+def classify_execution_outcome(run: dict[str, Any]) -> TerminalOutcome | None:
+    launch_error = run.get("launch_error")
+    if isinstance(launch_error, str) and launch_error:
+        return runner_failed("harness_error", truncate_utf8(launch_error, 240))
+
+    if run.get("timed_out") is True:
+        return runner_failed(
+            "provider_timeout",
+            truncate_utf8(f"command timed out after {run.get('timeout_seconds', 'unknown')}s", 240),
+        )
+
+    stderr = run.get("stderr")
+    if isinstance(stderr, str) and stderr:
+        lower_stderr = stderr.lower()
+        if "connection refused" in lower_stderr or "could not connect" in lower_stderr:
+            return runner_failed("provider_unavailable", truncate_utf8(stderr, 240))
+
+    if run.get("tool_loop_detected") is True:
+        loop_command = run.get("tool_loop_command")
+        detail = (
+            f"repeated identical failed tool call: {loop_command}"
+            if isinstance(loop_command, str) and loop_command
+            else "repeated identical failed tool call"
+        )
+        return model_failed("tool_loop", truncate_utf8(detail, 240))
+
+    if int(run.get("stdout_parse_errors", 0) or 0) > 0:
+        return runner_failed(
+            "malformed_jsonl",
+            truncate_utf8("model output was not valid JSONL", 240),
+        )
+
+    if not agent_has_final_message(run):
+        return model_failed(
+            "missing_final_message",
+            truncate_utf8("scenario ended without a final assistant message", 240),
+        )
+
+    return None
+
+
+def classify_terminal_outcome(
+    run: dict[str, Any], failures: list[str]
+) -> TerminalOutcome:
+    execution_outcome = classify_execution_outcome(run)
+    if execution_outcome is not None:
+        return execution_outcome
+    if failures:
+        return policy_failed(truncate_utf8(failures[0], 240))
+
+    return passed()
 
 
 TOKEN_USAGE_FIELDS = [
@@ -931,6 +1109,12 @@ def run_turns(
                 "commands": commands,
                 "token_usage": token_usage_delta,
                 "token_usage_snapshot": token_usage_snapshot,
+                "stdout_parse_errors": result["stdout_parse_errors"],
+                "stderr": result["stderr"],
+                "launch_error": result.get("launch_error"),
+                "tool_loop_detected": result["tool_loop_detected"],
+                "tool_loop_command": result["tool_loop_command"],
+                "timed_out": result["timed_out"],
                 "artifact_dir": str(artifact_dir),
                 "command": command,
             }
@@ -947,6 +1131,31 @@ def run_turns(
         "turns": turn_results,
         "thread_id": thread_id,
         "token_usage": previous_token_usage,
+        "stdout_parse_errors": sum(int(turn.get("stdout_parse_errors", 0)) for turn in turn_results),
+        "stderr": "".join(
+            str(turn.get("stderr", "")) for turn in turn_results
+        ),
+        "launch_error": next(
+            (
+                turn.get("launch_error")
+                for turn in turn_results
+                if turn.get("launch_error")
+            ),
+            None,
+        ),
+        "timed_out": any(bool(turn.get("timed_out")) for turn in turn_results),
+        "tool_loop_detected": any(
+            bool(turn.get("tool_loop_detected")) for turn in turn_results
+        ),
+        "tool_loop_command": next(
+            (
+                turn.get("tool_loop_command")
+                for turn in turn_results
+                if turn.get("tool_loop_command")
+            ),
+            None,
+        ),
+        "timeout_seconds": scenario.get("timeout_seconds", 90),
         "workspace": str(paths.workspace),
         "run_dir": str(paths.run_dir),
     }
@@ -1006,6 +1215,24 @@ def add_text_assertion_failures(
                 failures.append(
                     f"{label}: expected {needle!r} {expected} times, found {actual}"
                 )
+
+
+def add_absent_key_assertion_failures(
+    failures: list[str], subject: Any, assertion: dict[str, Any], label: str
+) -> None:
+    absent_keys = assertion.get("absent_keys", [])
+    if not isinstance(absent_keys, list):
+        raise HarnessError(f"{label}.absent_keys must be a list")
+    if not absent_keys:
+        return
+    if not isinstance(subject, dict):
+        failures.append(f"{label}: missing object body for absent_keys assertion")
+        return
+    for key in absent_keys:
+        if not isinstance(key, str) or not key:
+            raise HarnessError(f"{label}.absent_keys entries must be non-empty strings")
+        if key in subject:
+            failures.append(f"{label}: unexpectedly contained key {key!r}")
 
 
 def add_json_suffix_assertion_failures(
@@ -1549,6 +1776,9 @@ def evaluate_expectations(
         add_text_assertion_failures(
             failures, subject, assertion, f"responses[{request_index}].{scope}"
         )
+        add_absent_key_assertion_failures(
+            failures, subject, assertion, f"responses[{request_index}].{scope}"
+        )
         add_prefix_assertion_failures(
             failures,
             subject,
@@ -1594,6 +1824,47 @@ def evaluate_expectations(
         add_json_suffix_assertion_failures(failures, outputs[0], assertion, label)
 
     return failures
+
+
+def add_terminal_outcome_assertion_failures(
+    failures: list[str], scenario: dict[str, Any], outcome: TerminalOutcome
+) -> None:
+    expect = scenario.get("expect", {})
+    if not isinstance(expect, dict):
+        raise HarnessError("expect must be an object")
+    assertion = expect.get("terminal_outcome")
+    if assertion is None:
+        return
+    if not isinstance(assertion, dict):
+        raise HarnessError("expect.terminal_outcome must be an object")
+    supported_fields = {"outcome", "reason", "detail_contains"}
+    unknown_fields = set(assertion) - supported_fields
+    if unknown_fields:
+        raise HarnessError(
+            "expect.terminal_outcome has unsupported fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+    actual = {
+        "outcome": outcome.outcome,
+        "reason": outcome.reason,
+        "detail": outcome.detail,
+    }
+    for field in ["outcome", "reason"]:
+        expected = assertion.get(field)
+        if expected is not None and not isinstance(expected, str):
+            raise HarnessError(f"expect.terminal_outcome.{field} must be a string")
+        if isinstance(expected, str) and actual[field] != expected:
+            failures.append(
+                f"terminal_outcome.{field}: expected {expected!r}, found {actual[field]!r}"
+            )
+    detail_contains = assertion.get("detail_contains")
+    if detail_contains is not None and not isinstance(detail_contains, str):
+        raise HarnessError("expect.terminal_outcome.detail_contains must be a string")
+    actual_detail = actual["detail"]
+    if isinstance(detail_contains, str) and (
+        not isinstance(actual_detail, str) or detail_contains not in actual_detail
+    ):
+        failures.append(f"terminal_outcome.detail: missing {detail_contains!r}")
 
 
 def run_scenario(args: argparse.Namespace) -> int:
@@ -1647,6 +1918,16 @@ def run_scenario(args: argparse.Namespace) -> int:
     run["background_review_runs"] = background_review_runs
     run["workspace_git"] = workspace_git
     failures = evaluate_expectations(scenario, run, requests)
+    terminal_outcome = classify_terminal_outcome(run, failures)
+    add_terminal_outcome_assertion_failures(failures, scenario, terminal_outcome)
+    expect = scenario.get("expect", {})
+    expected_terminal_outcome = (
+        expect.get("terminal_outcome") if isinstance(expect, dict) else None
+    )
+    passed_run = not failures and (
+        isinstance(expected_terminal_outcome, dict)
+        or terminal_outcome.outcome == "passed"
+    )
     save_json(paths.artifacts / "responses-requests.json", requests)
     save_json(paths.artifacts / "background-review-runs.json", background_review_runs)
     save_json(paths.artifacts / "workspace-git.json", workspace_git)
@@ -1655,8 +1936,13 @@ def run_scenario(args: argparse.Namespace) -> int:
         "scenario_path": str(scenario_path),
         "run_dir": str(paths.run_dir),
         "returncode": run["returncode"],
-        "passed": not failures,
+        "passed": passed_run,
         "failures": failures,
+        "terminal_outcome": {
+            "outcome": terminal_outcome.outcome,
+            "reason": terminal_outcome.reason,
+            "detail": terminal_outcome.detail,
+        },
         "event_count": len(run["events"]),
         "event_types": run.get("event_types", {}),
         "responses_request_count": len(requests),
@@ -1664,10 +1950,13 @@ def run_scenario(args: argparse.Namespace) -> int:
         "thread_id": run.get("thread_id"),
         "token_usage": run.get("token_usage", empty_token_usage()),
         "turns": run.get("turns", []),
+        "stdout_parse_errors": run.get("stdout_parse_errors", 0),
+        "tool_loop_detected": run.get("tool_loop_detected", False),
+        "tool_loop_command": run.get("tool_loop_command"),
     }
     save_json(paths.artifacts / "summary.json", summary)
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 1 if failures else 0
+    return 0 if passed_run else 1
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

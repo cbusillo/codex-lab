@@ -1020,6 +1020,25 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
 
         self.assertEqual(["responses[1].inputs: missing prefix subject"], failures)
 
+    def test_response_assertion_proves_tools_are_absent(self) -> None:
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "responses": [
+                        {
+                            "request": 0,
+                            "scope": "body",
+                            "absent_keys": ["tools", "tool_choice"],
+                        }
+                    ]
+                }
+            },
+            {"returncode": 0, "events": [], "event_types": {}, "turns": []},
+            [{"body": {"input": "policy-only request"}}],
+        )
+
+        self.assertEqual([], failures)
+
     def test_run_codex_preserves_artifacts_on_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = HARNESS.make_paths(Path(tmp), "timeout")
@@ -1048,6 +1067,56 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             self.assertTrue((artifact_dir / "stderr.log").exists())
             self.assertIn("turn.started", (artifact_dir / "stdout.jsonl").read_text())
             self.assertIn("timed out", (artifact_dir / "stderr.log").read_text())
+
+    def test_failed_commands_only_include_failed_execution_events(self) -> None:
+        events = [
+            {
+                "item": {
+                    "type": "command_execution",
+                    "command": "undefined-helper",
+                    "status": "completed",
+                    "exit_code": 0,
+                }
+            },
+            {
+                "item": {
+                    "type": "command_execution",
+                    "command": "undefined-helper",
+                    "status": "failed",
+                    "exit_code": 127,
+                }
+            },
+        ]
+
+        self.assertEqual(
+            ["undefined-helper"], HARNESS.failed_commands_from_events(events)
+        )
+
+    def test_run_turns_propagates_timeout_stderr_and_launch_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "terminal-evidence")
+            paths.workspace.mkdir(parents=True)
+            result = {
+                "returncode": 124,
+                "events": [],
+                "stderr": "connection refused",
+                "launch_error": "missing binary",
+                "timed_out": True,
+                "stdout_parse_errors": 0,
+                "tool_loop_detected": False,
+                "tool_loop_command": None,
+            }
+            with unittest.mock.patch.object(HARNESS, "run_codex", return_value=result):
+                run = HARNESS.run_turns(
+                    {"prompt": "test", "timeout_seconds": 2},
+                    "codex",
+                    paths,
+                    requests=None,
+                )
+
+        self.assertTrue(run["timed_out"])
+        self.assertEqual("connection refused", run["stderr"])
+        self.assertEqual("missing binary", run["launch_error"])
 
     def test_run_codex_uses_codex_lab_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
