@@ -183,8 +183,12 @@ fn raw_cli_invocation_appends_mode_args_and_prompt() {
         /*is_read_only*/ true,
     );
 
-    let invocation = build_external_agent_invocation(&launch, "inspect this repo")
-        .expect("raw cli invocation should build");
+    let invocation = build_external_agent_invocation(
+        &launch,
+        "inspect this repo",
+        launch.claude_stream_json_enabled,
+    )
+    .expect("raw cli invocation should build");
 
     assert_eq!(invocation.command, PathBuf::from("/bin/echo"));
     assert_eq!(
@@ -196,6 +200,28 @@ fn raw_cli_invocation_appends_mode_args_and_prompt() {
             "inspect this repo".to_string(),
         ]
     );
+}
+
+#[test]
+fn claude_stream_json_uses_preflight_capability_for_v1_launch() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let backend = ExternalCommandAgentBackendConfig {
+        command: "claude".to_string(),
+        protocol: ExternalCommandProtocol::RawCli,
+        launch_family: Some("claude".to_string()),
+        ..Default::default()
+    };
+    let launch = test_launch(&temp_dir, backend.clone(), /*is_read_only*/ true);
+    let mut provider = ExternalAgentProviderProvenance::new(
+        Some("claude"),
+        &backend,
+        temp_dir.path(),
+        /*is_read_only*/ true,
+        /*cli_version*/ None,
+    );
+    provider.set_supports_claude_stream_json(true);
+
+    assert!(claude_stream_json_enabled(&launch, Some(&provider)));
 }
 
 #[test]
@@ -214,8 +240,12 @@ fn antigravity_invocation_adds_repo_dir_and_prompt_flag() {
         /*is_read_only*/ false,
     );
 
-    let invocation = build_external_agent_invocation(&launch, "inspect this repo")
-        .expect("antigravity invocation should build");
+    let invocation = build_external_agent_invocation(
+        &launch,
+        "inspect this repo",
+        launch.claude_stream_json_enabled,
+    )
+    .expect("antigravity invocation should build");
 
     assert_eq!(invocation.command, PathBuf::from("agy"));
     assert_eq!(
@@ -267,8 +297,12 @@ fn third_party_cli_families_use_prompt_flag() {
         let mut launch = launch;
         launch.claude_stream_json_enabled = launch_family == "claude";
 
-        let invocation = build_external_agent_invocation(&launch, "inspect this repo")
-            .expect("third-party invocation should build");
+        let invocation = build_external_agent_invocation(
+            &launch,
+            "inspect this repo",
+            launch.claude_stream_json_enabled,
+        )
+        .expect("third-party invocation should build");
 
         let mut expected_args = mode_args;
         if launch_family == "claude" {
@@ -416,6 +450,43 @@ async fn claude_malformed_stream_returns_bounded_diagnostic_without_transport_ou
 
 #[cfg(unix)]
 #[tokio::test]
+async fn claude_plaintext_auth_failure_is_preserved_without_transport_output() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-auth.sh");
+    tokio::fs::write(
+        &script_path,
+        "printf '%s\\n' 'authentication required' '{\"type\":\"rate_limit_event\"}'\nexit 1\n",
+    )
+    .await
+    .expect("fake Claude CLI should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("plaintext authentication failure should be preserved");
+
+    assert_eq!(
+        err.detail.kind,
+        ExternalAgentFailureKind::AuthenticationRequired
+    );
+    assert!(err.to_string().contains("authentication required"));
+    assert!(!err.to_string().contains("rate_limit_event"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn generic_429_does_not_infer_structured_quota_details() {
     let temp_dir = TempDir::new().expect("tempdir");
     let script_path = temp_dir.path().join("claude-429.sh");
@@ -547,8 +618,12 @@ fn positional_prompt_families_keep_bare_prompt() {
             /*is_read_only*/ false,
         );
 
-        let invocation = build_external_agent_invocation(&launch, "inspect this repo")
-            .expect("code-family invocation should build");
+        let invocation = build_external_agent_invocation(
+            &launch,
+            "inspect this repo",
+            launch.claude_stream_json_enabled,
+        )
+        .expect("code-family invocation should build");
 
         assert_eq!(invocation.command, PathBuf::from("coder"));
         assert_eq!(
@@ -1281,8 +1356,12 @@ fn json_invocation_keeps_command_as_literal_path() {
         /*is_read_only*/ true,
     );
 
-    let invocation = build_external_agent_invocation(&launch, "inspect this repo")
-        .expect("json invocation should build");
+    let invocation = build_external_agent_invocation(
+        &launch,
+        "inspect this repo",
+        launch.claude_stream_json_enabled,
+    )
+    .expect("json invocation should build");
 
     assert_eq!(
         invocation.command,
@@ -1308,8 +1387,12 @@ fn raw_cli_rejects_invalid_command_quoting() {
         /*is_read_only*/ false,
     );
 
-    let err = build_external_agent_invocation(&launch, "inspect this repo")
-        .expect_err("invalid raw cli command quoting should be rejected");
+    let err = build_external_agent_invocation(
+        &launch,
+        "inspect this repo",
+        launch.claude_stream_json_enabled,
+    )
+    .expect_err("invalid raw cli command quoting should be rejected");
 
     assert!(
         err.to_string().contains("invalid shell quoting"),
@@ -1451,6 +1534,33 @@ async fn oversized_output_is_truncated_instead_of_failing_wrapper() {
 
     assert!(output.starts_with(EXTERNAL_AGENT_TRUNCATED_MARKER));
     assert!(output.ends_with(b"qrstuvwx"));
+}
+
+#[tokio::test]
+async fn head_tail_reader_preserves_under_limit_output_exactly() {
+    let (mut writer, reader) = tokio::io::duplex(256);
+    let payload = b"0123456789abcdef".to_vec();
+    let expected = payload.clone();
+    let writer_task = tokio::spawn(async move {
+        writer.write_all(&payload).await.expect("write payload");
+    });
+
+    let output =
+        read_limited_output_with_head(reader, /*limit*/ 20, /*head_limit*/ 8, "stdout")
+            .await
+            .expect("under-limit output should remain unchanged");
+    writer_task.await.expect("writer task should finish");
+
+    assert_eq!(expected, output);
+}
+
+#[test]
+fn claude_plaintext_output_omits_json_transport_events() {
+    let output = claude_plaintext_output(
+        b"authentication required\n{\"type\":\"rate_limit_event\"}\nretry login\n",
+    );
+
+    assert_eq!(b"authentication required\nretry login\n", output.as_slice());
 }
 
 #[cfg(unix)]

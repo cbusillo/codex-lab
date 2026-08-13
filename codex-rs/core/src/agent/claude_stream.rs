@@ -8,6 +8,7 @@ pub(crate) struct ClaudeStreamJsonOutput {
     pub(crate) final_message: Option<String>,
     pub(crate) is_error: Option<bool>,
     pub(crate) has_result: bool,
+    pub(crate) error_subtype: Option<String>,
     pub(crate) quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
 }
 
@@ -20,6 +21,7 @@ pub(crate) fn parse_claude_stream_json(output: &[u8]) -> Option<ClaudeStreamJson
     let mut result_message = None;
     let mut is_error = None;
     let mut has_result = false;
+    let mut error_subtype = None;
     let mut quota_diagnostic = None;
     let mut recognized_event = false;
 
@@ -64,6 +66,10 @@ pub(crate) fn parse_claude_stream_json(output: &[u8]) -> Option<ClaudeStreamJson
                 if let Some(value) = object.get("result") {
                     result_message = value.as_str().map(str::to_string);
                 }
+                error_subtype = object
+                    .get("subtype")
+                    .and_then(Value::as_str)
+                    .and_then(bounded_contract_value);
             }
             "rate_limit_event" => {
                 if let Some(diagnostic) = object
@@ -89,6 +95,7 @@ pub(crate) fn parse_claude_stream_json(output: &[u8]) -> Option<ClaudeStreamJson
         final_message,
         is_error,
         has_result,
+        error_subtype,
         quota_diagnostic,
     })
 }
@@ -123,11 +130,7 @@ fn optional_contract_string(
 ) -> Result<Option<String>, ()> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value
-            .as_str()
-            .and_then(bounded_contract_value)
-            .map(Some)
-            .ok_or(()),
+        Some(value) => Ok(value.as_str().and_then(bounded_contract_value)),
     }
 }
 
@@ -137,7 +140,7 @@ fn optional_timestamp(
 ) -> Result<Option<i64>, ()> {
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
-        Some(value) => value.as_i64().map(Some).ok_or(()),
+        Some(value) => Ok(value.as_i64()),
     }
 }
 

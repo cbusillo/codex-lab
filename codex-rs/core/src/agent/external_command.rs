@@ -40,6 +40,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
+const MAX_CLAUDE_STREAM_HEAD_BYTES: usize = 4 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
 pub(super) const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
 const MAX_MODEL_VISIBLE_EXTERNAL_AGENT_BYTES: usize = 8 * 1024;
@@ -190,8 +191,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 .final_message
                 .filter(|message| !message.is_empty())
                 .unwrap_or_else(|| "external agent failed".to_string());
-            let failure = response
-                .quota_diagnostic
+            let quota_diagnostic = response.quota_diagnostic;
+            let mut failure = quota_diagnostic
+                .clone()
                 .filter(ExternalAgentQuotaDiagnostic::is_rejected)
                 .map(ExternalAgentFailureDetail::from_quota_diagnostic)
                 .unwrap_or_else(|| {
@@ -200,6 +202,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                         message.clone(),
                     )
                 });
+            failure.quota_diagnostic = quota_diagnostic;
             let parent_message =
                 external_agent_parent_failure_message(&launch, &failure, message.as_str());
             control.update_external_agent_failure(
@@ -320,9 +323,12 @@ async fn run_external_agent_inner(
             .map_err(ExternalAgentRunError::from_detail)?,
         )
     };
-    let mut invocation = build_external_agent_invocation(launch, &message).map_err(|error| {
-        ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error)
-    })?;
+    let claude_stream_json_enabled =
+        claude_stream_json_enabled(launch, preflight_provider.as_ref());
+    let mut invocation =
+        build_external_agent_invocation(launch, &message, claude_stream_json_enabled).map_err(
+            |error| ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error),
+        )?;
     if let Some(resolved_command) = launch.resolved_command.as_deref().or_else(|| {
         preflight_provider
             .as_ref()
@@ -392,7 +398,19 @@ async fn run_external_agent_inner(
         }
 
         let (stdout, stderr, status) = tokio::try_join!(
-            read_limited_output(stdout, MAX_EXTERNAL_AGENT_STDOUT_BYTES, "stdout"),
+            async {
+                if claude_stream_json_enabled {
+                    read_limited_output_with_head(
+                        stdout,
+                        MAX_EXTERNAL_AGENT_STDOUT_BYTES,
+                        MAX_CLAUDE_STREAM_HEAD_BYTES,
+                        "stdout",
+                    )
+                    .await
+                } else {
+                    read_limited_output(stdout, MAX_EXTERNAL_AGENT_STDOUT_BYTES, "stdout").await
+                }
+            },
             read_limited_output(stderr, MAX_EXTERNAL_AGENT_STDERR_BYTES, "stderr"),
             async { child.wait().await.map_err(anyhow::Error::from) },
         )?;
@@ -425,7 +443,7 @@ async fn run_external_agent_inner(
         },
     };
 
-    let claude_stream = if launch.claude_stream_json_enabled {
+    let claude_stream = if claude_stream_json_enabled {
         parse_claude_stream_json(&output.stdout)
     } else {
         None
@@ -450,23 +468,31 @@ async fn run_external_agent_inner(
     if !output.status.success() {
         if let Some(stream) = claude_stream
             && stream.is_error == Some(true)
-            && let Some(final_message) = stream
+        {
+            let final_message = stream
                 .final_message
                 .as_deref()
                 .map(bound_external_agent_message)
-        {
+                .or_else(|| {
+                    stream.error_subtype.as_deref().map(|subtype| {
+                        bound_external_agent_message(&format!(
+                            "Claude Code reported an error result: {subtype}"
+                        ))
+                    })
+                });
             return Ok(ExternalAgentResponse {
                 status: ExternalAgentResponseStatus::Failed,
-                final_message: Some(final_message),
+                final_message,
                 quota_diagnostic: stream.quota_diagnostic,
             });
         }
-        let diagnostic = if launch.claude_stream_json_enabled {
-            let stderr = bounded_preflight_output(&[], &output.stderr);
-            if stderr.is_empty() {
+        let diagnostic = if claude_stream_json_enabled {
+            let plaintext_stdout = claude_plaintext_output(&output.stdout);
+            let diagnostic = bounded_preflight_output(&plaintext_stdout, &output.stderr);
+            if diagnostic.is_empty() {
                 "Claude Code did not emit a usable stream-json response".to_string()
             } else {
-                format!("Claude Code did not emit a usable stream-json response: {stderr}")
+                format!("Claude Code did not emit a usable stream-json response: {diagnostic}")
             }
         } else {
             bounded_preflight_output(&output.stdout, &output.stderr)
@@ -539,7 +565,7 @@ async fn run_external_agent_inner(
                     ));
                 }
             }
-            if launch.claude_stream_json_enabled {
+            if claude_stream_json_enabled {
                 return Err(ExternalAgentRunError::new(
                     ExternalAgentFailureKind::MalformedOutput,
                     anyhow::anyhow!("Claude Code did not emit a usable stream-json response"),
@@ -671,6 +697,7 @@ struct ExternalAgentInvocation {
 fn build_external_agent_invocation(
     launch: &ExternalAgentLaunch,
     message: &str,
+    claude_stream_json_enabled: bool,
 ) -> anyhow::Result<ExternalAgentInvocation> {
     let (command, mut args) = match launch.backend.protocol {
         ExternalCommandProtocol::Json => (launch.backend.command.trim().to_string(), Vec::new()),
@@ -689,7 +716,7 @@ fn build_external_agent_invocation(
     );
     if launch.backend.protocol == ExternalCommandProtocol::RawCli {
         let launch_family = launch.backend.launch_family.as_deref();
-        if launch.claude_stream_json_enabled {
+        if claude_stream_json_enabled {
             args.extend([
                 "--verbose".to_string(),
                 "--output-format".to_string(),
@@ -709,6 +736,16 @@ fn build_external_agent_invocation(
         command: PathBuf::from(command),
         args,
     })
+}
+
+fn claude_stream_json_enabled(
+    launch: &ExternalAgentLaunch,
+    preflight_provider: Option<&ExternalAgentProviderProvenance>,
+) -> bool {
+    launch.backend.protocol == ExternalCommandProtocol::RawCli
+        && (launch.claude_stream_json_enabled
+            || preflight_provider
+                .is_some_and(ExternalAgentProviderProvenance::supports_claude_stream_json))
 }
 
 fn raw_cli_uses_prompt_flag(launch_family: Option<&str>) -> bool {
@@ -901,6 +938,68 @@ pub(super) async fn read_limited_output<R: AsyncRead + Unpin>(
     }
 
     Ok(tail)
+}
+
+async fn read_limited_output_with_head<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+    head_limit: usize,
+    stream_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let head_limit = head_limit.min(limit);
+    let tail_limit = limit.saturating_sub(head_limit);
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut total_bytes = 0_usize;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_bytes += bytes_read;
+        let chunk = &buffer[..bytes_read];
+        if head.len() < head_limit {
+            let head_bytes = (head_limit - head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..head_bytes]);
+        }
+        if tail_limit > 0 {
+            tail.extend_from_slice(chunk);
+            if tail.len() > tail_limit {
+                let overflow = tail.len() - tail_limit;
+                tail.drain(..overflow);
+            }
+        }
+    }
+
+    if total_bytes <= limit {
+        let overlap = head.len() + tail.len() - total_bytes;
+        head.extend_from_slice(&tail[overlap..]);
+        return Ok(head);
+    }
+
+    tracing::warn!("external agent {stream_name} exceeded limit; preserving head and tail");
+    let mut output = Vec::with_capacity(EXTERNAL_AGENT_TRUNCATED_MARKER.len() + limit);
+    output.extend_from_slice(EXTERNAL_AGENT_TRUNCATED_MARKER);
+    output.extend_from_slice(&head);
+    output.extend_from_slice(&tail);
+    Ok(output)
+}
+
+fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
+    let mut plaintext = Vec::new();
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let trimmed = line.trim_ascii();
+        if trimmed.starts_with(b"{")
+            || trimmed.starts_with(b"[")
+            || serde_json::from_slice::<serde_json::Value>(trimmed).is_ok()
+        {
+            continue;
+        }
+        plaintext.extend_from_slice(line);
+    }
+    plaintext
 }
 
 async fn send_completion_to_parent(

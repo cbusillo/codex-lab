@@ -10,6 +10,7 @@ use crate::agent::provider_routing::ProviderRoutingKind;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::registry::SpawnReservation;
 use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use codex_agent_graph_store::ExternalAgentRunOutcome;
 use codex_agent_graph_store::ExternalAgentRunStart;
 use std::collections::HashSet;
@@ -128,7 +129,8 @@ impl AgentControl {
                 /*cli_version*/ None,
             )
         });
-        let claude_stream_json_enabled = provider.supports_claude_stream_json();
+        let claude_stream_json_enabled = backend.protocol == ExternalCommandProtocol::RawCli
+            && provider.supports_claude_stream_json();
         let routing = external_agent_routing.unwrap_or_else(|| ProviderRoutingSummary {
             kind: ProviderRoutingKind::Explicit,
             requested: agent_role.clone(),
