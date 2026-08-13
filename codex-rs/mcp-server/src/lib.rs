@@ -29,12 +29,11 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-#[cfg(test)]
-#[path = "approval_response_compat_tests.rs"]
-mod approval_response_compat_tests;
+mod active_turn_registry;
 mod codex_tool_config;
 mod codex_tool_runner;
 mod exec_approval;
+mod extension_event_sink;
 pub(crate) mod message_processor;
 mod outgoing_message;
 mod patch_approval;
@@ -81,6 +80,7 @@ pub async fn run_main(
         .map_err(|e| {
             std::io::Error::new(ErrorKind::InvalidData, format!("error loading config: {e}"))
         })?;
+    config.auth_config().validate()?;
     set_default_client_residency_requirement(config.enforce_residency.value());
     let otel = codex_core::otel_init::build_provider(
         &config,

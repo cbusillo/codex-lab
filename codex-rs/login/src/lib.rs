@@ -6,12 +6,15 @@ pub mod auth_profiles;
 pub mod test_support;
 pub mod token_data;
 
+mod callback_params;
 mod device_code_auth;
 mod outbound_proxy;
 mod pkce;
 mod server;
 mod success_page;
 
+pub use callback_params::LoginCallbackResult;
+pub use callback_params::LoginOnboardingEntrypoint;
 pub use codex_config::types::AuthCredentialsStoreMode;
 pub use codex_http_client::BuildCustomCaTransportError as BuildLoginHttpClientError;
 pub use device_code_auth::DeviceCode;
@@ -54,6 +57,7 @@ pub use auth::UnauthorizedRecovery;
 pub use auth::default_client;
 pub use auth::delete_auth;
 pub use auth::enforce_login_restrictions;
+pub use auth::is_workload_identity_selected;
 pub use auth::load_auth_dot_json;
 pub use auth::login_with_access_token;
 pub use auth::login_with_api_key;

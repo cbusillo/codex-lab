@@ -6,7 +6,6 @@ use codex_config::McpServerConfig;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
 use codex_connectors::PluginConnectorSource;
-use codex_core_plugins::PluginAuthContext;
 use codex_core_plugins::PluginsManager;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_extension_api::ExtensionData;
@@ -27,6 +26,7 @@ use codex_mcp::configured_mcp_servers;
 use codex_mcp::effective_mcp_servers;
 use codex_plugin::AppConnectorId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::protocol::SessionSource;
 
 const LEGACY_CODEX_APPS_REGISTRATION_ID: &str = "legacy_codex_apps";
 
@@ -35,6 +35,11 @@ const LEGACY_CODEX_APPS_REGISTRATION_ID: &str = "legacy_codex_apps";
 pub(crate) struct McpRuntimeProjection {
     pub(crate) config: McpConfig,
     pub(crate) plugins_available: bool,
+}
+
+pub(crate) struct McpThreadIdentity<'a> {
+    pub(crate) session_source: &'a SessionSource,
+    pub(crate) originator: &'a str,
 }
 
 enum OrderedMcpOverlay {
@@ -99,21 +104,18 @@ impl McpManager {
             // originator; active-thread tool calls use runtime_config_for_step below.
             /*originator*/
             None,
-            PluginAuthContext::from_auth_mode(self.plugins_manager.auth_mode()),
         )
         .await
         .config
     }
 
     #[tracing::instrument(name = "mcp.runtime_config.project_for_step", skip_all)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn runtime_config_for_step(
         &self,
         config: &Config,
         thread_init: &ExtensionDataInit,
         thread_store: &ExtensionData,
-        originator: &str,
-        plugin_auth_context: PluginAuthContext,
+        identity: McpThreadIdentity<'_>,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
     ) -> McpRuntimeProjection {
@@ -122,12 +124,12 @@ impl McpManager {
                 config,
                 thread_init,
                 thread_store,
-                originator,
+                identity.originator,
                 ready_selected_capability_roots,
                 executor_capability_discovery,
-            ),
-            Some(originator),
-            plugin_auth_context,
+            )
+            .with_session_source(identity.session_source),
+            Some(identity.originator),
         )
         .await
     }
@@ -136,7 +138,6 @@ impl McpManager {
         &self,
         context: McpServerContributionContext<'_, Config>,
         originator: Option<&str>,
-        plugin_auth_context: PluginAuthContext,
     ) -> McpRuntimeProjection {
         let config = context.config();
         let mut selected_plugin_available = false;
@@ -201,10 +202,7 @@ impl McpManager {
 
         let loaded_plugins = self
             .plugins_manager
-            .plugins_for_config_with_auth_context(
-                &config.plugins_config_input(),
-                plugin_auth_context,
-            )
+            .plugins_for_config(&config.plugins_config_input())
             .await;
         let plugins_available =
             selected_plugin_available || !loaded_plugins.capability_summaries().is_empty();

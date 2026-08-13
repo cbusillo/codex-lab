@@ -1,16 +1,17 @@
+use codex_analytics::InvocationType;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolExecutorFuture;
 use codex_extension_api::ToolName;
 use codex_extension_api::ToolSpec;
-use codex_protocol::protocol::TruncationPolicy;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
 use crate::catalog::SkillResourceId;
 use crate::provider::SkillReadRequest;
+use crate::render::build_alias_plan;
 
 use super::MAX_HANDLE_BYTES;
 use super::SkillToolAuthority;
@@ -18,7 +19,7 @@ use super::SkillToolContext;
 use super::pagination_cursor;
 use super::parse_args;
 use super::parse_pagination_cursor;
-use super::serialized_fits_output_budget;
+use super::serialized_len;
 use super::skill_function_tool;
 use super::skill_json_output;
 use super::skill_tool_name;
@@ -28,11 +29,9 @@ const TOOL_NAME: &str = "read";
 const MAX_READ_RESPONSE_BYTES: usize = 512 * 1024;
 
 #[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 struct ReadArgs {
-    authority: SkillToolAuthority,
     package: String,
-    resource: String,
+    resource: Option<String>,
     cursor: Option<String>,
 }
 
@@ -41,6 +40,8 @@ struct ReadArgs {
 struct ReadResponse {
     resource: String,
     contents: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill_root: Option<String>,
     next_cursor: Option<String>,
 }
 
@@ -57,39 +58,59 @@ impl ToolExecutor<ToolCall> for ReadTool {
     fn spec(&self) -> ToolSpec {
         skill_function_tool::<ReadArgs, ReadResponse>(
             TOOL_NAME,
-            "Read one page from a skill resource. Pass the exact authority and package from skills.list or an explicitly selected skill's resource_access metadata, plus its main_resource or a referenced resource beneath that package. Pass next_cursor back as cursor to continue.",
+            "Read one page from a skill. Pass its provided package directly; root aliases are resolved automatically. Omit resource to read SKILL.md; to read another file, use the same package and pass the file's complete skill:// identifier as resource. For executor-backed skills, skill_root is the skill's absolute directory in the executor filesystem and can be used to locate bundled scripts. If the package is not provided, use skills.list to find it. Pass next_cursor back as cursor to continue.",
         )
     }
 
     fn handle(&self, call: ToolCall) -> ToolExecutorFuture<'_> {
         Box::pin(async move {
             let args: ReadArgs = parse_args(&call)?;
-            if let SkillToolAuthority::Executor { id } = &args.authority {
-                validate_handle("authority.id", id, MAX_HANDLE_BYTES)?;
-            }
             validate_handle("package", &args.package, MAX_HANDLE_BYTES)?;
-            validate_handle("resource", &args.resource, MAX_HANDLE_BYTES)?;
+            if let Some(resource) = args.resource.as_deref() {
+                validate_handle("resource", resource, MAX_HANDLE_BYTES)?;
+            }
 
-            let output_authority = args.authority.selector();
-            let catalog = self.context.catalog(&call.turn_id, output_authority).await;
-            let Some(skill_entry) = catalog.entries.iter().find(|entry| {
-                entry.enabled
-                    && args.authority.matches(&entry.authority)
-                    && entry.id.0 == args.package
-            }) else {
+            let mut selected_skill = None;
+            for selector in [
+                super::SkillToolAuthoritySelector::Orchestrator,
+                super::SkillToolAuthoritySelector::Executor,
+            ] {
+                let catalog = self.context.catalog(&call.turn_id, selector).await;
+                let alias_plan = build_alias_plan(
+                    &catalog
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.is_model_visible())
+                        .collect::<Vec<_>>(),
+                );
+                if let Some(entry) = catalog.entries.into_iter().find(|entry| {
+                    entry.enabled
+                        && (entry.id.0 == args.package
+                            || alias_plan
+                                .as_ref()
+                                .and_then(|plan| plan.shorten(&entry.id.0))
+                                .is_some_and(|alias| alias == args.package))
+                        && SkillToolAuthority::from_authority(&entry.authority)
+                            .is_some_and(|authority| authority.selector() == selector)
+                }) {
+                    selected_skill = Some((entry, selector));
+                    break;
+                }
+            }
+            let Some((skill_entry, output_authority)) = selected_skill else {
                 return Err(FunctionCallError::RespondToModel(
-                    "skill package is not available from the requested authority".to_string(),
+                    "skill package is not available".to_string(),
                 ));
             };
             let authority = skill_entry.authority.clone();
             let package = skill_entry.id.clone();
             let main_prompt = skill_entry.main_prompt.clone();
-            let requested_resource = if args.resource == main_prompt.as_str() {
-                main_prompt.clone()
-            } else {
-                main_prompt
-                    .bind_environment_package_resource(&package, args.resource.clone())
-                    .unwrap_or_else(|| SkillResourceId::new(args.resource))
+            let requested_resource = match args.resource {
+                None => main_prompt.clone(),
+                Some(resource) if resource == main_prompt.as_str() => main_prompt.clone(),
+                Some(resource) => main_prompt
+                    .bind_environment_package_resource(&package, resource.clone())
+                    .unwrap_or_else(|| SkillResourceId::new(resource)),
             };
             let resolved_executor_roots = self
                 .context
@@ -170,13 +191,35 @@ impl ToolExecutor<ToolCall> for ReadTool {
                     "skills.read cursor is invalid".to_string(),
                 ));
             }
+            let skill_root = if output_authority == super::SkillToolAuthoritySelector::Executor {
+                main_prompt
+                    .environment_path()
+                    .and_then(|(_, path)| path.parent())
+                    .map(|path| path.inferred_native_path_string())
+            } else {
+                None
+            };
             let response = page_response(
                 result.resource.as_str(),
                 &result.contents,
+                skill_root.as_deref(),
                 start,
-                call.truncation_policy,
             )?;
-            skill_json_output(&response, output_authority)
+            let output = skill_json_output(&response, output_authority)?;
+
+            if requested_resource == main_prompt
+                && args.cursor.is_none()
+                && let Some(analytics) = self.context.analytics.as_ref()
+            {
+                analytics.track_skill_invocation(
+                    &skill_entry,
+                    call.model.clone(),
+                    call.turn_id.clone(),
+                    InvocationType::Implicit,
+                );
+            }
+
+            Ok(output)
         })
     }
 }
@@ -184,137 +227,32 @@ impl ToolExecutor<ToolCall> for ReadTool {
 fn page_response(
     resource: &str,
     contents: &str,
+    skill_root: Option<&str>,
     start: usize,
-    truncation_policy: TruncationPolicy,
 ) -> Result<ReadResponse, FunctionCallError> {
     let response = |end, next_cursor| ReadResponse {
         resource: resource.to_string(),
         contents: contents[start..end].to_string(),
+        skill_root: skill_root.map(str::to_string),
         next_cursor,
     };
     let complete = response(contents.len(), None);
-    if serialized_fits_output_budget(&complete, truncation_policy, MAX_READ_RESPONSE_BYTES)? {
+    if serialized_len(&complete)? <= MAX_READ_RESPONSE_BYTES {
         return Ok(complete);
     }
 
-    let mut low = start;
-    let mut high = contents.len();
-    let mut best = None;
-    while high.saturating_sub(low) > 1 {
-        let midpoint = low + (high - low) / 2;
-        let mut end = midpoint;
-        while end > low && !contents.is_char_boundary(end) {
+    let mut end = contents.len();
+    while end > start {
+        end = start + (end - start) / 2;
+        while !contents.is_char_boundary(end) {
             end -= 1;
         }
-        if end == low {
-            end = midpoint;
-            while end < high && !contents.is_char_boundary(end) {
-                end += 1;
-            }
-            if end == high {
-                break;
-            }
-        }
         let candidate = response(end, Some(pagination_cursor(contents, end)));
-        if serialized_fits_output_budget(&candidate, truncation_policy, MAX_READ_RESPONSE_BYTES)? {
-            low = end;
-            best = Some(candidate);
-        } else {
-            high = end;
+        if serialized_len(&candidate)? <= MAX_READ_RESPONSE_BYTES {
+            return Ok(candidate);
         }
     }
-    best.ok_or_else(|| {
-        FunctionCallError::RespondToModel(
-            "skill resource handle leaves no room for contents".to_string(),
-        )
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use codex_utils_string::approx_token_count;
-    use pretty_assertions::assert_eq;
-
-    use super::*;
-
-    #[test]
-    fn pages_reconstruct_resource_within_model_output_budgets() {
-        let contents = "abcd💡".repeat(8_000);
-
-        for truncation_policy in [
-            TruncationPolicy::Bytes(/*limit*/ 10_000),
-            TruncationPolicy::Tokens(/*limit*/ 2_500),
-        ] {
-            let mut start = 0;
-            let mut reconstructed = String::new();
-            let mut page_count = 0;
-            loop {
-                let response = page_response(
-                    "skill://demo-plugin@1/skills/deploy/references/details.md",
-                    &contents,
-                    start,
-                    truncation_policy,
-                )
-                .expect("skills.read page should fit the model output budget");
-                let serialized =
-                    serde_json::to_string(&response).expect("read response should serialize");
-                match truncation_policy {
-                    TruncationPolicy::Bytes(limit) => assert!(serialized.len() <= limit),
-                    TruncationPolicy::Tokens(limit) => {
-                        assert!(approx_token_count(&serialized) <= limit)
-                    }
-                }
-                assert!(!response.contents.is_empty());
-                reconstructed.push_str(&response.contents);
-                page_count += 1;
-
-                let Some(cursor) = response.next_cursor else {
-                    break;
-                };
-                start = parse_pagination_cursor(Some(&cursor), &contents, "skills.read")
-                    .expect("skills.read cursor should remain valid");
-            }
-
-            assert!(page_count > 1);
-            assert_eq!(reconstructed, contents);
-        }
-    }
-
-    #[test]
-    fn tiny_budget_does_not_emit_nonadvancing_page() {
-        let error = page_response(
-            "skill://demo-plugin@1/skills/deploy/SKILL.md",
-            "x",
-            /*start*/ 0,
-            TruncationPolicy::Bytes(/*limit*/ 1),
-        )
-        .expect_err("tiny budget should return a recoverable tool error");
-        assert!(matches!(error, FunctionCallError::RespondToModel(_)));
-    }
-
-    #[test]
-    fn page_search_tries_the_next_unicode_boundary() {
-        let resource = "skill://demo-plugin@1/skills/deploy/SKILL.md";
-        let contents = format!("{}💡{}", "a".repeat(100), "b".repeat(100));
-        let expected_contents = format!("{}💡", "a".repeat(100));
-        let expected = ReadResponse {
-            resource: resource.to_string(),
-            contents: expected_contents.clone(),
-            next_cursor: Some(pagination_cursor(&contents, expected_contents.len())),
-        };
-        let budget = serde_json::to_string(&expected)
-            .expect("expected read response should serialize")
-            .len();
-
-        assert_eq!(
-            page_response(
-                resource,
-                &contents,
-                /*start*/ 0,
-                TruncationPolicy::Bytes(budget),
-            )
-            .expect("one complete Unicode scalar should fit"),
-            expected
-        );
-    }
+    Err(FunctionCallError::Fatal(
+        "skill resource handle leaves no room for contents".to_string(),
+    ))
 }

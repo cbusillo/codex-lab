@@ -1,6 +1,7 @@
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::edit::apply_blocking;
+use crate::plugins::plugins_manager_for_config;
 use assert_matches::assert_matches;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerEntry;
@@ -14,7 +15,6 @@ use codex_config::ProfileV2Name;
 use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_config::config_toml::AgentRoleToml;
-use codex_config::config_toml::AgentSelectorToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
@@ -68,10 +68,10 @@ use codex_config::types::TuiNotificationSettings;
 use codex_config::types::TuiPetAnchor;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_config::types::WindowsToml;
-use codex_core_plugins::PluginsManager;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_model_provider::ProviderCapabilities;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
@@ -137,6 +137,7 @@ fn stdio_mcp_with_args(command: &str, args: &[&str]) -> McpServerConfig {
         enabled: true,
         required: false,
         supports_parallel_tool_calls: false,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
@@ -158,11 +159,13 @@ fn http_mcp(url: &str) -> McpServerConfig {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         },
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
         supports_parallel_tool_calls: false,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: None,
         tool_timeout_sec: None,
@@ -322,6 +325,28 @@ consolidation_model = "gpt-5.2"
         )
         .disable_on_external_context
     );
+}
+
+#[tokio::test]
+async fn goal_max_token_budget_requires_positive_integer() {
+    let config_toml = toml::from_str::<ConfigToml>("[goals]\nmax_goal_token_budget = 25000\n")
+        .expect("positive goal token budget should deserialize");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("positive goal token budget should load");
+    assert_eq!(config.max_goal_token_budget, Some(25_000));
+
+    for invalid in ["0", "-1", "1.5", "\"100\""] {
+        let config = format!("[goals]\nmax_goal_token_budget = {invalid}\n");
+        assert!(
+            toml::from_str::<ConfigToml>(&config).is_err(),
+            "invalid goal token budget should be rejected: {invalid}"
+        );
+    }
 }
 
 #[test]
@@ -497,7 +522,7 @@ async fn load_config_resolves_non_prefixed_mcp_tool_servers() -> std::io::Result
 
         assert_eq!(config.non_prefixed_mcp_tool_servers, expected_servers);
         assert_eq!(config.prefix_mcp_tool_names(), expected_prefix);
-        let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+        let plugins_manager = plugins_manager_for_config(&config);
         let mcp_config = config.to_mcp_config(&plugins_manager).await;
         assert_eq!(mcp_config.prefix_mcp_tool_names, expected_prefix);
         assert_eq!(
@@ -536,6 +561,7 @@ async fn load_config_resolves_code_mode_config() -> std::io::Result<()> {
         r#"
 [features.code_mode]
 enabled = true
+default_exec_yield_time_ms = 10000
 excluded_tool_namespaces = ["mcp__codex_apps", "multi_agent_v1"]
 direct_only_tool_namespaces = ["mcp__history", "mcp__notes"]
 
@@ -552,6 +578,7 @@ disable_in_process_fallback = true
     )
     .await?;
 
+    assert_eq!(config.code_mode.default_exec_yield_time_ms, 10_000);
     assert_eq!(
         config.code_mode.excluded_tool_namespaces,
         vec!["mcp__codex_apps".to_string(), "multi_agent_v1".to_string()]
@@ -563,6 +590,46 @@ disable_in_process_fallback = true
     assert!(config.code_mode.disable_in_process_fallback);
     assert!(config.features.enabled(Feature::CodeMode));
     assert!(config.features.enabled(Feature::CodeModeHost));
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_resolves_tool_registry_config() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+
+    for (config_toml, error_on_tool_collisions, turn_metadata_includes_tool_info) in [
+        ("", false, false),
+        (
+            "[features.tool_registry]\nerror_on_tool_collisions = true\n",
+            true,
+            false,
+        ),
+        (
+            "[features.tool_registry]\nturn_metadata_includes_tool_info = true\n",
+            false,
+            true,
+        ),
+    ] {
+        let config_toml: ConfigToml =
+            toml::from_str(config_toml).expect("TOML deserialization should succeed");
+        let config = Config::load_from_base_config_with_overrides(
+            config_toml,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(
+            config.tool_registry.error_on_tool_collisions,
+            error_on_tool_collisions
+        );
+        assert_eq!(
+            config.tool_registry.turn_metadata_includes_tool_info,
+            turn_metadata_includes_tool_info
+        );
+        assert!(!config.features.enabled(Feature::CodeMode));
+    }
+
     Ok(())
 }
 
@@ -2370,11 +2437,7 @@ async fn managed_unrestricted_permission_profile_still_enables_network_requireme
 
     let layers = config
         .config_layer_stack
-        .get_layers(
-            ConfigLayerStackOrdering::LowestPrecedenceFirst,
-            /*include_disabled*/ true,
-        )
-        .into_iter()
+        .all_layers_low_to_high()
         .cloned()
         .collect();
     let mut requirements = config.config_layer_stack.requirements().clone();
@@ -5171,7 +5234,7 @@ async fn rebuild_preserving_session_layers_refreshes_plugin_derived_mcp_config()
     let config = thread_config
         .rebuild_preserving_session_layers(&refreshed_config)
         .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5233,7 +5296,7 @@ enabled = true
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5301,7 +5364,7 @@ url = "https://sample.example/mcp"
         )
         .build()
         .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5403,7 +5466,7 @@ enabled = true
         )
         .build()
         .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     let configured_servers = mcp_config.mcp_server_catalog.configured_servers();
 
@@ -5800,7 +5863,11 @@ fn web_search_mode_disabled_overrides_legacy_request() {
 #[test]
 fn web_search_mode_for_turn_preserves_indexed_for_disabled_permissions() {
     let web_search_mode = Constrained::allow_any(WebSearchMode::Indexed);
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &PermissionProfile::Disabled);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &PermissionProfile::Disabled,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Indexed);
 }
@@ -5809,7 +5876,11 @@ fn web_search_mode_for_turn_preserves_indexed_for_disabled_permissions() {
 fn web_search_mode_for_turn_uses_preference_for_read_only() {
     let web_search_mode = Constrained::allow_any(WebSearchMode::Cached);
     let permission_profile = PermissionProfile::read_only();
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &permission_profile);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &permission_profile,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Cached);
 }
@@ -5817,15 +5888,75 @@ fn web_search_mode_for_turn_uses_preference_for_read_only() {
 #[test]
 fn web_search_mode_for_turn_prefers_live_for_disabled_permissions() {
     let web_search_mode = Constrained::allow_any(WebSearchMode::Cached);
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &PermissionProfile::Disabled);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &PermissionProfile::Disabled,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Live);
 }
 
 #[test]
+fn web_search_mode_for_turn_falls_back_when_provider_disallows_external_web_access() {
+    for preferred in [WebSearchMode::Live, WebSearchMode::Indexed] {
+        let web_search_mode = Constrained::allow_any(preferred);
+        let mode = resolve_web_search_mode_for_turn(
+            &web_search_mode,
+            &PermissionProfile::Disabled,
+            ProviderCapabilities {
+                external_web_access: false,
+                ..ProviderCapabilities::default()
+            },
+        );
+
+        assert_eq!(mode, WebSearchMode::Cached);
+    }
+}
+
+#[test]
+fn web_search_mode_for_turn_disables_when_external_access_and_cached_are_disallowed()
+-> anyhow::Result<()> {
+    let allowed = [
+        WebSearchMode::Disabled,
+        WebSearchMode::Live,
+        WebSearchMode::Indexed,
+    ];
+    for preferred in [WebSearchMode::Live, WebSearchMode::Indexed] {
+        let web_search_mode = Constrained::new(preferred, move |candidate| {
+            if allowed.contains(candidate) {
+                Ok(())
+            } else {
+                Err(ConstraintError::InvalidValue {
+                    field_name: "web_search_mode",
+                    candidate: format!("{candidate:?}"),
+                    allowed: format!("{allowed:?}"),
+                    requirement_source: RequirementSource::Unknown,
+                })
+            }
+        })?;
+        let mode = resolve_web_search_mode_for_turn(
+            &web_search_mode,
+            &PermissionProfile::Disabled,
+            ProviderCapabilities {
+                external_web_access: false,
+                ..ProviderCapabilities::default()
+            },
+        );
+
+        assert_eq!(mode, WebSearchMode::Disabled);
+    }
+    Ok(())
+}
+
+#[test]
 fn web_search_mode_for_turn_respects_disabled_for_disabled_permissions() {
     let web_search_mode = Constrained::allow_any(WebSearchMode::Disabled);
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &PermissionProfile::Disabled);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &PermissionProfile::Disabled,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Disabled);
 }
@@ -5845,7 +5976,11 @@ fn web_search_mode_for_turn_falls_back_when_live_is_disallowed() -> anyhow::Resu
             })
         }
     })?;
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &PermissionProfile::Disabled);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &PermissionProfile::Disabled,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Cached);
     Ok(())
@@ -5870,7 +6005,11 @@ fn web_search_mode_for_turn_does_not_implicitly_select_indexed() -> anyhow::Resu
             })
         }
     })?;
-    let mode = resolve_web_search_mode_for_turn(&web_search_mode, &PermissionProfile::Disabled);
+    let mode = resolve_web_search_mode_for_turn(
+        &web_search_mode,
+        &PermissionProfile::Disabled,
+        ProviderCapabilities::default(),
+    );
 
     assert_eq!(mode, WebSearchMode::Cached);
     Ok(())
@@ -6098,6 +6237,7 @@ async fn replace_mcp_servers_round_trips_entries() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(Duration::from_secs(3)),
             tool_timeout_sec: Some(Duration::from_secs(5)),
@@ -6343,7 +6483,7 @@ async fn to_mcp_config_preserves_apps_feature_from_config() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
 
     config.apps_mcp_product_sku = Some("tpp".to_string());
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
@@ -6370,7 +6510,7 @@ async fn to_mcp_config_flows_mcp_tool_prefix_from_feature() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert!(mcp_config.prefix_mcp_tool_names);
@@ -6406,7 +6546,7 @@ async fn to_mcp_config_flows_mcp_2026_feature_from_config() -> std::io::Result<(
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert_eq!(mcp_config.protocol_mode, codex_mcp::McpProtocolMode::Legacy);
@@ -6430,7 +6570,7 @@ async fn to_mcp_config_preserves_auth_elicitation_feature_from_config() -> std::
         codex_home.abs(),
     )
     .await?;
-    let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
+    let plugins_manager = plugins_manager_for_config(&config);
 
     let mcp_config = config.to_mcp_config(&plugins_manager).await;
     assert_eq!(
@@ -6497,6 +6637,7 @@ async fn replace_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -6574,6 +6715,7 @@ async fn replace_mcp_servers_serializes_env_vars() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -6636,6 +6778,7 @@ async fn replace_mcp_servers_serializes_sourced_env_vars() -> anyhow::Result<()>
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -6689,6 +6832,7 @@ async fn replace_mcp_servers_serializes_cwd() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -6739,11 +6883,13 @@ async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow
                 bearer_token_env_var: Some("MCP_TOKEN".to_string()),
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(Duration::from_secs(2)),
             tool_timeout_sec: None,
@@ -6781,6 +6927,7 @@ startup_timeout_sec = 2.0
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
@@ -6810,11 +6957,13 @@ async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyh
                     "X-Auth".to_string(),
                     "DOCS_AUTH".to_string(),
                 )])),
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(Duration::from_secs(2)),
             tool_timeout_sec: None,
@@ -6893,11 +7042,13 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
                     "X-Auth".to_string(),
                     "DOCS_AUTH".to_string(),
                 )])),
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(Duration::from_secs(2)),
             tool_timeout_sec: None,
@@ -6929,11 +7080,13 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -6967,6 +7120,7 @@ url = "https://example.com/mcp"
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert!(bearer_token_env_var.is_none());
@@ -7000,11 +7154,13 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
                         "X-Auth".to_string(),
                         "DOCS_AUTH".to_string(),
                     )])),
+                    http_headers_helper: None,
                 },
                 environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                 enabled: true,
                 required: false,
                 supports_parallel_tool_calls: false,
+                omit_tools_from: None,
                 disabled_reason: None,
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 tool_timeout_sec: None,
@@ -7032,6 +7188,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
                 enabled: true,
                 required: false,
                 supports_parallel_tool_calls: false,
+                omit_tools_from: None,
                 disabled_reason: None,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
@@ -7121,6 +7278,7 @@ async fn replace_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
             enabled: false,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -7172,6 +7330,7 @@ async fn replace_mcp_servers_serializes_required_flag() -> anyhow::Result<()> {
             enabled: true,
             required: true,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -7223,6 +7382,7 @@ async fn replace_mcp_servers_serializes_tool_filters() -> anyhow::Result<()> {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -7273,11 +7433,13 @@ async fn replace_mcp_servers_streamable_http_serializes_oauth_resource() -> anyh
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -7545,7 +7707,6 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
-            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7583,7 +7744,6 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
-            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7614,7 +7774,6 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
-            ..Default::default()
         }),
         ..Default::default()
     };
@@ -7677,14 +7836,12 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
-            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
-                    backend: None,
                 },
             )]),
         }),
@@ -8624,14 +8781,6 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             default_subagent_model: Some("gpt-5.6-terra".to_string()),
             default_subagent_reasoning_effort: Some(ReasoningEffort::High),
             interrupt_message: Some(false),
-            selectors: BTreeMap::from([(
-                "antigravity".to_string(),
-                AgentSelectorToml {
-                    enabled: Some(true),
-                    model: Some("gemini-3.1-pro".to_string()),
-                    effort: Some("high".to_string()),
-                },
-            )]),
             ..Default::default()
         }),
         ..Default::default()
@@ -8660,79 +8809,7 @@ async fn load_config_resolves_agent_controls() -> std::io::Result<()> {
             false,
         )
     );
-    assert_eq!(
-        config
-            .agent_selector_overrides
-            .get("antigravity")
-            .and_then(|selector| selector.model.as_deref()),
-        Some("gemini-3.1-pro")
-    );
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_rejects_flaglike_agent_selector_defaults() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let cfg = ConfigToml {
-        agents: Some(AgentsToml {
-            selectors: BTreeMap::from([(
-                "antigravity".to_string(),
-                AgentSelectorToml {
-                    model: Some("--dangerously-skip-permissions".to_string()),
-                    ..Default::default()
-                },
-            )]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let err = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await
-    .expect_err("flag-like selector defaults should be rejected");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(
-        err.to_string()
-            .contains("agents.selectors.antigravity.model")
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn load_config_accepts_provider_qualified_agent_model_names() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let cfg = ConfigToml {
-        agents: Some(AgentsToml {
-            selectors: BTreeMap::from([(
-                "antigravity".to_string(),
-                AgentSelectorToml {
-                    model: Some("models/gemini:3.1+preview".to_string()),
-                    ..Default::default()
-                },
-            )]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
-    assert_eq!(
-        config
-            .agent_selector_overrides
-            .get("antigravity")
-            .and_then(|selector| selector.model.as_deref()),
-        Some("models/gemini:3.1+preview")
-    );
     Ok(())
 }
 
@@ -8769,7 +8846,6 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
-            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -8779,7 +8855,6 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
-                    backend: None,
                 },
             )]),
         }),
@@ -8817,14 +8892,12 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
-            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
-                    backend: None,
                 },
             )]),
         }),
@@ -8859,14 +8932,12 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
-            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
-                    backend: None,
                 },
             )]),
         }),
@@ -8901,14 +8972,12 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
-            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
-                    backend: None,
                 },
             )]),
         }),
@@ -9408,6 +9477,8 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
     let fixture = create_test_fixture()?;
 
     let requirements_toml = codex_config::ConfigRequirementsToml {
+        allowed_login_methods: None,
+        allowed_chatgpt_workspaces: None,
         sqlite_home: None,
         log_dir: None,
         model_catalog_json: None,
@@ -9437,6 +9508,7 @@ async fn test_requirements_web_search_mode_allowlist_does_not_warn_when_unset() 
         enforce_residency: None,
         network: None,
         permissions: None,
+        auto_review: None,
         models: None,
         guardian_policy_config: None,
     };
@@ -10378,6 +10450,7 @@ async fn requirements_web_search_mode_overrides_danger_full_access_default() -> 
         resolve_web_search_mode_for_turn(
             &config.web_search_mode,
             &config.permissions.effective_permission_profile(),
+            ProviderCapabilities::default(),
         ),
         WebSearchMode::Cached,
     );
@@ -10521,77 +10594,6 @@ browser_use_full_cdp_access = false
     assert!(!config.features.enabled(Feature::InAppBrowser));
     assert!(!config.features.enabled(Feature::BrowserUse));
     assert!(!config.features.enabled(Feature::BrowserUseFullCdpAccess));
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn debug_config_lockfile_export_settings_load_from_nested_table() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"[debug.config_lockfile]
-export_dir = "locks"
-allow_codex_version_mismatch = true
-save_fields_resolved_from_model_catalog = false
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await?;
-
-    assert_eq!(
-        config.config_lock_export_dir,
-        Some(AbsolutePathBuf::resolve_path_against_base(
-            "locks",
-            codex_home.path()
-        ))
-    );
-    assert!(config.config_lock_allow_codex_version_mismatch);
-    assert!(!config.config_lock_save_fields_resolved_from_model_catalog);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn debug_config_lockfile_load_path_loads_lock_from_nested_table() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    let lock_path = codex_home.path().join("session.config.lock.toml");
-    std::fs::write(
-        &lock_path,
-        format!(
-            r#"version = {}
-codex_version = "older-version"
-
-[config]
-"#,
-            crate::config_lock::CONFIG_LOCK_VERSION
-        ),
-    )?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        format!(
-            r#"[debug.config_lockfile]
-load_path = '{}'
-allow_codex_version_mismatch = true
-save_fields_resolved_from_model_catalog = false
-"#,
-            lock_path.display()
-        ),
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await?;
-
-    assert!(config.config_lock_toml.is_some());
-    assert!(config.config_lock_allow_codex_version_mismatch);
-    assert!(!config.config_lock_save_fields_resolved_from_model_catalog);
 
     Ok(())
 }
@@ -10946,64 +10948,6 @@ max_concurrent_threads_per_session = 9
 }
 
 #[tokio::test]
-async fn disabled_multi_agent_v2_feature_is_normalized_to_enabled() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        "[features]\nmulti_agent_v2 = false\n",
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await?;
-
-    assert!(config.features.enabled(Feature::MultiAgentV2));
-    assert_eq!(
-        config.multi_agent_version_from_features(),
-        MultiAgentVersion::V2
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn multi_agent_v2_migrates_legacy_collaboration_namespace() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"[features.multi_agent_v2]
-enabled = true
-tool_namespace = "collaboration"
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await?;
-
-    assert_eq!(
-        config.multi_agent_v2.tool_namespace.as_deref(),
-        Some("agents")
-    );
-    assert!(
-        config
-            .multi_agent_v2
-            .root_agent_usage_hint_text
-            .as_deref()
-            .is_some_and(|hint| hint.contains("to=functions.agents.spawn_agent"))
-    );
-    assert!(config.startup_warnings.iter().any(|warning| {
-        warning.contains("tool namespace `collaboration` is reserved")
-            && warning.contains("using `agents` instead")
-    }));
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn multi_agent_v2_default_session_thread_cap_counts_root() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
@@ -11045,11 +10989,10 @@ max_concurrent_threads_per_session = 17
     .expect("multi-agent v2 config should parse");
 
     let config = resolve_multi_agent_v2_config(&config_toml);
-    assert_eq!(config.tool_namespace.as_deref(), Some("agents"));
     let concurrency_guidance = "There are 17 available concurrency slots, meaning that up to 17 agents can be active at once, including you.";
-    let shared_usage_hint_text =
-        default_multi_agent_v2_shared_usage_hint_text(Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE));
-    let expected_suffix = format!("{shared_usage_hint_text}\n{concurrency_guidance}");
+    let expected_suffix = format!(
+        "{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT}\n\n{concurrency_guidance}"
+    );
     assert!(
         [
             config.root_agent_usage_hint_text,
@@ -11057,29 +11000,6 @@ max_concurrent_threads_per_session = 17
         ]
         .into_iter()
         .all(|hint| hint.is_some_and(|hint| hint.contains(expected_suffix.as_str())))
-    );
-}
-
-#[test]
-fn multi_agent_v2_default_usage_hints_follow_configured_namespace() {
-    let config_toml = toml::from_str(
-        r#"[features.multi_agent_v2]
-tool_namespace = "delegation"
-"#,
-    )
-    .expect("multi-agent v2 config should parse");
-
-    let config = resolve_multi_agent_v2_config(&config_toml);
-    assert!(
-        [
-            config.root_agent_usage_hint_text,
-            config.subagent_usage_hint_text,
-        ]
-        .into_iter()
-        .all(|hint| hint.is_some_and(|hint| {
-            hint.contains("to=functions.delegation.spawn_agent")
-                && !hint.contains("to=functions.agents.spawn_agent")
-        }))
     );
 }
 

@@ -3,6 +3,8 @@ mod external_agent_run;
 mod graph;
 mod log;
 mod memories;
+mod queued_item;
+mod rollout_migration_state;
 mod thread_goal;
 mod thread_metadata;
 
@@ -20,6 +22,10 @@ pub use memories::Stage1JobClaim;
 pub use memories::Stage1JobClaimOutcome;
 pub use memories::Stage1Output;
 pub use memories::Stage1StartupClaimParams;
+pub use queued_item::QueuedUserSubmissionRecord;
+pub use rollout_migration_state::RolloutMigrationCursor;
+pub use rollout_migration_state::RolloutMigrationSkippedRollout;
+pub use rollout_migration_state::RolloutMigrationState;
 pub use thread_goal::ThreadGoal;
 pub use thread_goal::ThreadGoalStatus;
 pub use thread_metadata::Anchor;
@@ -31,6 +37,7 @@ pub use thread_metadata::ThreadMetadata;
 pub use thread_metadata::ThreadMetadataBuilder;
 pub use thread_metadata::ThreadRelationFilter;
 pub use thread_metadata::ThreadSection;
+pub use thread_metadata::ThreadSectionAppearance;
 pub use thread_metadata::ThreadSectionsPage;
 pub use thread_metadata::ThreadsPage;
 

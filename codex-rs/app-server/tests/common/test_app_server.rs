@@ -69,6 +69,7 @@ use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginInstalledParams;
 use codex_app_server_protocol::PluginListParams;
 use codex_app_server_protocol::PluginReadParams;
+use codex_app_server_protocol::PluginSearchParams;
 use codex_app_server_protocol::PluginSkillReadParams;
 use codex_app_server_protocol::PluginUninstallParams;
 use codex_app_server_protocol::ProcessKillParams;
@@ -269,10 +270,20 @@ impl TestAppServer {
             }
         }
 
-        let mut process = cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context("codex-mcp-server proc should start")?;
+        cmd.kill_on_drop(true);
+        let mut retries = 0;
+        let mut process = loop {
+            let process = cmd.spawn();
+            if !process
+                .as_ref()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy)
+                || retries == 2
+            {
+                break process.context("codex-mcp-server proc should start")?;
+            }
+            retries += 1;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
         let stdin = process
             .stdin
             .take()
@@ -935,6 +946,15 @@ impl TestAppServer {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("plugin/list", params).await
+    }
+
+    /// Send a `plugin/search` JSON-RPC request.
+    pub async fn send_plugin_search_request(
+        &mut self,
+        params: PluginSearchParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("plugin/search", params).await
     }
 
     /// Send a `plugin/installed` JSON-RPC request.
@@ -2082,7 +2102,12 @@ impl TestAppServerBuilder {
         {
             // Bazel keeps binary targets in separate package directories.
             // Recreate the installed sibling layout without a path override.
-            let install_dir = TempDir::new()?;
+            // Prefer Bazel's TEST_TMPDIR so staging can share a filesystem with
+            // the binaries and avoid expensive cross-filesystem copies.
+            let install_dir = match std::env::var_os("TEST_TMPDIR") {
+                Some(test_tmpdir) => TempDir::new_in(test_tmpdir)?,
+                None => TempDir::new()?,
+            };
             let staged_program = install_dir.path().join(
                 program
                     .file_name()

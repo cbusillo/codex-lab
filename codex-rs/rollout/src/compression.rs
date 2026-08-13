@@ -3,18 +3,12 @@ use std::fs::File;
 use std::fs::Permissions;
 use std::io;
 use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-
-use codex_protocol::ThreadId;
-
-use crate::RolloutCompressionMode;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -26,13 +20,6 @@ const MAX_NOT_FOUND_RETRIES: usize = 3;
 const OPEN_ROLLOUT_LINE_READER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const TEMP_SUFFIX: &str = ".tmp";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-const ROLLOUT_LEASE_DIR: &str = "rollout-leases";
-const ROLLOUT_LEASE_COORDINATION_FILE: &str = ".coordination.lock";
-const ROLLOUT_REFERENCE_STATE_FILE: &str = ".reference-state";
-const ROLLOUT_LEASE_RETRY_DELAY: Duration = Duration::from_millis(50);
-const ROLLOUT_LEASE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
-const COMPRESSION_LEVEL: i32 = 3;
-pub const ROLLOUT_COMPRESSION_MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Starts a best-effort background job that compresses cold local rollout files.
 ///
@@ -43,405 +30,12 @@ pub fn spawn_rollout_compression_worker(codex_home: PathBuf) {
     worker::spawn(codex_home)
 }
 
-/// Holds a cross-process lease for one rollout identity.
-#[derive(Debug)]
-pub struct RolloutLease {
-    directory: PathBuf,
-    path: PathBuf,
-    file: Option<File>,
-}
-
-#[derive(Clone, Copy)]
-enum RolloutLeaseKind {
-    Shared,
-    Exclusive,
-}
-
-impl RolloutLease {
-    /// Checks an existing lease without creating, deleting, or updating lease files.
-    pub async fn is_active_read_only(codex_home: &Path, thread_id: ThreadId) -> io::Result<bool> {
-        let path = lease_path(codex_home, thread_id);
-        tokio::task::spawn_blocking(move || {
-            let file = match std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)
-            {
-                Ok(file) => file,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(err) => return Err(err),
-            };
-            match file.try_lock() {
-                Ok(()) => Ok(false),
-                Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-                Err(std::fs::TryLockError::Error(err)) => Err(err),
-            }
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    pub async fn acquire_shared(
-        codex_home: &Path,
-        compression_mode: RolloutCompressionMode,
-        thread_id: ThreadId,
-    ) -> io::Result<Option<Self>> {
-        if matches!(compression_mode, RolloutCompressionMode::Disabled) {
-            return Ok(None);
-        }
-        let codex_home = codex_home.to_path_buf();
-        let started_at = tokio::time::Instant::now();
-        loop {
-            let result = tokio::task::spawn_blocking({
-                let codex_home = codex_home.clone();
-                move || Self::try_acquire_blocking(&codex_home, thread_id, RolloutLeaseKind::Shared)
-            })
-            .await
-            .map_err(io::Error::other)??;
-            if let Some(lease) = result {
-                return Ok(Some(lease));
-            }
-            if started_at.elapsed() >= ROLLOUT_LEASE_WAIT_TIMEOUT {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("timed out waiting for rollout lease: {thread_id}"),
-                ));
-            }
-            tokio::time::sleep(ROLLOUT_LEASE_RETRY_DELAY).await;
-        }
-    }
-
-    pub async fn try_acquire_exclusive(
-        codex_home: &Path,
-        compression_mode: RolloutCompressionMode,
-        thread_id: ThreadId,
-    ) -> io::Result<Option<Self>> {
-        if matches!(compression_mode, RolloutCompressionMode::Disabled) {
-            return Ok(None);
-        }
-        let codex_home = codex_home.to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            Self::try_acquire_blocking(&codex_home, thread_id, RolloutLeaseKind::Exclusive)
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    fn try_acquire_blocking(
-        codex_home: &Path,
-        thread_id: ThreadId,
-        kind: RolloutLeaseKind,
-    ) -> io::Result<Option<Self>> {
-        let directory = lease_directory(codex_home);
-        let coordination_lock = lock_lease_coordination(directory.as_path())?;
-        let path = lease_path(codex_home, thread_id);
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path.as_path())?;
-        let result = match kind {
-            RolloutLeaseKind::Shared => file.try_lock_shared(),
-            RolloutLeaseKind::Exclusive => file.try_lock(),
-        };
-        let lease = match result {
-            Ok(()) => Some(Self {
-                directory,
-                path,
-                file: Some(file),
-            }),
-            Err(std::fs::TryLockError::WouldBlock) => None,
-            Err(std::fs::TryLockError::Error(err)) => return Err(err),
-        };
-        drop(coordination_lock);
-        Ok(lease)
-    }
-}
-
-/// Estimates the exact zstd output size for a plain rollout without creating an output file.
-pub async fn estimate_compressed_rollout_size(path: &Path) -> io::Result<u64> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        struct CountingWriter(u64);
-
-        impl Write for CountingWriter {
-            fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-                self.0 = self.0.saturating_add(buffer.len() as u64);
-                Ok(buffer.len())
-            }
-
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let mut input = File::open(path)?;
-        let mut encoder = zstd::stream::write::Encoder::new(CountingWriter(0), COMPRESSION_LEVEL)?;
-        io::copy(&mut input, &mut encoder)?;
-        Ok(encoder.finish()?.0)
-    })
-    .await
-    .map_err(io::Error::other)?
-}
-
-impl Drop for RolloutLease {
-    fn drop(&mut self) {
-        let coordination_lock = match lock_lease_coordination(self.directory.as_path()) {
-            Ok(lock) => lock,
-            Err(_) => return,
-        };
-        drop(self.file.take());
-        let probe = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(self.path.as_path())
-        {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return,
-            Err(_) => return,
-        };
-        match probe.try_lock() {
-            Ok(()) => {
-                drop(probe);
-                let _ = std::fs::remove_file(self.path.as_path());
-            }
-            Err(std::fs::TryLockError::WouldBlock) => {}
-            Err(std::fs::TryLockError::Error(_)) => {}
-        }
-        drop(coordination_lock);
-    }
-}
-
-fn lease_directory(codex_home: &Path) -> PathBuf {
-    codex_home.join(".tmp").join(ROLLOUT_LEASE_DIR)
-}
-
-fn lease_path(codex_home: &Path, thread_id: ThreadId) -> PathBuf {
-    lease_directory(codex_home).join(format!("{thread_id}.lock"))
-}
-
-pub(crate) fn thread_id_from_rollout_path(path: &Path) -> io::Result<ThreadId> {
-    let file_name = path
-        .file_name()
-        .and_then(OsStr::to_str)
-        .ok_or_else(|| io::Error::other("rollout path has no UTF-8 filename"))?;
-    let (_timestamp, uuid) = crate::list::parse_timestamp_uuid_from_filename(file_name)
-        .ok_or_else(|| io::Error::other("rollout filename does not contain a thread id"))?;
-    ThreadId::from_string(&uuid.to_string()).map_err(io::Error::other)
-}
-
-fn lock_lease_coordination(directory: &Path) -> io::Result<File> {
-    std::fs::create_dir_all(directory)?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(directory.join(ROLLOUT_LEASE_COORDINATION_FILE))?;
-    file.lock()?;
-    Ok(file)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RolloutReferenceState {
-    generation: u64,
-    dirty: bool,
-}
-
-pub(crate) struct RolloutReferenceSnapshot {
-    file: File,
-    state: RolloutReferenceState,
-}
-
-impl RolloutReferenceSnapshot {
-    pub(crate) async fn acquire(codex_home: &Path) -> io::Result<Self> {
-        let path = reference_state_path(codex_home);
-        tokio::task::spawn_blocking(move || {
-            let mut file = open_reference_state_file(path.as_path())?;
-            file.lock_shared()?;
-            let state = read_reference_state(&mut file)?;
-            Ok(Self { file, state })
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    pub(crate) fn generation(&self) -> u64 {
-        self.state.generation
-    }
-
-    pub(crate) fn is_dirty(&self) -> bool {
-        self.state.dirty
-    }
-}
-
-impl Drop for RolloutReferenceSnapshot {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
-pub(crate) struct RolloutReferenceUpdate {
-    file: File,
-    generation: u64,
-}
-
-impl RolloutReferenceUpdate {
-    pub(crate) async fn begin(codex_home: &Path) -> io::Result<Self> {
-        let path = reference_state_path(codex_home);
-        tokio::task::spawn_blocking(move || {
-            let mut file = open_reference_state_file(path.as_path())?;
-            file.lock()?;
-            let state = read_reference_state(&mut file)?;
-            write_reference_state(
-                &mut file,
-                RolloutReferenceState {
-                    generation: state.generation,
-                    dirty: true,
-                },
-            )?;
-            Ok(Self {
-                file,
-                generation: state.generation,
-            })
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    pub(crate) fn commit(&mut self) -> io::Result<()> {
-        let generation = self.generation.saturating_add(1);
-        write_reference_state(
-            &mut self.file,
-            RolloutReferenceState {
-                generation,
-                dirty: false,
-            },
-        )?;
-        self.generation = generation;
-        Ok(())
-    }
-}
-
-impl Drop for RolloutReferenceUpdate {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
-struct RolloutReferenceRepair {
-    file: File,
-    generation: u64,
-}
-
-impl RolloutReferenceRepair {
-    async fn acquire(codex_home: &Path) -> io::Result<Option<Self>> {
-        let path = reference_state_path(codex_home);
-        tokio::task::spawn_blocking(move || {
-            let mut file = open_reference_state_file(path.as_path())?;
-            file.lock()?;
-            let state = read_reference_state(&mut file)?;
-            if !state.dirty {
-                return Ok(None);
-            }
-            Ok(Some(Self {
-                file,
-                generation: state.generation,
-            }))
-        })
-        .await
-        .map_err(io::Error::other)?
-    }
-
-    fn commit(&mut self) -> io::Result<u64> {
-        let generation = self.generation.saturating_add(1);
-        write_reference_state(
-            &mut self.file,
-            RolloutReferenceState {
-                generation,
-                dirty: false,
-            },
-        )?;
-        self.generation = generation;
-        Ok(generation)
-    }
-}
-
-impl Drop for RolloutReferenceRepair {
-    fn drop(&mut self) {
-        let _ = self.file.unlock();
-    }
-}
-
-fn reference_state_path(codex_home: &Path) -> PathBuf {
-    lease_directory(codex_home).join(ROLLOUT_REFERENCE_STATE_FILE)
-}
-
-fn open_reference_state_file(path: &Path) -> io::Result<File> {
-    let Some(parent) = path.parent() else {
-        return Err(io::Error::other(
-            "rollout reference state path has no parent",
-        ));
-    };
-    std::fs::create_dir_all(parent)?;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-}
-
-fn read_reference_state(file: &mut File) -> io::Result<RolloutReferenceState> {
-    file.seek(SeekFrom::Start(0))?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    let mut state = RolloutReferenceState {
-        generation: 0,
-        dirty: false,
-    };
-    for record in contents.split_inclusive('\n') {
-        if !record.ends_with('\n') {
-            break;
-        }
-        let mut fields = record.split_whitespace();
-        let status = fields.next();
-        let generation = fields.next().and_then(|value| value.parse::<u64>().ok());
-        if fields.next().is_some() {
-            return Err(io::Error::other("invalid rollout reference state"));
-        }
-        state = match (status, generation) {
-            (Some("clean"), Some(generation)) => RolloutReferenceState {
-                generation,
-                dirty: false,
-            },
-            (Some("dirty"), Some(generation)) => RolloutReferenceState {
-                generation,
-                dirty: true,
-            },
-            _ => return Err(io::Error::other("invalid rollout reference state")),
-        };
-    }
-    Ok(state)
-}
-
-fn write_reference_state(file: &mut File, state: RolloutReferenceState) -> io::Result<()> {
-    file.seek(SeekFrom::End(0))?;
-    let status = if state.dirty { "dirty" } else { "clean" };
-    writeln!(file, "{status} {}", state.generation)?;
-    file.flush()?;
-    file.sync_data()
-}
-
 /// Returns the modified time for the existing plain or compressed rollout file.
 pub(crate) async fn file_modified_time(path: &Path) -> io::Result<Option<time::OffsetDateTime>> {
-    let Some(path) = path::existing_rollout_path(path).await else {
-        return Ok(None);
-    };
-    let meta = tokio::fs::metadata(path).await?;
-    let modified = meta.modified().ok();
-    Ok(modified.map(time::OffsetDateTime::from))
+    Ok(path::existing_rollout_with_metadata(path)
+        .await
+        .and_then(|(_, metadata)| metadata.modified().ok())
+        .map(time::OffsetDateTime::from))
 }
 
 /// Opens a rollout line reader that transparently handles plain `.jsonl` and `.jsonl.zst` files.
@@ -462,7 +56,8 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
 }
 
 /// Returns the compressed `.jsonl.zst` path for a rollout path.
-pub fn compressed_rollout_path(path: &Path) -> PathBuf {
+#[cfg(test)]
+pub(crate) fn compressed_rollout_path(path: &Path) -> PathBuf {
     path::compressed_rollout_path(path)
 }
 
@@ -642,7 +237,6 @@ mod worker {
     use std::time::Instant;
     use std::time::SystemTime;
 
-    use codex_protocol::ThreadId;
     use tracing::debug;
     use tracing::info;
     use tracing::warn;
@@ -650,7 +244,6 @@ mod worker {
     use tokio::task::JoinSet;
 
     use crate::ARCHIVED_SESSIONS_SUBDIR;
-    use crate::RolloutCompressionMode;
     use crate::RolloutReferenceIndex;
     use crate::SESSIONS_SUBDIR;
 
@@ -659,6 +252,8 @@ mod worker {
     use super::path;
 
     const TEMP_SUFFIX: &str = ".tmp";
+    const COMPRESSION_LEVEL: i32 = 3;
+    const MIN_ROLLOUT_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
     const RUN_MARKER_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
     const TEMP_FILE_STALE_AFTER: Duration = RUN_MARKER_STALE_AFTER;
     const WORKER_MAX_RUNTIME: Duration = Duration::from_secs(5 * 60 * 60);
@@ -749,6 +344,16 @@ mod worker {
     }
 
     pub(super) async fn run(codex_home: PathBuf) -> io::Result<()> {
+        let Some(_maintenance_guard) =
+            crate::try_acquire_rollout_maintenance_lock(codex_home.as_path())?
+        else {
+            metrics::run("skipped_maintenance");
+            debug!(
+                "rollout maintenance is already running for {}",
+                codex_home.display()
+            );
+            return Ok(());
+        };
         let marker = match CompressionRunMarker::try_claim(codex_home.as_path()) {
             Ok(Some(marker)) => marker,
             Ok(None) => {
@@ -769,16 +374,13 @@ mod worker {
         let started_at = Instant::now();
         let result = async {
             cleanup_stale_temps(codex_home.as_path()).await?;
-            let ReferenceIndexScan::Ready {
-                index: mut reference_index,
-                generation: mut reference_generation,
-            } = scan_reference_index_until_stable(codex_home.as_path(), started_at).await?
+            let Some(reference_index) = RolloutReferenceIndex::scan_until(
+                codex_home.as_path(),
+                started_at,
+                WORKER_MAX_RUNTIME,
+            )
+            .await?
             else {
-                metrics::run("skipped_reference_scan_deadline");
-                warn!(
-                    "rollout compression skipped for {} because the reference scan deadline expired",
-                    codex_home.display()
-                );
                 return Ok(CompressionStats::default());
             };
             let mut stats = CompressionStats::default();
@@ -789,15 +391,8 @@ mod worker {
                 if started_at.elapsed() >= WORKER_MAX_RUNTIME {
                     break;
                 }
-                compress_rollouts_in_root(
-                    codex_home.as_path(),
-                    root.as_path(),
-                    started_at,
-                    &mut reference_index,
-                    &mut reference_generation,
-                    &mut stats,
-                )
-                .await?;
+                compress_rollouts_in_root(root.as_path(), started_at, &reference_index, &mut stats)
+                    .await?;
             }
             Ok::<_, io::Error>(stats)
         }
@@ -835,11 +430,9 @@ mod worker {
     }
 
     async fn compress_rollouts_in_root(
-        codex_home: &Path,
         root: &Path,
         started_at: Instant,
-        reference_index: &mut RolloutReferenceIndex,
-        reference_generation: &mut u64,
+        reference_index: &RolloutReferenceIndex,
         stats: &mut CompressionStats,
     ) -> io::Result<()> {
         if !tokio::fs::try_exists(root).await.unwrap_or(false) {
@@ -897,75 +490,18 @@ mod worker {
                 if rollout_file.is_compressed() {
                     continue;
                 }
-                let Some((_timestamp, thread_uuid)) =
-                    crate::list::parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-                else {
-                    continue;
-                };
-                let thread_id = match ThreadId::from_string(&thread_uuid.to_string()) {
-                    Ok(thread_id) => thread_id,
-                    Err(_) => continue,
-                };
                 let path = rollout_file.into_path();
-                if !is_cold_candidate(path.as_path()).await {
+                let Some(rollout_id) = crate::rollout_id_from_path(path.as_path()) else {
                     stats.skipped = stats.skipped.saturating_add(1);
-                    metrics::file("skipped_not_cold");
+                    metrics::file("skipped_unreadable_meta");
                     continue;
-                }
-                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
-                    collect_next_compression_job(&mut jobs, stats).await;
-                }
-                let lease = match super::RolloutLease::try_acquire_exclusive(
-                    codex_home,
-                    RolloutCompressionMode::Enabled,
-                    thread_id,
-                )
-                .await
-                {
-                    Ok(Some(lease)) => lease,
-                    Ok(None) => {
-                        stats.skipped = stats.skipped.saturating_add(1);
-                        metrics::file("skipped_leased");
-                        continue;
-                    }
-                    Err(err) => {
-                        stats.failed = stats.failed.saturating_add(1);
-                        metrics::file("failed_lease");
-                        warn!("failed to acquire rollout lease {}: {err}", path.display());
-                        continue;
-                    }
                 };
                 let Ok(meta) = crate::read_session_meta_line(path.as_path()).await else {
                     stats.skipped = stats.skipped.saturating_add(1);
                     metrics::file("skipped_unreadable_meta");
                     continue;
                 };
-                let reference_snapshot =
-                    match super::RolloutReferenceSnapshot::acquire(codex_home).await {
-                        Ok(snapshot) => snapshot,
-                        Err(err) => {
-                            stats.failed = stats.failed.saturating_add(1);
-                            metrics::file("failed_reference_state");
-                            warn!(
-                                "failed to read rollout reference state for {}: {err}",
-                                path.display()
-                            );
-                            continue;
-                        }
-                    };
-                let reference_state_changed = reference_snapshot.is_dirty()
-                    || reference_snapshot.generation() != *reference_generation;
-                drop(reference_snapshot);
-                if reference_state_changed {
-                    let ReferenceIndexScan::Ready { index, generation } =
-                        scan_reference_index_until_stable(codex_home, started_at).await?
-                    else {
-                        continue;
-                    };
-                    *reference_index = index;
-                    *reference_generation = generation;
-                }
-                if reference_index.reference_count(meta.meta.id) > 0 {
+                if reference_index.reference_count(rollout_id) > 0 {
                     stats.skipped = stats.skipped.saturating_add(1);
                     metrics::file("skipped_referenced");
                     continue;
@@ -977,8 +513,10 @@ mod worker {
                 }
                 stats.scanned = stats.scanned.saturating_add(1);
                 metrics::file("scanned");
+                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
+                    collect_next_compression_job(&mut jobs, stats).await;
+                }
                 jobs.spawn_blocking(move || {
-                    let _lease = lease;
                     let started_at = Instant::now();
                     let result = compress_rollout_if_cold_blocking(path.as_path());
                     let duration = started_at.elapsed();
@@ -988,88 +526,6 @@ mod worker {
         }
         drain_compression_jobs(&mut jobs, stats).await;
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(super) async fn compress_rollouts_with_index_for_test(
-        codex_home: &Path,
-        root: &Path,
-        reference_index: &mut RolloutReferenceIndex,
-        reference_generation: &mut u64,
-    ) -> io::Result<()> {
-        let mut stats = CompressionStats::default();
-        compress_rollouts_in_root(
-            codex_home,
-            root,
-            Instant::now(),
-            reference_index,
-            reference_generation,
-            &mut stats,
-        )
-        .await
-    }
-
-    async fn is_cold_candidate(path: &Path) -> bool {
-        let Ok(metadata) = tokio::fs::metadata(path).await else {
-            return false;
-        };
-        let Ok(modified) = metadata.modified() else {
-            return false;
-        };
-        SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or(Duration::ZERO)
-            >= super::ROLLOUT_COMPRESSION_MIN_AGE
-    }
-
-    enum ReferenceIndexScan {
-        Ready {
-            index: RolloutReferenceIndex,
-            generation: u64,
-        },
-        Expired,
-    }
-
-    async fn scan_reference_index_until_stable(
-        codex_home: &Path,
-        started_at: Instant,
-    ) -> io::Result<ReferenceIndexScan> {
-        loop {
-            if started_at.elapsed() >= WORKER_MAX_RUNTIME {
-                return Ok(ReferenceIndexScan::Expired);
-            }
-            let before = super::RolloutReferenceSnapshot::acquire(codex_home).await?;
-            if before.is_dirty() {
-                drop(before);
-                let Some(mut repair) = super::RolloutReferenceRepair::acquire(codex_home).await?
-                else {
-                    continue;
-                };
-                let Some(index) =
-                    RolloutReferenceIndex::scan_until(codex_home, started_at, WORKER_MAX_RUNTIME)
-                        .await?
-                else {
-                    return Ok(ReferenceIndexScan::Expired);
-                };
-                let generation = repair.commit()?;
-                return Ok(ReferenceIndexScan::Ready { index, generation });
-            }
-            let generation = before.generation();
-            drop(before);
-            let Some(index) =
-                RolloutReferenceIndex::scan_until(codex_home, started_at, WORKER_MAX_RUNTIME)
-                    .await?
-            else {
-                return Ok(ReferenceIndexScan::Expired);
-            };
-            let after = super::RolloutReferenceSnapshot::acquire(codex_home).await?;
-            if after.is_dirty() {
-                continue;
-            }
-            if after.generation() == generation {
-                return Ok(ReferenceIndexScan::Ready { index, generation });
-            }
-        }
     }
 
     type CompressionJobResult = (PathBuf, Duration, io::Result<CompressionMeasurement>);
@@ -1270,7 +726,7 @@ mod worker {
         let age = SystemTime::now()
             .duration_since(modified)
             .unwrap_or(Duration::ZERO);
-        if age < super::ROLLOUT_COMPRESSION_MIN_AGE {
+        if age < MIN_ROLLOUT_AGE {
             return Ok(ColdFileState::NotCold(Some(state)));
         }
         Ok(ColdFileState::Cold(state))
@@ -1288,7 +744,7 @@ mod worker {
 
     fn encode_zstd_to_writer(source: &Path, output: impl Write) -> io::Result<()> {
         let mut input = File::open(source)?;
-        let mut encoder = zstd::stream::write::Encoder::new(output, super::COMPRESSION_LEVEL)?;
+        let mut encoder = zstd::stream::write::Encoder::new(output, COMPRESSION_LEVEL)?;
         io::copy(&mut input, &mut encoder)?;
         encoder.finish()?;
         Ok(())
@@ -1493,6 +949,7 @@ pub async fn existing_rollout_path(path: &Path) -> Option<PathBuf> {
 
 mod path {
     use std::ffi::OsStr;
+    use std::fs::Metadata;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -1531,15 +988,26 @@ mod path {
     }
 
     pub(super) async fn existing_rollout_path(path: &Path) -> Option<PathBuf> {
+        existing_rollout_with_metadata(path)
+            .await
+            .map(|(path, _)| path)
+    }
+
+    /// Resolves the plain rollout before its compressed sibling and retains the lookup metadata.
+    ///
+    /// Returning the metadata lets callers inspect the selected file without a second stat.
+    pub(super) async fn existing_rollout_with_metadata(path: &Path) -> Option<(PathBuf, Metadata)> {
         let plain_path = plain_rollout_path(path);
-        if matches!(tokio::fs::metadata(plain_path.as_path()).await, Ok(metadata) if metadata.is_file())
+        if let Ok(metadata) = tokio::fs::metadata(plain_path.as_path()).await
+            && metadata.is_file()
         {
-            return Some(plain_path);
+            return Some((plain_path, metadata));
         }
         let compressed_path = compressed_rollout_path(plain_path.as_path());
-        if matches!(tokio::fs::metadata(compressed_path.as_path()).await, Ok(metadata) if metadata.is_file())
+        if let Ok(metadata) = tokio::fs::metadata(compressed_path.as_path()).await
+            && metadata.is_file()
         {
-            return Some(compressed_path);
+            return Some((compressed_path, metadata));
         }
         None
     }

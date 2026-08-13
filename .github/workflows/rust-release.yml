@@ -10,9 +10,9 @@
 
 name: rust-release
 on:
-  # Temporarily unreachable while Codex Lab operates Apple Silicon-only.
-  # Keep the reusable definition intact for an explicit cross-platform restore.
-  workflow_call:
+  push:
+    tags:
+      - "rust-v*.*.*"
 
 env:
   CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
@@ -22,12 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  authorize_self_hosted:
-    name: Authorize self-hosted execution
-    uses: ./.github/workflows/authorize-self-hosted.yml
-
   tag-check:
-    needs: authorize_self_hosted
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -63,7 +58,7 @@ jobs:
   build:
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runs_on || matrix.runner }}
     # Release builds can take a long time, so leave some headroom to avoid
     # having to restart the full workflow due to a timeout.
     timeout-minutes: 90
@@ -86,50 +81,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-codex-lab
+          - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             bundle: primary
             artifact_name: aarch64-apple-darwin
             binaries: "codex codex-code-mode-host codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-codex-lab
+          - runner: macos-15-xlarge
             target: aarch64-apple-darwin
             bundle: app-server
             artifact_name: aarch64-apple-darwin-app-server
             binaries: "codex-app-server codex-code-mode-host"
             build_dmg: "false"
-          - runner: macos-codex-lab
+          - runner: macos-15-xlarge
             target: x86_64-apple-darwin
             bundle: primary
             artifact_name: x86_64-apple-darwin
             binaries: "codex codex-code-mode-host codex-responses-api-proxy"
             build_dmg: "true"
-          - runner: macos-codex-lab
+          - runner: macos-15-xlarge
             target: x86_64-apple-darwin
             bundle: app-server
             artifact_name: x86_64-apple-darwin-app-server
             binaries: "codex-app-server codex-code-mode-host"
             build_dmg: "false"
           # Release artifacts intentionally ship MUSL-linked Linux binaries.
-          - runner: codex-lab-linux
+          - runner: ${{ github.event.repository.name }}-linux-x64-xl
             target: x86_64-unknown-linux-musl
             bundle: primary
             artifact_name: x86_64-unknown-linux-musl
             binaries: "codex codex-code-mode-host codex-responses-api-proxy bwrap"
             build_dmg: "false"
-          - runner: codex-lab-linux
+          - runner: ${{ github.event.repository.name }}-linux-x64-xl
             target: x86_64-unknown-linux-musl
             bundle: app-server
             artifact_name: x86_64-unknown-linux-musl-app-server
             binaries: "codex-app-server codex-code-mode-host"
             build_dmg: "false"
-          - runner: ubuntu-24.04-arm
+          - runner: ${{ github.event.repository.name }}-linux-arm64
             target: aarch64-unknown-linux-musl
             bundle: primary
             artifact_name: aarch64-unknown-linux-musl
             binaries: "codex codex-code-mode-host codex-responses-api-proxy bwrap"
             build_dmg: "false"
-          - runner: ubuntu-24.04-arm
+          - runner: ${{ github.event.repository.name }}-linux-arm64
             target: aarch64-unknown-linux-musl
             bundle: app-server
             artifact_name: aarch64-unknown-linux-musl-app-server
@@ -172,12 +167,10 @@ jobs:
       - name: Install Linux bwrap build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash
-        env:
-          APT_INSTALL_ARGS: --no-install-recommends
         run: |
           set -euo pipefail
-          bash "${GITHUB_WORKSPACE}/.github/scripts/install-apt-packages.sh" \
-            binutils pkg-config libcap-dev
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils pkg-config libcap-dev
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -355,21 +348,6 @@ jobs:
                 "$dest/${binary}-${{ matrix.target }}.sigstore"
             fi
           done
-
-          if [[ "${{ matrix.target }}" == *linux* && "${{ matrix.bundle }}" == "primary" ]]; then
-            bundle_root="${RUNNER_TEMP}/codex-${{ matrix.target }}-bundle"
-            rm -rf "$bundle_root"
-            mkdir -p "$bundle_root/codex-resources"
-            cp "$dest/codex-${{ matrix.target }}" "$bundle_root/codex"
-            cp "$dest/codex-code-mode-host-${{ matrix.target }}" "$bundle_root/codex-code-mode-host"
-            cp "$dest/bwrap-${{ matrix.target }}" "$bundle_root/codex-resources/bwrap"
-            chmod 0755 \
-              "$bundle_root/codex" \
-              "$bundle_root/codex-code-mode-host" \
-              "$bundle_root/codex-resources/bwrap"
-            tar -C "$bundle_root" -cf - codex codex-code-mode-host codex-resources/bwrap |
-              zstd -T0 -19 -o "$dest/codex-${{ matrix.target }}-bundle.tar.zst"
-          fi
 
           if [[ "${{ matrix.build_dmg }}" == "true" ]]; then
             cp target/${{ matrix.target }}/release/codex-${{ matrix.target }}.dmg "$dest/codex-${{ matrix.target }}.dmg"
@@ -560,9 +538,9 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           BINARIES: ${{ matrix.binaries }}
-          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
-          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ secrets.AKV_NOTARIZATION_KEY_NAME }}
+          APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ secrets.AKV_NOTARIZATION_KEY_VERSION }}
         run: |
           set -euo pipefail
 
@@ -601,7 +579,7 @@ jobs:
             rcodesign print-signature-info "$signed_path" \
               >"${report_dir}/${binary}/signature-info.yaml"
 
-            .github/scripts/macos-signing/notarize_macos_binary_with_rcodesign.sh \
+            .github/scripts/macos-signing/notarize_macos_binary_with_akv.sh \
               --binary "$signed_path" \
               --report-dir "${report_dir}/${binary}"
           done
@@ -611,9 +589,9 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
-          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ secrets.AKV_NOTARIZATION_KEY_NAME }}
+          APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ secrets.AKV_NOTARIZATION_KEY_VERSION }}
         run: |
           set -euo pipefail
 
@@ -658,7 +636,7 @@ jobs:
             rcodesign print-signature-info "$binary" \
               >"${report_dir}/signature-info.yaml"
 
-            .github/scripts/macos-signing/notarize_macos_binary_with_rcodesign.sh \
+            .github/scripts/macos-signing/notarize_macos_binary_with_akv.sh \
               --binary "$binary" \
               --report-dir "$report_dir"
           done
@@ -689,7 +667,7 @@ jobs:
   package-macos:
     needs: sign-macos-binaries
     name: Package macOS artifacts - ${{ matrix.target }} - ${{ matrix.bundle }}
-    runs-on: macos-codex-lab
+    runs-on: macos-15-xlarge
     timeout-minutes: 45
     permissions:
       contents: read
@@ -945,9 +923,9 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          APPLE_NOTARIZATION_KEY_P8: ${{ secrets.APPLE_NOTARIZATION_KEY_P8 }}
-          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
           APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+          APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ secrets.AKV_NOTARIZATION_KEY_NAME }}
+          APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ secrets.AKV_NOTARIZATION_KEY_VERSION }}
         run: |
           set -euo pipefail
 
@@ -968,7 +946,7 @@ jobs:
           rcodesign print-signature-info "$dmg_path" \
             >"${report_dir}/signature-info-before-notarization.yaml"
 
-          .github/scripts/macos-signing/notarize_macos_dmg_with_rcodesign.sh \
+          .github/scripts/macos-signing/notarize_macos_dmg_with_akv.sh \
             --dmg "$dmg_path" \
             --report-dir "$report_dir"
 
@@ -995,7 +973,7 @@ jobs:
       - package-macos
       - sign-macos-dmg
     name: Verify macOS artifacts - ${{ matrix.target }} - ${{ matrix.bundle }}
-    runs-on: macos-codex-lab
+    runs-on: macos-15-xlarge
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1360,12 +1338,7 @@ jobs:
             --package codex-responses-api-proxy \
             --package codex-sdk
 
-      # scripts/install/install.{sh,ps1} resolve every download from
-      # openai/codex. Publishing them as fork release assets would hand users an
-      # installer that ignores the release they downloaded it from, so they ship
-      # only from the repository they point at.
       - name: Stage installer scripts
-        if: ${{ github.repository == 'openai/codex' }}
         run: |
           cp scripts/install/install.sh dist/install.sh
           cp scripts/install/install.ps1 dist/install.ps1
@@ -1383,14 +1356,9 @@ jobs:
           # (e.g. -alpha, -beta). Otherwise publish a normal release.
           prerelease: ${{ steps.release_name.outputs.prerelease }}
 
-  publish-r2:
-    name: publish-r2
-    needs: [release, publish-dotslash]
-    # Inherited upstream job. It mirrors openai/codex release assets into the
-    # upstream R2 `releases` bucket, so a fork that ran it would fetch upstream
-    # assets and publish them under fork-owned credentials. Pin it to the
-    # repository that owns the bucket.
-    if: ${{ github.repository == 'openai/codex' }}
+  publish-r2-assets:
+    name: publish-r2-assets
+    needs: release
     permissions:
       contents: read
     uses: ./.github/workflows/r2-release.yml
@@ -1399,6 +1367,20 @@ jobs:
       tag: ${{ needs.release.outputs.tag }}
       make_latest: ${{ fromJSON(needs.release.outputs.make_latest) }}
       prerelease: ${{ fromJSON(needs.release.outputs.prerelease) }}
+      stage: assets
+
+  publish-r2:
+    name: publish-r2
+    needs: [release, publish-dotslash, publish-r2-assets]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/r2-release.yml
+    secrets: inherit
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+      make_latest: ${{ fromJSON(needs.release.outputs.make_latest) }}
+      prerelease: ${{ fromJSON(needs.release.outputs.prerelease) }}
+      stage: finalize
 
   publish-dotslash:
     name: publish-dotslash
@@ -1431,11 +1413,8 @@ jobs:
   # npm docs: https://docs.npmjs.com/trusted-publishers
   publish-npm:
     # Publish to npm for stable releases, numbered alphas, and alpha hotfixes.
-    # Every tarball is published under the OpenAI-owned `@openai` npm scope, so
-    # pin this to the repository that owns those packages.
     if: >-
       ${{
-        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.should_publish_npm == 'true'
@@ -1596,11 +1575,9 @@ jobs:
     name: Trigger developers.openai.com deploy
     needs: release
     # Only trigger the deploy for a stable release.
-    # The deploy updates developers.openai.com with the new config schema json
-    # file, an OpenAI-owned property, so pin it to the upstream repository.
+    # The deploy updates developers.openai.com with the new config schema json file.
     if: >-
       ${{
-        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         !contains(needs.release.outputs.version, '-')
@@ -1627,12 +1604,9 @@ jobs:
     name: winget
     needs: release
     # Only publish stable/mainline releases to WinGet; pre-releases include a
-    # '-' in the semver string (e.g., 1.2.3-alpha.1). The manifest identifier
-    # `OpenAI.Codex` and the `openai-oss-forks` winget-pkgs fork are both
-    # OpenAI-owned, so pin this to the upstream repository.
+    # '-' in the semver string (e.g., 1.2.3-alpha.1).
     if: >-
       ${{
-        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         !contains(needs.release.outputs.version, '-')

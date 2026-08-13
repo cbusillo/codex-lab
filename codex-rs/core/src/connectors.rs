@@ -10,7 +10,6 @@ pub use codex_connectors::AppInfo;
 pub use codex_connectors::AppMetadata;
 use codex_connectors::ConnectorDirectoryCacheContext;
 use codex_connectors::ConnectorDirectoryCacheKey;
-use codex_connectors::app_is_enabled;
 use codex_connectors::apps_config_from_layer_stack;
 use codex_connectors::connector_runtime_context_key;
 use codex_exec_server::EnvironmentManager;
@@ -23,6 +22,7 @@ use tracing::warn;
 use crate::config::Config;
 use crate::mcp::McpManager;
 use crate::plugins::list_tool_suggest_discoverable_plugins;
+use crate::plugins::plugins_manager_for_config;
 use crate::session::INITIAL_SUBMIT_ID;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::ToolSuggestDiscoverableType;
@@ -35,11 +35,12 @@ use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
-use codex_mcp::McpStartupReconnectPolicy;
+use codex_mcp::McpStartupPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::ToolPluginProvenance;
 use codex_mcp::effective_mcp_servers;
 use codex_mcp::tool_plugin_provenance;
+use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::PermissionProfile;
 
 const CONNECTORS_READY_TIMEOUT_ON_EMPTY_TOOLS: Duration = Duration::from_secs(30);
@@ -78,19 +79,6 @@ pub async fn list_accessible_connectors_from_mcp_tools(
         .await?
         .connectors,
     )
-}
-
-pub(crate) async fn list_accessible_and_enabled_connectors_from_runtime(
-    mcp_runtime: &McpRuntime,
-    config: &Config,
-) -> Vec<AppInfo> {
-    with_app_enabled_state(
-        accessible_connectors_from_mcp_tools(&mcp_runtime.latest_list_all_tools().await),
-        config,
-    )
-    .into_iter()
-    .filter(|connector| connector.is_accessible && connector.is_enabled)
-    .collect()
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -199,7 +187,7 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_environment_manager(
     force_refetch: bool,
     environment_manager: Arc<EnvironmentManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
-    let plugins_manager = Arc::new(PluginsManager::new(config.codex_home.to_path_buf()));
+    let plugins_manager = Arc::new(plugins_manager_for_config(config));
     let mcp_manager = Arc::new(McpManager::new(plugins_manager));
     list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         config,
@@ -256,18 +244,12 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
 
     let cancel_token = CancellationToken::new();
-    let codex_apps_auth = codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-        .then(|| {
-            auth.as_ref().map(|auth| {
-                codex_mcp::CodexAppsAuthContext::from_auth_manager(Arc::clone(&auth_manager), auth)
-            })
-        })
-        .flatten();
+    let codex_apps_auth_manager =
+        codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+            .then(|| Arc::clone(&auth_manager));
     let mcp_runtime = McpRuntime::new(McpRuntimeInput {
+        startup_policy: McpStartupPolicy::Eager,
         config: Arc::clone(&mcp_config),
-        // Discovery shuts this runtime down as soon as it has an answer, so a
-        // background reconnect would outlive the caller it reports to.
-        startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),
         mcp_servers: mcp_servers.clone(),
@@ -280,9 +262,9 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
         tool_catalog_cache: mcp_manager.tool_catalog_cache(),
         codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
-        supports_openai_form_elicitation: false,
+        client_mcp_extensions: ClientMcpExtensions::default(),
         auth: auth.clone(),
-        codex_apps_auth,
+        codex_apps_auth_manager,
         elicitation_reviewer: None,
         elicitation_lifecycle: None,
     })
@@ -510,32 +492,6 @@ fn accessible_connectors_for_app_list_from_mcp_tools(mcp_tools: &[ToolInfo]) -> 
     collect_accessible_connectors_from_mcp_tools(non_synthetic_tools)
 }
 
-pub fn with_app_enabled_state(mut connectors: Vec<AppInfo>, config: &Config) -> Vec<AppInfo> {
-    let user_apps_config = apps_config_from_layer_stack(&config.config_layer_stack);
-    let requirements_apps_config = config.config_layer_stack.requirements_toml().apps.as_ref();
-    if user_apps_config.is_none() && requirements_apps_config.is_none() {
-        return connectors;
-    }
-
-    for connector in &mut connectors {
-        if let Some(apps_config) = user_apps_config.as_ref()
-            && (apps_config.default.is_some()
-                || apps_config.apps.contains_key(connector.id.as_str()))
-        {
-            connector.is_enabled = app_is_enabled(apps_config, Some(connector.id.as_str()));
-        }
-
-        if requirements_apps_config
-            .and_then(|apps| apps.apps.get(connector.id.as_str()))
-            .is_some_and(|app| app.enabled == Some(false))
-        {
-            connector.is_enabled = false;
-        }
-    }
-
-    connectors
-}
-
 pub fn with_app_plugin_sources(
     mut connectors: Vec<AppInfo>,
     tool_plugin_provenance: &ToolPluginProvenance,
@@ -548,25 +504,18 @@ pub fn with_app_plugin_sources(
     connectors
 }
 
-pub(crate) fn mcp_approvals_reviewer(
-    config: &Config,
-    server_name: &str,
-    connector_id: Option<&str>,
-) -> ApprovalsReviewer {
-    mcp_approvals_reviewer_from_layers(
-        &config.config_layer_stack,
-        config.approvals_reviewer,
-        server_name,
-        connector_id,
-    )
-}
-
 pub(crate) fn mcp_approvals_reviewer_from_layers(
     config_layer_stack: &codex_config::ConfigLayerStack,
     default_reviewer: ApprovalsReviewer,
+    model: Option<&str>,
     server_name: &str,
     connector_id: Option<&str>,
 ) -> ApprovalsReviewer {
+    let requirements = config_layer_stack.requirements();
+    if model.is_some_and(|model| requirements.auto_review_required_for_model(model)) {
+        return ApprovalsReviewer::AutoReview;
+    }
+
     let app_reviewer = if server_name == CODEX_APPS_MCP_SERVER_NAME {
         apps_config_from_layer_stack(config_layer_stack).and_then(|apps_config| {
             connector_id
@@ -583,11 +532,7 @@ pub(crate) fn mcp_approvals_reviewer_from_layers(
     };
 
     if let Some(reviewer) = app_reviewer
-        && config_layer_stack
-            .requirements()
-            .approvals_reviewer
-            .can_set(&reviewer)
-            .is_ok()
+        && requirements.approvals_reviewer.can_set(&reviewer).is_ok()
     {
         return reviewer;
     }

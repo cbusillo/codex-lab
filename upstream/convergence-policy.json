@@ -11,5 +11,5 @@
   },
   "contractsPath": "upstream/convergence-contracts.md",
   "evidenceRoot": "upstream/openai-codex",
-  "planIssue": "https://github.com/cbusillo/codex-lab/issues/428"
+  "planIssue": "https://github.com/cbusillo/codex-lab/issues/230"
 }

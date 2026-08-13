@@ -2,37 +2,31 @@ use super::collect_output_until_exit;
 use super::combine_spawned_output;
 use super::find_python;
 use super::wait_for_output_contains;
-use crate::ProcessSignal;
 use crate::TerminalSize;
 use crate::spawn_pipe_process_no_stdin;
 use crate::spawn_pty_process;
 use std::collections::HashMap;
-use std::io::ErrorKind;
+use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::FromRawHandle;
+use std::os::windows::io::OwnedHandle;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
+use tokio::process::Command;
+use winapi::um::jobapi::IsProcessInJob;
+use winapi::um::processthreadsapi::OpenProcess;
+use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
 
 const READY_MARKER: &str = "__CODEX_CHILD_READY__";
 const VALUE_MARKER: &str = "__CODEX_CHILD_VALUE__";
-
-/// How long the root process waits for its detached child to publish the ready
-/// marker. Loaded Windows CI workers regularly need more than a few seconds to
-/// start a second Python interpreter.
-const NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS: u64 = 30;
-
-/// How long the harness waits for the root process to exit. This must stay
-/// strictly larger than the child-readiness budget: if the two deadlines are
-/// equal, the harness can give up in the same instant the root is deciding its
-/// exit code, which reports a harness timeout instead of the real behavior.
-const NORMAL_EXIT_ROOT_TIMEOUT_MS: u64 = 45_000;
-
-/// How long an interactive Windows shell may take to start a foreground child
-/// on a loaded CI worker.
-const FOREGROUND_CHILD_READY_TIMEOUT_MS: u64 = 30_000;
 
 struct WindowsShell {
     name: &'static str,
     program: String,
     args: Vec<String>,
+    child_command: String,
 }
 
 fn find_powershell() -> Option<String> {
@@ -144,24 +138,10 @@ async fn assert_normal_exit_preserves_descendant(
         utf8_hex(&ready_marker.to_string_lossy()),
         utf8_hex(&survival_marker.to_string_lossy())
     );
-    // The root reports each stage on stdout so a failure says whether the
-    // detached child was never spawned, never became ready, or was ready and the
-    // root still failed to exit.
     let code = format!(
-        "import pathlib,subprocess,sys,time\n\
-         code=bytes.fromhex('{child_code_hex}').decode()\n\
-         ready=pathlib.Path(bytes.fromhex('{ready_marker_hex}').decode())\n\
-         child=subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP)\n\
-         print('ROOT_SPAWNED_CHILD pid='+str(child.pid),flush=True)\n\
-         deadline=time.time()+{NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}\n\
-         while not ready.exists() and time.time()<deadline: time.sleep(.05)\n\
-         if not ready.exists():\n\
-         \x20   print('ROOT_CHILD_NOT_READY after {NORMAL_EXIT_CHILD_READY_TIMEOUT_SECS}s',flush=True)\n\
-         \x20   sys.exit(2)\n\
-         print('ROOT_CHILD_READY',flush=True)\n\
-         sys.exit(0)\n",
-        child_code_hex = utf8_hex(&child_code),
-        ready_marker_hex = utf8_hex(&ready_marker.to_string_lossy())
+        "import pathlib,subprocess,sys,time; code=bytes.fromhex('{}').decode(); ready=pathlib.Path(bytes.fromhex('{}').decode()); subprocess.Popen([sys.executable,'-u','-c',code],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP); deadline=time.time()+10\nwhile not ready.exists() and time.time()<deadline: time.sleep(.05)\nsys.exit(0 if ready.exists() else 2)",
+        utf8_hex(&child_code),
+        utf8_hex(&ready_marker.to_string_lossy())
     );
     let args = vec!["-u".to_string(), "-c".to_string(), code];
     let spawned = if backend == "pipe" {
@@ -179,26 +159,14 @@ async fn assert_normal_exit_preserves_descendant(
         .await?
     };
     let (session, output_rx, exit_rx) = combine_spawned_output(spawned);
-    let (root_output, exit_code) = collect_output_until_exit(
-        output_rx,
-        exit_rx,
-        /*timeout_ms*/ NORMAL_EXIT_ROOT_TIMEOUT_MS,
-    )
-    .await;
-    let root_output = String::from_utf8_lossy(&root_output).into_owned();
-    assert_eq!(
-        exit_code, 0,
-        "{backend} root did not exit normally: root_output={root_output:?}"
-    );
+    let (_, exit_code) = collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
+    assert_eq!(exit_code, 0, "{backend} root did not exit normally");
     drop(session);
 
     let survived = wait_for_path(&survival_marker, Duration::from_secs(10)).await;
     let _ = std::fs::remove_file(ready_marker);
     let _ = std::fs::remove_file(survival_marker);
-    assert!(
-        survived,
-        "{backend} descendant did not survive normal exit: root_output={root_output:?}"
-    );
+    assert!(survived, "{backend} descendant did not survive normal exit");
     Ok(())
 }
 
@@ -226,6 +194,113 @@ async fn normal_exit_preserves_descendants_for_pipe_and_conpty() -> anyhow::Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contained_spawn_owns_immediate_descendant() -> anyhow::Result<()> {
+    let Some(python) = find_python() else {
+        eprintln!("python not found; skipping Windows contained-spawn test");
+        return Ok(());
+    };
+
+    let mut command = Command::new(&python);
+    command
+        .args([
+            "-u",
+            "-c",
+            "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); print(child.pid,flush=True); child.wait()",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let job = crate::JobObject::create()?;
+    let mut root = job.spawn_contained(&mut command)?;
+    let stdout = root
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing contained process stdout"))?;
+    let mut stdout = BufReader::new(stdout);
+    let mut child_pid = String::new();
+    tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut child_pid)).await??;
+    let child_pid: u32 = child_pid.trim().parse()?;
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, child_pid) };
+    anyhow::ensure!(!process.is_null(), "failed to open immediate child process");
+    let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
+    let mut in_job = 0;
+    let checked = unsafe {
+        IsProcessInJob(
+            process.as_raw_handle().cast(),
+            job.as_raw_handle().cast(),
+            &mut in_job,
+        )
+    };
+    anyhow::ensure!(checked != 0, "failed to inspect child Job Object");
+    anyhow::ensure!(in_job != 0, "immediate child escaped its Job Object");
+
+    job.terminate()?;
+    tokio::time::timeout(Duration::from_secs(10), root.wait()).await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_job_assignment_resumes_existing_job_member() -> anyhow::Result<()> {
+    let Some(python) = find_python() else {
+        eprintln!("python not found; skipping Windows nested-job fallback test");
+        return Ok(());
+    };
+
+    let owning_job = crate::JobObject::create()?;
+    let rejected_job = crate::JobObject::create_without_breakaway()?;
+    let mut occupied_command = Command::new(&python);
+    occupied_command
+        .args(["-c", "import time; time.sleep(60)"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut existing_member = rejected_job.spawn_contained(&mut occupied_command)?;
+
+    let mut command = Command::new(&python);
+    command
+        .args([
+            "-u",
+            "-c",
+            "import time; print('resumed',flush=True); time.sleep(60)",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    rejected_job.prepare_suspended_spawn(&mut command);
+    let mut root = command.spawn()?;
+    let process_handle = root
+        .raw_handle()
+        .ok_or_else(|| anyhow::anyhow!("missing suspended process handle"))?;
+    owning_job.assign_process(process_handle)?;
+    let process_id = root
+        .id()
+        .ok_or_else(|| anyhow::anyhow!("missing suspended process id"))?;
+
+    assert!(
+        !rejected_job.assign_and_resume_process(process_id)?,
+        "unrelated nested job unexpectedly accepted the process"
+    );
+    let stdout = root
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing resumed process stdout"))?;
+    let mut stdout = BufReader::new(stdout);
+    let mut marker = String::new();
+    tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut marker)).await??;
+    assert_eq!(marker.trim(), "resumed");
+
+    let process_handle = crate::JobObject::open_process_handle(process_id)?;
+    crate::JobObject::terminate_process_handle(&process_handle)?;
+    rejected_job.terminate()?;
+    let status = tokio::time::timeout(Duration::from_secs(10), root.wait()).await??;
+    assert_eq!(status.code(), Some(1));
+    tokio::time::timeout(Duration::from_secs(10), existing_member.wait()).await??;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
     let Some(python) = find_python() else {
         eprintln!("python not found; skipping ConPTY input test");
@@ -236,30 +311,18 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
     );
     let expected = "cafeé 漢字";
     let expected_marker = format!("{VALUE_MARKER}{}", utf8_hex(expected));
-    let cmd_child_command = format!("{python} -u -c \"{code}\"");
     let mut shells = vec![WindowsShell {
         name: "cmd",
         program: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string()),
-        args: vec![
-            "/D".to_string(),
-            "/Q".to_string(),
-            "/C".to_string(),
-            cmd_child_command,
-        ],
+        args: vec!["/D".to_string(), "/Q".to_string()],
+        child_command: format!("\"{}\" -u -c \"{code}\"", python.replace('"', "\"\"")),
     }];
     if let Some(program) = find_powershell() {
         shells.push(WindowsShell {
             name: "PowerShell",
             program,
-            args: vec![
-                "-NoLogo".to_string(),
-                "-NoProfile".to_string(),
-                "-Command".to_string(),
-                format!(
-                    "& '{}' -u -c \"{code}\"; exit $LASTEXITCODE",
-                    python.replace('\'', "''")
-                ),
-            ],
+            args: vec!["-NoLogo".to_string(), "-NoProfile".to_string()],
+            child_command: format!("& '{}' -u -c \"{code}\"", python.replace('\'', "''")),
         });
     }
     let env: HashMap<String, String> = std::env::vars().collect();
@@ -277,13 +340,12 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
         .await?;
         let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
         let writer = session.writer_sender();
-        wait_for_output_contains(
-            &mut output_rx,
-            READY_MARKER,
-            /*timeout_ms*/ FOREGROUND_CHILD_READY_TIMEOUT_MS,
-        )
-        .await
-        .map_err(|err| anyhow::anyhow!("{} child did not become ready: {err}", shell.name))?;
+        writer
+            .send(format!("{}\n", shell.child_command).into_bytes())
+            .await?;
+        wait_for_output_contains(&mut output_rx, READY_MARKER, /*timeout_ms*/ 10_000)
+            .await
+            .map_err(|err| anyhow::anyhow!("{} child did not become ready: {err}", shell.name))?;
 
         writer
             .send(format!("{expected}X\u{8}\n").into_bytes())
@@ -295,6 +357,7 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
                     anyhow::anyhow!("{} child received incorrect input: {err}", shell.name)
                 })?;
 
+        writer.send(b"exit 0\n".to_vec()).await?;
         let (remaining, exit_code) =
             collect_output_until_exit(output_rx, exit_rx, /*timeout_ms*/ 10_000).await;
         output.extend_from_slice(&remaining);
@@ -312,9 +375,11 @@ async fn conpty_delivers_input_to_foreground_children() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conpty_interrupt_signal_is_unsupported_and_leaves_session_usable() -> anyhow::Result<()> {
-    let program = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-    let args = vec!["/D".to_string(), "/Q".to_string()];
+async fn conpty_ctrl_c_interrupts_powershell_foreground_child() -> anyhow::Result<()> {
+    let Some(program) = find_powershell() else {
+        return Ok(());
+    };
+    let args = vec!["-NoLogo".to_string(), "-NoProfile".to_string()];
     let env: HashMap<String, String> = std::env::vars().collect();
     let spawned = spawn_pty_process(
         &program,
@@ -328,12 +393,11 @@ async fn conpty_interrupt_signal_is_unsupported_and_leaves_session_usable() -> a
     .await?;
     let (session, mut output_rx, exit_rx) = combine_spawned_output(spawned);
     let writer = session.writer_sender();
+    writer.send(b"ping.exe -4 -t localhost\n".to_vec()).await?;
+    wait_for_output_contains(&mut output_rx, "127.0.0.1", /*timeout_ms*/ 10_000).await?;
 
-    let error = session
-        .signal(ProcessSignal::Interrupt)
-        .expect_err("ConPTY interrupt should be unsupported on Windows");
-    assert_eq!(error.kind(), ErrorKind::Unsupported);
-
+    writer.send(vec![0x03]).await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     writer.send(b"cmd.exe /D /C ver\n".to_vec()).await?;
     let mut output = wait_for_output_contains(
         &mut output_rx,
@@ -349,7 +413,7 @@ async fn conpty_interrupt_signal_is_unsupported_and_leaves_session_usable() -> a
     assert_eq!(
         exit_code,
         0,
-        "ConPTY session did not stay usable after a rejected interrupt: {:?}",
+        "PowerShell did not resume after Ctrl-C: {:?}",
         String::from_utf8_lossy(&output)
     );
     Ok(())
