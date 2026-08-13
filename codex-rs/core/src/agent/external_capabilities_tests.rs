@@ -63,6 +63,39 @@ fn antigravity_capabilities_produce_provider_qualified_selectors() {
 }
 
 #[test]
+fn antigravity_models_parse_tab_separated_rows() {
+    let capabilities = antigravity_capabilities(
+        Some("1.1.12".to_string()),
+        b"gemini-3.6-flash-high\tGemini 3.6 Flash (High)\ngemini-3.1-pro-low\tGemini 3.1 Pro (Low)\n",
+        /*models_truncated*/ false,
+        b"--model Model\n--effort low|medium|high\n--sandbox\n--mode\n--dangerously-skip-permissions\n",
+        /*help_truncated*/ false,
+    );
+
+    assert_eq!(
+        capabilities.models,
+        vec![
+            ExternalAgentModelCapability {
+                selector: "antigravity-gemini-3.6-flash-high".to_string(),
+                model: "gemini-3.6-flash-high".to_string(),
+                explicit_only: false,
+            },
+            ExternalAgentModelCapability {
+                selector: "antigravity-gemini-3.1-pro-low".to_string(),
+                model: "gemini-3.1-pro-low".to_string(),
+                explicit_only: false,
+            },
+        ]
+    );
+    assert_eq!(
+        capabilities.effort_levels,
+        ["low", "medium", "high"].map(str::to_string)
+    );
+    assert_eq!(capabilities.source, ExternalAgentCapabilitySource::LocalCli);
+    assert!(capabilities.failure.is_none());
+}
+
+#[test]
 fn antigravity_read_only_requires_safety_flags() {
     let capabilities = antigravity_capabilities(
         Some("1.1.9".to_string()),
