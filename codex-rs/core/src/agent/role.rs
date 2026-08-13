@@ -206,6 +206,12 @@ pub fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
         return spec.is_enabled();
     }
     if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
+        let Some(model) = selector.strip_prefix("antigravity-") else {
+            return false;
+        };
+        if !crate::agent::external_capabilities::is_valid_antigravity_model_name(model) {
+            return false;
+        }
         if let Some(enabled) = config
             .agent_selector_overrides
             .get(selector)
@@ -213,19 +219,83 @@ pub fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
         {
             return enabled;
         }
+        if config
+            .agent_selector_overrides
+            .get("antigravity")
+            .and_then(|override_config| override_config.enabled)
+            == Some(false)
+        {
+            return false;
+        }
         let configured_provider_model = config
             .agent_selector_overrides
             .get("antigravity")
             .and_then(|override_config| override_config.model.as_deref())
             .is_some_and(|model| selector == format!("antigravity-{model}"));
-        return configured_provider_model
-            && config
-                .agent_selector_overrides
-                .get("antigravity")
-                .and_then(|override_config| override_config.enabled)
-                .unwrap_or(true);
+        if configured_provider_model {
+            return true;
+        }
+        return external_agent_backend_for_selector(config, "antigravity").is_some_and(|backend| {
+            crate::agent::external_capabilities::discovered_antigravity_selectors(
+                &backend,
+                config.cwd.as_path(),
+            )
+            .iter()
+            .any(|model| model.selector == selector)
+        });
     }
     true
+}
+
+pub(crate) fn antigravity_selector_rejection(config: &Config, selector: &str) -> Option<String> {
+    let model = selector.strip_prefix("antigravity-")?;
+    if !crate::agent::external_capabilities::is_valid_antigravity_model_name(model) {
+        return Some(format!(
+            "Antigravity selector `{selector}` was rejected before launch. Rule: the model portion must be a canonical identifier using only letters, digits, and `-_.:/+`. Remediation: refresh Antigravity capabilities and retry with an advertised `antigravity-<model>` selector; no provider or model was substituted."
+        ));
+    }
+    if config
+        .agent_selector_overrides
+        .get(selector)
+        .and_then(|override_config| override_config.enabled)
+        .is_some()
+    {
+        return None;
+    }
+    let provider_override = config.agent_selector_overrides.get("antigravity");
+    if provider_override.and_then(|override_config| override_config.enabled) == Some(false) {
+        return None;
+    }
+    if provider_override
+        .and_then(|override_config| override_config.model.as_deref())
+        .is_some_and(|configured| selector == format!("antigravity-{configured}"))
+    {
+        return None;
+    }
+    let backend = external_agent_backend_for_selector(config, "antigravity")?;
+    let advertised = crate::agent::external_capabilities::discovered_antigravity_selectors(
+        &backend,
+        config.cwd.as_path(),
+    );
+    if advertised
+        .iter()
+        .any(|candidate| candidate.selector == selector)
+    {
+        return None;
+    }
+    let advertised = advertised
+        .iter()
+        .map(|candidate| candidate.selector.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "Antigravity selector `{selector}` was rejected before launch. Rule: a discovered selector must exactly match the current Antigravity capability catalog. Remediation: refresh Antigravity capabilities and retry with an advertised selector{}; no provider or model was substituted.",
+        if advertised.is_empty() {
+            String::new()
+        } else {
+            format!(" ({advertised})")
+        }
+    ))
 }
 
 pub(crate) fn dynamic_antigravity_role_config(

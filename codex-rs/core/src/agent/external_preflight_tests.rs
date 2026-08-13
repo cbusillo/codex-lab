@@ -1,7 +1,6 @@
 use super::*;
 use crate::agent::external_capabilities::ExternalAgentCapabilityFreshness;
 use crate::agent::external_capabilities::ExternalAgentCapabilitySource;
-use crate::agent::external_capabilities::clear_active_capability_catalog;
 use crate::agent::external_capabilities::clear_capability_cache;
 use crate::agent::external_capabilities::discovered_antigravity_selectors;
 use pretty_assertions::assert_eq;
@@ -201,13 +200,13 @@ async fn current_antigravity_capabilities_are_discovered_and_cached() {
         &format!(
             r#"if [ "$1" = "--version" ]; then
   echo version >> '{}'
-  echo "1.1.9"
+  echo "1.1.12"
   exit 0
 fi
 if [ "$1" = "models" ]; then
   echo models >> '{}'
-  echo 'gemini-3.6-flash-high'
-  echo 'gemini-3.1-pro-low'
+  printf '%s\t%s\n' 'gemini-3.6-flash-high' 'Gemini 3.6 Flash (High)'
+  printf '%s\t%s\n' 'gemini-3.1-pro-low' 'Gemini 3.1 Pro (Low)'
   exit 0
 fi
 if [ "$1" = "--help" ]; then
@@ -305,7 +304,6 @@ exit 2
 #[tokio::test]
 async fn antigravity_catalog_is_scoped_and_deterministic() {
     clear_capability_cache();
-    clear_active_capability_catalog();
     let temp_dir = TempDir::new().expect("tempdir");
     let first = shell_backend(
         &temp_dir,

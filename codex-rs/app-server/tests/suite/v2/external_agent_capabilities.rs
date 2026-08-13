@@ -97,11 +97,12 @@ async fn capabilities_refresh_notifies_with_discovered_antigravity_models() -> R
 for arg in "$@"; do
   case "$arg" in
     --version)
-      echo "agy 1.2.3"
+      echo "agy 1.1.12"
       exit 0
       ;;
     models)
-      printf '%s\n' 'gemini-3-pro' 'gemini-3-flash'
+      printf '%s\t%s\n' 'gemini-3-pro' 'Gemini 3 Pro'
+      printf '%s\t%s\n' 'gemini-3-flash' 'Gemini 3 Flash'
       exit 0
       ;;
     --help)
@@ -158,10 +159,10 @@ exit 0
     assert_eq!(provider.install, ExternalAgentInstallState::Installed);
     assert_eq!(provider.auth, ExternalAgentAuthState::Authenticated);
     assert!(provider.selectors.iter().any(|selector| {
-        selector.selector == "antigravity-gemini-3-pro" && selector.discovered
+        selector.selector == "antigravity-gemini-3-pro" && selector.discovered && selector.enabled
     }));
     assert!(provider.selectors.iter().any(|selector| {
-        selector.selector == "antigravity-gemini-3-flash" && selector.discovered
+        selector.selector == "antigravity-gemini-3-flash" && selector.discovered && selector.enabled
     }));
 
     Ok(())
