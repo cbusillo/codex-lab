@@ -1,0 +1,51 @@
+{
+  "name": "local-provider-no-tools",
+  "model": "local-policy-model",
+  "prompt": "Reply with exactly: policy-only.",
+  "files": {
+    "README.md": "# Policy-only local provider fixture\n"
+  },
+  "home_files": {
+    "models.json": "{\"models\":[{\"slug\":\"local-policy-model\",\"display_name\":\"Local Policy Model\",\"description\":\"Hermetic policy-only model fixture.\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"disabled\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"availability_nux\":null,\"upgrade\":null,\"base_instructions\":\"Follow the user request.\",\"include_skills_usage_instructions\":false,\"supports_reasoning_summary_parameter\":true,\"default_reasoning_summary\":\"none\",\"support_verbosity\":false,\"default_verbosity\":null,\"apply_patch_tool_type\":null,\"web_search_tool_type\":\"text\",\"truncation_policy\":{\"mode\":\"bytes\",\"limit\":10000},\"supports_parallel_tool_calls\":false,\"context_window\":8192,\"max_context_window\":8192,\"auto_compact_token_limit\":null,\"comp_hash\":null,\"effective_context_window_percent\":95,\"experimental_supported_tools\":[],\"input_modalities\":[\"text\"],\"supports_search_tool\":false,\"use_responses_lite\":false,\"auto_review_model_override\":null,\"tool_mode\":\"direct\",\"multi_agent_version\":null}]}"
+  },
+  "config_toml": "model_provider = \"harness\"\nmodel_catalog_json = \"{home}/models.json\"\n\n[tools]\nenabled = false\n\n[model_providers.harness]\nname = \"Harness\"\nbase_url = \"{responses_base_url}\"\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\n",
+  "responses_api": {
+    "responses": [
+      {
+        "response_id": "resp-local-no-tools",
+        "events": [
+          {
+            "item": {
+              "type": "message",
+              "id": "msg-local-no-tools",
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "policy-only."
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "expect": {
+    "returncode": 0,
+    "responses_request_count": 1,
+    "turn_count": 1,
+    "terminal_outcome": {
+      "outcome": "passed",
+      "reason": "passed"
+    },
+    "responses": [
+      {
+        "request": 0,
+        "scope": "body",
+        "absent_keys": ["tools"]
+      }
+    ]
+  },
+  "timeout_seconds": 30
+}

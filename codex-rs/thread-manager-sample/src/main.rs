@@ -298,6 +298,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         forced_login_method: None,
         web_search_mode: Constrained::allow_any(WebSearchMode::Disabled),
         web_search_config: None,
+        tools_enabled: true,
         experimental_request_user_input_enabled: true,
         update_plan_enabled: true,
         tool_registry: Default::default(),

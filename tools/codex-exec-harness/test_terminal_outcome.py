@@ -22,6 +22,7 @@ SPEC.loader.exec_module(HARNESS)
 def completed_run(**overrides: object) -> dict[str, object]:
     run: dict[str, object] = {
         "agent_messages": ["done"],
+        "returncode": 0,
         "stderr": "",
         "stdout_parse_errors": 0,
         "timed_out": False,
@@ -49,13 +50,23 @@ class TerminalOutcomeTest(unittest.TestCase):
             ),
             (
                 completed_run(
-                    tool_loop_detected=True, tool_loop_command="undefined-helper"
+                    tool_loop_detected=True,
+                    tool_loop_command="undefined-helper",
+                    stderr="connection refused",
                 ),
                 ("model_failed", "tool_loop"),
             ),
             (
                 completed_run(stdout_parse_errors=1),
                 ("runner_failed", "malformed_jsonl"),
+            ),
+            (
+                completed_run(returncode=1, agent_messages=[]),
+                ("model_failed", "malformed_output"),
+            ),
+            (
+                completed_run(returncode=1, stderr="invalid config"),
+                ("runner_failed", "harness_error"),
             ),
             (
                 completed_run(agent_messages=[]),
@@ -126,6 +137,20 @@ class TerminalOutcomeTest(unittest.TestCase):
 
         self.assertEqual([], failures)
         self.assertIsInstance(scenario["expect"]["terminal_outcome"], dict)
+
+    def test_terminal_outcome_rejects_unknown_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported terminal outcome"):
+            HARNESS.TerminalOutcome("unknown", "passed")
+        with self.assertRaisesRegex(ValueError, "unsupported terminal reason"):
+            HARNESS.TerminalOutcome("passed", "unknown")
+
+    def test_terminal_outcome_assertion_rejects_unknown_values(self) -> None:
+        with self.assertRaisesRegex(HARNESS.HarnessError, "unsupported value"):
+            HARNESS.add_terminal_outcome_assertion_failures(
+                [],
+                {"expect": {"terminal_outcome": {"outcome": "unknown"}}},
+                HARNESS.passed(),
+            )
 
 
 if __name__ == "__main__":

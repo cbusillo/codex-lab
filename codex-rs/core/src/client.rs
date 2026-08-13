@@ -872,16 +872,19 @@ impl ModelClient {
             }
         }
         let (instructions, tools) = if model_info.use_responses_lite {
-            let tools = if self.state.provider.capabilities().namespace_tools {
-                create_tools_json_for_responses_lite(&prompt.tools)?
-            } else {
-                create_tools_json_for_responses_api(&prompt.tools)?
-            };
-            let mut prefix = vec![ResponseItem::AdditionalTools {
-                id: None,
-                role: "developer".to_string(),
-                tools,
-            }];
+            let mut prefix = Vec::new();
+            if !prompt.tools.is_empty() {
+                let tools = if self.state.provider.capabilities().namespace_tools {
+                    create_tools_json_for_responses_lite(&prompt.tools)?
+                } else {
+                    create_tools_json_for_responses_api(&prompt.tools)?
+                };
+                prefix.push(ResponseItem::AdditionalTools {
+                    id: None,
+                    role: "developer".to_string(),
+                    tools,
+                });
+            }
             if !prompt.base_instructions.text.is_empty() {
                 prefix.push(ResponseItem::Message {
                     id: None,
@@ -896,10 +899,11 @@ impl ModelClient {
             input.splice(0..0, prefix);
             (String::new(), None)
         } else {
-            (
-                prompt.base_instructions.text.clone(),
-                Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
-            )
+            let tools = (!prompt.tools.is_empty())
+                .then(|| create_tools_raw_json_for_responses_api(&prompt.tools))
+                .transpose()?
+                .map(Into::into);
+            (prompt.base_instructions.text.clone(), tools)
         };
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled

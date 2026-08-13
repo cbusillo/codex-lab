@@ -22,6 +22,8 @@ if str(HARNESS_DIR) not in sys.path:
     sys.path.insert(0, str(HARNESS_DIR))
 
 from terminal_outcome import (
+    TERMINAL_OUTCOMES,
+    TERMINAL_REASONS,
     TerminalOutcome,
     model_failed,
     passed,
@@ -564,6 +566,19 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
         file_text = str(content).replace("{workspace}", str(paths.workspace))
         save_text(resolve_under(paths.workspace, rel_path, "file path"), file_text)
 
+    home_files = scenario.get("home_files", {})
+    if not isinstance(home_files, dict):
+        raise HarnessError("home_files must be an object")
+    for rel_path, content in home_files.items():
+        if not isinstance(rel_path, str):
+            raise HarnessError("home file paths must be strings")
+        file_text = (
+            str(content)
+            .replace("{workspace}", str(paths.workspace))
+            .replace("{home}", str(paths.home))
+        )
+        save_text(resolve_under(paths.home, rel_path, "home file path"), file_text)
+
     symlinks = scenario.get("symlinks", {})
     if not isinstance(symlinks, dict):
         raise HarnessError("symlinks must be an object")
@@ -626,6 +641,7 @@ def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None)
     config = config.replace("{external}", str(paths.run_dir / "external")).replace(
         "{run_dir}", str(paths.run_dir)
     )
+    config = config.replace("{codex_home}", str(paths.codex_home))
     uses_responses_base_url = "{responses_base_url}" in config
     if uses_responses_base_url:
         if base_url is None:
@@ -973,12 +989,6 @@ def classify_execution_outcome(run: dict[str, Any]) -> TerminalOutcome | None:
             truncate_utf8(f"command timed out after {run.get('timeout_seconds', 'unknown')}s", 240),
         )
 
-    stderr = run.get("stderr")
-    if isinstance(stderr, str) and stderr:
-        lower_stderr = stderr.lower()
-        if "connection refused" in lower_stderr or "could not connect" in lower_stderr:
-            return runner_failed("provider_unavailable", truncate_utf8(stderr, 240))
-
     if run.get("tool_loop_detected") is True:
         loop_command = run.get("tool_loop_command")
         detail = (
@@ -988,16 +998,29 @@ def classify_execution_outcome(run: dict[str, Any]) -> TerminalOutcome | None:
         )
         return model_failed("tool_loop", truncate_utf8(detail, 240))
 
+    stderr = run.get("stderr")
+    if isinstance(stderr, str) and stderr:
+        lower_stderr = stderr.lower()
+        if "connection refused" in lower_stderr or "could not connect" in lower_stderr:
+            return runner_failed("provider_unavailable", truncate_utf8(stderr, 240))
+
     if int(run.get("stdout_parse_errors", 0) or 0) > 0:
         return runner_failed(
             "malformed_jsonl",
             truncate_utf8("model output was not valid JSONL", 240),
         )
 
+    returncode = run.get("returncode")
+    if isinstance(returncode, int) and returncode != 0 and isinstance(stderr, str) and stderr:
+        return runner_failed("harness_error", truncate_utf8(stderr, 240))
+
     if not agent_has_final_message(run):
+        detail = "scenario ended without a final assistant message"
+        if isinstance(returncode, int) and returncode != 0:
+            detail = f"model process exited with status {returncode} without a final message"
         return model_failed(
-            "missing_final_message",
-            truncate_utf8("scenario ended without a final assistant message", 240),
+            "malformed_output" if returncode else "missing_final_message",
+            truncate_utf8(detail, 240),
         )
 
     return None
@@ -1849,6 +1872,16 @@ def add_terminal_outcome_assertion_failures(
         "reason": outcome.reason,
         "detail": outcome.detail,
     }
+    expected_outcome = assertion.get("outcome")
+    expected_reason = assertion.get("reason")
+    if isinstance(expected_outcome, str) and expected_outcome not in TERMINAL_OUTCOMES:
+        raise HarnessError(
+            f"expect.terminal_outcome.outcome has unsupported value: {expected_outcome}"
+        )
+    if isinstance(expected_reason, str) and expected_reason not in TERMINAL_REASONS:
+        raise HarnessError(
+            f"expect.terminal_outcome.reason has unsupported value: {expected_reason}"
+        )
     for field in ["outcome", "reason"]:
         expected = assertion.get(field)
         if expected is not None and not isinstance(expected, str):

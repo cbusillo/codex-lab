@@ -385,11 +385,42 @@ web_search = true
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
         })
     );
+}
+
+#[test]
+fn tools_enabled_defaults_to_true_and_can_be_disabled() {
+    let default_tools: ConfigToml = toml::from_str("[tools]").expect("parse default tools");
+    let disabled_tools: ConfigToml =
+        toml::from_str("[tools]\nenabled = false").expect("parse disabled tools");
+
+    assert!(default_tools.tools.expect("default tools").enabled);
+    assert!(!disabled_tools.tools.expect("disabled tools").enabled);
+}
+
+#[tokio::test]
+async fn load_config_resolves_tools_enabled() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            tools: Some(ToolsToml {
+                enabled: false,
+                ..ToolsToml::default()
+            }),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(!config.tools_enabled);
+    Ok(())
 }
 
 #[test]
@@ -405,6 +436,7 @@ web_search = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
@@ -424,6 +456,7 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
             update_plan: None,
@@ -444,6 +477,7 @@ enabled = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
             update_plan: None,
@@ -457,6 +491,7 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
     let config = Config::load_from_base_config_with_overrides(
         ConfigToml {
             tools: Some(ToolsToml {
+                enabled: true,
                 web_search: None,
                 experimental_request_user_input: Some(ExperimentalRequestUserInput {
                     enabled: false,

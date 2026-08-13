@@ -3,23 +3,28 @@
 from dataclasses import dataclass
 
 
-TERMINAL_OUTCOMES = (
-    "passed",
-    "policy_failed",
-    "model_failed",
-    "runner_failed",
+TERMINAL_OUTCOMES = frozenset(
+    {
+        "passed",
+        "policy_failed",
+        "model_failed",
+        "runner_failed",
+    }
 )
 
-TERMINAL_REASONS = (
-    "assertion_mismatch",
-    "missing_final_message",
-    "malformed_output",
-    "tool_loop",
-    "provider_timeout",
-    "provider_unavailable",
-    "malformed_jsonl",
-    "binary_verification_failed",
-    "harness_error",
+TERMINAL_REASONS = frozenset(
+    {
+        "passed",
+        "assertion_mismatch",
+        "missing_final_message",
+        "malformed_output",
+        "tool_loop",
+        "provider_timeout",
+        "provider_unavailable",
+        "malformed_jsonl",
+        "binary_verification_failed",
+        "harness_error",
+    }
 )
 
 
@@ -30,6 +35,12 @@ class TerminalOutcome:
     outcome: str
     reason: str
     detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.outcome not in TERMINAL_OUTCOMES:
+            raise ValueError(f"unsupported terminal outcome: {self.outcome}")
+        if self.reason not in TERMINAL_REASONS:
+            raise ValueError(f"unsupported terminal reason: {self.reason}")
 
 
 def passed() -> TerminalOutcome:

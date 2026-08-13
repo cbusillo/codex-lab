@@ -104,6 +104,8 @@ Scenarios are JSON files. Supported fields:
 - `turns`: ordered turn objects; turn 1 runs `codex exec`, later turns resume
   the captured thread id with `codex exec resume`
 - `files`: workspace files created before the run
+- `home_files`: non-executable files created under the isolated home
+- `executable_home_files`: executable fixtures created under the isolated home
 - `external_files`: files created under the run-local `external/` directory
 - `symlinks`: workspace-relative links to run-local fixture paths; targets may
   use `{workspace}`, `{external}`, or `{run_dir}`
@@ -111,7 +113,9 @@ Scenarios are JSON files. Supported fields:
 - `workspace_roots`: exact run-local workspace roots passed to Codex with
   repeatable `--workspace-root`; unlike `add_dirs`, these replace the implicit
   writable launch CWD and require `sandbox: workspace-write`
-- `config_toml`: isolated `CODEX_LAB_HOME/config.toml` contents
+- `config_toml`: isolated `CODEX_LAB_HOME/config.toml` contents; supports
+  `{workspace}`, `{home}`, `{codex_home}`, `{external}`, `{run_dir}`, and
+  `{responses_base_url}` placeholders
 - `config_overrides`: `-c key=value` arguments passed to `codex exec`
 - `responses_api`: start a local fake Responses API and point Codex at it
   - each configured response may use `function_call` to emit one fake function

@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from argparse import Namespace
@@ -385,6 +386,35 @@ class HarnessSafetyTest(unittest.TestCase):
             self.assertEqual(
                 f"home={paths.home}\nworkspace={paths.workspace}\n",
                 executable.read_text(encoding="utf-8"),
+            )
+
+    def test_materialize_workspace_creates_home_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "home-file")
+
+            HARNESS.materialize_workspace(
+                {"git_init": False, "home_files": {"models.json": "home={home}"}},
+                paths,
+            )
+
+            self.assertEqual(
+                f"home={paths.home}",
+                (paths.home / "models.json").read_text(encoding="utf-8"),
+            )
+
+    def test_save_config_expands_codex_home_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "config-codex-home")
+
+            HARNESS.save_config(
+                {"config_toml": 'model_catalog_json = "{codex_home}/models.json"'},
+                paths,
+                None,
+            )
+
+            self.assertEqual(
+                f'model_catalog_json = "{paths.codex_home}/models.json"',
+                (paths.codex_home / "config.toml").read_text(encoding="utf-8"),
             )
 
     def test_fake_responses_rejects_empty_responses(self) -> None:
@@ -1068,6 +1098,45 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             self.assertIn("turn.started", (artifact_dir / "stdout.jsonl").read_text())
             self.assertIn("timed out", (artifact_dir / "stderr.log").read_text())
 
+    def test_run_codex_terminates_repeated_failed_tool_loop_before_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "tool-loop")
+            paths.workspace.mkdir(parents=True)
+            artifact_dir = paths.artifacts
+            artifact_dir.mkdir(parents=True)
+            event = {
+                "item": {
+                    "type": "command_execution",
+                    "command": "undefined-helper",
+                    "status": "failed",
+                    "exit_code": 127,
+                }
+            }
+            script = (
+                "import json,time; "
+                f"event={event!r}; "
+                "[print(json.dumps(event), flush=True) for _ in range(3)]; "
+                "time.sleep(30)"
+            )
+            started_at = time.monotonic()
+
+            result = HARNESS.run_codex(
+                [sys.executable, "-c", script],
+                {"timeout_seconds": 10},
+                paths,
+                artifact_dir,
+            )
+            elapsed = time.monotonic() - started_at
+            outcome = HARNESS.classify_terminal_outcome(
+                {**result, "agent_messages": []}, []
+            )
+
+            self.assertLess(elapsed, 5)
+            self.assertFalse(result["timed_out"])
+            self.assertTrue(result["tool_loop_detected"])
+            self.assertEqual("undefined-helper", result["tool_loop_command"])
+            self.assertEqual(("model_failed", "tool_loop"), (outcome.outcome, outcome.reason))
+
     def test_failed_commands_only_include_failed_execution_events(self) -> None:
         events = [
             {
@@ -1091,6 +1160,33 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
         self.assertEqual(
             ["undefined-helper"], HARNESS.failed_commands_from_events(events)
         )
+
+    def test_repeated_failed_tool_streak_resets_after_another_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = HARNESS.make_paths(Path(tmp), "tool-loop-reset")
+            paths.workspace.mkdir(parents=True)
+            artifact_dir = paths.artifacts
+            artifact_dir.mkdir(parents=True)
+            commands = [
+                "undefined-helper",
+                "undefined-helper",
+                "another-helper",
+                "undefined-helper",
+                "undefined-helper",
+            ]
+            script = (
+                "import json; commands="
+                + repr(commands)
+                + "; [print(json.dumps({'item': {'type': 'command_execution', "
+                "'command': command, 'status': 'failed', 'exit_code': 127}}), flush=True) "
+                "for command in commands]"
+            )
+
+            result = HARNESS.run_codex(
+                [sys.executable, "-c", script], {}, paths, artifact_dir
+            )
+
+            self.assertFalse(result["tool_loop_detected"])
 
     def test_run_turns_propagates_timeout_stderr_and_launch_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
