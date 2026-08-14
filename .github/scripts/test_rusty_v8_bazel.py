@@ -167,6 +167,35 @@ class RustyV8BazelTest(unittest.TestCase):
             ),
         )
 
+    def test_write_release_checksums_selects_target_pair(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = root / "release.sha256"
+            output = root / "target.sha256"
+            manifest.write_text(
+                "a" * 64
+                + "  librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz\n"
+                + "b" * 64
+                + "  src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs\n"
+                + "c" * 64
+                + "  librusty_v8_ptrcomp_sandbox_release_x86_64-apple-darwin.a.gz\n",
+                encoding="utf-8",
+            )
+
+            rusty_v8_bazel.write_release_checksums(
+                "aarch64-apple-darwin",
+                manifest,
+                output,
+            )
+
+            self.assertEqual(
+                "a" * 64
+                + "  librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz\n"
+                + "b" * 64
+                + "  src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs\n",
+                output.read_text(encoding="utf-8"),
+            )
+
     def test_stage_artifacts(self) -> None:
         with TemporaryDirectory() as source_dir, TemporaryDirectory() as output_dir:
             source_root = Path(source_dir)

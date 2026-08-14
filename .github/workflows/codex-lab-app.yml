@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - ".github/actions/setup-rusty-v8/**"
+      - ".github/scripts/rusty_v8_bazel.py"
       - ".github/workflows/codex-lab-app.yml"
       - ".github/workflows/codex-lab-release.yml"
       - "scripts/github/configure-codex-lab-cargo-cache.sh"
@@ -13,6 +15,7 @@ on:
       - "scripts/codex_lab_package/**"
       - "scripts/codex_package/**"
       - "codex-rs/**"
+      - "third_party/v8/rusty_v8_*_codex_release.sha256"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

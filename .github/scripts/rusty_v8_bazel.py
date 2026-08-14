@@ -16,6 +16,7 @@ from run_bazel_with_buildbuddy import bazel_command
 from rusty_v8_module_bazel import (
     RustyV8ChecksumError,
     check_module_bazel,
+    parse_checksum_manifest,
     rusty_v8_http_file_versions,
     update_module_bazel,
 )
@@ -212,6 +213,29 @@ def staged_checksums_name(target: str, artifact_profile: str) -> str:
     return f"rusty_v8_{artifact_profile}_{target}.sha256"
 
 
+def write_release_checksums(
+    target: str,
+    manifest_path: Path,
+    output_path: Path,
+) -> None:
+    checksums = parse_checksum_manifest(manifest_path)
+    artifact_names = [
+        staged_archive_name(target, Path(), SANDBOX_ARTIFACT_PROFILE),
+        staged_binding_name(target, SANDBOX_ARTIFACT_PROFILE),
+    ]
+    missing = [name for name in artifact_names if name not in checksums]
+    if missing:
+        raise RustyV8ChecksumError(
+            f"{manifest_path}: missing release checksums for {', '.join(missing)}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        "".join(f"{checksums[name]}  {name}\n" for name in artifact_names),
+        encoding="utf-8",
+    )
+
+
 def stage_artifacts(
     target: str,
     lib_path: Path,
@@ -344,6 +368,13 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser("resolved-v8-crate-version")
 
+    write_release_checksums_parser = subparsers.add_parser(
+        "write-release-checksums"
+    )
+    write_release_checksums_parser.add_argument("--version")
+    write_release_checksums_parser.add_argument("--target", required=True)
+    write_release_checksums_parser.add_argument("--output", type=Path, required=True)
+
     check_module_bazel_parser = subparsers.add_parser("check-module-bazel")
     check_module_bazel_parser.add_argument("--version")
     check_module_bazel_parser.add_argument("--manifest", type=Path)
@@ -387,6 +418,17 @@ def main() -> int:
         return 0
     if args.command == "resolved-v8-crate-version":
         print(resolved_v8_crate_version())
+        return 0
+    if args.command == "write-release-checksums":
+        version = args.version or resolved_v8_crate_version()
+        manifest_path = (
+            RUSTY_V8_CHECKSUMS_DIR
+            / f"rusty_v8_{version.replace('.', '_')}_codex_release.sha256"
+        )
+        try:
+            write_release_checksums(args.target, manifest_path, args.output)
+        except RustyV8ChecksumError as exc:
+            raise SystemExit(str(exc)) from exc
         return 0
     if args.command == "check-module-bazel":
         version = command_version(args.version)
