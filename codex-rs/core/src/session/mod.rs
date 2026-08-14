@@ -201,6 +201,10 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod cargo_validation_cache;
+mod cargo_validation_cache_key;
+mod cargo_validation_probe;
+pub(crate) mod cargo_validation_provider;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod environment;
@@ -213,6 +217,8 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+pub(crate) mod project_validation;
+pub(crate) mod project_validation_coordinator;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -225,6 +231,7 @@ mod token_budget;
 pub(crate) mod turn;
 pub(crate) mod turn_context;
 mod turn_input;
+pub(crate) mod validation_provider;
 mod world_state;
 use self::code_mode_warning::unsupported_code_mode_warning;
 #[cfg(test)]
@@ -233,6 +240,7 @@ use self::handlers::submission_loop;
 pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
+use self::project_validation_coordinator::ProjectValidationCoordinator;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -392,6 +400,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
+    pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
     pub(crate) skills_service: Arc<HostSkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -489,6 +498,7 @@ impl Session {
             auth_manager,
             models_manager,
             environment_manager,
+            project_validation_coordinator,
             skills_service,
             plugins_manager,
             mcp_manager,
@@ -751,6 +761,7 @@ impl Session {
             client_mcp_extensions,
             agent_control,
             environment_manager,
+            project_validation_coordinator,
             inherited_environments,
             analytics_events_client,
             thread_store,

@@ -1,5 +1,6 @@
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
+use crate::context::is_project_validation_correction_consumed;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
@@ -576,7 +577,9 @@ impl ContextManager {
                     cut_idx -= 1;
                 }
                 ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content) =>
+                    if role == "user"
+                        && is_contextual_user_message_content(content)
+                        && !is_project_validation_correction_consumed_content(content) =>
                 {
                     cut_idx -= 1;
                 }
@@ -585,6 +588,15 @@ impl ContextManager {
         }
         cut_idx
     }
+}
+
+fn is_project_validation_correction_consumed_content(content: &[ContentItem]) -> bool {
+    content.iter().any(|item| {
+        let ContentItem::InputText { text } = item else {
+            return false;
+        };
+        is_project_validation_correction_consumed(text)
+    })
 }
 
 pub(crate) fn truncate_function_output_payload(

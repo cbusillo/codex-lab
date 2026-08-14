@@ -6,6 +6,130 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
+use std::process::Command;
+
+use super::super::project_validation_coordinator::ProjectValidationSuccessCache;
+
+#[test]
+fn cargo_success_environment_fingerprint_is_order_independent_and_complete() {
+    let first = HashMap::from([
+        ("PATH".to_string(), "/first/bin".to_string()),
+        ("BUILD_INPUT".to_string(), "alpha".to_string()),
+    ]);
+    let reordered = HashMap::from([
+        ("BUILD_INPUT".to_string(), "alpha".to_string()),
+        ("PATH".to_string(), "/first/bin".to_string()),
+    ]);
+    let changed_path = HashMap::from([
+        ("PATH".to_string(), "/second/bin".to_string()),
+        ("BUILD_INPUT".to_string(), "alpha".to_string()),
+    ]);
+    let changed_build_input = HashMap::from([
+        ("PATH".to_string(), "/first/bin".to_string()),
+        ("BUILD_INPUT".to_string(), "beta".to_string()),
+    ]);
+
+    let fingerprint = cargo_success_environment_fingerprint(&first);
+
+    assert_eq!(
+        cargo_success_environment_fingerprint(&reordered),
+        fingerprint
+    );
+    assert_ne!(
+        cargo_success_environment_fingerprint(&changed_path),
+        fingerprint
+    );
+    assert_ne!(
+        cargo_success_environment_fingerprint(&changed_build_input),
+        fingerprint
+    );
+}
+
+#[tokio::test]
+async fn cargo_success_cache_misses_after_environment_change() {
+    let temp = tempfile::tempdir().expect("create temp directory");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write Cargo manifest");
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["add", "Cargo.toml"],
+        vec![
+            "-c",
+            "user.name=Project Validation Test",
+            "-c",
+            "user.email=project-validation@example.com",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    ] {
+        let status = Command::new("git")
+            .args(arguments)
+            .current_dir(temp.path())
+            .status()
+            .expect("run git command");
+        assert!(status.success());
+    }
+    let cwd = AbsolutePathBuf::from_absolute_path(temp.path())
+        .expect("temporary directory should be absolute");
+    let plan = ValidationCommandPlan {
+        kind: ValidationCommandKind::Cargo,
+        command: vec![
+            "cargo".to_string(),
+            "check".to_string(),
+            "--manifest-path".to_string(),
+            temp.path().join("Cargo.toml").display().to_string(),
+            "--target-dir".to_string(),
+            temp.path().join("target").display().to_string(),
+        ],
+        cwd: cwd.clone(),
+        execution_cwd: cwd.clone(),
+        _execution_cwd_guard: None,
+        cargo_toolchain: Some(
+            "rust-toolchain.toml\n[toolchain]\nchannel = \"1.95.0\"\n".to_string(),
+        ),
+        timeout_ms: 5_000,
+        changed_file_count: Some(1),
+    };
+    let first_environment = HashMap::from([
+        ("PATH".to_string(), "/first/bin".to_string()),
+        ("BUILD_INPUT".to_string(), "alpha".to_string()),
+    ]);
+    let changed_environment = HashMap::from([
+        ("PATH".to_string(), "/first/bin".to_string()),
+        ("BUILD_INPUT".to_string(), "beta".to_string()),
+    ]);
+    let cancellation_token = CancellationToken::new();
+    let repository_root = temp.path().to_path_buf();
+    let first_key = cargo_validation_success_key(
+        &cwd,
+        Some(&repository_root),
+        &plan,
+        Some("cargo 1.95.0 (fixture)"),
+        &first_environment,
+        &cancellation_token,
+    )
+    .await
+    .expect("first success key");
+    let changed_key = cargo_validation_success_key(
+        &cwd,
+        Some(&repository_root),
+        &plan,
+        Some("cargo 1.95.0 (fixture)"),
+        &changed_environment,
+        &cancellation_token,
+    )
+    .await
+    .expect("changed success key");
+    let cache = ProjectValidationSuccessCache::default();
+    cache.record_successful_validation(first_key.clone()).await;
+
+    assert!(cache.has_successful_validation(&first_key).await);
+    assert!(!cache.has_successful_validation(&changed_key).await);
+}
 
 #[test]
 fn cargo_validation_managed_profile_adds_only_cache_target_write_access() {

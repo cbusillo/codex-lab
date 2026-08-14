@@ -4,6 +4,7 @@ use super::parse_turn_item;
 use crate::context::ContextualUserFragment;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
+use crate::context::ProjectValidationFailure;
 use codex_protocol::ResponseItemId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::HookPromptFragment;
@@ -20,6 +21,8 @@ use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_OPEN_TAG;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
+use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
@@ -68,6 +71,29 @@ fn recognizes_context_window_guidance_as_contextual_developer_content() {
 
     assert!(is_contextual_dev_message_content(&content));
     assert!(!has_non_contextual_dev_message_content(&content));
+}
+
+#[test]
+fn hides_project_validation_failure_from_user_turn_items() {
+    let event = ProjectValidationCompletedEvent {
+        turn_id: "turn-1".to_string(),
+        item_id: None,
+        command: vec!["just".to_string(), "test".to_string()],
+        command_truncated: false,
+        cwd: None,
+        status: ProjectValidationStatus::ActionableFailure,
+        skip_reason: None,
+        changed_file_count: Some(1),
+        exit_code: Some(1),
+        output: "test failed".to_string(),
+        output_truncated: false,
+        duration_ms: 10,
+    };
+    let fragment = ProjectValidationFailure::from_event(&event)
+        .expect("actionable failure should produce correction context");
+    let item = ContextualUserFragment::into(fragment);
+
+    assert!(parse_turn_item(&item).is_none());
 }
 
 #[test]

@@ -176,6 +176,7 @@ enum RunTurnMode {
 pub(crate) struct RunTurnState {
     turn_diff_tracker: tokio::sync::OnceCell<SharedTurnDiffTracker>,
     mode: RunTurnMode,
+    next_sampling_start_context_item: Option<ResponseItem>,
 }
 
 impl RunTurnState {
@@ -183,7 +184,12 @@ impl RunTurnState {
         Self {
             turn_diff_tracker: tokio::sync::OnceCell::new(),
             mode: RunTurnMode::Initial,
+            next_sampling_start_context_item: None,
         }
+    }
+
+    pub(crate) fn set_next_sampling_start_context_item(&mut self, item: ResponseItem) {
+        self.next_sampling_start_context_item = Some(item);
     }
 
     fn begin_run(&mut self) -> RunTurnMode {
@@ -215,6 +221,7 @@ pub(crate) async fn run_turn(
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
     let run_mode = run_state.begin_run();
+    let mut sampling_start_context_item = run_state.next_sampling_start_context_item.take();
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -419,6 +426,7 @@ pub(crate) async fn run_turn(
                 &responses_metadata,
                 sampling_request_input,
                 auto_review_awareness_input_item,
+                &mut sampling_start_context_item,
                 cancellation_token.child_token(),
             )
             .await
@@ -1507,6 +1515,7 @@ async fn run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     request_only_input_item: Option<ResponseItem>,
+    sampling_start_context_item: &mut Option<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1570,6 +1579,11 @@ async fn run_sampling_request(
             ) {
                 return Err(CodexErr::TurnAborted);
             }
+        }
+        if let Some(item) = sampling_start_context_item.take() {
+            sess.record_conversation_items(turn_context.as_ref(), std::slice::from_ref(&item))
+                .await;
+            sess.flush_rollout().await?;
         }
         let err = match try_run_sampling_request(
             tool_runtime.clone(),

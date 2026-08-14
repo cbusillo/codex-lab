@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
@@ -21,6 +22,8 @@ use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::ProjectValidationSkipReason;
 use codex_protocol::protocol::ProjectValidationStatus;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use sha1::Digest;
+use sha1::Sha1;
 use tokio_util::sync::CancellationToken;
 
 use super::Session;
@@ -480,7 +483,7 @@ pub(crate) async fn run_project_validation(
         && let Some(key) = successful_validation_key.as_ref()
         && sess
             .services
-            .project_validation_coordinator
+            .project_validation_success_cache
             .has_successful_validation(key)
             .await
     {
@@ -512,7 +515,7 @@ pub(crate) async fn run_project_validation(
     };
 
     let cargo_cache = if plan.kind == ValidationCommandKind::Cargo
-        && persistent_cargo_validation_cache_allowed(&turn_context.permission_profile)
+        && persistent_cargo_validation_cache_allowed(&turn_context.permission_profile())
         && let Some(toolchain_identity) = cargo_toolchain_identity.as_deref()
     {
         let repository_root = lease_root
@@ -568,7 +571,7 @@ pub(crate) async fn run_project_validation(
         workspace_roots.push(cache.target_dir().clone());
     }
     let validation_permission_profile = cargo_validation_permission_profile(
-        &turn_context.permission_profile,
+        &turn_context.permission_profile(),
         &plan.cwd,
         cargo_cache
             .as_ref()
@@ -712,7 +715,7 @@ pub(crate) async fn run_project_validation(
         && let Some(key) = successful_validation_key
     {
         sess.services
-            .project_validation_coordinator
+            .project_validation_success_cache
             .record_successful_validation(key)
             .await;
     }
@@ -896,7 +899,10 @@ async fn cargo_validation_success_key(
         environment,
     )
     .ok()?;
-    let command = vec![cache_key.semantic_id().to_string()];
+    let command = vec![
+        cache_key.semantic_id().to_string(),
+        cargo_success_environment_fingerprint(environment),
+    ];
     Some(ProjectValidationSuccessKey::new(
         repository_root,
         validation_scope,
@@ -904,6 +910,28 @@ async fn cargo_validation_success_key(
         fingerprint.worktree_diff,
         command,
     ))
+}
+
+fn cargo_success_environment_fingerprint(environment: &HashMap<String, String>) -> String {
+    let environment = environment
+        .iter()
+        .map(|(name, value)| {
+            let name = if cfg!(windows) {
+                name.to_ascii_uppercase()
+            } else {
+                name.clone()
+            };
+            (name, value)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut hasher = Sha1::new();
+    for (name, value) in environment {
+        hasher.update((name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 async fn prepare_cargo_validation_cache(

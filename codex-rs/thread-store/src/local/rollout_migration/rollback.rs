@@ -34,8 +34,19 @@ pub(super) fn is_pre_turn_context_update(response: &ResponseItem) -> bool {
     let ResponseItem::Message { role, content, .. } = response else {
         return false;
     };
-    (role == "user" && is_known_contextual_user_message_content(content))
+    (role == "user"
+        && is_known_contextual_user_message_content(content)
+        && !is_project_validation_correction_consumed_content(content))
         || (role == "developer" && is_known_contextual_developer_message_content(content))
+}
+
+fn is_project_validation_correction_consumed_content(content: &[ContentItem]) -> bool {
+    content.iter().any(|item| {
+        let ContentItem::InputText { text } = item else {
+            return false;
+        };
+        is_project_validation_correction_consumed(text)
+    })
 }
 
 /// Apply the same response-history cut used by legacy cold resume to a persisted
@@ -123,6 +134,14 @@ fn is_known_contextual_user_text(text: &str) -> bool {
             ("<user_shell_command>", "</user_shell_command>"),
             ("<turn_aborted>", "</turn_aborted>"),
             ("<subagent_notification>", "</subagent_notification>"),
+            (
+                "<project_validation_failure>",
+                "</project_validation_failure>",
+            ),
+            (
+                "<project_validation_correction_consumed>",
+                "</project_validation_correction_consumed>",
+            ),
             ("<recommended_plugins>", "</recommended_plugins>"),
             ("<goal_context>", "</goal_context>"),
         ]
@@ -143,4 +162,13 @@ fn is_known_contextual_user_text(text: &str) -> bool {
         || text.starts_with(
             "Warning: Your account was flagged for potentially high-risk cyber activity",
         )
+}
+
+fn is_project_validation_correction_consumed(text: &str) -> bool {
+    let text = text.trim();
+    (text.starts_with("<project_validation_correction_consumed>")
+        && text.ends_with("</project_validation_correction_consumed>"))
+        || (text.starts_with("<codex_internal_context source=\"project_validation\">")
+            && text.ends_with("</codex_internal_context>")
+            && text.contains("correction request has been consumed"))
 }

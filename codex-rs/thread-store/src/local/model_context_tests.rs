@@ -266,6 +266,7 @@ async fn ignores_contextual_user_messages_when_selecting_turn_context() {
             turn_complete("turn-1"),
             turn_started("turn-2"),
             contextual_user_message(),
+            project_validation_failure_message(),
             turn_context(home.path(), "turn-2"),
             turn_complete("turn-2"),
         ],
@@ -557,6 +558,10 @@ fn user_message(message: &str) -> RolloutItem {
 
 fn contextual_user_message() -> RolloutItem {
     user_message("<environment_context>context only</environment_context>")
+}
+
+fn project_validation_failure_message() -> RolloutItem {
+    user_message("<project_validation_failure>validation context only</project_validation_failure>")
 }
 
 fn completed_user_message(turn_id: &str, message: &str) -> RolloutItem {

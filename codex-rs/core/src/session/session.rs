@@ -1,5 +1,7 @@
 use super::input_queue::InputQueue;
 use super::mcp_refresh::McpRefresh;
+use super::project_validation_coordinator::ProjectValidationCoordinator;
+use super::project_validation_coordinator::ProjectValidationSuccessCache;
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
@@ -607,6 +609,7 @@ impl Session {
         client_mcp_extensions: ClientMcpExtensions,
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
+        project_validation_coordinator: Arc<ProjectValidationCoordinator>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
@@ -1346,6 +1349,8 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                project_validation_coordinator,
+                project_validation_success_cache: ProjectValidationSuccessCache::default(),
             };
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
