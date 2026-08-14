@@ -137,12 +137,17 @@ class StageSdkBazelBinariesTest(unittest.TestCase):
                     command_runner=arm64_macho,
                 )
 
-    def test_removes_the_pair_when_publication_fails_partway(self) -> None:
+    def test_restores_existing_pair_when_publication_fails_partway(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             codex = self.executable_file(root, "bazel-codex")
             host = self.executable_file(root, "bazel-host")
             destination = root / "stage"
+            destination.mkdir()
+            existing_codex = self.executable_file(destination, "codex")
+            existing_host = self.executable_file(destination, "codex-code-mode-host")
+            existing_codex.write_bytes(b"existing codex")
+            existing_host.write_bytes(b"existing host")
             replacement_count = 0
 
             def fail_second_replacement(source: Path, target: Path) -> None:
@@ -164,8 +169,8 @@ class StageSdkBazelBinariesTest(unittest.TestCase):
                     path_replacer=fail_second_replacement,
                 )
 
-            self.assertFalse((destination / "codex").exists())
-            self.assertFalse((destination / "codex-code-mode-host").exists())
+            self.assertEqual(existing_codex.read_bytes(), b"existing codex")
+            self.assertEqual(existing_host.read_bytes(), b"existing host")
 
 
 if __name__ == "__main__":

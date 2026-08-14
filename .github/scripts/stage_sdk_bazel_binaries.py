@@ -109,6 +109,8 @@ def stage_pair(
 
     prepared: list[tuple[Path, Path]] = []
     temporary_paths: list[Path] = []
+    backup_paths: list[tuple[Path, Path]] = []
+    published_paths: list[Path] = []
     try:
         for source, filename in zip(sources, EXPECTED_FILENAMES, strict=True):
             descriptor, temporary_name = tempfile.mkstemp(
@@ -129,8 +131,22 @@ def stage_pair(
 
         staged_paths = tuple(staged_path for _, staged_path in prepared)
         try:
+            for staged_path in staged_paths:
+                if not staged_path.exists():
+                    continue
+                descriptor, backup_name = tempfile.mkstemp(
+                    prefix=f".{staged_path.name}.backup.",
+                    dir=destination,
+                )
+                os.close(descriptor)
+                backup_path = Path(backup_name)
+                backup_path.unlink()
+                os.replace(staged_path, backup_path)
+                backup_paths.append((backup_path, staged_path))
+
             for temporary_path, staged_path in prepared:
                 path_replacer(temporary_path, staged_path)
+                published_paths.append(staged_path)
 
             for staged_path in staged_paths:
                 validate_macos_executable(
@@ -145,17 +161,23 @@ def stage_pair(
             if len({path.parent.resolve() for path in staged_paths}) != 1:
                 raise StagingError("staged executables are not siblings")
         except (OSError, StagingError) as error:
-            for staged_path in staged_paths:
-                staged_path.unlink(missing_ok=True)
+            for published_path in published_paths:
+                published_path.unlink(missing_ok=True)
+            for backup_path, staged_path in reversed(backup_paths):
+                os.replace(backup_path, staged_path)
             if isinstance(error, StagingError):
                 raise
             raise StagingError(
                 f"failed to publish staged executable pair: {error}"
             ) from error
+        for backup_path, _ in backup_paths:
+            backup_path.unlink(missing_ok=True)
         return staged_paths
     finally:
         for temporary_path in temporary_paths:
             temporary_path.unlink(missing_ok=True)
+        for backup_path, _ in backup_paths:
+            backup_path.unlink(missing_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
