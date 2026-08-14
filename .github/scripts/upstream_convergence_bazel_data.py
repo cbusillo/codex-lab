@@ -13,11 +13,11 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DIRECT_INCLUDE = re.compile(
-    r"\b(?P<macro>include_str|include_bytes)!\s*\(\s*"
-    r'"(?P<path>(?:\\.|[^"\\])*)"\s*\)',
+    r"\b(?P<macro>include_str|include_bytes)!\s*"
+    r'(?P<open>[({[])\s*"(?P<path>(?:\\.|[^"\\])*)"\s*(?P<close>[)}\]])',
     re.DOTALL,
 )
-ANY_INCLUDE = re.compile(r"\binclude_(?:str|bytes)!\s*\(")
+ANY_INCLUDE = re.compile(r"\binclude_(?:str|bytes)!\s*[({[]")
 SQLX_MIGRATE = re.compile(
     r"\bsqlx::migrate!\s*\(\s*"
     r'"(?P<path>(?:\\.|[^"\\])*)"\s*\)',
@@ -25,6 +25,8 @@ SQLX_MIGRATE = re.compile(
 )
 STRING_LITERAL = re.compile(r'"((?:\\.|[^"\\])*)"')
 RAW_STRING_START = re.compile(r'(?:br|r)(?P<hashes>#{0,255})"')
+CHAR_LITERAL = re.compile(r"'(?:\\.|[^\\'])'")
+DELIMITER_PAIRS = {"(": ")", "{": "}", "[": "]"}
 ALLOWED_DYNAMIC_INCLUDE_COUNTS = {
     "codex-rs/tui/src/frames.rs": 36,
 }
@@ -119,6 +121,7 @@ def without_keyword_arguments(text: str, name: str) -> str:
 
 
 def compile_data_spec(build_text: str) -> DataSpec:
+    build_text = mask_starlark_comments(build_text)
     values: set[str] = set()
     excludes: set[str] = set()
     pending = assignment_expressions(build_text, "compile_data")
@@ -149,11 +152,20 @@ def call_expressions(text: str, name: str) -> list[str]:
     return expressions
 
 
-def exported_files(build_text: str) -> set[str]:
+def exported_file_spec(build_text: str) -> DataSpec:
+    build_text = mask_starlark_comments(build_text)
     values: set[str] = set()
+    excludes: set[str] = set()
     for expression in call_expressions(build_text, "exports_files"):
-        values.update(string_values(expression))
-    return values
+        excludes.update(
+            value
+            for _start, _end, exclude_expression in keyword_argument_expressions(
+                expression, "exclude"
+            )
+            for value in string_values(exclude_expression)
+        )
+        values.update(string_values(without_keyword_arguments(expression, "exclude")))
+    return DataSpec(frozenset(values), frozenset(excludes))
 
 
 def nearest_bazel_package(path: Path, repo_root: Path) -> Path | None:
@@ -253,9 +265,39 @@ def mask_comments_and_raw_strings(text: str) -> str:
             block_depth = 1
             masked[index : index + 2] = "  "
             index += 2
+        elif (char_match := CHAR_LITERAL.match(text, index)) is not None:
+            index = char_match.end()
         elif text[index] == '"':
             quote = text[index]
             index += 1
+        else:
+            index += 1
+    return "".join(masked)
+
+
+def mask_starlark_comments(text: str) -> str:
+    masked = list(text)
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            index += 1
+        elif character in {'"', "'"}:
+            quote = character
+            index += 1
+        elif character == "#":
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            masked[index:end] = " " * (end - index)
+            index = end
         else:
             index += 1
     return "".join(masked)
@@ -271,6 +313,9 @@ def verify(repo_root: Path) -> dict[str, object]:
     observed_dynamic_counts: dict[str, int] = {}
 
     for source in sorted(rust_root.rglob("*.rs")):
+        relative_parts = source.relative_to(rust_root).parts
+        if any(part == "target" or part.startswith("target-") for part in relative_parts):
+            continue
         if source.name == "build.rs":
             continue
         raw_text = source.read_text(encoding="utf-8")
@@ -281,6 +326,15 @@ def verify(repo_root: Path) -> dict[str, object]:
         for match in DIRECT_INCLUDE.finditer(text):
             direct_positions.add(match.start())
             include_count += 1
+            if DELIMITER_PAIRS[match.group("open")] != match.group("close"):
+                failures.append(
+                    Failure(
+                        source_relative,
+                        line_number(text, match.start()),
+                        "include macro uses mismatched delimiters",
+                    )
+                )
+                continue
             try:
                 requested = decode_string(match.group("path"))
             except (json.JSONDecodeError, ValueError) as error:
@@ -317,10 +371,15 @@ def verify(repo_root: Path) -> dict[str, object]:
                 )
             target_name = target.relative_to(producer).as_posix()
             producer_build = (producer / "BUILD.bazel").read_text(encoding="utf-8")
-            if not any(
+            export_spec = exported_file_spec(producer_build)
+            exported = any(
                 pattern_covers(pattern, target_name, directory=False)
-                for pattern in exported_files(producer_build)
-            ):
+                for pattern in export_spec.values
+            ) and not any(
+                pattern_covers(pattern, target_name, directory=False)
+                for pattern in export_spec.excludes
+            )
+            if not exported:
                 failures.append(
                     Failure(
                         source_relative,
@@ -370,7 +429,17 @@ def verify(repo_root: Path) -> dict[str, object]:
                     Failure(source_relative, line, f"migration directory is missing: {target}")
                 )
                 continue
-            target_name = target.relative_to(consumer).as_posix()
+            try:
+                target_name = target.relative_to(consumer).as_posix()
+            except ValueError:
+                failures.append(
+                    Failure(
+                        source_relative,
+                        line,
+                        "migration directory falls outside its Bazel package",
+                    )
+                )
+                continue
             build_text = (consumer / "BUILD.bazel").read_text(encoding="utf-8")
             data_spec = compile_data_spec(build_text)
             covered = any(

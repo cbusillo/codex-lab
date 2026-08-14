@@ -82,6 +82,42 @@ class BazelDataFixture(unittest.TestCase):
 
         self.assertEqual([], report["errors"])
 
+    def test_export_glob_exclude_is_honored(self) -> None:
+        self.write(
+            "codex-rs/consumer/BUILD.bazel",
+            'codex_rust_crate(compile_data = ["//codex-rs/producer:templates/asset.txt"])\n',
+        )
+        self.write(
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/templates/asset.txt");\n',
+        )
+        self.write(
+            "codex-rs/producer/BUILD.bazel",
+            'exports_files(glob(["templates/**"], exclude = ["templates/asset.txt"]))\n',
+        )
+        self.write("codex-rs/producer/templates/asset.txt", "asset\n")
+
+        report = bazel_data.verify(self.root)
+
+        self.assertTrue(any("does not export" in error for error in report["errors"]))
+
+    def test_starlark_comments_do_not_supply_compile_data(self) -> None:
+        self.write(
+            "codex-rs/consumer/BUILD.bazel",
+            '# compile_data = ["//codex-rs/producer:asset.txt"]\ncodex_rust_crate()\n',
+        )
+        self.write(
+            "codex-rs/consumer/src/lib.rs", 'const ASSET: &str = include_str!("../../producer/asset.txt");\n'
+        )
+        self.write("codex-rs/producer/BUILD.bazel", 'exports_files(["asset.txt"])\n')
+        self.write("codex-rs/producer/asset.txt", "asset\n")
+
+        report = bazel_data.verify(self.root)
+
+        self.assertTrue(
+            any("missing compile_data label" in error for error in report["errors"])
+        )
+
     def test_migration_directory_requires_compile_data_glob(self) -> None:
         self.write("codex-rs/state/BUILD.bazel", "codex_rust_crate()\n")
         self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
@@ -198,6 +234,29 @@ class BazelDataFixture(unittest.TestCase):
         report = bazel_data.verify(self.root)
 
         self.assertTrue(any("compile-time file is missing" in error for error in report["errors"]))
+
+    def test_brace_delimited_include_is_verified(self) -> None:
+        self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")
+        self.write("codex-rs/sample/src/asset.txt", "asset\n")
+        self.write(
+            "codex-rs/sample/src/lib.rs",
+            'const ASSET: &str = include_str!{"asset.txt"};\n',
+        )
+
+        report = bazel_data.verify(self.root)
+
+        self.assertEqual([], report["errors"])
+
+    def test_cargo_target_trees_are_not_scanned(self) -> None:
+        self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")
+        self.write(
+            "codex-rs/target/debug/build/generated.rs",
+            'const ASSET: &str = include_str!(concat!("missing", NAME));\n',
+        )
+
+        report = bazel_data.verify(self.root)
+
+        self.assertEqual([], report["errors"])
 
 
 class CheckedInBazelDataTest(unittest.TestCase):
