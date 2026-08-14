@@ -24,6 +24,7 @@ GOVERNANCE_PATHS = (
     "AGENTS.md",
     "upstream/README.md",
     "upstream/convergence-contracts.md",
+    "upstream/convergence-gates.json",
     "upstream/convergence-policy.json",
     "upstream/convergence-guard.json",
     "upstream/convergence-waivers.json",
@@ -31,10 +32,12 @@ GOVERNANCE_PATHS = (
     ".github/scripts/upstream_convergence.py",
     ".github/scripts/upstream_convergence_guard.py",
     ".github/scripts/upstream_convergence_inventory.py",
+    ".github/scripts/upstream_convergence_gates.py",
     ".github/scripts/verify_upstream_convergence_governance.py",
     ".github/scripts/test_upstream_convergence_driver.py",
     ".github/scripts/test_upstream_convergence_guard.py",
     ".github/scripts/test_upstream_convergence_inventory.py",
+    ".github/scripts/test_upstream_convergence_gates.py",
     ".github/scripts/test_upstream_convergence_governance.py",
     ".github/scripts/test_convergence_guard_workflows.py",
     ".github/workflows/blocking-ci.yml",
@@ -263,6 +266,7 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
         if repo_checks is not None:
             for command in (
                 "python3 .github/scripts/verify_upstream_convergence_governance.py",
+                "python3 .github/scripts/upstream_convergence_gates.py",
                 "python3 .github/scripts/upstream_convergence_guard.py",
                 "python3 .github/scripts/verify_repo_checks_test_registration.py",
                 "python3 .github/scripts/upstream_convergence.py validate",

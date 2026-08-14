@@ -84,6 +84,13 @@ class RepoCheckWiringTest(unittest.TestCase):
             contents,
         )
 
+    def test_repo_checks_runs_the_contract_gate_verifier(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence_gates.py", contents
+        )
+
     def test_repo_checks_runs_the_convergence_validator(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
