@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/actions/setup-rusty-v8/**"
       - ".github/scripts/rusty_v8_bazel.py"
+      - ".github/scripts/rusty_v8_module_bazel.py"
       - ".github/workflows/codex-lab-app.yml"
       - ".github/workflows/codex-lab-release.yml"
       - "scripts/github/configure-codex-lab-cargo-cache.sh"

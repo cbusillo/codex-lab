@@ -328,6 +328,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         for path in (
             ".github/actions/setup-rusty-v8/**",
             ".github/scripts/rusty_v8_bazel.py",
+            ".github/scripts/rusty_v8_module_bazel.py",
             "third_party/v8/rusty_v8_*_codex_release.sha256",
         ):
             with self.subTest(path=path):
