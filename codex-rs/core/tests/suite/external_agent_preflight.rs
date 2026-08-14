@@ -9,7 +9,7 @@ use codex_utils_output_truncation::approx_token_count;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
+use core_test_support::responses::ev_function_call_with_namespace as raw_ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -30,13 +30,28 @@ const LIST_CALL_ID: &str = "list-external-probe";
 const MESSAGE_CALL_ID: &str = "message-external-probe";
 const FOLLOWUP_CALL_ID: &str = "followup-external-probe";
 const ROLE: &str = "external_probe";
-const COLLABORATION_NAMESPACE: &str = "agents";
+const COLLABORATION_NAMESPACE: &str = "collaboration";
 const FOLLOW_UP_PROMPT: &str = "summarize what the external agent reported";
 /// The repeating unit of the stub external agent's ~200 KB final message.
 const EXTERNAL_AGENT_OUTPUT_CHUNK: &str = "0123456789";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     String::from_utf8_lossy(&request.body).contains(text)
+}
+
+fn ev_function_call_with_namespace(
+    call_id: &str,
+    namespace: &str,
+    name: &str,
+    arguments: &str,
+) -> Value {
+    let mut event = raw_ev_function_call_with_namespace(call_id, namespace, name, arguments);
+    if namespace == COLLABORATION_NAMESPACE
+        && matches!(name, "spawn_agent" | "send_message" | "followup_task")
+    {
+        event["item"]["encrypted_function_args"] = json!([]);
+    }
+    event
 }
 
 /// Every text span an input item carries, whatever its role or content type.
@@ -86,6 +101,19 @@ fn spawn_agent_arguments_with_selector_and_effort(
 /// Configure a single explicit external role and the timeouts the spawn tools need.
 fn builder_with_external_role(backend: ExternalCommandAgentBackendConfig) -> TestCodexBuilder {
     builder_with_named_external_role(ROLE, backend)
+}
+
+fn builder_with_multi_agent_v2() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should enable Collab");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable MultiAgentV2");
+    })
 }
 
 fn builder_with_named_external_role(
@@ -540,7 +568,7 @@ async fn named_user_agent_rejects_explicit_substitution() -> Result<()> {
     )
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = builder_with_multi_agent_v2();
     let test = builder.build(&server).await?;
     test.submit_turn(USER_PROMPT).await?;
 
@@ -588,7 +616,7 @@ async fn rejected_user_agent_cannot_be_selected_explicitly() -> Result<()> {
     )
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = builder_with_multi_agent_v2();
     let test = builder.build(&server).await?;
     test.submit_turn(USER_PROMPT).await?;
 
