@@ -11,6 +11,9 @@
   `$upstream-convergence` skill. Treat `upstream/convergence-policy.json`,
   `upstream/convergence-contracts.md`, and the repository-local convergence
   command as the authority for this repository.
+- Treat `.github/github.json` as repository-owned workflow metadata. Preserve
+  its default-branch, readiness-gate, and JetBrains routing configuration during
+  upstream convergence even when the file is absent upstream.
 - New implementation work belongs in this repo unless the user explicitly says
   otherwise.
 - When sibling restored sources are present, use
