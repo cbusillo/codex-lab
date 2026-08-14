@@ -4,6 +4,7 @@ use super::multi_agents_routing_spec::create_agent_task_kind_schema;
 use super::multi_agents_routing_spec::create_agent_task_size_schema;
 use super::multi_agents_routing_spec::external_agent_failure_output_schema;
 use super::multi_agents_routing_spec::external_agent_provider_output_schema;
+use super::multi_agents_routing_spec::external_agent_quota_diagnostic_output_schema;
 use super::multi_agents_routing_spec::provider_routing_guidance;
 use super::multi_agents_routing_spec::provider_routing_output_schema;
 use codex_protocol::openai_models::ModelPreset;
@@ -484,6 +485,7 @@ fn send_input_output_schema() -> Value {
 fn list_agents_output_schema() -> Value {
     let provider = external_agent_provider_output_schema();
     let failure = external_agent_failure_output_schema();
+    let quota_diagnostic = external_agent_quota_diagnostic_output_schema();
     json!({
         "type": "object",
         "properties": {
@@ -506,6 +508,7 @@ fn list_agents_output_schema() -> Value {
                         },
                         "provider": provider,
                         "failure": failure,
+                        "quota_diagnostic": quota_diagnostic,
                         "duration_ms": {
                             "type": "integer",
                             "minimum": 0,

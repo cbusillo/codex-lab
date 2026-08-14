@@ -127,6 +127,7 @@ pub(super) fn external_agent_provider_output_schema() -> Value {
 }
 
 pub(super) fn external_agent_failure_output_schema() -> Value {
+    let quota_diagnostic = external_agent_quota_diagnostic_output_schema();
     json!({
         "type": "object",
         "description": "Structured external-provider failure details when the agent failed.",
@@ -146,9 +147,27 @@ pub(super) fn external_agent_failure_output_schema() -> Value {
                     "provider_failed"
                 ]
             },
-            "message": { "type": "string" }
+            "message": { "type": "string" },
+            "quota_diagnostic": quota_diagnostic
         },
         "required": ["kind"],
+        "additionalProperties": false
+    })
+}
+
+pub(super) fn external_agent_quota_diagnostic_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Bounded external-provider quota window and overage state.",
+        "properties": {
+            "status": { "type": "string" },
+            "window": { "type": "string" },
+            "resets_at": { "type": "integer" },
+            "overage_state": { "type": "string" },
+            "overage_reason": { "type": "string" },
+            "is_using_overage": { "type": "boolean" }
+        },
+        "required": ["status", "window", "overage_state", "is_using_overage"],
         "additionalProperties": false
     })
 }

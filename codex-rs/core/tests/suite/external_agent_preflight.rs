@@ -9,7 +9,7 @@ use codex_utils_output_truncation::approx_token_count;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
+use core_test_support::responses::ev_function_call_with_namespace as raw_ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -30,13 +30,28 @@ const LIST_CALL_ID: &str = "list-external-probe";
 const MESSAGE_CALL_ID: &str = "message-external-probe";
 const FOLLOWUP_CALL_ID: &str = "followup-external-probe";
 const ROLE: &str = "external_probe";
-const COLLABORATION_NAMESPACE: &str = "agents";
+const COLLABORATION_NAMESPACE: &str = "collaboration";
 const FOLLOW_UP_PROMPT: &str = "summarize what the external agent reported";
 /// The repeating unit of the stub external agent's ~200 KB final message.
 const EXTERNAL_AGENT_OUTPUT_CHUNK: &str = "0123456789";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     String::from_utf8_lossy(&request.body).contains(text)
+}
+
+fn ev_function_call_with_namespace(
+    call_id: &str,
+    namespace: &str,
+    name: &str,
+    arguments: &str,
+) -> Value {
+    let mut event = raw_ev_function_call_with_namespace(call_id, namespace, name, arguments);
+    if namespace == COLLABORATION_NAMESPACE
+        && matches!(name, "spawn_agent" | "send_message" | "followup_task")
+    {
+        event["item"]["encrypted_function_args"] = json!([]);
+    }
+    event
 }
 
 /// Every text span an input item carries, whatever its role or content type.
@@ -86,6 +101,19 @@ fn spawn_agent_arguments_with_selector_and_effort(
 /// Configure a single explicit external role and the timeouts the spawn tools need.
 fn builder_with_external_role(backend: ExternalCommandAgentBackendConfig) -> TestCodexBuilder {
     builder_with_named_external_role(ROLE, backend)
+}
+
+fn builder_with_multi_agent_v2() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should enable Collab");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should enable MultiAgentV2");
+    })
 }
 
 fn builder_with_named_external_role(
@@ -540,7 +568,7 @@ async fn named_user_agent_rejects_explicit_substitution() -> Result<()> {
     )
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = builder_with_multi_agent_v2();
     let test = builder.build(&server).await?;
     test.submit_turn(USER_PROMPT).await?;
 
@@ -588,7 +616,7 @@ async fn rejected_user_agent_cannot_be_selected_explicitly() -> Result<()> {
     )
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = builder_with_multi_agent_v2();
     let test = builder.build(&server).await?;
     test.submit_turn(USER_PROMPT).await?;
 
@@ -1098,6 +1126,251 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
             },
         })
     );
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum QuotaMetadataExposure {
+    Visible,
+    Hidden,
+}
+
+#[derive(Clone, Copy)]
+enum ClaudeStreamScenario {
+    Success,
+    QuotaRejected,
+}
+
+struct ClaudeStreamAgentStatus {
+    agent: Value,
+    request_texts: Vec<String>,
+}
+
+async fn claude_stream_agent_status(
+    scenario: ClaudeStreamScenario,
+    exposure: QuotaMetadataExposure,
+) -> Result<ClaudeStreamAgentStatus> {
+    let stub_dir = TempDir::new()?;
+    let (fixture, exit_status) = match scenario {
+        ClaudeStreamScenario::Success => (
+            include_str!("../../src/agent/fixtures/claude_stream/assistant_success.jsonl"),
+            0,
+        ),
+        ClaudeStreamScenario::QuotaRejected => (
+            include_str!("../../src/agent/fixtures/claude_stream/five_hour_rejected.jsonl"),
+            1,
+        ),
+    };
+    let script = format!(
+        r#"if [ "${{1:-}}" = "--version" ]; then printf 'Claude Code 2.1.220\n'; exit 0; fi
+if [ "${{1:-}}" = "auth" ] && [ "${{2:-}}" = "status" ]; then printf '{{"loggedIn":true}}\n'; exit 0; fi
+if [ "${{1:-}}" = "--help" ]; then printf '%s\n' '--model <model>' '--verbose' '--output-format <format>'; exit 0; fi
+case " $* " in
+  *" --verbose --output-format stream-json "*) ;;
+  *) printf 'missing stream-json flags\n' >&2; exit 2 ;;
+esac
+cat <<'EOF'
+{fixture}
+EOF
+exit {exit_status}
+"#
+    );
+    let mut backend = stub_cli(&stub_dir, "fake-claude.sh", &script);
+    backend.launch_family = Some("claude".to_string());
+
+    let server = start_mock_server().await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-spawn"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &spawn_agent_arguments()?,
+            ),
+            ev_completed("resp-spawn"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, SPAWN_CALL_ID) && !body_contains(request, WAIT_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-wait"),
+            ev_function_call_with_namespace(
+                WAIT_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "wait_agent",
+                &serde_json::to_string(&json!({ "timeout_ms": 5_000 }))?,
+            ),
+            ev_completed("resp-wait"),
+        ]),
+    )
+    .await;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, WAIT_CALL_ID) && !body_contains(request, LIST_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-list"),
+            ev_function_call_with_namespace(
+                LIST_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "list_agents",
+                "{}",
+            ),
+            ev_completed("resp-list"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, LIST_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = match exposure {
+        QuotaMetadataExposure::Visible => builder_with_external_role(backend),
+        QuotaMetadataExposure::Hidden => {
+            builder_with_external_role(backend).with_config(|config| {
+                config.multi_agent_v2.hide_spawn_agent_metadata = true;
+            })
+        }
+    };
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let final_request = final_response.single_request();
+    let request_texts = final_request
+        .input()
+        .iter()
+        .flat_map(input_item_texts)
+        .collect();
+    let output_item = final_request.function_call_output(LIST_CALL_ID);
+    let listed = serde_json::from_str::<Value>(
+        output_item["output"]
+            .as_str()
+            .expect("list_agents output string"),
+    )?;
+    let mut agent = listed["agents"]
+        .as_array()
+        .and_then(|agents| {
+            agents
+                .iter()
+                .find(|agent| agent["agent_name"] == "/root/external_probe")
+        })
+        .expect("external agent should be listed")
+        .clone();
+    agent
+        .as_object_mut()
+        .expect("listed agent object")
+        .remove("duration_ms")
+        .expect("completed external agent should report a duration");
+
+    Ok(ClaudeStreamAgentStatus {
+        agent,
+        request_texts,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Result<()> {
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::QuotaRejected,
+        QuotaMetadataExposure::Visible,
+    )
+    .await?;
+    let agent = status.agent;
+
+    assert_eq!(
+        agent["agent_status"]["errored"].as_str(),
+        Some(
+            "External agent rate limit status rejected: five_hour window; resets at 2026-07-12T04:20:00+00:00; paid overage rejected (reason: org_level_disabled_until); using paid overage: false."
+        )
+    );
+    assert_eq!(agent["failure"]["kind"], "quota_or_rate_limited");
+    assert_eq!(
+        agent["quota_diagnostic"],
+        json!({
+            "status": "rejected",
+            "window": "five_hour",
+            "resets_at": 1_783_830_000,
+            "overage_state": "rejected",
+            "overage_reason": "org_level_disabled_until",
+            "is_using_overage": false,
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_quota_diagnostic_is_redacted_with_provider_metadata() -> Result<()> {
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::QuotaRejected,
+        QuotaMetadataExposure::Hidden,
+    )
+    .await?;
+
+    assert_eq!(
+        status.agent,
+        json!({
+            "agent_name": "/root/external_probe",
+            "agent_status": { "errored": "external agent failed: quota_or_rate_limited" },
+            "supports_followup_messages": false,
+            "failure": { "kind": "quota_or_rate_limited" },
+        })
+    );
+    assert!(
+        status
+            .request_texts
+            .iter()
+            .any(|text| text.contains("external agent failed: quota_or_rate_limited"))
+    );
+    assert!(status.request_texts.iter().all(|text| {
+        !text.contains("five_hour")
+            && !text.contains("org_level_disabled_until")
+            && !text.contains("2026-07-12T04:20:00")
+    }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_success_reaches_agent_status_without_transport_events() -> Result<()> {
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::Success,
+        QuotaMetadataExposure::Visible,
+    )
+    .await?;
+
+    assert_eq!(
+        status.agent["agent_status"],
+        json!({ "completed": "Repository inspection complete." })
+    );
+    assert_eq!(status.agent["quota_diagnostic"]["status"], "allowed");
+    assert!(
+        status
+            .request_texts
+            .iter()
+            .any(|text| text.contains("Repository inspection complete."))
+    );
+    assert!(status.request_texts.iter().all(|text| {
+        !text.contains("rate_limit_event") && !text.contains("\"type\":\"assistant\"")
+    }));
 
     Ok(())
 }

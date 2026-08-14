@@ -4,6 +4,7 @@ use crate::TurnStartOptions;
 use crate::agent::AgentStatus;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
@@ -104,6 +105,8 @@ pub(crate) struct ListedAgent {
     pub(crate) provider: Option<ExternalAgentProviderProvenance>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure: Option<ExternalAgentFailureDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duration_ms: Option<u64>,
 }
@@ -525,6 +528,7 @@ impl AgentControl {
                 supports_followup_messages: true,
                 provider: None,
                 failure: None,
+                quota_diagnostic: None,
                 duration_ms: None,
             });
         }
@@ -545,26 +549,34 @@ impl AgentControl {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
-            let (agent_status, supports_followup_messages, provider, failure, duration_ms) =
-                if let Some(snapshot) = self.state.external_agent_snapshot(thread_id) {
-                    (
-                        snapshot.status,
-                        false,
-                        Some(snapshot.provider),
-                        snapshot.failure,
-                        Some(snapshot.duration_ms),
-                    )
-                } else if let Ok(thread) = state.get_thread(thread_id).await {
-                    (thread.agent_status().await, true, None, None, None)
-                } else {
-                    continue;
-                };
+            let (
+                agent_status,
+                supports_followup_messages,
+                provider,
+                failure,
+                quota_diagnostic,
+                duration_ms,
+            ) = if let Some(snapshot) = self.state.external_agent_snapshot(thread_id) {
+                (
+                    snapshot.status,
+                    false,
+                    Some(snapshot.provider),
+                    snapshot.failure,
+                    snapshot.quota_diagnostic,
+                    Some(snapshot.duration_ms),
+                )
+            } else if let Ok(thread) = state.get_thread(thread_id).await {
+                (thread.agent_status().await, true, None, None, None, None)
+            } else {
+                continue;
+            };
             agents.push(ListedAgent {
                 agent_name,
                 agent_status,
                 supports_followup_messages,
                 provider,
                 failure,
+                quota_diagnostic,
                 duration_ms,
             });
         }

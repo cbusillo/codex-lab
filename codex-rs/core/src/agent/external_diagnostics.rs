@@ -47,6 +47,8 @@ pub struct ExternalAgentFailureDetail {
     pub kind: ExternalAgentFailureKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
 }
 
 impl ExternalAgentFailureDetail {
@@ -54,6 +56,15 @@ impl ExternalAgentFailureDetail {
         Self {
             kind,
             message: Some(message.into()),
+            quota_diagnostic: None,
+        }
+    }
+
+    pub(crate) fn from_quota_diagnostic(quota_diagnostic: ExternalAgentQuotaDiagnostic) -> Self {
+        Self {
+            kind: ExternalAgentFailureKind::QuotaOrRateLimited,
+            message: Some(quota_diagnostic.user_message()),
+            quota_diagnostic: Some(quota_diagnostic),
         }
     }
 
@@ -61,7 +72,53 @@ impl ExternalAgentFailureDetail {
         Self {
             kind: self.kind,
             message: None,
+            quota_diagnostic: None,
         }
+    }
+}
+
+/// A bounded, provider-neutral account-quota observation reported by an
+/// external agent CLI. Providers may expose richer private event payloads; only
+/// this stable envelope is retained outside their decoder.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ExternalAgentQuotaDiagnostic {
+    pub status: String,
+    pub window: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
+    pub overage_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overage_reason: Option<String>,
+    pub is_using_overage: bool,
+}
+
+impl ExternalAgentQuotaDiagnostic {
+    pub(crate) fn is_rejected(&self) -> bool {
+        self.status == "rejected"
+    }
+
+    pub(crate) fn user_message(&self) -> String {
+        let reset = self.resets_at.map_or_else(
+            || "reset time unavailable".to_string(),
+            |resets_at| match chrono::DateTime::from_timestamp(resets_at, 0) {
+                Some(timestamp) => format!("resets at {}", timestamp.to_rfc3339()),
+                None => format!("resets at Unix timestamp {resets_at}"),
+            },
+        );
+        let overage_reason = self
+            .overage_reason
+            .as_deref()
+            .map(|reason| format!(" (reason: {reason})"))
+            .unwrap_or_default();
+        format!(
+            "External agent rate limit status {}: {} window; {}; paid overage {}{}; using paid overage: {}.",
+            self.status,
+            self.window,
+            reset,
+            self.overage_state,
+            overage_reason,
+            self.is_using_overage
+        )
     }
 }
 
@@ -150,6 +207,8 @@ pub(crate) struct ExternalAgentProviderProvenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) effort: Option<String>,
     #[serde(skip)]
+    supports_claude_stream_json: bool,
+    #[serde(skip)]
     resolved_command: Option<PathBuf>,
 }
 
@@ -177,6 +236,7 @@ impl ExternalAgentProviderProvenance {
             workspace: workspace.display().to_string(),
             model: requested_flag_value(&backend.args, "--model"),
             effort: requested_flag_value(&backend.args, "--effort"),
+            supports_claude_stream_json: false,
             resolved_command: None,
         }
     }
@@ -192,6 +252,14 @@ impl ExternalAgentProviderProvenance {
     ) {
         self.capability_source = source;
         self.capability_freshness = Some(freshness);
+    }
+
+    pub(crate) fn set_supports_claude_stream_json(&mut self, supported: bool) {
+        self.supports_claude_stream_json = supported;
+    }
+
+    pub(crate) fn supports_claude_stream_json(&self) -> bool {
+        self.supports_claude_stream_json
     }
 
     pub(crate) fn resolved_command(&self) -> Option<&Path> {

@@ -391,7 +391,7 @@ pub(super) fn claude_capabilities(
 
     let supports_model_selection = help_supports_flag(help_output, "--model");
     let supports_effort_selection = help_supports_flag(help_output, "--effort");
-    let supported_flags = ["--model", "--effort"]
+    let supported_flags = ["--model", "--effort", "--verbose", "--output-format"]
         .into_iter()
         .filter(|flag| help_supports_flag(help_output, flag))
         .map(str::to_string)

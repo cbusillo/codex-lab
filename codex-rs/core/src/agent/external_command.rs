@@ -1,8 +1,11 @@
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::claude_stream::is_claude_transport_event;
+use crate::agent::claude_stream::parse_claude_stream_json;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentFailureKind;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
 use crate::agent::external_diagnostics::classify_provider_failure_text;
 use crate::agent::external_diagnostics::redact_external_agent_status;
 #[cfg(all(test, unix))]
@@ -38,6 +41,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 const MAX_EXTERNAL_AGENT_STDOUT_BYTES: usize = 64 * 1024;
+const MAX_CLAUDE_STREAM_HEAD_BYTES: usize = 4 * 1024;
 const MAX_EXTERNAL_AGENT_STDERR_BYTES: usize = 8 * 1024;
 pub(super) const EXTERNAL_AGENT_TRUNCATED_MARKER: &[u8] = b"[external agent output truncated]\n";
 const MAX_MODEL_VISIBLE_EXTERNAL_AGENT_BYTES: usize = 8 * 1024;
@@ -64,6 +68,7 @@ pub(crate) struct ExternalAgentLaunch {
     pub(crate) is_read_only: bool,
     pub(crate) preflight_completed: bool,
     pub(crate) resolved_command: Option<PathBuf>,
+    pub(crate) claude_stream_json_enabled: bool,
     pub(crate) hide_provider_metadata: bool,
 }
 
@@ -80,11 +85,13 @@ struct ExternalAgentRequest {
     message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ExternalAgentResponse {
     status: ExternalAgentResponseStatus,
     final_message: Option<String>,
+    #[serde(skip)]
+    quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -170,9 +177,10 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
     match result {
         Ok(response) if response.status == ExternalAgentResponseStatus::Completed => {
             let final_message = response.final_message.unwrap_or_default();
-            control.update_external_agent_status(
+            control.update_external_agent_status_with_quota(
                 thread_id,
                 AgentStatus::Completed(Some(final_message.clone())),
+                response.quota_diagnostic,
             );
             control
                 .persist_external_agent_run_finished(thread_id, "completed")
@@ -184,10 +192,18 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 .final_message
                 .filter(|message| !message.is_empty())
                 .unwrap_or_else(|| "external agent failed".to_string());
-            let failure = ExternalAgentFailureDetail::new(
-                classify_provider_failure_text(&message),
-                message.clone(),
-            );
+            let quota_diagnostic = response.quota_diagnostic;
+            let mut failure = quota_diagnostic
+                .clone()
+                .filter(ExternalAgentQuotaDiagnostic::is_rejected)
+                .map(ExternalAgentFailureDetail::from_quota_diagnostic)
+                .unwrap_or_else(|| {
+                    ExternalAgentFailureDetail::new(
+                        classify_provider_failure_text(&message),
+                        message.clone(),
+                    )
+                });
+            failure.quota_diagnostic = quota_diagnostic;
             let parent_message =
                 external_agent_parent_failure_message(&launch, &failure, message.as_str());
             control.update_external_agent_failure(
@@ -308,9 +324,12 @@ async fn run_external_agent_inner(
             .map_err(ExternalAgentRunError::from_detail)?,
         )
     };
-    let mut invocation = build_external_agent_invocation(launch, &message).map_err(|error| {
-        ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error)
-    })?;
+    let claude_stream_json_enabled =
+        claude_stream_json_enabled(launch, preflight_provider.as_ref());
+    let mut invocation =
+        build_external_agent_invocation(launch, &message, claude_stream_json_enabled).map_err(
+            |error| ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error),
+        )?;
     if let Some(resolved_command) = launch.resolved_command.as_deref().or_else(|| {
         preflight_provider
             .as_ref()
@@ -380,7 +399,19 @@ async fn run_external_agent_inner(
         }
 
         let (stdout, stderr, status) = tokio::try_join!(
-            read_limited_output(stdout, MAX_EXTERNAL_AGENT_STDOUT_BYTES, "stdout"),
+            async {
+                if claude_stream_json_enabled {
+                    read_limited_output_with_head(
+                        stdout,
+                        MAX_EXTERNAL_AGENT_STDOUT_BYTES,
+                        MAX_CLAUDE_STREAM_HEAD_BYTES,
+                        "stdout",
+                    )
+                    .await
+                } else {
+                    read_limited_output(stdout, MAX_EXTERNAL_AGENT_STDOUT_BYTES, "stdout").await
+                }
+            },
             read_limited_output(stderr, MAX_EXTERNAL_AGENT_STDERR_BYTES, "stderr"),
             async { child.wait().await.map_err(anyhow::Error::from) },
         )?;
@@ -413,8 +444,60 @@ async fn run_external_agent_inner(
         },
     };
 
+    let claude_stream = if claude_stream_json_enabled {
+        parse_claude_stream_json(&output.stdout)
+    } else {
+        None
+    };
+
+    if let Some(quota_diagnostic) = claude_stream
+        .as_ref()
+        .and_then(|stream| stream.quota_diagnostic.clone())
+        .filter(ExternalAgentQuotaDiagnostic::is_rejected)
+        .filter(|_| {
+            !output.status.success()
+                || !claude_stream
+                    .as_ref()
+                    .is_some_and(|stream| stream.has_result)
+        })
+    {
+        return Err(ExternalAgentRunError::from_detail(
+            ExternalAgentFailureDetail::from_quota_diagnostic(quota_diagnostic),
+        ));
+    }
+
     if !output.status.success() {
-        let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
+        if let Some(stream) = claude_stream
+            && stream.is_error == Some(true)
+        {
+            let final_message = stream
+                .final_message
+                .as_deref()
+                .map(bound_external_agent_message)
+                .or_else(|| {
+                    stream.error_subtype.as_deref().map(|subtype| {
+                        bound_external_agent_message(&format!(
+                            "Claude Code reported an error result: {subtype}"
+                        ))
+                    })
+                });
+            return Ok(ExternalAgentResponse {
+                status: ExternalAgentResponseStatus::Failed,
+                final_message,
+                quota_diagnostic: stream.quota_diagnostic,
+            });
+        }
+        let diagnostic = if claude_stream_json_enabled {
+            let plaintext_stdout = claude_plaintext_output(&output.stdout);
+            let diagnostic = bounded_preflight_output(&plaintext_stdout, &output.stderr);
+            if diagnostic.is_empty() {
+                "Claude Code did not emit a usable stream-json response".to_string()
+            } else {
+                format!("Claude Code did not emit a usable stream-json response: {diagnostic}")
+            }
+        } else {
+            bounded_preflight_output(&output.stdout, &output.stderr)
+        };
         let reason = if diagnostic.is_empty() {
             format!("external agent exited with {}", output.status)
         } else {
@@ -453,11 +536,49 @@ async fn run_external_agent_inner(
                     .as_deref()
                     .map(bound_external_agent_message);
             }
+            response.quota_diagnostic = None;
             Ok(response)
         }
         ExternalCommandProtocol::RawCli => {
-            let final_message = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if let Some(stream) = claude_stream.filter(|stream| stream.has_result) {
+                let final_message = stream
+                    .final_message
+                    .as_deref()
+                    .map(bound_external_agent_message);
+                if stream.is_error == Some(true) {
+                    return Ok(ExternalAgentResponse {
+                        status: ExternalAgentResponseStatus::Failed,
+                        final_message,
+                        quota_diagnostic: stream.quota_diagnostic,
+                    });
+                }
+                if let Some(final_message) = final_message {
+                    return Ok(ExternalAgentResponse {
+                        status: ExternalAgentResponseStatus::Completed,
+                        final_message: Some(final_message),
+                        quota_diagnostic: stream.quota_diagnostic,
+                    });
+                }
+                return Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::EmptyOutput,
+                    anyhow::anyhow!("external agent completed without output"),
+                ));
+            }
+            let plaintext_stdout;
+            let stdout = if claude_stream_json_enabled {
+                plaintext_stdout = claude_plaintext_output(&output.stdout);
+                plaintext_stdout.as_slice()
+            } else {
+                output.stdout.as_slice()
+            };
+            let final_message = String::from_utf8_lossy(stdout).trim().to_string();
             if final_message.is_empty() {
+                if claude_stream_json_enabled {
+                    return Err(ExternalAgentRunError::new(
+                        ExternalAgentFailureKind::MalformedOutput,
+                        anyhow::anyhow!("Claude Code did not emit a usable stream-json response"),
+                    ));
+                }
                 let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
                 let (kind, message) = if diagnostic.is_empty() {
                     (
@@ -481,6 +602,7 @@ async fn run_external_agent_inner(
             Ok(ExternalAgentResponse {
                 status: ExternalAgentResponseStatus::Completed,
                 final_message: Some(bound_external_agent_message(&final_message)),
+                quota_diagnostic: None,
             })
         }
     }
@@ -581,6 +703,7 @@ struct ExternalAgentInvocation {
 fn build_external_agent_invocation(
     launch: &ExternalAgentLaunch,
     message: &str,
+    claude_stream_json_enabled: bool,
 ) -> anyhow::Result<ExternalAgentInvocation> {
     let (command, mut args) = match launch.backend.protocol {
         ExternalCommandProtocol::Json => (launch.backend.command.trim().to_string(), Vec::new()),
@@ -599,6 +722,13 @@ fn build_external_agent_invocation(
     );
     if launch.backend.protocol == ExternalCommandProtocol::RawCli {
         let launch_family = launch.backend.launch_family.as_deref();
+        if claude_stream_json_enabled {
+            args.extend([
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]);
+        }
         if launch_family == Some("antigravity") {
             args.push("--add-dir".to_string());
             args.push(launch.cwd.display().to_string());
@@ -612,6 +742,16 @@ fn build_external_agent_invocation(
         command: PathBuf::from(command),
         args,
     })
+}
+
+fn claude_stream_json_enabled(
+    launch: &ExternalAgentLaunch,
+    preflight_provider: Option<&ExternalAgentProviderProvenance>,
+) -> bool {
+    launch.backend.protocol == ExternalCommandProtocol::RawCli
+        && (launch.claude_stream_json_enabled
+            || preflight_provider
+                .is_some_and(ExternalAgentProviderProvenance::supports_claude_stream_json))
 }
 
 fn raw_cli_uses_prompt_flag(launch_family: Option<&str>) -> bool {
@@ -804,6 +944,111 @@ pub(super) async fn read_limited_output<R: AsyncRead + Unpin>(
     }
 
     Ok(tail)
+}
+
+async fn read_limited_output_with_head<R: AsyncRead + Unpin>(
+    mut reader: R,
+    limit: usize,
+    head_limit: usize,
+    stream_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let head_limit = head_limit.min(limit);
+    let tail_limit = limit.saturating_sub(head_limit);
+    let mut head = Vec::new();
+    let mut tail = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut total_bytes = 0_usize;
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break;
+        }
+        total_bytes += bytes_read;
+        let chunk = &buffer[..bytes_read];
+        if head.len() < head_limit {
+            let head_bytes = (head_limit - head.len()).min(chunk.len());
+            head.extend_from_slice(&chunk[..head_bytes]);
+        }
+        if tail_limit > 0 {
+            tail.extend_from_slice(chunk);
+            if tail.len() > tail_limit {
+                let overflow = tail.len() - tail_limit;
+                tail.drain(..overflow);
+            }
+        }
+    }
+
+    if total_bytes <= limit {
+        let overlap = head.len() + tail.len() - total_bytes;
+        head.extend_from_slice(&tail[overlap..]);
+        return Ok(head);
+    }
+
+    tracing::warn!("external agent {stream_name} exceeded limit; preserving head and tail");
+    let mut output = Vec::with_capacity(EXTERNAL_AGENT_TRUNCATED_MARKER.len() + limit);
+    output.extend_from_slice(EXTERNAL_AGENT_TRUNCATED_MARKER);
+    output.extend_from_slice(&head);
+    output.extend_from_slice(&tail);
+    Ok(output)
+}
+
+fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
+    let mut plaintext = Vec::new();
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        let trimmed = line.trim_ascii();
+        match serde_json::from_slice::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Object(event))
+                if event
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event_type| {
+                        is_claude_transport_event(event_type, |field| event.contains_key(field))
+                    }) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                if let Some(type_key_start) = trimmed
+                    .windows(b"\"type\"".len())
+                    .position(|window| window == b"\"type\"")
+                {
+                    let after_type_key = &trimmed[type_key_start + b"\"type\"".len()..];
+                    if let Some(colon_offset) = after_type_key.iter().position(|byte| *byte == b':')
+                    {
+                        let value = after_type_key[colon_offset + 1..].trim_ascii_start();
+                        if let Some(value) = value.strip_prefix(b"\"")
+                            && let Some(end_quote) = value.iter().position(|byte| *byte == b'\"')
+                            && let Ok(event_type) = std::str::from_utf8(&value[..end_quote])
+                            && is_claude_transport_event(event_type, |field| {
+                                json_object_has_field(trimmed, field)
+                            })
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        plaintext.extend_from_slice(line);
+    }
+    plaintext
+}
+
+fn json_object_has_field(output: &[u8], field: &str) -> bool {
+    let field = format!("\"{field}\"");
+    output
+        .windows(field.len())
+        .enumerate()
+        .any(|(field_start, window)| {
+            if window != field.as_bytes() {
+                return false;
+            }
+            output[field_start + field.len()..]
+                .trim_ascii_start()
+                .starts_with(b":")
+        })
 }
 
 async fn send_completion_to_parent(
