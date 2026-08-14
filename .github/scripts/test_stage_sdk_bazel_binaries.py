@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 from stage_sdk_bazel_binaries import FILE_TOOL
@@ -117,6 +118,54 @@ class StageSdkBazelBinariesTest(unittest.TestCase):
                     "arm64",
                     command_runner=x86_64_macho,
                 )
+
+    def test_rejects_a_file_as_the_staging_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex = self.executable_file(root, "bazel-codex")
+            host = self.executable_file(root, "bazel-host")
+            destination = self.executable_file(root, "stage")
+
+            with self.assertRaisesRegex(
+                StagingError, "cannot prepare staging destination"
+            ):
+                stage_pair(
+                    codex,
+                    host,
+                    destination,
+                    "arm64",
+                    command_runner=arm64_macho,
+                )
+
+    def test_removes_the_pair_when_publication_fails_partway(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            codex = self.executable_file(root, "bazel-codex")
+            host = self.executable_file(root, "bazel-host")
+            destination = root / "stage"
+            replacement_count = 0
+
+            def fail_second_replacement(source: Path, target: Path) -> None:
+                nonlocal replacement_count
+                replacement_count += 1
+                if replacement_count == 2:
+                    raise OSError("simulated publication failure")
+                os.replace(source, target)
+
+            with self.assertRaisesRegex(
+                StagingError, "failed to publish staged executable pair"
+            ):
+                stage_pair(
+                    codex,
+                    host,
+                    destination,
+                    "arm64",
+                    command_runner=arm64_macho,
+                    path_replacer=fail_second_replacement,
+                )
+
+            self.assertFalse((destination / "codex").exists())
+            self.assertFalse((destination / "codex-code-mode-host").exists())
 
 
 if __name__ == "__main__":

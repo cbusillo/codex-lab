@@ -21,6 +21,7 @@ class StagingError(RuntimeError):
 
 
 CommandRunner = Callable[[Sequence[str]], str]
+PathReplacer = Callable[[Path, Path], None]
 
 
 def run_command(arguments: Sequence[str]) -> str:
@@ -87,6 +88,7 @@ def stage_pair(
     expected_architecture: str,
     *,
     command_runner: CommandRunner = run_command,
+    path_replacer: PathReplacer = os.replace,
 ) -> tuple[Path, Path]:
     sources = (codex_source, host_source)
     for source in sources:
@@ -96,7 +98,12 @@ def stage_pair(
             command_runner=command_runner,
         )
 
-    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise StagingError(
+            f"cannot prepare staging destination: {destination}: {error}"
+        ) from error
     if not destination.is_dir():
         raise StagingError(f"staging destination is not a directory: {destination}")
 
@@ -120,22 +127,31 @@ def stage_pair(
             )
             prepared.append((temporary_path, destination / filename))
 
-        for temporary_path, staged_path in prepared:
-            os.replace(temporary_path, staged_path)
-
         staged_paths = tuple(staged_path for _, staged_path in prepared)
-        for staged_path in staged_paths:
-            validate_macos_executable(
-                staged_path,
-                expected_architecture,
-                command_runner=command_runner,
-            )
-        if tuple(path.name for path in staged_paths) != EXPECTED_FILENAMES:
+        try:
+            for temporary_path, staged_path in prepared:
+                path_replacer(temporary_path, staged_path)
+
+            for staged_path in staged_paths:
+                validate_macos_executable(
+                    staged_path,
+                    expected_architecture,
+                    command_runner=command_runner,
+                )
+            if tuple(path.name for path in staged_paths) != EXPECTED_FILENAMES:
+                raise StagingError(
+                    "staged executable filenames do not match the SDK contract"
+                )
+            if len({path.parent.resolve() for path in staged_paths}) != 1:
+                raise StagingError("staged executables are not siblings")
+        except (OSError, StagingError) as error:
+            for staged_path in staged_paths:
+                staged_path.unlink(missing_ok=True)
+            if isinstance(error, StagingError):
+                raise
             raise StagingError(
-                "staged executable filenames do not match the SDK contract"
-            )
-        if len({path.parent.resolve() for path in staged_paths}) != 1:
-            raise StagingError("staged executables are not siblings")
+                f"failed to publish staged executable pair: {error}"
+            ) from error
         return staged_paths
     finally:
         for temporary_path in temporary_paths:
