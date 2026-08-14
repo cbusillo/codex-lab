@@ -229,6 +229,14 @@ async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
     probe_with(configure_turn, ToolPlanInputs::default()).await
 }
 
+#[tokio::test]
+async fn tools_disabled_omits_visible_and_registered_tools() {
+    let plan = probe(|turn| update_config(turn, |config| config.tools_enabled = false)).await;
+
+    assert_eq!(Vec::<String>::new(), plan.visible_names);
+    assert_eq!(Vec::<String>::new(), plan.registered_names);
+}
+
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
     let mut config = (*turn.config).clone();
     if enabled {

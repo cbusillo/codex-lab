@@ -1095,6 +1095,9 @@ pub struct Config {
     /// Additional parameters for the web search tool when it is enabled.
     pub web_search_config: Option<WebSearchConfig>,
 
+    /// Whether model-visible tools are available for turns using this config.
+    pub tools_enabled: bool,
+
     /// Whether to register the experimental request_user_input tool.
     pub experimental_request_user_input_enabled: bool,
 
@@ -2783,6 +2786,10 @@ fn resolve_web_search_config(config_toml: &ConfigToml) -> Option<WebSearchConfig
         .map(Into::into)
 }
 
+fn resolve_tools_enabled(config_toml: &ConfigToml) -> bool {
+    config_toml.tools.as_ref().is_none_or(|tools| tools.enabled)
+}
+
 fn resolve_experimental_request_user_input_enabled(config_toml: &ConfigToml) -> bool {
     config_toml
         .tools
@@ -3861,6 +3868,7 @@ impl Config {
         let web_search_mode =
             resolve_web_search_mode(&cfg, &features).unwrap_or(WebSearchMode::Cached);
         let web_search_config = resolve_web_search_config(&cfg);
+        let tools_enabled = resolve_tools_enabled(&cfg);
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let update_plan_enabled = resolve_update_plan_enabled(&cfg);
@@ -4426,6 +4434,7 @@ impl Config {
             forced_login_method,
             web_search_mode: constrained_web_search_mode.value,
             web_search_config,
+            tools_enabled,
             experimental_request_user_input_enabled,
             update_plan_enabled,
             tool_registry,
