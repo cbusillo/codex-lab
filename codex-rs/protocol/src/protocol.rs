@@ -3387,6 +3387,10 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "RolloutItem is a persisted wire enum; boxing would create widespread Rust API churn without changing serialization"
+)]
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {

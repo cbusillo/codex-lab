@@ -219,7 +219,7 @@ fn claude_stream_json_uses_preflight_capability_for_v1_launch() {
         /*is_read_only*/ true,
         /*cli_version*/ None,
     );
-    provider.set_supports_claude_stream_json(true);
+    provider.set_supports_claude_stream_json(/*supported*/ true);
 
     assert!(claude_stream_json_enabled(&launch, Some(&provider)));
 }
