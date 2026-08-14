@@ -121,8 +121,13 @@ instead.
 
 Issue #230 is the durable continuous-maintenance plan.
 `upstream/convergence-contracts.md` defines which Codex Lab differences may
-survive the upstream-first default. Bootstrap history remains available in the
-completed issue #428.
+survive the upstream-first default. `upstream/convergence-gates.json` is the
+machine-readable evidence projection for that matrix. Blocking repo checks
+verify that every contract ID retains file-backed evidence, local proof paths
+exist, declared symbol text remains present, suite proofs stay registered, and
+non-executable release claims name a deciding issue. The recorded CI tiers are
+an inventory; they do not imply that nightly or release proof runs on every pull
+request. Bootstrap history remains available in the completed issue #428.
 
 ## Supported command
 

@@ -1,0 +1,325 @@
+{
+  "schemaVersion": 1,
+  "contracts": [
+    {
+      "id": "HOME-1",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/utils/home-dir/src/lib.rs",
+          "token": "fn find_codex_home_without_env_uses_codex_lab_default()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/cli/tests/mcp_add_remove.rs",
+          "token": "async fn codex_lab_home_preserves_default_home_sentinel_when_legacy_homes_are_set()",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "IDENTITY-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": ".github/scripts/verify_release_installer_provenance.py",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/cli/src/main.rs",
+          "token": "fn codex_lab_command_name_updates_help_usage()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "narrative",
+          "description": "Identity snapshots and authenticated product-copy checks span multiple suites rather than one stable test symbol.",
+          "issue": 641,
+          "ciTier": "narrative"
+        }
+      ]
+    },
+    {
+      "id": "AUTH-1",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/auth/storage_tests.rs",
+          "token": "fn file_storage_save_repairs_private_auth_file_permissions()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/auth/storage.rs",
+          "token": "#[path = \"storage_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/auth_accounts_tests.rs",
+          "token": "fn saved_accounts_file_is_private_after_rewrite()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/auth_accounts.rs",
+          "token": "#[path = \"auth_accounts_tests.rs\"]",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "AUTH-2",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/account_switching.rs",
+          "token": "fn current_account_override_takes_precedence_over_stored_active_account()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/account_switching.rs",
+          "token": "fn current_account_override_is_not_reselected()",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "AUTH-3",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/tui/src/bottom_pane/login_accounts_view_tests.rs",
+          "token": "fn add_account_chatgpt_enter_starts_login()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/tui/src/bottom_pane/login_accounts_view.rs",
+          "token": "#[path = \"login_accounts_view_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/server.rs",
+          "token": "async fn persist_tokens_async_preserves_previous_account_when_adding_account()",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "HISTORY-1",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/sqlite_state.rs",
+          "token": "async fn resume_restores_dynamic_tools_from_rollout_with_sqlite_enabled()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/permissions_messages.rs",
+          "token": "async fn resume_replays_permissions_messages()",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "PROTOCOL-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/app-server/tests/suite/v2/initialize.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/app-server/tests/suite/v2/mod.rs",
+          "token": "mod initialize;",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "SANDBOX-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/core/tests/suite/approvals.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/core/tests/suite/skill_approval.rs",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "AGENT-1",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/external_agent_preflight.rs",
+          "token": "async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "tools/codex-exec-harness/scenarios/third-party-agent-current-binary-lifecycle.json",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "INTEGRATION-1",
+      "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/tools.rs",
+          "token": "async fn code_bridge_status_tool_is_model_visible_and_bounded_when_unavailable()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/app-server/tests/suite/v2/remote_control.rs",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "VALIDATION-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/core/tests/suite/project_validation.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/exec/tests/suite/project_validation_event.rs",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "RELEASE-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": ".github/scripts/verify_release_installer_provenance.py",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "file",
+          "path": "tools/codex-exec-harness/test_local_cleanup.py",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "narrative",
+          "description": "External publication authority and post-install behavior require the non-publishing release rehearsal tracked by the release plan.",
+          "issue": 624,
+          "ciTier": "release"
+        }
+      ]
+    },
+    {
+      "id": "MODEL-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/core/tests/suite/remote_models.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "narrative",
+          "description": "Authenticated live catalog comparison depends on external service state and the pinned convergence candidate.",
+          "issue": 230,
+          "ciTier": "release"
+        }
+      ]
+    },
+    {
+      "id": "CONTEXT-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/core/src/context/token_budget_context_tests.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/token_budget_context.rs",
+          "token": "#[path = \"token_budget_context_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/core/src/context_manager/history_tests.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context_manager/history.rs",
+          "token": "#[path = \"history_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/core/tests/suite/view_image.rs",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "HOOKS-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": "codex-rs/config/src/hooks_tests.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/config/src/hook_config.rs",
+          "token": "#[path = \"hooks_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "file",
+          "path": "codex-rs/hooks/src/engine/mod_tests.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/hooks/src/engine/mod.rs",
+          "token": "#[path = \"mod_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/hooks/src/declarations.rs",
+          "token": "fn lists_declared_plugin_handlers_with_persisted_hook_keys()",
+          "ciTier": "nightly"
+        }
+      ]
+    },
+    {
+      "id": "GOVERNANCE-1",
+      "evidence": [
+        {
+          "kind": "file",
+          "path": ".github/scripts/upstream_convergence_gates.py",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "file",
+          "path": "upstream/convergence-guard.json",
+          "ciTier": "blocking"
+        }
+      ]
+    }
+  ]
+}
