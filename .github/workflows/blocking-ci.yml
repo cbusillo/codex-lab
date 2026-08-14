@@ -10,6 +10,11 @@ on:
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the
   # version-controlled list that the main-branch ruleset should require.
+  bazel-analysis:
+    name: bazel-analysis
+    uses: ./.github/workflows/codex-lab-bazel-analysis.yml
+    secrets: inherit
+
   blob-size-policy:
     name: Blob size policy
     uses: ./.github/workflows/blob-size-policy.yml
@@ -46,6 +51,7 @@ jobs:
     # required check can appear successful instead of reporting the failure.
     if: ${{ always() }}
     needs:
+      - bazel-analysis
       - blob-size-policy
       - cargo-deny
       - codespell
