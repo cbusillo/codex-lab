@@ -27,6 +27,12 @@
           "ciTier": "blocking"
         },
         {
+          "kind": "symbol",
+          "path": "codex-rs/cli/src/main.rs",
+          "token": "fn codex_lab_command_name_updates_help_usage()",
+          "ciTier": "nightly"
+        },
+        {
           "kind": "narrative",
           "description": "Identity snapshots and authenticated product-copy checks span multiple suites rather than one stable test symbol.",
           "issue": 641,
@@ -45,8 +51,20 @@
         },
         {
           "kind": "symbol",
+          "path": "codex-rs/login/src/auth/storage.rs",
+          "token": "#[path = \"storage_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
           "path": "codex-rs/login/src/auth_accounts_tests.rs",
           "token": "fn saved_accounts_file_is_private_after_rewrite()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/login/src/auth_accounts.rs",
+          "token": "#[path = \"auth_accounts_tests.rs\"]",
           "ciTier": "nightly"
         }
       ]
@@ -75,6 +93,12 @@
           "kind": "symbol",
           "path": "codex-rs/tui/src/bottom_pane/login_accounts_view_tests.rs",
           "token": "fn add_account_chatgpt_enter_starts_login()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/tui/src/bottom_pane/login_accounts_view.rs",
+          "token": "#[path = \"login_accounts_view_tests.rs\"]",
           "ciTier": "nightly"
         },
         {
@@ -226,8 +250,20 @@
           "ciTier": "nightly"
         },
         {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/token_budget_context.rs",
+          "token": "#[path = \"token_budget_context_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
           "kind": "file",
           "path": "codex-rs/core/src/context_manager/history_tests.rs",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context_manager/history.rs",
+          "token": "#[path = \"history_tests.rs\"]",
           "ciTier": "nightly"
         },
         {
@@ -246,13 +282,26 @@
           "ciTier": "nightly"
         },
         {
+          "kind": "symbol",
+          "path": "codex-rs/config/src/hook_config.rs",
+          "token": "#[path = \"hooks_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
           "kind": "file",
           "path": "codex-rs/hooks/src/engine/mod_tests.rs",
           "ciTier": "nightly"
         },
         {
-          "kind": "file",
+          "kind": "symbol",
+          "path": "codex-rs/hooks/src/engine/mod.rs",
+          "token": "#[path = \"mod_tests.rs\"]",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
           "path": "codex-rs/hooks/src/declarations.rs",
+          "token": "fn lists_declared_plugin_handlers_with_persisted_hook_keys()",
           "ciTier": "nightly"
         }
       ]
