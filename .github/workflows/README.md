@@ -34,6 +34,13 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   - `cargo shear`
   - one hosted macOS ARM64 `cargo check --workspace --tests` compile gate
   - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+- `codex-lab-bazel-analysis.yml` runs only for Bazel/Rust/release-relevant
+  changes. It analyzes the release target set with `--nobuild` on hosted Apple
+  Silicon, uses non-fatal repository-cache restore/save, and feeds the existing
+  `blocking-ci / CI required` check instead of adding another required status.
+  The initial August 14, 2026 measurement on 718 targets was 11.11 seconds with
+  an empty repository cache and 0.91 seconds warm, below the 25-minute cold and
+  10-minute warm limits recorded in issue #651.
 - `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
   The TypeScript tests that spawn a real Codex binary run in the full suite
   instead of compiling the full Bazel/V8 graph on an ephemeral PR runner.

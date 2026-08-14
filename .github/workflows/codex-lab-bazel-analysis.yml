@@ -1,0 +1,142 @@
+name: codex-lab-bazel-analysis
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  changed:
+    name: Detect Bazel-relevant changes
+    runs-on: macos-26
+    outputs:
+      relevant: ${{ steps.detect.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect Bazel analysis paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          files=()
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+            while IFS= read -r file; do
+              files+=("$file")
+            done < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
+          elif [[ "${{ github.event_name }}" == "push" && '${{ github.event.before }}' =~ ^[0-9a-f]{40}$ && '${{ github.event.before }}' != '0000000000000000000000000000000000000000' ]]; then
+            while IFS= read -r file; do
+              files+=("$file")
+            done < <(git diff --name-only --no-renames '${{ github.event.before }}' '${{ github.sha }}')
+          else
+            files=("codex-rs/force")
+          fi
+
+          relevant=false
+          for file in "${files[@]}"; do
+            case "$file" in
+              codex-rs/*|third_party/v8/*|announcement_tip.toml|BUILD.bazel|MODULE.bazel|MODULE.bazel.lock|defs.bzl|.bazelrc|.bazelversion|justfile|scripts/list-bazel-release-targets.sh|.github/actions/setup-ci/*|.github/actions/setup-bazel-ci/*|.github/actions/prepare-bazel-ci/*|.github/scripts/run-bazel-ci.sh|.github/workflows/bazel.yml|.github/workflows/blocking-ci.yml|.github/workflows/codex-lab-bazel-analysis.yml)
+                relevant=true
+                break
+                ;;
+            esac
+          done
+
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  analysis:
+    name: Release target analysis
+    needs: changed
+    if: ${{ needs.changed.outputs.relevant == 'true' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Prepare Bazel analysis
+        id: prepare_bazel
+        uses: ./.github/actions/prepare-bazel-ci
+        with:
+          target: aarch64-apple-darwin
+          cache-scope: bazel-pr-analysis
+
+      - name: Analyze release targets without building
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          bazel_targets=()
+          while IFS= read -r target; do
+            bazel_targets+=("$target")
+          done < <(bash ./scripts/list-bazel-release-targets.sh)
+
+          started_at=$SECONDS
+          ./.github/scripts/run-bazel-ci.sh \
+            -- \
+            build \
+            --nobuild \
+            --compilation_mode=fastbuild \
+            --@rules_rust//rust/settings:extra_rustc_flag=-Cdebug-assertions=no \
+            --@rules_rust//rust/settings:extra_exec_rustc_flag=-Cdebug-assertions=no \
+            -- \
+            "${bazel_targets[@]}"
+          elapsed_seconds=$((SECONDS - started_at))
+
+          {
+            echo "### Bazel release-target analysis"
+            echo
+            echo "- Elapsed: ${elapsed_seconds}s"
+            echo "- Targets: ${#bazel_targets[@]} selectors"
+            echo "- Build actions: disabled with \`--nobuild\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if (( elapsed_seconds > 1500 )); then
+            echo "::error::Bazel analysis exceeded the 25-minute cold limit (${elapsed_seconds}s)."
+            exit 1
+          fi
+
+      - name: Save Bazel repository cache
+        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.prepare_bazel.outputs.repository-cache-path }}
+          key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  results:
+    name: CI results (required)
+    needs: [changed, analysis]
+    if: always()
+    runs-on: macos-26
+    steps:
+      - name: Require analysis when relevant
+        env:
+          ANALYSIS_RESULT: ${{ needs.analysis.result }}
+          RELEVANT: ${{ needs.changed.outputs.relevant }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEVANT" != "true" ]]; then
+            echo "No Bazel-relevant changes; analysis not required."
+            exit 0
+          fi
+          if [[ "$ANALYSIS_RESULT" != "success" ]]; then
+            echo "Bazel release-target analysis failed: $ANALYSIS_RESULT" >&2
+            exit 1
+          fi
