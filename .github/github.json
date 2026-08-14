@@ -1,0 +1,36 @@
+{
+  "defaultBranch": "main",
+  "qualityGate": {
+    "inspection": {
+      "tool": "jetbrains",
+      "ide": "IntelliJ IDEA",
+      "prepare": {
+        "python": {
+          "version": "3.12",
+          "moduleName": "codex-lab",
+          "testRoots": [
+            ".github/scripts",
+            "scripts",
+            "sdk/python/tests"
+          ],
+          "sync": false,
+          "requiredGeneratedState": [
+            ".venv",
+            ".idea"
+          ]
+        }
+      },
+      "scopePreference": [
+        "changed_files",
+        "directory",
+        "whole_project"
+      ]
+    }
+  },
+  "jetbrains": {
+    "ide": "IntelliJ IDEA",
+    "ideChannel": "stable",
+    "openProjectPath": ".",
+    "scopePreference": "changed_files"
+  }
+}
