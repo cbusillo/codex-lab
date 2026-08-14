@@ -2131,7 +2131,7 @@ impl TurnRequestProcessor {
 fn current_auto_review_build_provenance() -> AutoReviewBuildProvenance {
     let provenance = codex_version::build_provenance();
     AutoReviewBuildProvenance {
-        schema_version: provenance.schema_version,
+        schema_version: AutoReviewBuildProvenance::SCHEMA_VERSION,
         version: provenance.version,
         source_commit: provenance.source_commit,
         dirty_state: provenance.dirty_state.as_str().to_string(),

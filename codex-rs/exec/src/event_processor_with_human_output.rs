@@ -13,6 +13,7 @@ use codex_model_provider_info::WireApi;
 use codex_protocol::num_format::format_with_separators;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_sandbox_summary::summarize_permission_profile;
+use codex_version::ProductIdentity;
 use owo_colors::OwoColorize;
 use owo_colors::Style;
 
@@ -36,13 +37,29 @@ pub(crate) struct EventProcessorWithHumanOutput {
     final_message_rendered: bool,
     emit_final_message_on_shutdown: bool,
     last_total_token_usage: Option<ThreadTokenUsage>,
+    product_identity: ProductIdentity,
 }
 
 impl EventProcessorWithHumanOutput {
+    #[cfg(test)]
     pub(crate) fn create_with_ansi(
         with_ansi: bool,
         config: &Config,
         last_message_path: Option<PathBuf>,
+    ) -> Self {
+        Self::create_with_ansi_and_identity(
+            with_ansi,
+            config,
+            last_message_path,
+            ProductIdentity::Codex,
+        )
+    }
+
+    pub(crate) fn create_with_ansi_and_identity(
+        with_ansi: bool,
+        config: &Config,
+        last_message_path: Option<PathBuf>,
+        product_identity: ProductIdentity,
     ) -> Self {
         let style = |styled: Style, plain: Style| if with_ansi { styled } else { plain };
         Self {
@@ -61,6 +78,7 @@ impl EventProcessorWithHumanOutput {
             final_message_rendered: false,
             emit_final_message_on_shutdown: false,
             last_total_token_usage: None,
+            product_identity,
         }
     }
 
@@ -214,8 +232,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
         prompt: &str,
         session_configured_event: &SessionConfiguredEvent,
     ) {
-        const VERSION: &str = env!("CARGO_PKG_VERSION");
-        eprintln!("OpenAI Codex v{VERSION}\n--------");
+        eprintln!("{}\n--------", product_banner(self.product_identity));
         for (key, value) in config_summary_entries(config, session_configured_event) {
             eprintln!("{} {}", format!("{key}:").style(self.bold), value);
         }
@@ -414,6 +431,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             );
         }
     }
+}
+
+fn product_banner(product_identity: ProductIdentity) -> String {
+    format!(
+        "{} v{}",
+        product_identity.display_name(),
+        product_identity.version()
+    )
 }
 
 fn config_summary_entries(

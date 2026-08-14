@@ -497,6 +497,7 @@ const DEFAULT_STATUS_LINE_ITEMS: [&str; 2] = ["model-with-reasoning", "current-d
 
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
+    pub(crate) product_identity: codex_version::ProductIdentity,
     pub(crate) config: Config,
     pub(crate) frame_requester: FrameRequester,
     pub(crate) app_event_tx: AppEventSender,
@@ -545,6 +546,7 @@ pub(crate) enum ExternalEditorState {
 /// (which view gets Ctrl+C), while `ChatWidget` owns process-level decisions such as interrupting
 /// active work, arming the double-press quit shortcut, and requesting shutdown-first exit.
 pub(crate) struct ChatWidget {
+    product_identity: codex_version::ProductIdentity,
     app_event_tx: AppEventSender,
     codex_op_target: CodexOpTarget,
     bottom_pane: BottomPane,
@@ -1459,16 +1461,19 @@ impl ChatWidget {
     }
 
     /// Build a placeholder header cell while the session is configuring.
-    fn placeholder_session_header_cell(config: &Config) -> Box<dyn HistoryCell> {
+    fn placeholder_session_header_cell(
+        config: &Config,
+        product_identity: codex_version::ProductIdentity,
+    ) -> Box<dyn HistoryCell> {
         let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
         Box::new(
-            history_cell::SessionHeaderHistoryCell::new_with_style(
+            history_cell::SessionHeaderHistoryCell::new_with_identity_and_style(
+                product_identity,
                 DEFAULT_MODEL_DISPLAY_NAME.to_string(),
                 placeholder_style,
                 /*reasoning_effort*/ None,
                 /*show_fast_status*/ false,
                 config.cwd.to_path_buf(),
-                CODEX_CLI_VERSION,
             )
             .with_yolo_mode(history_cell::is_yolo_mode(config)),
         )

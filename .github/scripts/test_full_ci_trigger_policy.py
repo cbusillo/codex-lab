@@ -192,6 +192,10 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             "      CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}",
             workflow,
         )
+        self.assertIn(
+            "      CODEX_LAB_RELEASE_VERSION: ${{ needs.release-metadata.outputs.release_identity }}",
+            workflow,
+        )
         self.assertIn("Configure clean Codex Lab build provenance", workflow)
         self.assertIn(
             "git status --porcelain=v1 --untracked-files=normal --ignore-submodules=none",
@@ -204,11 +208,23 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             "cargo build --locked --timings --release -p codex-cli --bin codex-lab",
             workflow,
         )
-        self.assertIn('lab_version="${CODE_VERSION:?missing release version}"', workflow)
-        self.assertIn('--embedded-cli-version "$CODE_VERSION"', workflow)
+        self.assertIn(
+            'lab_version="${CODE_VERSION:?missing compatibility version}"', workflow
+        )
+        self.assertIn(
+            'release_version="${CODEX_LAB_RELEASE_VERSION:?missing release identity}"',
+            workflow,
+        )
+        self.assertIn('--embedded-cli-version "$release_version"', workflow)
         self.assertIn('expected_version = os.environ["CODE_VERSION"]', workflow)
+        self.assertIn(
+            'expected_version="codex-lab ${CODEX_LAB_RELEASE_VERSION:?missing release identity}"',
+            workflow,
+        )
+        self.assertIn('--arg release "$CODEX_LAB_RELEASE_VERSION"', workflow)
         self.assertIn('if identity.build_channel != "lab":', workflow)
         self.assertIn('--version "$CODE_VERSION"', workflow)
+        self.assertIn('--release-version "$CODEX_LAB_RELEASE_VERSION"', workflow)
         self.assertIn(
             '--arg version "${{ needs.build-macos-aarch64.outputs.release_version }}"',
             workflow,

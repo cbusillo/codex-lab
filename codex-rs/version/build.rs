@@ -11,6 +11,10 @@ fn main() {
         .ok()
         .and_then(|value| normalized_value(&value))
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let lab_release_version = env::var("CODEX_LAB_RELEASE_VERSION")
+        .ok()
+        .and_then(|value| normalized_value(&value))
+        .unwrap_or_else(|| version.clone());
     let build_profile = env::var("PROFILE")
         .ok()
         .and_then(|value| normalized_value(&value))
@@ -23,6 +27,7 @@ fn main() {
 
     for (name, value) in [
         ("CODE_VERSION", version),
+        ("CODEX_LAB_RELEASE_VERSION", lab_release_version),
         ("CODEX_BUILD_SOURCE_COMMIT", source_metadata.source_commit),
         ("CODEX_BUILD_DIRTY_STATE", source_metadata.dirty_state),
         ("CODEX_BUILD_PROFILE", build_profile),
@@ -33,6 +38,7 @@ fn main() {
 
     for name in [
         "CODE_VERSION",
+        "CODEX_LAB_RELEASE_VERSION",
         "CODEX_BUILD_COMMIT",
         "CODEX_BUILD_DIRTY",
         "CODEX_BUILD_CHANNEL",

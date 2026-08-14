@@ -12,7 +12,44 @@ pub const CODE_VERSION: &str = {
     }
 };
 
-pub const BUILD_PROVENANCE_SCHEMA_VERSION: u32 = 1;
+pub const CODEX_LAB_RELEASE_VERSION: &str = {
+    match option_env!("CODEX_LAB_RELEASE_VERSION") {
+        Some(version) => version,
+        None => CODE_VERSION,
+    }
+};
+
+/// User-visible product identity selected by the top-level executable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductIdentity {
+    Codex,
+    CodexLab,
+}
+
+impl ProductIdentity {
+    pub const fn cli_name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::CodexLab => "codex-lab",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "OpenAI Codex",
+            Self::CodexLab => "Codex Lab",
+        }
+    }
+
+    pub const fn version(self) -> &'static str {
+        match self {
+            Self::Codex => CODE_VERSION,
+            Self::CodexLab => CODEX_LAB_RELEASE_VERSION,
+        }
+    }
+}
+
+pub const BUILD_PROVENANCE_SCHEMA_VERSION: u32 = 2;
 const UNAVAILABLE: &str = "unavailable";
 const BUILD_SOURCE_COMMIT: Option<&str> = option_env!("CODEX_BUILD_SOURCE_COMMIT");
 const BUILD_DIRTY_STATE: Option<&str> = option_env!("CODEX_BUILD_DIRTY_STATE");
@@ -33,6 +70,8 @@ const BUILD_CHANNEL: Option<&str> = option_env!("CODEX_BUILD_CHANNEL");
 pub struct BuildProvenance {
     pub schema_version: u32,
     pub version: String,
+    pub release_version: String,
+    pub compatibility_version: String,
     pub source_commit: String,
     pub dirty_state: DirtyState,
     pub build_profile: String,
@@ -45,6 +84,8 @@ impl BuildProvenance {
         json!({
             "schema_version": self.schema_version,
             "version": self.version,
+            "release_version": self.release_version,
+            "compatibility_version": self.compatibility_version,
             "source_commit": self.source_commit,
             "dirty_state": self.dirty_state.as_str(),
             "build_profile": self.build_profile,
@@ -82,7 +123,8 @@ impl DirtyState {
 }
 
 struct BuildProvenanceMetadata<'a> {
-    version: &'a str,
+    release_version: &'a str,
+    compatibility_version: &'a str,
     source_commit: Option<&'a str>,
     dirty_state: Option<&'a str>,
     build_profile: Option<&'a str>,
@@ -139,7 +181,8 @@ impl SourceMetadata {
 pub fn build_provenance() -> BuildProvenance {
     provenance_from_metadata(
         BuildProvenanceMetadata {
-            version: CODE_VERSION,
+            release_version: CODEX_LAB_RELEASE_VERSION,
+            compatibility_version: CODE_VERSION,
             source_commit: BUILD_SOURCE_COMMIT,
             dirty_state: BUILD_DIRTY_STATE,
             build_profile: BUILD_PROFILE,
@@ -161,7 +204,9 @@ fn provenance_from_metadata(
 
     BuildProvenance {
         schema_version: BUILD_PROVENANCE_SCHEMA_VERSION,
-        version: metadata.version.to_string(),
+        version: metadata.compatibility_version.to_string(),
+        release_version: metadata.release_version.to_string(),
+        compatibility_version: metadata.compatibility_version.to_string(),
         source_commit: source.source_commit,
         dirty_state: source.dirty_state,
         build_profile: normalized_value(metadata.build_profile.unwrap_or(UNAVAILABLE))

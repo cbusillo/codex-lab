@@ -202,6 +202,27 @@ async fn token_usage_update_uses_runtime_context_window() {
 }
 
 #[tokio::test]
+async fn status_output_uses_codex_lab_release_identity() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.product_identity = codex_version::ProductIdentity::CodexLab;
+
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
+
+    let identity_line = drain_insert_history(&mut rx)
+        .into_iter()
+        .flatten()
+        .map(|line| lines_to_single_string(&[line]))
+        .find(|line| line.contains("Codex Lab"))
+        .expect("status output should contain Codex Lab identity");
+    insta::assert_snapshot!(
+        "status_output_uses_codex_lab_release_identity",
+        identity_line
+    );
+}
+
+#[tokio::test]
 async fn status_line_git_summary_items_render_values() {
     let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.status_line_git_summary = Some(StatusLineGitSummary {
@@ -471,6 +492,7 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
     let resolved_model = get_model_offline_for_tests(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
+        product_identity: codex_version::ProductIdentity::Codex,
         config: cfg.clone(),
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: tx,

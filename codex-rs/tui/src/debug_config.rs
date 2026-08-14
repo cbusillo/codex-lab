@@ -64,6 +64,12 @@ fn render_build_provenance_lines(provenance: &BuildProvenance) -> Vec<Line<'stat
         "Build provenance:".bold().into(),
         format!("  - schema_version = {}", provenance.schema_version).into(),
         format!("  - version = {}", provenance.version).into(),
+        format!("  - release_version = {}", provenance.release_version).into(),
+        format!(
+            "  - compatibility_version = {}",
+            provenance.compatibility_version
+        )
+        .into(),
         format!("  - source_commit = {}", provenance.source_commit).into(),
         format!("  - dirty_state = {}", provenance.dirty_state.as_str()).into(),
         format!("  - build_profile = {}", provenance.build_profile).into(),
@@ -746,6 +752,8 @@ interrupt_message = false
         let provenance = BuildProvenance {
             schema_version: BUILD_PROVENANCE_SCHEMA_VERSION,
             version: "1.2.3".to_string(),
+            release_version: "1.2.3-lab.5".to_string(),
+            compatibility_version: "1.2.3".to_string(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
             dirty_state: DirtyState::Clean,
             build_profile: "release".to_string(),
@@ -758,8 +766,10 @@ interrupt_message = false
             @r###"
 
 Build provenance:
-  - schema_version = 1
+  - schema_version = 2
   - version = 1.2.3
+  - release_version = 1.2.3-lab.5
+  - compatibility_version = 1.2.3
   - source_commit = 0123456789abcdef0123456789abcdef01234567
   - dirty_state = clean
   - build_profile = release

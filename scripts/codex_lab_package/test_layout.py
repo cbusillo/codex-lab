@@ -90,7 +90,16 @@ class BuildCodexLabAppTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             codex_bin = root / "fake-codex"
-            codex_bin.write_text('#!/bin/sh\nexec /bin/sh "$@"\n', encoding="utf-8")
+            codex_bin.write_text(
+                f"""#!/bin/sh
+if [ "$*" = "debug provenance --json" ]; then
+  printf '{{"schema_version":2,"version":"9.9.9","release_version":"1.2.3-lab.5","compatibility_version":"9.9.9","source_commit":"{"a" * 40}","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}}\\n' "$0"
+  exit 0
+fi
+exec /bin/sh "$@"
+""",
+                encoding="utf-8",
+            )
             os.chmod(codex_bin, 0o755)
 
             result = build_codex_lab_app(
@@ -101,8 +110,9 @@ class BuildCodexLabAppTest(unittest.TestCase):
                     shim_dir=root / "bin",
                     bundle_identifier="dev.example.codex-lab-test",
                     short_version="1.2.3",
+                    release_version="1.2.3-lab.5",
                     bundle_version="42",
-                    embedded_cli_version="1.2.3",
+                    embedded_cli_version="1.2.3-lab.5",
                     source_commit="a" * 40,
                 )
             )
@@ -135,6 +145,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
                     "CFBundlePackageType": "APPL",
                     "CFBundleShortVersionString": "1.2.3",
                     "CFBundleVersion": "42",
+                    "CodexLabReleaseVersion": "1.2.3-lab.5",
                     "LSMinimumSystemVersion": "13.0",
                     "NSHighResolutionCapable": True,
                 },
@@ -172,6 +183,15 @@ class BuildCodexLabAppTest(unittest.TestCase):
             self.assertIn('exec "$LAB_CLI" "$@"', shim)
 
             smoke_check(result.app_dir, result.shim_path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "embedded CLI compatibility version does not match",
+            ):
+                smoke_check(
+                    result.app_dir,
+                    result.shim_path,
+                    expected_compatibility_version="1.2.3",
+                )
 
             completed = subprocess.run(
                 [str(result.shim_path), "-c", "printf shim-ok"],
@@ -222,7 +242,7 @@ class BuildCodexLabAppTest(unittest.TestCase):
 set -eu
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
   executable_path=${PROVENANCE_EXECUTABLE_PATH:-$0}
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$executable_path"
+  printf '{"schema_version":2,"version":"1.2.3","release_version":"1.2.3-lab.5","compatibility_version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$executable_path"
   exit 0
 fi
 case " $* " in
@@ -364,7 +384,8 @@ printf 'cli=%s\\nforce_cli=%s\\ncodex_home=%s\\nlab_home=%s\\nlocal_daemon=%s\\n
                         embedded_cli.read_bytes()
                     ).hexdigest(),
                     expected_source_commit=source_commit,
-                    expected_cli_version="1.2.3",
+                    expected_cli_version="1.2.3-lab.5",
+                    expected_compatibility_version="1.2.3",
                     codesign_path=fake_codesign,
                     id_path=fake_id,
                     launchctl_path=fake_launchctl,
@@ -567,7 +588,7 @@ exit 1
             codex_bin.write_text(
                 """#!/bin/sh
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+  printf '{"schema_version":2,"version":"1.2.3","release_version":"1.2.3-lab.5","compatibility_version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
   exit 0
 fi
 exit 2
@@ -598,7 +619,8 @@ exit 2
             launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("EXPECTED_CLI_VERSION='1.2.3'", launcher)
+            self.assertIn("EXPECTED_CLI_VERSION='1.2.3-lab.5'", launcher)
+            self.assertIn("EXPECTED_COMPATIBILITY_VERSION='1.2.3'", launcher)
             self.assertIn("EXPECTED_SOURCE_COMMIT='" + source_commit + "'", launcher)
             self.assertIn("Built Codex Lab app bundle", completed.stdout)
 
@@ -612,7 +634,7 @@ exit 2
             codex_bin.write_text(
                 """#!/bin/sh
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ] && [ "${3:-}" = --json ]; then
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+  printf '{"schema_version":2,"version":"1.2.3","release_version":"1.2.3-lab.5","compatibility_version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
   exit 0
 fi
 exit 2
@@ -634,7 +656,7 @@ exit 2
                     "--short-version",
                     "2026.7.22",
                     "--embedded-cli-version",
-                    "1.2.3",
+                    "1.2.3-lab.5",
                 ],
                 check=True,
                 capture_output=True,
@@ -647,7 +669,8 @@ exit 2
             launcher = (app_dir / "Contents/MacOS/Codex Lab Launcher").read_text(
                 encoding="utf-8"
             )
-            self.assertIn("EXPECTED_CLI_VERSION='1.2.3'", launcher)
+            self.assertIn("EXPECTED_CLI_VERSION='1.2.3-lab.5'", launcher)
+            self.assertIn("EXPECTED_COMPATIBILITY_VERSION='2026.7.22'", launcher)
 
     def test_build_script_rejects_metadata_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -656,7 +679,7 @@ exit 2
             source_commit = "a" * 64
             codex_bin.write_text(
                 """#!/bin/sh
-printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
+printf '{"schema_version":2,"version":"1.2.3","release_version":"1.2.3-lab.5","compatibility_version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"lab","executable_path":"%s"}\\n' "__SOURCE_COMMIT__" "$0"
 """.replace("__SOURCE_COMMIT__", source_commit),
                 encoding="utf-8",
             )

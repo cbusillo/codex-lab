@@ -390,7 +390,7 @@ fn assert_valid_server_build(server_build: Option<ServerBuildInfo>) {
     assert_eq!(
         server_build,
         ServerBuildInfo {
-            schema_version: provenance.schema_version,
+            schema_version: 1,
             version: provenance.version,
             source_commit: provenance.source_commit,
             dirty_state: provenance.dirty_state.as_str().to_string(),

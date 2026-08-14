@@ -7,7 +7,6 @@ use crate::legacy_core::config::Config;
 use crate::line_truncation::line_width;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
-use crate::version::CODEX_CLI_VERSION;
 use crate::width::display_width;
 use chrono::DateTime;
 use chrono::Local;
@@ -117,6 +116,7 @@ impl StatusHistoryHandle {
 
 #[derive(Debug)]
 struct StatusHistoryCell {
+    product_identity: codex_version::ProductIdentity,
     model_name: String,
     model_details: Vec<String>,
     directory: PathBuf,
@@ -211,6 +211,7 @@ pub(crate) fn new_status_output_with_rate_limits(
     .0
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
@@ -231,8 +232,52 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     agents_summary: String,
     refreshing_rate_limits: bool,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
+    new_status_output_with_identity_and_rate_limits_handle(
+        codex_version::ProductIdentity::Codex,
+        config,
+        runtime_model_provider_base_url,
+        remote_connection,
+        account_display,
+        token_info,
+        total_usage,
+        session_id,
+        thread_name,
+        forked_from,
+        rate_limits,
+        _plan_type,
+        now,
+        model_name,
+        collaboration_mode,
+        reasoning_effort_override,
+        agents_summary,
+        refreshing_rate_limits,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn new_status_output_with_identity_and_rate_limits_handle(
+    product_identity: codex_version::ProductIdentity,
+    config: &Config,
+    runtime_model_provider_base_url: Option<&str>,
+    remote_connection: Option<&RemoteConnectionStatus>,
+    account_display: Option<&StatusAccountDisplay>,
+    token_info: Option<&TokenUsageInfo>,
+    total_usage: &TokenUsage,
+    session_id: &Option<ThreadId>,
+    thread_name: Option<String>,
+    forked_from: Option<ThreadId>,
+    rate_limits: &[RateLimitSnapshotDisplay],
+    _plan_type: Option<PlanType>,
+    now: DateTime<Local>,
+    model_name: &str,
+    collaboration_mode: Option<&str>,
+    reasoning_effort_override: Option<Option<ReasoningEffort>>,
+    agents_summary: String,
+    refreshing_rate_limits: bool,
+) -> (CompositeHistoryCell, StatusHistoryHandle) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let (card, handle) = StatusHistoryCell::new(
+        product_identity,
         config,
         runtime_model_provider_base_url,
         remote_connection,
@@ -261,6 +306,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
 impl StatusHistoryCell {
     #[allow(clippy::too_many_arguments)]
     fn new(
+        product_identity: codex_version::ProductIdentity,
         config: &Config,
         runtime_model_provider_base_url: Option<&str>,
         remote_connection: Option<&RemoteConnectionStatus>,
@@ -368,6 +414,7 @@ impl StatusHistoryCell {
 
         (
             Self {
+                product_identity,
                 model_name,
                 model_details,
                 directory: config.cwd.to_path_buf(),
@@ -725,12 +772,7 @@ fn status_approval_label(
 impl HistoryCell for StatusHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(Line::from(vec![
-            Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-            Span::from("OpenAI Codex").bold(),
-            Span::from(" ").dim(),
-            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
-        ]));
+        lines.push(status_title_line(self.product_identity));
 
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
@@ -930,6 +972,16 @@ impl HistoryCell for StatusHistoryCell {
     ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         self.display_hyperlink_lines(width)
     }
+}
+
+pub(crate) fn status_title_line(product_identity: codex_version::ProductIdentity) -> Line<'static> {
+    vec![
+        Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
+        Span::from(product_identity.display_name()).bold(),
+        Span::from(" ").dim(),
+        Span::from(format!("(v{})", product_identity.version())).dim(),
+    ]
+    .into()
 }
 
 fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Option<String> {

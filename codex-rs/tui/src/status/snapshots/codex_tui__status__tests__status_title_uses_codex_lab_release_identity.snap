@@ -1,0 +1,5 @@
+---
+source: tui/src/status/tests.rs
+expression: "render_lines(&[status_title_line(codex_version::ProductIdentity::CodexLab)]).join(\"\\n\")"
+---
+ >_ Codex Lab (v0.0.0)

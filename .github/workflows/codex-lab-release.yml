@@ -32,6 +32,7 @@ jobs:
     outputs:
       release_tag: ${{ steps.release.outputs.release_tag }}
       release_version: ${{ steps.release.outputs.release_version }}
+      release_identity: ${{ steps.release.outputs.release_identity }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -49,8 +50,10 @@ jobs:
             echo "Invalid Codex Lab release tag: $release_tag" >&2
             exit 1
           }
+          release_identity="$(PYTHONPATH=scripts python3 -c 'import sys; from codex_lab_package.release_tag import release_identity_from_tag; print(release_identity_from_tag(sys.argv[1]))' "$release_tag")"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
           echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "release_identity=$release_identity" >> "$GITHUB_OUTPUT"
 
       - name: Fail fast when release tag is unavailable
         env:
@@ -144,6 +147,7 @@ jobs:
       release_version: ${{ needs.release-metadata.outputs.release_version }}
     env:
       CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}
+      CODEX_LAB_RELEASE_VERSION: ${{ needs.release-metadata.outputs.release_identity }}
       # The release profile builds with `debug = "line-tables-only"` and
       # `split-debuginfo = "off"`, which leaves the debug map inside the shipped
       # engine. Pack it into a `.dSYM` sidecar so the engine can be stripped
@@ -212,6 +216,28 @@ jobs:
           code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
           test -x "$code_mode_host_bin"
           echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
+
+      - name: Verify embedded Codex Lab release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_version="codex-lab ${CODEX_LAB_RELEASE_VERSION:?missing release identity}"
+          actual_version="$($CODEX_LAB_BIN --version)"
+          if [[ "$actual_version" != "$expected_version" ]]; then
+            echo "Codex Lab CLI version mismatch: $actual_version != $expected_version" >&2
+            exit 1
+          fi
+          "$CODEX_LAB_BIN" debug provenance --json | jq -e \
+            --arg release "$CODEX_LAB_RELEASE_VERSION" \
+            --arg compatibility "$CODE_VERSION" \
+            --arg commit "$(git rev-parse HEAD)" \
+            '.schema_version == 2
+              and .release_version == $release
+              and .compatibility_version == $compatibility
+              and .version == $compatibility
+              and .source_commit == $commit
+              and .dirty_state == "clean"
+              and .build_channel == "lab"' >/dev/null
 
       - name: Report Cargo cache after build
         if: always()
@@ -348,7 +374,8 @@ jobs:
           output_root="${RUNNER_TEMP}/codex-lab-app"
           app_dir="${output_root}/Codex Lab.app"
           shim_dir="${output_root}/bin"
-          lab_version="${CODE_VERSION:?missing release version}"
+          lab_version="${CODE_VERSION:?missing compatibility version}"
+          release_version="${CODEX_LAB_RELEASE_VERSION:?missing release identity}"
           mkdir -p "$output_root"
           start=$SECONDS
           python3 scripts/build_codex_lab_app.py \
@@ -356,7 +383,8 @@ jobs:
             --app-dir "$app_dir" \
             --shim-dir "$shim_dir" \
             --short-version "$lab_version" \
-            --embedded-cli-version "$CODE_VERSION" \
+            --release-version "$release_version" \
+            --embedded-cli-version "$release_version" \
             --bundle-version "$GITHUB_RUN_NUMBER" \
             --source-commit "$(git rev-parse HEAD)" \
             --force
@@ -365,7 +393,10 @@ jobs:
           python3 scripts/codex_lab_package/smoke.py \
             "$app_dir" \
             --shim-path "${shim_dir}/codex-lab" \
-            --expected-source-commit "$(git rev-parse HEAD)"
+            --expected-source-commit "$(git rev-parse HEAD)" \
+            --expected-release-version "$release_version" \
+            --expected-compatibility-version "$lab_version" \
+            --expected-bundle-version "$GITHUB_RUN_NUMBER"
           smoke_seconds=$((SECONDS - start))
           {
             echo "- Bundle build seconds: \`$bundle_seconds\`"
@@ -474,7 +505,10 @@ jobs:
           python3 scripts/codex_lab_package/smoke.py \
             "${output_root}/Codex Lab.app" \
             --shim-path "${output_root}/bin/codex-lab" \
-            --expected-source-commit "$source_commit"
+            --expected-source-commit "$source_commit" \
+            --expected-release-version "$CODEX_LAB_RELEASE_VERSION" \
+            --expected-compatibility-version "$CODE_VERSION" \
+            --expected-bundle-version "$GITHUB_RUN_NUMBER"
           cp "$signed_engine" "${engine_dir}/engine/codex"
           cp "$signed_code_mode_host" "${engine_dir}/engine/codex-code-mode-host"
           start=$SECONDS
@@ -518,6 +552,7 @@ jobs:
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --version "$CODE_VERSION" \
+            --release-version "$CODEX_LAB_RELEASE_VERSION" \
             --release-tag "$release_tag" \
             --download-base-url "$download_base_url" \
             --engine-signed

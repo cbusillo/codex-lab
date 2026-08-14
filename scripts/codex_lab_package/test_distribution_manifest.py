@@ -3,6 +3,7 @@
 from pathlib import Path
 from zipfile import ZipFile
 from zipfile import ZipInfo
+import copy
 import shutil
 import stat
 import subprocess
@@ -26,6 +27,7 @@ from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from codex_lab_package.release_tag import release_version_from_tag
+from codex_lab_package.release_tag import release_identity_from_tag
 
 
 class DistributionManifestTest(unittest.TestCase):
@@ -33,6 +35,12 @@ class DistributionManifestTest(unittest.TestCase):
         self.assertEqual(
             release_version_from_tag("codex-lab-v0.1.0-lab.1"),
             "0.1.0",
+        )
+
+    def test_extracts_full_release_identity_from_prerelease_tag(self) -> None:
+        self.assertEqual(
+            release_identity_from_tag("codex-lab-v0.1.0-lab.5"),
+            "0.1.0-lab.5",
         )
 
     def test_rejects_unorderable_prerelease_tag(self) -> None:
@@ -67,7 +75,8 @@ class DistributionManifestTest(unittest.TestCase):
             self.assertEqual(manifest["product"], "codex-lab")
             self.assertEqual(manifest["channel"], "lab")
             self.assertEqual(manifest["platform"], "aarch64-apple-darwin")
-            self.assertEqual(manifest["schemaVersion"], 3)
+            self.assertEqual(manifest["schemaVersion"], 4)
+            self.assertEqual(manifest["releaseVersion"], "1.2.3-lab.42")
             self.assertEqual(manifest["source"]["commit"], "abc123")
             self.assertEqual(manifest["release"], {"tag": "codex-lab-v1.2.3-lab.42"})
             self.assertEqual(
@@ -173,6 +182,7 @@ class DistributionManifestTest(unittest.TestCase):
                     "sourceCommit": "abc123",
                     "teamIdentifier": ENGINE_TEAM_IDENTIFIER,
                     "version": "1.2.3",
+                    "releaseVersion": "1.2.3-lab.42",
                 },
             )
             validate_manifest(
@@ -432,9 +442,78 @@ class DistributionManifestTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "does not match"):
                 validate_manifest(manifest)
 
+    def test_accepts_schema_three_prerelease_manifest_without_release_version(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = _prerelease_manifest(Path(temp_dir))
+            manifest["schemaVersion"] = 3
+            del manifest["releaseVersion"]
+            del manifest["managedEngine"]["releaseVersion"]
+
+            validate_manifest(manifest)
+
+    def test_rejects_schema_four_release_identity_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = _prerelease_manifest(Path(temp_dir))
+            cases = (
+                (
+                    "missing releaseVersion",
+                    ("releaseVersion",),
+                    "missing required field",
+                ),
+                (
+                    "releaseVersion drift",
+                    ("releaseVersion", "1.2.3-lab.99"),
+                    "tag identity does not match",
+                ),
+                (
+                    "missing managed releaseVersion",
+                    ("managedEngine", "releaseVersion"),
+                    "managedEngine is missing",
+                ),
+                (
+                    "managed releaseVersion drift",
+                    ("managedEngine", "releaseVersion", "1.2.3-lab.99"),
+                    "must match the manifest releaseVersion",
+                ),
+            )
+            for name, mutation, error in cases:
+                with self.subTest(name=name):
+                    candidate = copy.deepcopy(manifest)
+                    if len(mutation) == 1:
+                        del candidate[mutation[0]]
+                    elif len(mutation) == 2 and mutation[0] == "managedEngine":
+                        del candidate[mutation[0]][mutation[1]]
+                    elif len(mutation) == 2:
+                        candidate[mutation[0]] = mutation[1]
+                    else:
+                        candidate[mutation[0]][mutation[1]] = mutation[2]
+                    with self.assertRaisesRegex(ValueError, error):
+                        validate_manifest(candidate)
+
 
 def _copy_fixture(dest: Path) -> None:
     shutil.copyfile(__file__, dest)
+
+
+def _prerelease_manifest(dist_dir: Path) -> dict[str, object]:
+    _create_fixtures(dist_dir)
+    return build_manifest(
+        dist_dir=dist_dir,
+        checksums=_checksums(dist_dir),
+        version="1.2.3",
+        bundle_version="42",
+        commit="abc123",
+        repository="cbusillo/codex-lab",
+        workflow="codex-lab-release",
+        run_id="100",
+        run_attempt="2",
+        release_tag="codex-lab-v1.2.3-lab.42",
+        download_base_url="https://github.com/cbusillo/codex-lab/releases/download/codex-lab-v1.2.3-lab.42/",
+        generated_at="2026-06-07T00:00:00Z",
+        engine_signed=True,
+    )
 
 
 def _create_fixtures(dist_dir: Path) -> tuple[Path, Path, Path]:

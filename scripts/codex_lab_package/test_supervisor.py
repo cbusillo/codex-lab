@@ -27,7 +27,7 @@ class SupervisorTest(unittest.TestCase):
         path.write_text(
             """#!/bin/sh
 if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ]; then
-  printf '{"schema_version":1,"version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"release","executable_path":"%s"}\\n' "__COMMIT__" "$0"
+  printf '{"schema_version":2,"version":"1.2.3","release_version":"1.2.3-lab.5","compatibility_version":"1.2.3","source_commit":"%s","dirty_state":"clean","build_profile":"release","build_channel":"release","executable_path":"%s"}\\n' "__COMMIT__" "$0"
   exit 0
 fi
 exit 2

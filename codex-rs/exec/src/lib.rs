@@ -339,6 +339,7 @@ struct ExecRunArgs {
     prompt: Option<String>,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
+    product_identity: codex_version::ProductIdentity,
 }
 
 fn exec_root_span() -> tracing::Span {
@@ -358,7 +359,11 @@ fn exec_stderr_env_filter() -> EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new("error"))
 }
 
-pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+pub async fn run_main(
+    cli: Cli,
+    arg0_paths: Arg0DispatchPaths,
+    product_identity: codex_version::ProductIdentity,
+) -> anyhow::Result<()> {
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
@@ -712,6 +717,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         prompt,
         skip_git_repo_check,
         stderr_with_ansi,
+        product_identity,
     })
     .instrument(exec_span)
     .await
@@ -810,15 +816,19 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         prompt,
         skip_git_repo_check,
         stderr_with_ansi,
+        product_identity,
     } = args;
 
     let mut event_processor: Box<dyn EventProcessor> = match json_mode {
         true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
-        _ => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
-            stderr_with_ansi,
-            &config,
-            last_message_file.clone(),
-        )),
+        _ => Box::new(
+            EventProcessorWithHumanOutput::create_with_ansi_and_identity(
+                stderr_with_ansi,
+                &config,
+                last_message_file.clone(),
+                product_identity,
+            ),
+        ),
     };
     if oss {
         // We're in the oss section, so provider_id should be Some

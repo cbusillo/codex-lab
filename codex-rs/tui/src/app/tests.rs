@@ -417,6 +417,7 @@ async fn enqueue_primary_thread_session_replays_turns_before_initial_prompt_subm
     let config = app.config.clone();
     let model = get_model_offline_for_tests(config.model.as_deref());
     app.chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        product_identity: codex_version::ProductIdentity::Codex,
         config,
         frame_requester: crate::tui::FrameRequester::test_dummy(),
         app_event_tx: app.app_event_tx.clone(),
@@ -4790,6 +4791,7 @@ async fn make_test_app() -> App {
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
     App {
+        product_identity: codex_version::ProductIdentity::Codex,
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
@@ -4872,6 +4874,7 @@ async fn make_test_app_with_channels() -> (
 
     (
         App {
+            product_identity: codex_version::ProductIdentity::Codex,
             model_catalog: chat_widget.model_catalog(),
             session_telemetry,
             app_event_tx,
@@ -6900,6 +6903,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
     );
 
     let replacement = ChatWidget::new_with_app_event(ChatWidgetInit {
+        product_identity: codex_version::ProductIdentity::Codex,
         config: app.config.clone(),
         frame_requester: crate::tui::FrameRequester::test_dummy(),
         app_event_tx: app.app_event_tx.clone(),

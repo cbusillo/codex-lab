@@ -25,11 +25,12 @@ from codex_lab_package.engine_contract import ENGINE_TEAM_IDENTIFIER
 from codex_lab_package.engine_contract import REQUIRED_CODE_MODE_HOST_ENTITLEMENTS
 from codex_lab_package.engine_contract import REQUIRED_ENGINE_ENTITLEMENTS
 from codex_lab_package.release_tag import release_version_from_tag
+from codex_lab_package.release_tag import release_identity_from_tag
 from codex_package.version import read_workspace_version
 
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = (2, SCHEMA_VERSION)
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = (2, 3, SCHEMA_VERSION)
 LEGACY_ENGINE_ARCHIVE_ROOT = "codex"
 LEGACY_REQUIRED_ENGINE_ENTITLEMENTS = ("com.apple.security.cs.allow-jit",)
 PRODUCT = "codex-lab"
@@ -83,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     generate.add_argument("--output", type=Path, required=True)
     generate.add_argument("--sha256sums", type=Path)
     generate.add_argument("--version")
+    generate.add_argument("--release-version")
     generate.add_argument("--bundle-version", required=True)
     generate.add_argument("--commit", required=True)
     generate.add_argument("--repository", required=True)
@@ -120,6 +122,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         dist_dir=args.dist_dir,
         checksums=checksums,
         version=args.version or read_workspace_version(),
+        release_version=args.release_version,
         bundle_version=args.bundle_version,
         commit=args.commit,
         repository=args.repository,
@@ -150,6 +153,7 @@ def build_manifest(
     dist_dir: Path,
     checksums: dict[str, str],
     version: str,
+    release_version: str | None = None,
     bundle_version: str,
     commit: str,
     repository: str,
@@ -162,6 +166,15 @@ def build_manifest(
     engine_signed: bool = False,
     engine_notarized: bool = False,
 ) -> dict[str, Any]:
+    tag_release_version = (
+        release_identity_from_tag(release_tag) if release_tag is not None else None
+    )
+    release_version = release_version or tag_release_version or version
+    if tag_release_version is not None and release_version != tag_release_version:
+        raise ValueError(
+            "release version does not match release tag: "
+            f"{release_version} != {tag_release_version}"
+        )
     if engine_notarized and not engine_signed:
         raise ValueError("The managed engine cannot be notarized unless it is signed")
     timestamp = generated_at or utc_timestamp()
@@ -246,9 +259,11 @@ def build_manifest(
             "sourceCommit": commit,
             "teamIdentifier": ENGINE_TEAM_IDENTIFIER if engine_signed else None,
             "version": version,
+            "releaseVersion": release_version,
         },
         "platform": PLATFORM,
         "product": PRODUCT,
+        "releaseVersion": release_version,
         "schemaVersion": SCHEMA_VERSION,
         "source": {
             "commit": commit,
@@ -324,7 +339,18 @@ def validate_manifest(
     version = manifest["version"]
     if not isinstance(version, str) or not version:
         raise ValueError("Manifest version must be a non-empty string")
-    validate_release(manifest.get("release"), version)
+    release_version = manifest.get("releaseVersion")
+    if release_version is None:
+        if schema_version >= 4:
+            raise ValueError("Manifest is missing required field: releaseVersion")
+        release = manifest.get("release")
+        if isinstance(release, dict) and isinstance(release.get("tag"), str):
+            release_version = release_identity_from_tag(release["tag"])
+        else:
+            release_version = version
+    if not isinstance(release_version, str) or not release_version:
+        raise ValueError("Manifest releaseVersion must be a non-empty string")
+    validate_release(manifest.get("release"), version, release_version)
     validate_supported_layouts(manifest["supportedLayouts"])
     artifacts = manifest["artifacts"]
     if not isinstance(artifacts, dict):
@@ -346,6 +372,7 @@ def validate_manifest(
         manifest["managedEngine"],
         artifacts["engineZip"],
         version=version,
+        release_version=release_version,
         source=manifest["source"],
         release=manifest.get("release"),
         dist_dir=dist_dir,
@@ -375,7 +402,7 @@ def validate_supported_layouts(layouts: object) -> None:
         )
 
 
-def validate_release(release: object, version: str) -> None:
+def validate_release(release: object, version: str, release_version: str) -> None:
     if release is None:
         return
     if not isinstance(release, dict):
@@ -387,6 +414,12 @@ def validate_release(release: object, version: str) -> None:
     if tag_version != version:
         raise ValueError(
             f"Manifest release tag version does not match manifest version: {tag} != {version}"
+        )
+    tag_release_version = release_identity_from_tag(tag)
+    if tag_release_version != release_version:
+        raise ValueError(
+            "Manifest release tag identity does not match manifest releaseVersion: "
+            f"{tag} != {release_version}"
         )
 
 
@@ -487,6 +520,7 @@ def validate_managed_engine(
     engine_artifact: dict[str, Any],
     *,
     version: str,
+    release_version: str,
     source: object,
     release: object,
     dist_dir: Path | None,
@@ -503,6 +537,8 @@ def validate_managed_engine(
         "teamIdentifier",
         "version",
     }
+    if schema_version >= 4:
+        required_fields.add("releaseVersion")
     missing = sorted(required_fields - managed_engine.keys())
     if missing:
         raise ValueError(f"managedEngine is missing required fields: {missing}")
@@ -510,6 +546,10 @@ def validate_managed_engine(
         raise ValueError("managedEngine artifactRole must be engineZip")
     if managed_engine["version"] != version:
         raise ValueError("managedEngine version must match the manifest version")
+    if schema_version >= 4 and managed_engine["releaseVersion"] != release_version:
+        raise ValueError(
+            "managedEngine releaseVersion must match the manifest releaseVersion"
+        )
     if not isinstance(source, dict) or managed_engine["sourceCommit"] != source.get(
         "commit"
     ):

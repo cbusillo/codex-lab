@@ -23,6 +23,8 @@ fn clean_metadata_records_versioned_json() {
         json!({
             "schema_version": BUILD_PROVENANCE_SCHEMA_VERSION,
             "version": "1.2.3",
+            "release_version": "1.2.3-lab.4",
+            "compatibility_version": "1.2.3",
             "source_commit": COMMIT,
             "dirty_state": "clean",
             "build_profile": "debug",
@@ -106,7 +108,8 @@ fn metadata<'a>(
     build_channel: Option<&'a str>,
 ) -> BuildProvenanceMetadata<'a> {
     BuildProvenanceMetadata {
-        version: "1.2.3",
+        release_version: "1.2.3-lab.4",
+        compatibility_version: "1.2.3",
         source_commit,
         dirty_state,
         build_profile,
@@ -118,6 +121,8 @@ fn unavailable(build_profile: &str) -> BuildProvenance {
     BuildProvenance {
         schema_version: BUILD_PROVENANCE_SCHEMA_VERSION,
         version: "1.2.3".to_string(),
+        release_version: "1.2.3-lab.4".to_string(),
+        compatibility_version: "1.2.3".to_string(),
         source_commit: "unavailable".to_string(),
         dirty_state: DirtyState::Unavailable,
         build_profile: build_profile.to_string(),

@@ -946,6 +946,7 @@ pub async fn run_main(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
+    product_identity: codex_version::ProductIdentity,
 ) -> std::io::Result<AppExitInfo> {
     cli.shared
         .take_auto_review_config_overrides(&mut cli.config_overrides);
@@ -1370,6 +1371,7 @@ pub async fn run_main(
         log_db,
         state_db,
         environment_manager,
+        product_identity,
     )
     .await
     .map_err(|err| std::io::Error::other(err.to_string()))
@@ -1392,6 +1394,7 @@ async fn run_ratatui_app(
     log_db: Option<log_db::LogDbLayer>,
     state_db: Option<StateDbHandle>,
     environment_manager: Arc<EnvironmentManager>,
+    product_identity: codex_version::ProductIdentity,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
     color_eyre::install()?;
@@ -1892,6 +1895,7 @@ async fn run_ratatui_app(
         startup_elapsed_before_app,
         startup_bootstrap,
         startup_hooks_browser,
+        product_identity,
     )
     .await;
 

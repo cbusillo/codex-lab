@@ -225,7 +225,8 @@ impl ChatWidget {
             .collect();
         let agents_summary =
             crate::status::compose_agents_summary(&self.config, &self.instruction_source_paths);
-        let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
+        let (cell, handle) = crate::status::new_status_output_with_identity_and_rate_limits_handle(
+            self.product_identity,
             &self.config,
             self.runtime_model_provider_base_url.as_deref(),
             self.remote_connection.as_ref(),

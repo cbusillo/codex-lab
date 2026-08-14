@@ -947,7 +947,7 @@ pub(crate) async fn collect_auto_review_target(
 fn auto_review_build_provenance() -> AutoReviewBuildProvenance {
     let provenance = codex_version::build_provenance();
     AutoReviewBuildProvenance {
-        schema_version: provenance.schema_version,
+        schema_version: AutoReviewBuildProvenance::SCHEMA_VERSION,
         version: provenance.version,
         source_commit: provenance.source_commit,
         dirty_state: provenance.dirty_state.as_str().to_string(),
@@ -1594,7 +1594,19 @@ mod tests {
                 construction_error: None,
             }
         );
-        assert!(persistence.target().build_provenance.is_some());
+        let provenance = codex_version::build_provenance();
+        assert_eq!(
+            persistence.target().build_provenance,
+            Some(AutoReviewBuildProvenance {
+                schema_version: AutoReviewBuildProvenance::SCHEMA_VERSION,
+                version: provenance.version,
+                source_commit: provenance.source_commit,
+                dirty_state: provenance.dirty_state.as_str().to_string(),
+                build_profile: provenance.build_profile,
+                build_channel: provenance.build_channel,
+                executable_path: provenance.executable_path,
+            })
+        );
 
         assert!(persistence.save_pending(codex_home.path()));
         let store = AutoReviewStore::for_scope(codex_home.path(), cwd.path());

@@ -313,6 +313,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(state["listenHost"], self.supervisor_paths.listen_host)
             self.assertEqual(state["listenPort"], self.supervisor_paths.listen_port)
             self.assertEqual(state["releaseTag"], "codex-lab-v1.2.3-lab.1")
+            self.assertEqual(state["releaseVersion"], "1.2.3-lab.1")
             self.assertEqual(state["shimPath"], str(result.shim_path))
             self.assertEqual(state["supervisorLabel"], self.supervisor_paths.label)
             self.assertEqual(state["version"], "1.2.3")

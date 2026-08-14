@@ -1,3 +1,4 @@
+use super::card::status_title_line;
 use super::new_status_output;
 use super::new_status_output_with_rate_limits;
 use super::new_status_output_with_rate_limits_handle;
@@ -275,6 +276,13 @@ fn permissions_text_for(config: &Config) -> Option<String> {
                 .map(str::trim)
                 .map(ToString::to_string)
         })
+}
+
+#[test]
+fn status_title_uses_codex_lab_release_identity() {
+    insta::assert_snapshot!(
+        render_lines(&[status_title_line(codex_version::ProductIdentity::CodexLab)]).join("\n")
+    );
 }
 
 #[tokio::test]

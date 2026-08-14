@@ -17,6 +17,13 @@ def release_version_from_tag(tag: str) -> str:
     return ".".join((match.group("major"), match.group("minor"), match.group("patch")))
 
 
+def release_identity_from_tag(tag: str) -> str:
+    match = LAB_RELEASE_TAG_PATTERN.fullmatch(tag)
+    if match is None:
+        raise ValueError(f"Codex Lab release tag has invalid format: {tag}")
+    return tag.removeprefix(LAB_RELEASE_TAG_PREFIX)
+
+
 def codex_lab_release_order(tag: str) -> tuple[int, int, int, int, int] | None:
     match = LAB_RELEASE_TAG_PATTERN.fullmatch(tag)
     if match is None:
