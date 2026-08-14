@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -55,6 +57,108 @@ class StageNpmPackagesTest(unittest.TestCase):
             args = stage_npm_packages.parse_args()
 
         self.assertTrue(args.no_expand_packages)
+
+    def test_main_expands_and_stages_platform_packages_hermetically(self) -> None:
+        build_module = stage_npm_packages._BUILD_MODULE
+        staged: dict[str, Path] = {}
+        install_calls: list[set[str]] = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            runner_temp = root / "runner"
+            artifacts_dir = root / "artifacts"
+            output_dir = root / "output"
+            runner_temp.mkdir()
+
+            def fake_install_native_components(
+                workflow_url: str,
+                components: set[str],
+                vendor_root: Path,
+                artifacts_root: Path,
+            ) -> None:
+                self.assertEqual("https://example.test/actions/runs/1", workflow_url)
+                self.assertEqual(artifacts_dir.resolve(), artifacts_root)
+                install_calls.append(components)
+                vendor = vendor_root / "vendor"
+                for target in stage_npm_packages.BINARY_TARGETS:
+                    target_dir = vendor / target
+                    target_dir.mkdir(parents=True)
+                    binary = target_dir / (
+                        "codex.exe" if "windows" in target else "codex"
+                    )
+                    binary.write_text("binary\n", encoding="utf-8")
+
+            def fake_run_command(command: list[str]) -> None:
+                package = command[command.index("--package") + 1]
+                version = command[command.index("--release-version") + 1]
+                staging_dir = Path(command[command.index("--staging-dir") + 1])
+                pack_output = Path(command[command.index("--pack-output") + 1])
+                build_module.stage_sources(staging_dir, version, package)
+                if "--vendor-src" in command:
+                    vendor_src = Path(command[command.index("--vendor-src") + 1])
+                    target = build_module.PACKAGE_TARGET_FILTERS.get(package)
+                    build_module.copy_native_binaries(
+                        vendor_src,
+                        staging_dir,
+                        list(stage_npm_packages.native_components_for_package(package)),
+                        target_filter={target} if target else None,
+                    )
+                pack_output.parent.mkdir(parents=True, exist_ok=True)
+                pack_output.write_text(package, encoding="utf-8")
+                staged[package] = staging_dir
+
+            argv = [
+                str(SCRIPT),
+                "--release-version",
+                "0.0.0",
+                "--package",
+                "codex",
+                "--workflow-url",
+                "https://example.test/actions/runs/1",
+                "--artifacts-dir",
+                str(artifacts_dir),
+                "--output-dir",
+                str(output_dir),
+                "--keep-staging-dirs",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.dict("os.environ", {"RUNNER_TEMP": str(runner_temp)}),
+                mock.patch.object(
+                    stage_npm_packages,
+                    "install_native_components",
+                    side_effect=fake_install_native_components,
+                ),
+                mock.patch.object(
+                    stage_npm_packages,
+                    "run_command",
+                    side_effect=fake_run_command,
+                ),
+            ):
+                self.assertEqual(0, stage_npm_packages.main())
+
+            expected_packages = stage_npm_packages.PACKAGE_EXPANSIONS["codex"]
+            self.assertEqual(set(expected_packages), set(staged))
+            self.assertEqual(
+                [{stage_npm_packages.CODEX_PACKAGE_COMPONENT}], install_calls
+            )
+            root_package = json.loads(
+                (staged["codex"] / "package.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                len(stage_npm_packages.CODEX_PLATFORM_PACKAGES),
+                len(root_package["optionalDependencies"]),
+            )
+            for package, config in stage_npm_packages.CODEX_PLATFORM_PACKAGES.items():
+                target = config["target_triple"]
+                self.assertTrue((staged[package] / "vendor" / target).is_dir())
+            self.assertEqual(
+                {
+                    stage_npm_packages.tarball_name_for_package(package, "0.0.0")
+                    for package in expected_packages
+                },
+                {path.name for path in output_dir.iterdir()},
+            )
 
 
 if __name__ == "__main__":

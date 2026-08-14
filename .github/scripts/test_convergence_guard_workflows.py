@@ -91,6 +91,13 @@ class RepoCheckWiringTest(unittest.TestCase):
             "python3 .github/scripts/upstream_convergence_gates.py", contents
         )
 
+    def test_repo_checks_runs_the_bazel_data_edge_verifier(self) -> None:
+        contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence_bazel_data.py", contents
+        )
+
     def test_repo_checks_runs_the_convergence_validator(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 

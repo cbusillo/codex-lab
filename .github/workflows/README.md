@@ -46,6 +46,10 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   Release builds retain the full release profile.
 - Repository policy, spelling, dependency, and workflow-routing checks remain
   merge-blocking through their dedicated reusable workflows.
+- `repo-checks.yml` statically verifies cross-package/root Bazel compile-data
+  labels, producer exports, and SQLx migration globs, and runs a hermetic npm
+  expansion/native-staging smoke test. These checks catch release metadata
+  wiring errors without invoking Bazel or downloading release artifacts.
 
 ## Full Verification
 

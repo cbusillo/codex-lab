@@ -36,6 +36,9 @@ jobs:
       - name: Verify Bazel clippy flags match Cargo workspace lints
         run: python3 .github/scripts/verify_bazel_clippy_lints.py
 
+      - name: Verify release-critical Bazel compile-data edges
+        run: python3 .github/scripts/upstream_convergence_bazel_data.py
+
       - name: Verify blocking CI runner routing
         run: python3 .github/scripts/verify_blocking_ci_runner_routing.py
 
