@@ -12,9 +12,22 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
+fn codex_command(codex_lab_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    cmd.env("CODEX_LAB_HOME", codex_lab_home);
+    Ok(cmd)
+}
+
+fn codex_command_with_legacy_homes(
+    codex_lab_home: &Path,
+    default_home: &Path,
+    codex_home: &Path,
+    code_home: &Path,
+) -> Result<assert_cmd::Command> {
+    let mut cmd = codex_command(codex_lab_home)?;
+    cmd.env("HOME", default_home);
     cmd.env("CODEX_HOME", codex_home);
+    cmd.env("CODE_HOME", code_home);
     Ok(cmd)
 }
 
@@ -69,6 +82,70 @@ async fn add_and_remove_server_updates_global_config() -> Result<()> {
 
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     assert!(servers.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_lab_home_preserves_default_home_sentinel_when_legacy_homes_are_set() -> Result<()> {
+    let default_home = TempDir::new()?;
+    let default_lab_home = default_home.path().join(".codex-lab");
+    std::fs::create_dir(&default_lab_home)?;
+    let default_config = default_lab_home.join("config.toml");
+    let sentinel = b"model = \"sentinel-model\"\n";
+    std::fs::write(&default_config, sentinel)?;
+
+    let codex_lab_home = TempDir::new()?;
+    let codex_home = TempDir::new()?;
+    let code_home = TempDir::new()?;
+    codex_command_with_legacy_homes(
+        codex_lab_home.path(),
+        default_home.path(),
+        codex_home.path(),
+        code_home.path(),
+    )?
+    .args(["mcp", "add", "docs", "--", "echo", "hello"])
+    .assert()
+    .success()
+    .stdout(contains("Added global MCP server 'docs'."));
+
+    assert_eq!(std::fs::read(default_config)?, sentinel);
+    assert!(
+        load_global_mcp_servers(codex_lab_home.path())
+            .await?
+            .contains_key("docs")
+    );
+    assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
+    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn codex_home_alone_does_not_redirect_lab_config() -> Result<()> {
+    let default_home = TempDir::new()?;
+    let default_lab_home = default_home.path().join(".codex-lab");
+    std::fs::create_dir(&default_lab_home)?;
+    let codex_home = TempDir::new()?;
+    let code_home = TempDir::new()?;
+
+    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    cmd.env("HOME", default_home.path());
+    cmd.env("CODEX_HOME", codex_home.path());
+    cmd.env("CODE_HOME", code_home.path());
+    cmd.env_remove("CODEX_LAB_HOME");
+    cmd.args(["mcp", "add", "docs", "--", "echo", "hello"])
+        .assert()
+        .success()
+        .stdout(contains("Added global MCP server 'docs'."));
+
+    assert!(
+        load_global_mcp_servers(&default_lab_home)
+            .await?
+            .contains_key("docs")
+    );
+    assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
+    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
 
     Ok(())
 }
