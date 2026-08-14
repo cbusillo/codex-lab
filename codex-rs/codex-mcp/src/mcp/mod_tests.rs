@@ -148,6 +148,7 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
             PluginCapabilitySummary {
                 config_name: "alpha@test".to_string(),
                 display_name: "alpha-plugin".to_string(),
+                plugin_namespace: None,
                 app_connector_ids: vec![AppConnectorId("connector_example".to_string())],
                 mcp_server_names: vec!["alpha".to_string()],
                 ..PluginCapabilitySummary::default()
@@ -155,6 +156,7 @@ fn tool_plugin_provenance_collects_app_and_mcp_sources() {
             PluginCapabilitySummary {
                 config_name: "beta@test".to_string(),
                 display_name: "beta-plugin".to_string(),
+                plugin_namespace: None,
                 app_connector_ids: vec![
                     AppConnectorId("connector_example".to_string()),
                     AppConnectorId("connector_gmail".to_string()),
@@ -219,6 +221,7 @@ fn selected_mcp_attribution_does_not_join_an_unrelated_local_summary() {
             PluginCapabilitySummary {
                 config_name: "shared-plugin-id".to_string(),
                 display_name: "Local GitHub".to_string(),
+                plugin_namespace: None,
                 mcp_server_names: vec!["github".to_string()],
                 ..PluginCapabilitySummary::default()
             },
@@ -362,6 +365,25 @@ fn codex_apps_server_config_forwards_originator_and_configured_product_sku_heade
     }
 }
 
+#[test]
+fn effective_mcp_servers_preserve_chatgpt_auth_for_staging() {
+    for url in [
+        "https://chatgpt-staging.com",
+        "https://preview.chatgpt-staging.com",
+    ] {
+        let mut config = test_mcp_config(PathBuf::new());
+        config.chatgpt_base_url = url.to_string();
+        let server = codex_apps_mcp_server_config(
+            url, /*apps_mcp_product_sku*/ None, /*originator*/ None,
+        );
+        let configured = HashMap::from([("staging".to_string(), server)]);
+        let effective =
+            effective_mcp_servers_from_configured(configured, &config, /*auth*/ None);
+
+        assert_eq!(effective["staging"].config().auth, McpServerAuth::ChatGpt);
+    }
+}
+
 #[tokio::test]
 async fn effective_mcp_servers_preserve_runtime_servers() {
     let codex_home = tempfile::tempdir().expect("tempdir");
@@ -379,11 +401,13 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -405,11 +429,13 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: None,
             tool_timeout_sec: None,
@@ -464,69 +490,4 @@ async fn effective_mcp_servers_preserve_runtime_servers() {
         }
         other => panic!("expected streamable http transport, got {other:?}"),
     }
-}
-
-#[test]
-fn host_owned_codex_apps_preserves_chatgpt_auth_for_custom_base_url() {
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let mut config = test_mcp_config(codex_home.path().to_path_buf());
-    config.apps_enabled = true;
-    config.chatgpt_base_url = "http://localhost:8080".to_string();
-    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let mut catalog = ResolvedMcpCatalog::builder();
-    catalog.register(McpServerRegistration::from_compatibility(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        "host-owned-codex-apps",
-        codex_apps_mcp_server_config(
-            &config.chatgpt_base_url,
-            config.apps_mcp_product_sku.as_deref(),
-            /*originator*/ None,
-        ),
-    ));
-    config.mcp_server_catalog = catalog.build();
-
-    let effective = effective_mcp_servers(&config, Some(&auth));
-    let codex_apps = effective
-        .get(CODEX_APPS_MCP_SERVER_NAME)
-        .and_then(EffectiveMcpServer::configured_config)
-        .expect("host-owned Codex Apps server should remain available");
-
-    assert_eq!(codex_apps.auth, McpServerAuth::ChatGpt);
-}
-
-#[test]
-fn extension_override_cannot_send_chatgpt_auth_to_custom_codex_apps_origin() {
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let mut config = test_mcp_config(codex_home.path().to_path_buf());
-    config.apps_enabled = true;
-    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
-    let mut catalog = ResolvedMcpCatalog::builder();
-    catalog.register(McpServerRegistration::from_compatibility(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        "host-owned-codex-apps",
-        codex_apps_mcp_server_config(
-            &config.chatgpt_base_url,
-            config.apps_mcp_product_sku.as_deref(),
-            /*originator*/ None,
-        ),
-    ));
-    catalog.register(McpServerRegistration::from_extension(
-        CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        "untrusted-extension",
-        /*contribution_order*/ 0,
-        codex_apps_mcp_server_config(
-            "https://extension.example",
-            config.apps_mcp_product_sku.as_deref(),
-            /*originator*/ None,
-        ),
-    ));
-    config.mcp_server_catalog = catalog.build();
-
-    let effective = effective_mcp_servers(&config, Some(&auth));
-    let codex_apps = effective
-        .get(CODEX_APPS_MCP_SERVER_NAME)
-        .and_then(EffectiveMcpServer::configured_config)
-        .expect("extension Codex Apps override should remain available");
-
-    assert_eq!(codex_apps.auth, McpServerAuth::OAuth);
 }

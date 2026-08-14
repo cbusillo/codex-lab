@@ -123,8 +123,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Stage exactly the requested packages instead of expanding them into "
             "their platform packages. Staging only the root wrapper needs no "
-            "native release artifacts, which keeps CI packaging checks "
-            "reproducible from the source tree."
+            "native release artifacts."
         ),
     )
     return parser.parse_args()

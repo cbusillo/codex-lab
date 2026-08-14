@@ -15,7 +15,6 @@ use codex_app_server_protocol::McpToolCallStatus as ApiMcpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus as ApiPatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind as ApiPatchChangeKind;
 use codex_app_server_protocol::ProjectValidationCompletedNotification;
-use codex_app_server_protocol::ProjectValidationSkipReason as ApiProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus as ApiProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
@@ -67,7 +66,6 @@ use codex_exec::McpToolCallStatus;
 use codex_exec::PatchApplyStatus;
 use codex_exec::PatchChangeKind;
 use codex_exec::ProjectValidationCompletedEvent;
-use codex_exec::ProjectValidationSkipReason;
 use codex_exec::ProjectValidationStatus;
 use codex_exec::ReasoningItem;
 use codex_exec::ThreadErrorEvent;
@@ -121,7 +119,7 @@ fn session_configured_produces_thread_started_event() {
         parent_thread_id: None,
         thread_source: None,
         thread_name: None,
-        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
+        history_mode: Default::default(),
         model: "codex-mini-latest".to_string(),
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
@@ -167,6 +165,52 @@ fn turn_started_emits_turn_started_event() {
         collected,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnStarted(TurnStartedEvent {})],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
+fn project_validation_completed_emits_validation_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(
+        ServerNotification::ProjectValidationCompleted(ProjectValidationCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: Some("validation-1".to_string()),
+            command: vec!["just".to_string(), "test".to_string()],
+            command_truncated: false,
+            cwd: Some(test_path_buf("/tmp/project").abs()),
+            status: ApiProjectValidationStatus::Passed,
+            skip_reason: None,
+            changed_file_count: Some(2),
+            exit_code: Some(0),
+            output: "ok".to_string(),
+            output_truncated: false,
+            duration_ms: 12,
+        }),
+    );
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ProjectValidationCompleted(
+                ProjectValidationCompletedEvent {
+                    turn_id: "turn-1".to_string(),
+                    item_id: Some("validation-1".to_string()),
+                    command: vec!["just".to_string(), "test".to_string()],
+                    command_truncated: false,
+                    cwd: Some(test_path_buf("/tmp/project").abs()),
+                    status: ProjectValidationStatus::Passed,
+                    skip_reason: None,
+                    changed_file_count: Some(2),
+                    exit_code: Some(0),
+                    output: "ok".to_string(),
+                    output_truncated: false,
+                    duration_ms: 12,
+                }
+            )],
             status: CodexStatus::Running,
         }
     );
@@ -1688,138 +1732,4 @@ fn model_reroute_surfaces_as_error_item() {
             message: "model rerouted: gpt-5 -> gpt-5-mini (HighRiskCyberActivity)".to_string(),
         })
     );
-}
-
-/// `codex exec --json` re-exports every project-validation outcome under its own
-/// event type, so the status and skip-reason translation has to be exercised
-/// through the real processor rather than by serializing a hand-built struct.
-#[test]
-fn project_validation_completed_maps_every_status_through_the_processor() {
-    let cases = [
-        (
-            ApiProjectValidationStatus::Passed,
-            ProjectValidationStatus::Passed,
-        ),
-        (
-            ApiProjectValidationStatus::ActionableFailure,
-            ProjectValidationStatus::ActionableFailure,
-        ),
-        (
-            ApiProjectValidationStatus::ConfigurationError,
-            ProjectValidationStatus::ConfigurationError,
-        ),
-        (
-            ApiProjectValidationStatus::TimedOut,
-            ProjectValidationStatus::TimedOut,
-        ),
-        (
-            ApiProjectValidationStatus::InfrastructureFailure,
-            ProjectValidationStatus::InfrastructureFailure,
-        ),
-        (
-            ApiProjectValidationStatus::Cancelled,
-            ProjectValidationStatus::Cancelled,
-        ),
-        (
-            ApiProjectValidationStatus::Skipped,
-            ProjectValidationStatus::Skipped,
-        ),
-    ];
-
-    for (api_status, expected_status) in cases {
-        let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
-        let collected =
-            processor.collect_thread_events(ServerNotification::ProjectValidationCompleted(
-                project_validation_notification(api_status, /*skip_reason*/ None),
-            ));
-
-        assert_eq!(
-            collected,
-            CollectedThreadEvents {
-                events: vec![ThreadEvent::ProjectValidationCompleted(
-                    ProjectValidationCompletedEvent {
-                        item_id: Some("validation-item".to_string()),
-                        command: vec!["just".to_string(), "test".to_string()],
-                        command_truncated: true,
-                        cwd: Some(test_path_buf("/repo").display().to_string()),
-                        status: expected_status,
-                        skip_reason: None,
-                        changed_file_count: Some(3),
-                        exit_code: Some(2),
-                        output: "validation output".to_string(),
-                        output_truncated: true,
-                        duration_ms: 1234,
-                    }
-                )],
-                status: CodexStatus::Running,
-            }
-        );
-    }
-}
-
-#[test]
-fn project_validation_completed_maps_every_skip_reason_through_the_processor() {
-    let cases = [
-        (
-            ApiProjectValidationSkipReason::ValidationDisabled,
-            ProjectValidationSkipReason::ValidationDisabled,
-        ),
-        (
-            ApiProjectValidationSkipReason::NoChangedFiles,
-            ProjectValidationSkipReason::NoChangedFiles,
-        ),
-        (
-            ApiProjectValidationSkipReason::NoApplicableProvider,
-            ProjectValidationSkipReason::NoApplicableProvider,
-        ),
-        (
-            ApiProjectValidationSkipReason::NonRootAgent,
-            ProjectValidationSkipReason::NonRootAgent,
-        ),
-        (
-            ApiProjectValidationSkipReason::UnchangedFingerprint,
-            ProjectValidationSkipReason::UnchangedFingerprint,
-        ),
-        (
-            ApiProjectValidationSkipReason::UnsupportedEnvironment,
-            ProjectValidationSkipReason::UnsupportedEnvironment,
-        ),
-    ];
-
-    for (api_reason, expected_reason) in cases {
-        let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
-        let collected = processor.collect_thread_events(
-            ServerNotification::ProjectValidationCompleted(project_validation_notification(
-                ApiProjectValidationStatus::Skipped,
-                Some(api_reason),
-            )),
-        );
-
-        let [ThreadEvent::ProjectValidationCompleted(event)] = collected.events.as_slice() else {
-            panic!("expected one ProjectValidationCompleted event, got {collected:?}");
-        };
-        assert_eq!(event.status, ProjectValidationStatus::Skipped);
-        assert_eq!(event.skip_reason, Some(expected_reason));
-    }
-}
-
-fn project_validation_notification(
-    status: ApiProjectValidationStatus,
-    skip_reason: Option<ApiProjectValidationSkipReason>,
-) -> ProjectValidationCompletedNotification {
-    ProjectValidationCompletedNotification {
-        thread_id: "thread-1".to_string(),
-        turn_id: "turn-1".to_string(),
-        item_id: Some("validation-item".to_string()),
-        command: vec!["just".to_string(), "test".to_string()],
-        command_truncated: true,
-        cwd: Some(test_path_buf("/repo").abs()),
-        status,
-        skip_reason,
-        changed_file_count: Some(3),
-        exit_code: Some(2),
-        output: "validation output".to_string(),
-        output_truncated: true,
-        duration_ms: 1234,
-    }
 }

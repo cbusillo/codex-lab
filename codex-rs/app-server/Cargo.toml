@@ -24,6 +24,21 @@ doctest = false
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+# These files are retained convergence references for behavior that is not wired
+# into this downstream app-server test target. They are not compiled modules.
+ignored-paths = [
+    "tests/suite/v2/account_thread_usage.rs",
+    "tests/suite/v2/external_agent_import_sync.rs",
+    "tests/suite/v2/model_auto_review.rs",
+    "tests/suite/v2/otel.rs",
+    "tests/suite/v2/plugin_search.rs",
+    "tests/suite/v2/rollout_migration.rs",
+    "tests/suite/v2/server_diagnostics.rs",
+    "tests/suite/v2/thread_sections.rs",
+    "tests/suite/v2/view_image.rs",
+]
+
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -45,6 +60,7 @@ codex-config = { workspace = true }
 codex-connectors = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }
+codex-diagnostics = { workspace = true }
 codex-home = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
@@ -79,6 +95,7 @@ codex-mcp-extension = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-protocol = { workspace = true }
+codex-queue-extension = { workspace = true }
 codex-app-server-protocol = { workspace = true }
 codex-app-server-transport = { workspace = true }
 codex-feedback = { workspace = true }

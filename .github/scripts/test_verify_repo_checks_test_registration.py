@@ -75,6 +75,24 @@ class UnregisteredTestsTest(unittest.TestCase):
             (nested / "__init__.py").write_text("")
             self.assertEqual(unregistered_tests({"pkg": ["test_*.py"]}, root), [])
 
+    def test_explicit_nested_discovery_does_not_need_a_package_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            nested = root / "pkg" / "nested-tools"
+            nested.mkdir(parents=True)
+            (nested / "test_nested.py").write_text("")
+
+            self.assertEqual(
+                unregistered_tests(
+                    {
+                        "pkg": ["test_*.py"],
+                        "pkg/nested-tools": ["test_*.py"],
+                    },
+                    root,
+                ),
+                [],
+            )
+
     def test_missing_discovery_directory_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             problems = unregistered_tests({"gone": ["test_*.py"]}, Path(temp_dir))
@@ -118,13 +136,7 @@ class RepoCheckWiringTest(unittest.TestCase):
         for name in self.PREVIOUSLY_UNREGISTERED:
             with self.subTest(name=name):
                 self.assertTrue((scripts / name).is_file())
-                self.assertEqual(
-                    unregistered_tests(
-                        {".github/scripts": registrations[".github/scripts"]},
-                        REPO_ROOT,
-                    ),
-                    [],
-                )
+                self.assertEqual(unregistered_tests(registrations, REPO_ROOT), [])
 
 
 if __name__ == "__main__":

@@ -25,9 +25,14 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 LEGACY_POLICY_VERSION = 1
-SUPPORTED_POLICY_VERSIONS = (LEGACY_POLICY_VERSION, POLICY_VERSION)
+PREVIOUS_POLICY_VERSION = 2
+SUPPORTED_POLICY_VERSIONS = (
+    LEGACY_POLICY_VERSION,
+    PREVIOUS_POLICY_VERSION,
+    POLICY_VERSION,
+)
 
 # Lanes whose local content may not silently disappear or silently revert to the
 # upstream blob during a refresh. `upstream_convergence_guard.py` enforces this.
@@ -504,7 +509,47 @@ POST_ANCHOR_RULES = (
     ),
 )
 
+CURRENT_IDENTITY_MODEL_RULES = (
+    Rule(
+        patterns=(
+            "README.md",
+            "codex-cli/package.json",
+            "codex-rs/cli/src/main.rs",
+            "codex-rs/cli/src/login.rs",
+            "codex-rs/tui/src/app.rs",
+            "codex-rs/tui/src/lib.rs",
+            "codex-rs/tui/src/status/**",
+        ),
+        lane="intentionally_owned",
+        contracts=("IDENTITY-1",),
+        reason="invariant Codex Lab product identity",
+    ),
+    Rule(
+        patterns=(
+            "codex-rs/model-provider-info/**",
+            "codex-rs/models-manager/**",
+            "codex-rs/core/src/models_manager/**",
+            "codex-rs/tui/src/model*",
+            "codex-rs/tui/src/bottom_pane/model*",
+        ),
+        lane="amber_contract_adapt",
+        contracts=("MODEL-1",),
+        reason="upstream model catalog and defaults with Codex Lab compatibility",
+    ),
+)
+
 POLICY_V2_RULES = (*GOVERNANCE_RULES, *POST_ANCHOR_RULES, *POLICY_V1_RULES)
+
+POLICY_V3_RULES = (
+    *GOVERNANCE_RULES,
+    *POST_ANCHOR_RULES,
+    *CURRENT_IDENTITY_MODEL_RULES,
+    *(
+        rule
+        for rule in POLICY_V1_RULES
+        if not ({"IDENTITY-1", "MODEL-1"} & set(rule.contracts))
+    ),
+)
 
 
 def git_environment(**updates: str) -> dict[str, str]:
@@ -649,8 +694,10 @@ def run_git_process(
 def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
     if policy_version == LEGACY_POLICY_VERSION:
         return POLICY_V1_RULES
-    if policy_version == POLICY_VERSION:
+    if policy_version == PREVIOUS_POLICY_VERSION:
         return POLICY_V2_RULES
+    if policy_version == POLICY_VERSION:
+        return POLICY_V3_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"

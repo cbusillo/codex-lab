@@ -4,9 +4,9 @@ use super::CheckStatus;
 use super::Config;
 use super::DoctorCheck;
 use super::DoctorIssue;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::protocol::InternalSessionSource;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_state::ThreadStateAuditRow;
@@ -212,7 +212,7 @@ fn missing_state_db_check(scan: RolloutScan, details: Vec<String>) -> DoctorChec
                 scan.reached_scan_cap
             ))
             .expected("rollout directories are fully scannable")
-            .remedy("Check file permissions and unexpected files under CODEX_LAB_HOME sessions."),
+            .remedy("Check file permissions and unexpected files under CODEX_HOME sessions."),
         );
     }
     check
@@ -430,7 +430,7 @@ fn parity_check_from_scan_and_rows(
                 scan.reached_scan_cap
             ))
             .expected("rollout directories are fully scannable")
-            .remedy("Check file permissions and unexpected files under CODEX_LAB_HOME sessions."),
+            .remedy("Check file permissions and unexpected files under CODEX_HOME sessions."),
         );
     }
     check

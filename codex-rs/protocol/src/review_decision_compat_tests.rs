@@ -15,6 +15,7 @@ fn all_variants() -> Vec<ReviewDecision> {
             ]),
         },
         ReviewDecision::ApprovedForSession,
+        ReviewDecision::ApprovedMcpPolicyAmendment,
         ReviewDecision::NetworkPolicyAmendment {
             network_policy_amendment: NetworkPolicyAmendment {
                 host: "example.com".to_string(),

@@ -226,6 +226,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::make_test_app;
+    use crate::start_embedded_app_server_for_picker;
+    use codex_app_server_client::AppServerEvent;
+    use codex_app_server_protocol::ServerNotification;
 
     #[test]
     fn capability_updates_ignore_stale_refresh_ids() {
@@ -283,6 +287,37 @@ mod tests {
         assert_eq!(
             state.refresh_status,
             Some(ExternalAgentCapabilitiesRefreshStatus::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn app_server_capability_update_finishes_the_matching_refresh() {
+        let mut app = Box::pin(make_test_app()).await;
+        let app_server = start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+            .await
+            .expect("embedded app server");
+        app.agent_settings.refresh_id = Some("current".to_string());
+        app.agent_settings.cancel_pending = true;
+
+        app.handle_app_server_event(
+            &app_server,
+            AppServerEvent::ServerNotification(Box::new(
+                ServerNotification::ExternalAgentCapabilitiesUpdated(
+                    ExternalAgentCapabilitiesUpdatedNotification {
+                        refresh_id: "current".to_string(),
+                        status: ExternalAgentCapabilitiesRefreshStatus::Completed,
+                        providers: Vec::new(),
+                    },
+                ),
+            )),
+        )
+        .await;
+
+        assert!(app.agent_settings.refresh_id.is_none());
+        assert!(!app.agent_settings.cancel_pending);
+        assert_eq!(
+            app.agent_settings.refresh_status,
+            Some(ExternalAgentCapabilitiesRefreshStatus::Completed)
         );
     }
 }

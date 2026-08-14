@@ -84,13 +84,6 @@ supports a narrow split-filesystem subset: full-read split policies whose
 writable roots still match the legacy `WorkspaceWrite` root set, but add extra
 read-only carveouts under those writable roots.
 
-The unelevated backend is a compatibility mode, not a strong filesystem
-containment boundary. Its Windows `WRITE_RESTRICTED` token applies restricting
-SIDs only to GenericWrite access, and broad filesystem ACLs can weaken those
-restrictions. It does not remove ambient `DELETE`, `WRITE_DAC`, or `WRITE_OWNER`
-rights already granted to the signed-in user. Use the elevated backend when
-workspace-write containment is required.
-
 New `[permissions]` / split filesystem policies remain supported on Windows
 only when they can be enforced directly by the selected Windows backend or
 round-trip through the legacy `SandboxPolicy` model without changing semantics.

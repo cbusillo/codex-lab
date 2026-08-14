@@ -85,14 +85,6 @@ impl Provider {
         }
     }
 
-    pub fn is_azure_responses_endpoint(&self) -> bool {
-        is_azure_responses_provider(&self.name, Some(&self.base_url))
-    }
-
-    pub fn supports_responses_max_output_tokens(&self) -> bool {
-        !is_chatgpt_backend_base_url(&self.base_url)
-    }
-
     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
         let mut url = Url::parse(&self.url_for_path(path))?;
 
@@ -128,13 +120,6 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
         "windows.net/openai",
     ];
     AZURE_MARKERS.iter().any(|marker| base_url.contains(marker))
-}
-
-fn is_chatgpt_backend_base_url(base_url: &str) -> bool {
-    Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-        .is_some_and(|host| host == "chatgpt.com" || host.ends_with(".chatgpt.com"))
 }
 
 #[cfg(test)]
@@ -176,36 +161,5 @@ mod tests {
                 "expected {base_url} not to be detected as Azure"
             );
         }
-    }
-
-    #[test]
-    fn detects_chatgpt_response_limit_support() {
-        let provider = |base_url: &str| Provider {
-            name: "test".to_string(),
-            base_url: base_url.to_string(),
-            query_params: None,
-            headers: HeaderMap::new(),
-            retry: RetryConfig {
-                max_attempts: 1,
-                base_delay: Duration::ZERO,
-                retry_429: false,
-                retry_5xx: false,
-                retry_transport: false,
-            },
-            stream_idle_timeout: Duration::ZERO,
-        };
-
-        assert!(
-            !provider("https://chatgpt.com/backend-api/codex")
-                .supports_responses_max_output_tokens()
-        );
-        assert!(
-            !provider("https://ab.chatgpt.com/backend-api/codex")
-                .supports_responses_max_output_tokens()
-        );
-        assert!(provider("https://api.openai.com/v1").supports_responses_max_output_tokens());
-        assert!(
-            provider("https://proxy.example.com/chatgpt").supports_responses_max_output_tokens()
-        );
     }
 }

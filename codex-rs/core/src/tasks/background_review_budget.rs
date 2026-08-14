@@ -118,7 +118,12 @@ impl BackgroundReviewBudgetGate {
         retry: bool,
     ) -> bool {
         let original_tool_count = prompt.tools.len();
-        prompt.tools.retain(|tool| review_tool_allowed(tool.name()));
+        prompt.tools = prompt
+            .tools
+            .iter()
+            .filter(|tool| review_tool_allowed(tool.name()))
+            .cloned()
+            .collect();
         let pruned_tool_count = original_tool_count.saturating_sub(prompt.tools.len());
         let consumed_tokens = token_usage.and_then(review_token_count).unwrap_or_default();
         let estimate = estimate_prompt_tokens(prompt);

@@ -43,6 +43,7 @@ fn collects_option_and_free_form_answers() {
                 options: None,
             },
         ],
+        is_blocking: false,
         auto_resolution_ms: Some(60_000),
     };
     let mut input = Cursor::new(b"2\ninclude snapshots\n");
@@ -102,6 +103,7 @@ fn retries_invalid_selection_and_collects_other_answer() {
                 description: "Inspect core".to_string(),
             }]),
         }],
+        is_blocking: true,
         auto_resolution_ms: None,
     };
     let mut input = Cursor::new(b"9\no\nSDK wrapper\n");

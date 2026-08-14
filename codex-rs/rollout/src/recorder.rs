@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use chrono::SecondsFormat;
+use codex_protocol::RolloutId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -46,11 +47,17 @@ use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
 use super::list::get_threads;
 use super::list::get_threads_in_root;
+use super::list::parse_cursor;
 use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::ordinal::RolloutOrdinalState;
 use super::ordinal::ordinal_state_for_rollout;
+use super::rollout_file_name::RolloutFileName;
 use super::session_index::find_thread_names_by_ids;
+use crate::InitialHistory;
+use crate::ResumedHistory;
+use crate::RolloutItem;
+use crate::RolloutLine;
 use crate::config::RolloutConfigView;
 use crate::state_db;
 use crate::state_db::StateDbHandle;
@@ -58,11 +65,7 @@ use codex_git_utils::collect_git_info;
 use codex_git_utils::get_git_repo_root;
 use codex_protocol::protocol::GitInfo as ProtocolGitInfo;
 use codex_protocol::protocol::HistoryPosition;
-use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::ResumedHistory;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -94,6 +97,13 @@ pub enum RolloutRecorderParams {
     Create {
         session_id: SessionId,
         conversation_id: ThreadId,
+        /// Overrides the rollout ID encoded in the filename.
+        ///
+        /// Normally this is `None`, so the filename is
+        /// `rollout-<timestamp>-<conversation_id>.jsonl`. `thread/revert` sets it, producing
+        /// `rollout-<timestamp>-<conversation_id>_<rollout_id>.jsonl`, because revert keeps the
+        /// thread ID stable while creating a new immutable rollout file.
+        rollout_id_override: Option<RolloutId>,
         forked_from_id: Option<ThreadId>,
         parent_thread_id: Option<ThreadId>,
         source: Box<SessionSource>,
@@ -125,11 +135,6 @@ enum RolloutCmd {
     },
     Shutdown {
         ack: oneshot::Sender<std::io::Result<()>>,
-    },
-    #[cfg(test)]
-    Block {
-        entered: oneshot::Sender<()>,
-        release: oneshot::Receiver<()>,
     },
 }
 
@@ -195,6 +200,7 @@ impl RolloutRecorderParams {
         Self::Create {
             session_id: conversation_id.into(),
             conversation_id,
+            rollout_id_override: None,
             forked_from_id,
             parent_thread_id,
             source: Box::new(source),
@@ -229,6 +235,20 @@ impl RolloutRecorderParams {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         if let Self::Create { session_id: id, .. } = &mut self {
             *id = session_id;
+        }
+        self
+    }
+
+    /// Override the rollout ID while preserving the thread ID.
+    ///
+    /// This is for creating a new immutable rollout file for an existing thread.
+    pub fn with_rollout_id(mut self, rollout_id: RolloutId) -> Self {
+        if let Self::Create {
+            rollout_id_override,
+            ..
+        } = &mut self
+        {
+            *rollout_id_override = Some(rollout_id);
         }
         self
     }
@@ -821,6 +841,7 @@ impl RolloutRecorder {
             RolloutRecorderParams::Create {
                 session_id,
                 conversation_id,
+                rollout_id_override,
                 forked_from_id,
                 parent_thread_id,
                 source,
@@ -838,10 +859,8 @@ impl RolloutRecorder {
             } => {
                 let ordinal_state =
                     RolloutOrdinalState::for_new_rollout(history_mode, history_base);
-                let log_file_info = precompute_log_file_info(config, conversation_id)?;
-                let path = log_file_info.path.clone();
-                let thread_id = log_file_info.conversation_id;
-                let started_at = log_file_info.timestamp;
+                let (path, started_at) =
+                    precompute_new_rollout_path(config, conversation_id, rollout_id_override)?;
 
                 let timestamp_format: &[FormatItem] = format_description!(
                     "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
@@ -853,7 +872,7 @@ impl RolloutRecorder {
 
                 let session_meta = SessionMeta {
                     session_id,
-                    id: thread_id,
+                    id: conversation_id,
                     forked_from_id,
                     parent_thread_id,
                     timestamp,
@@ -884,57 +903,23 @@ impl RolloutRecorder {
 
                 RolloutWriterState {
                     writer: None,
-                    reference_update: None,
-                    reference_source_lease: None,
-                    rollout_lease: None,
-                    deferred_log_file_info: Some(log_file_info),
+                    deferred_creation: true,
                     pending_items: Vec::new(),
                     meta: Some(session_meta),
                     cwd: cwd.clone(),
-                    codex_home: config.codex_home().to_path_buf(),
-                    compression_mode: config.rollout_compression_mode(),
-                    thread_id: Some(thread_id),
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
                 }
             }
             RolloutRecorderParams::Resume { path } => {
-                let lease_path = compression::plain_rollout_path(path.as_path());
-                let thread_id = if matches!(
-                    config.rollout_compression_mode(),
-                    crate::RolloutCompressionMode::Enabled
-                ) {
-                    Some(compression::thread_id_from_rollout_path(
-                        lease_path.as_path(),
-                    )?)
-                } else {
-                    None
-                };
-                let rollout_lease = match thread_id {
-                    Some(thread_id) => {
-                        compression::RolloutLease::acquire_shared(
-                            config.codex_home(),
-                            config.rollout_compression_mode(),
-                            thread_id,
-                        )
-                        .await?
-                    }
-                    None => None,
-                };
                 let (path, file, ordinal_state) = open_rollout_for_append(path.as_path()).await?;
                 RolloutWriterState {
                     writer: Some(JsonlWriter { file }),
-                    reference_update: None,
-                    reference_source_lease: None,
-                    rollout_lease,
-                    deferred_log_file_info: None,
+                    deferred_creation: false,
                     pending_items: Vec::new(),
                     meta: None,
                     cwd: cwd.clone(),
-                    codex_home: config.codex_home().to_path_buf(),
-                    compression_mode: config.rollout_compression_mode(),
-                    thread_id,
                     rollout_path: path,
                     ordinal_state,
                     last_logged_error: None,
@@ -1167,17 +1152,57 @@ fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
             .get("payload")
             .is_some_and(is_legacy_ghost_snapshot_response_item),
         Some("compacted") => {
-            if let Some(replacement_history) = value
-                .get_mut("payload")
-                .and_then(|payload| payload.get_mut("replacement_history"))
+            let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+                return false;
+            };
+            let Some(replacement_history) =
+                payload.get("replacement_history").and_then(Value::as_array)
+            else {
+                return false;
+            };
+            let remove = replacement_history
+                .iter()
+                .map(is_legacy_ghost_snapshot_response_item)
+                .collect::<Vec<_>>();
+            if !remove.contains(&true) {
+                return false;
+            }
+
+            // Legacy checkpoints have no sidecar. If a sidecar is present, only filter a
+            // full-length array; malformed shapes should remain intact for typed deserialization
+            // to reject instead of silently shifting metadata onto a different history item.
+            match payload.get("replacement_history_metadata") {
+                None => {}
+                Some(Value::Array(metadata)) if metadata.len() == remove.len() => {}
+                Some(_) => return false,
+            }
+
+            let Some(replacement_history) = payload
+                .get_mut("replacement_history")
+                .and_then(Value::as_array_mut)
+            else {
+                return false;
+            };
+            retain_entries_not_marked(replacement_history, &remove);
+            if let Some(metadata) = payload
+                .get_mut("replacement_history_metadata")
                 .and_then(Value::as_array_mut)
             {
-                replacement_history.retain(|item| !is_legacy_ghost_snapshot_response_item(item));
+                retain_entries_not_marked(metadata, &remove);
             }
             false
         }
         _ => false,
     }
+}
+
+fn retain_entries_not_marked(entries: &mut Vec<Value>, remove: &[bool]) {
+    let mut index = 0;
+    entries.retain(|_| {
+        let retain = !remove[index];
+        index += 1;
+        retain
+    });
 }
 
 fn is_legacy_ghost_snapshot_response_item(value: &Value) -> bool {
@@ -1193,10 +1218,20 @@ fn truncate_fs_page(
         return page;
     }
     page.items.truncate(page_size);
-    page.next_cursor = page
-        .items
-        .last()
-        .and_then(|item| cursor_from_thread_item(item, sort_key));
+    page.next_cursor = page.items.last().and_then(|item| {
+        let file_name = item.path.file_name()?.to_str()?;
+        let (created_at, _id) = parse_timestamp_uuid_from_filename(file_name)?;
+        let cursor_token = match sort_key {
+            ThreadSortKey::CreatedAt => created_at.format(&Rfc3339).ok()?,
+            ThreadSortKey::UpdatedAt => item.updated_at.as_deref()?.to_string(),
+            ThreadSortKey::RecencyAt => item
+                .recency_at
+                .as_deref()
+                .or(item.updated_at.as_deref())?
+                .to_string(),
+        };
+        parse_cursor(cursor_token.as_str())
+    });
     page
 }
 
@@ -1586,21 +1621,11 @@ fn cursor_from_thread_item(item: &ThreadItem, sort_key: ThreadSortKey) -> Option
     }
 }
 
-struct LogFileInfo {
-    /// Full path to the rollout file.
-    path: PathBuf,
-
-    /// Session ID (also embedded in filename).
-    conversation_id: ThreadId,
-
-    /// Timestamp for the start of the session.
-    timestamp: OffsetDateTime,
-}
-
-fn precompute_log_file_info(
+fn precompute_new_rollout_path(
     config: &impl RolloutConfigView,
-    conversation_id: ThreadId,
-) -> std::io::Result<LogFileInfo> {
+    thread_id: ThreadId,
+    rollout_id_override: Option<RolloutId>,
+) -> std::io::Result<(PathBuf, OffsetDateTime)> {
     // Resolve ~/.codex/sessions/YYYY/MM/DD path.
     let timestamp = OffsetDateTime::now_local()
         .map_err(|e| IoError::other(format!("failed to get local time: {e}")))?;
@@ -1610,23 +1635,14 @@ fn precompute_log_file_info(
     dir.push(format!("{:02}", u8::from(timestamp.month())));
     dir.push(format!("{:02}", timestamp.day()));
 
-    // Custom format for YYYY-MM-DDThh-mm-ss. Use `-` instead of `:` for
-    // compatibility with filesystems that do not allow colons in filenames.
-    let format: &[FormatItem] =
-        format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
-    let date_str = timestamp
-        .format(format)
+    let rollout_id = rollout_id_override.unwrap_or(thread_id);
+    let filename = RolloutFileName::new(timestamp, thread_id, rollout_id)
+        .render()
         .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
-
-    let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
 
     let path = dir.join(filename);
 
-    Ok(LogFileInfo {
-        path,
-        conversation_id,
-        timestamp,
-    })
+    Ok((path, timestamp))
 }
 
 fn open_log_file(path: &Path) -> std::io::Result<File> {
@@ -1658,16 +1674,11 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
 /// unwritten suffix so the next barrier can reopen the file and retry.
 struct RolloutWriterState {
     writer: Option<JsonlWriter>,
-    reference_update: Option<compression::RolloutReferenceUpdate>,
-    reference_source_lease: Option<compression::RolloutLease>,
-    rollout_lease: Option<compression::RolloutLease>,
-    deferred_log_file_info: Option<LogFileInfo>,
+    /// True until a newly created rollout is first materialized.
+    deferred_creation: bool,
     pending_items: Vec<RolloutItem>,
     meta: Option<SessionMeta>,
     cwd: PathBuf,
-    codex_home: PathBuf,
-    compression_mode: crate::RolloutCompressionMode,
-    thread_id: Option<ThreadId>,
     rollout_path: PathBuf,
     ordinal_state: RolloutOrdinalState,
     last_logged_error: Option<String>,
@@ -1700,13 +1711,9 @@ impl RolloutWriterState {
 
     async fn shutdown(&mut self) -> std::io::Result<()> {
         if self.is_deferred() && self.pending_items.is_empty() {
-            self.release_storage_leases();
             return Ok(());
         }
-        self.write_pending_with_recovery("shutdown").await?;
-        self.writer = None;
-        self.release_storage_leases();
-        Ok(())
+        self.write_pending_with_recovery("shutdown").await
     }
 
     async fn write_pending_with_recovery(&mut self, operation: &str) -> std::io::Result<()> {
@@ -1737,7 +1744,7 @@ impl RolloutWriterState {
     }
 
     fn is_deferred(&self) -> bool {
-        self.writer.is_none() && self.deferred_log_file_info.is_some()
+        self.writer.is_none() && self.deferred_creation
     }
 
     fn enter_recovery_mode(&mut self, err: &IoError) {
@@ -1760,72 +1767,12 @@ impl RolloutWriterState {
             return Ok(());
         }
 
-        self.ensure_rollout_lease().await?;
-
-        let path = self
-            .deferred_log_file_info
-            .as_ref()
-            .map(|info| info.path.as_path())
-            .unwrap_or(self.rollout_path.as_path());
-        let file = open_log_file(path)?;
+        let file = open_log_file(self.rollout_path.as_path())?;
         self.writer = Some(JsonlWriter {
             file: tokio::fs::File::from_std(file),
         });
-        self.deferred_log_file_info = None;
+        self.deferred_creation = false;
         Ok(())
-    }
-
-    async fn ensure_rollout_lease(&mut self) -> std::io::Result<()> {
-        if self.rollout_lease.is_none() {
-            let Some(thread_id) = self.thread_id else {
-                return Ok(());
-            };
-            self.rollout_lease = compression::RolloutLease::acquire_shared(
-                self.codex_home.as_path(),
-                self.compression_mode,
-                thread_id,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn begin_reference_update_if_needed(&mut self) -> std::io::Result<()> {
-        if self.reference_update.is_some() {
-            return Ok(());
-        }
-        let Some(history_base) = self.meta.as_ref().and_then(|meta| meta.history_base) else {
-            return Ok(());
-        };
-        self.reference_source_lease = compression::RolloutLease::acquire_shared(
-            self.codex_home.as_path(),
-            self.compression_mode,
-            history_base.thread_id,
-        )
-        .await?;
-        if matches!(
-            self.compression_mode,
-            crate::RolloutCompressionMode::Enabled
-        ) {
-            self.reference_update =
-                Some(compression::RolloutReferenceUpdate::begin(self.codex_home.as_path()).await?);
-        }
-        Ok(())
-    }
-
-    fn commit_reference_update(&mut self) -> std::io::Result<()> {
-        if let Some(update) = self.reference_update.as_mut() {
-            update.commit()?;
-        }
-        self.reference_update = None;
-        self.reference_source_lease = None;
-        Ok(())
-    }
-
-    fn release_storage_leases(&mut self) {
-        self.reference_update = None;
-        self.reference_source_lease = None;
-        self.rollout_lease = None;
     }
 
     async fn write_session_meta_if_needed(&mut self) -> std::io::Result<()> {
@@ -1845,7 +1792,6 @@ impl RolloutWriterState {
 
     async fn write_pending_once(&mut self) -> std::io::Result<()> {
         self.ensure_writer_open().await?;
-        self.begin_reference_update_if_needed().await?;
         self.write_session_meta_if_needed().await?;
 
         self.write_pending_items_once().await?;
@@ -1853,7 +1799,6 @@ impl RolloutWriterState {
         if let Some(writer) = self.writer.as_mut() {
             writer.file.flush().await?;
         }
-        self.commit_reference_update()?;
         Ok(())
     }
 
@@ -1915,11 +1860,6 @@ async fn rollout_writer(
                     let _ = ack.send(Err(err));
                 }
             },
-            #[cfg(test)]
-            RolloutCmd::Block { entered, release } => {
-                let _ = entered.send(());
-                let _ = release.await;
-            }
         }
     }
 
@@ -1961,48 +1901,13 @@ async fn write_session_meta(
 /// `RolloutRecorder::record_canonical_items` so rollout writes remain ordered
 /// with the rest of the session stream.
 pub async fn append_rollout_item_to_path(
-    codex_home: &Path,
-    compression_mode: crate::RolloutCompressionMode,
     rollout_path: &Path,
     item: &RolloutItem,
 ) -> std::io::Result<()> {
-    let _rollout_lease = if matches!(compression_mode, crate::RolloutCompressionMode::Enabled) {
-        let thread_id = compression::thread_id_from_rollout_path(rollout_path)?;
-        compression::RolloutLease::acquire_shared(codex_home, compression_mode, thread_id).await?
-    } else {
-        None
-    };
-    let history_base = match item {
-        RolloutItem::SessionMeta(meta) => meta.meta.history_base,
-        _ => None,
-    };
-    let _source_lease = match (compression_mode, history_base) {
-        (crate::RolloutCompressionMode::Enabled, Some(history_base)) => {
-            compression::RolloutLease::acquire_shared(
-                codex_home,
-                compression_mode,
-                history_base.thread_id,
-            )
-            .await?
-        }
-        _ => None,
-    };
     let (_rollout_path, file, ordinal_state) = open_rollout_for_append(rollout_path).await?;
     let ordinal = ordinal_state.current()?;
     let mut writer = JsonlWriter { file };
-    let mut reference_update = if history_base.is_some()
-        && matches!(compression_mode, crate::RolloutCompressionMode::Enabled)
-    {
-        Some(compression::RolloutReferenceUpdate::begin(codex_home).await?)
-    } else {
-        None
-    };
-    writer.write_rollout_item(item, ordinal).await?;
-    writer.file.flush().await?;
-    if let Some(update) = reference_update.as_mut() {
-        update.commit()?;
-    }
-    Ok(())
+    writer.write_rollout_item(item, ordinal).await
 }
 
 async fn open_rollout_for_append(
@@ -2186,6 +2091,7 @@ async fn resume_candidate_matches_cwd(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::EventMsg(_) => None,
         })
     {

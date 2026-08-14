@@ -420,13 +420,12 @@ fn snapshot_merge_patch_changes_and_removes_nested_values() {
             "removed_section": null,
         }))
     );
+    let patch = current
+        .merge_patch_from(&previous)
+        .expect("changed snapshots should produce a patch");
     previous
-        .apply_merge_patch(
-            &current
-                .merge_patch_from(&previous)
-                .expect("changed snapshots should produce a patch"),
-        )
-        .expect("apply world-state merge patch");
+        .apply_merge_patch(&patch)
+        .expect("generated merge patch should apply");
     assert_eq!(previous, current);
     assert_eq!(current.merge_patch_from(&current), None);
 }

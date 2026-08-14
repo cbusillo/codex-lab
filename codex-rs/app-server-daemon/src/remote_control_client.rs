@@ -723,14 +723,6 @@ mod tests {
                 id: INITIALIZE_REQUEST_ID,
                 result: serde_json::json!({
                     "userAgent": "codex_app_server/1.2.3",
-                    "serverBuild": {
-                        "schemaVersion": 1,
-                        "version": "1.2.3",
-                        "sourceCommit": "unavailable",
-                        "dirtyState": "unavailable",
-                        "buildProfile": "release",
-                        "buildChannel": "lab"
-                    },
                     "codexHome": TEST_CODEX_HOME,
                     "platformFamily": "unix",
                     "platformOs": "macos",

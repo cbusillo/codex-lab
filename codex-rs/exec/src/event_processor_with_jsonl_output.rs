@@ -9,14 +9,13 @@ use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
-use codex_app_server_protocol::ProjectValidationSkipReason as AppProjectValidationSkipReason;
-use codex_app_server_protocol::ProjectValidationStatus as AppProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::config::Config;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use serde_json::json;
 
@@ -43,9 +42,6 @@ use crate::exec_events::McpToolCallItemResult;
 use crate::exec_events::McpToolCallStatus as ExecMcpToolCallStatus;
 use crate::exec_events::PatchApplyStatus as ExecPatchApplyStatus;
 use crate::exec_events::PatchChangeKind as ExecPatchChangeKind;
-use crate::exec_events::ProjectValidationCompletedEvent;
-use crate::exec_events::ProjectValidationSkipReason;
-use crate::exec_events::ProjectValidationStatus;
 use crate::exec_events::ReasoningItem;
 use crate::exec_events::ThreadErrorEvent;
 use crate::exec_events::ThreadEvent;
@@ -467,63 +463,6 @@ impl EventProcessorWithJsonOutput {
             ServerNotification::HookStarted(_) | ServerNotification::HookCompleted(_) => {
                 CodexStatus::Running
             }
-            ServerNotification::ProjectValidationCompleted(notification) => {
-                events.push(ThreadEvent::ProjectValidationCompleted(
-                    ProjectValidationCompletedEvent {
-                        item_id: notification.item_id,
-                        command: notification.command,
-                        command_truncated: notification.command_truncated,
-                        cwd: notification
-                            .cwd
-                            .map(|cwd| cwd.as_path().display().to_string()),
-                        status: match notification.status {
-                            AppProjectValidationStatus::Passed => ProjectValidationStatus::Passed,
-                            AppProjectValidationStatus::ActionableFailure => {
-                                ProjectValidationStatus::ActionableFailure
-                            }
-                            AppProjectValidationStatus::ConfigurationError => {
-                                ProjectValidationStatus::ConfigurationError
-                            }
-                            AppProjectValidationStatus::TimedOut => {
-                                ProjectValidationStatus::TimedOut
-                            }
-                            AppProjectValidationStatus::InfrastructureFailure => {
-                                ProjectValidationStatus::InfrastructureFailure
-                            }
-                            AppProjectValidationStatus::Cancelled => {
-                                ProjectValidationStatus::Cancelled
-                            }
-                            AppProjectValidationStatus::Skipped => ProjectValidationStatus::Skipped,
-                        },
-                        skip_reason: notification.skip_reason.map(|reason| match reason {
-                            AppProjectValidationSkipReason::ValidationDisabled => {
-                                ProjectValidationSkipReason::ValidationDisabled
-                            }
-                            AppProjectValidationSkipReason::NoChangedFiles => {
-                                ProjectValidationSkipReason::NoChangedFiles
-                            }
-                            AppProjectValidationSkipReason::NoApplicableProvider => {
-                                ProjectValidationSkipReason::NoApplicableProvider
-                            }
-                            AppProjectValidationSkipReason::NonRootAgent => {
-                                ProjectValidationSkipReason::NonRootAgent
-                            }
-                            AppProjectValidationSkipReason::UnchangedFingerprint => {
-                                ProjectValidationSkipReason::UnchangedFingerprint
-                            }
-                            AppProjectValidationSkipReason::UnsupportedEnvironment => {
-                                ProjectValidationSkipReason::UnsupportedEnvironment
-                            }
-                        }),
-                        changed_file_count: notification.changed_file_count,
-                        exit_code: notification.exit_code,
-                        output: notification.output,
-                        output_truncated: notification.output_truncated,
-                        duration_ms: notification.duration_ms,
-                    },
-                ));
-                CodexStatus::Running
-            }
             ServerNotification::ItemStarted(notification) => {
                 if let Some(item) = self.map_started_item(notification.item) {
                     events.push(ThreadEvent::ItemStarted(ItemStartedEvent { item }));
@@ -615,6 +554,27 @@ impl EventProcessorWithJsonOutput {
                 }
             }
             ServerNotification::TurnDiffUpdated(_) => CodexStatus::Running,
+            ServerNotification::ProjectValidationCompleted(notification) => {
+                events.push(ThreadEvent::ProjectValidationCompleted(
+                    ProjectValidationCompletedEvent {
+                        turn_id: notification.turn_id,
+                        item_id: notification.item_id,
+                        command: notification.command,
+                        command_truncated: notification.command_truncated,
+                        cwd: notification.cwd,
+                        status: notification.status.to_core(),
+                        skip_reason: notification
+                            .skip_reason
+                            .map(codex_app_server_protocol::ProjectValidationSkipReason::to_core),
+                        changed_file_count: notification.changed_file_count,
+                        exit_code: notification.exit_code,
+                        output: notification.output,
+                        output_truncated: notification.output_truncated,
+                        duration_ms: notification.duration_ms,
+                    },
+                ));
+                CodexStatus::Running
+            }
             ServerNotification::TurnPlanUpdated(notification) => {
                 let items = Self::map_todo_items(&notification.plan);
                 if let Some(running) = self.running_todo_list.as_mut() {

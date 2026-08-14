@@ -14,18 +14,7 @@ use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_home);
-    Ok(cmd)
-}
-
-fn codex_command_with_legacy_homes(
-    codex_lab_home: &Path,
-    codex_home: &Path,
-    code_home: &Path,
-) -> Result<assert_cmd::Command> {
-    let mut cmd = codex_command(codex_lab_home)?;
     cmd.env("CODEX_HOME", codex_home);
-    cmd.env("CODE_HOME", code_home);
     Ok(cmd)
 }
 
@@ -80,26 +69,6 @@ async fn add_and_remove_server_updates_global_config() -> Result<()> {
 
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     assert!(servers.is_empty());
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn add_uses_codex_lab_home_when_legacy_homes_are_set() -> Result<()> {
-    let codex_lab_home = TempDir::new()?;
-    let codex_home = TempDir::new()?;
-    let code_home = TempDir::new()?;
-
-    codex_command_with_legacy_homes(codex_lab_home.path(), codex_home.path(), code_home.path())?
-        .args(["mcp", "add", "docs", "--", "echo", "hello"])
-        .assert()
-        .success()
-        .stdout(contains("Added global MCP server 'docs'."));
-
-    let codex_lab_servers = load_global_mcp_servers(codex_lab_home.path()).await?;
-    assert!(codex_lab_servers.contains_key("docs"));
-    assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
-    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
 
     Ok(())
 }
@@ -168,6 +137,18 @@ async fn add_and_login_discover_oauth_through_configured_http_proxy() -> Result<
             .await?
             .contains_key("oauth")
     );
+    let helper_command = if cfg!(windows) {
+        r#"echo {"X-Gateway":"gateway-token"}"#
+    } else {
+        r#"printf '{"X-Gateway":"gateway-token"}'"#
+    };
+    let config_path = codex_home.path().join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path)?;
+    config.push_str(&format!(
+        "http_headers_helper = {}\n",
+        toml::Value::String(helper_command.to_string())
+    ));
+    std::fs::write(config_path, config)?;
 
     // Local OAuth login does not require the execution-environment registry.
     std::fs::write(codex_home.path().join("environments.toml"), "invalid = [")?;
@@ -195,14 +176,22 @@ async fn add_and_login_discover_oauth_through_configured_http_proxy() -> Result<
         "mock OAuth registration should terminate the explicit login"
     );
 
-    let registrations = proxy
+    let requests = proxy
         .received_requests()
         .await
-        .expect("mock proxy should record OAuth requests")
+        .expect("mock proxy should record OAuth requests");
+    let registrations: Vec<_> = requests
         .iter()
         .filter(|request| request.method == "POST" && request.url.path() == "/oauth/register")
-        .count();
-    assert_eq!(registrations, 2);
+        .collect();
+    assert_eq!(registrations.len(), 2);
+    assert_eq!(
+        registrations
+            .iter()
+            .filter(|request| request.headers.get("x-gateway").is_some())
+            .count(),
+        1
+    );
     Ok(())
 }
 
@@ -270,7 +259,15 @@ async fn add_streamable_http_without_manual_token() -> Result<()> {
 
     let mut add_cmd = codex_command(codex_home.path())?;
     add_cmd
-        .args(["mcp", "add", "github", "--url", "https://example.com/mcp"])
+        .args([
+            "mcp",
+            "add",
+            "github",
+            "--url",
+            "https://example.com/mcp",
+            "--oauth-client-registration",
+            "dcr",
+        ])
         .assert()
         .success();
 
@@ -282,6 +279,7 @@ async fn add_streamable_http_without_manual_token() -> Result<()> {
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert!(bearer_token_env_var.is_none());
@@ -291,9 +289,13 @@ async fn add_streamable_http_without_manual_token() -> Result<()> {
         other => panic!("unexpected transport: {other:?}"),
     }
     assert!(github.enabled);
+    assert_eq!(github.oauth, None);
 
     assert!(!codex_home.path().join(".credentials.json").exists());
     assert!(!codex_home.path().join(".env").exists());
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    assert!(!config.contains("client_registration"));
+    assert!(!config.contains("[mcp_servers.github.oauth]"));
 
     Ok(())
 }
@@ -324,6 +326,7 @@ async fn add_streamable_http_with_custom_env_var() -> Result<()> {
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/issues");
             assert_eq!(bearer_token_env_var.as_deref(), Some("GITHUB_TOKEN"));

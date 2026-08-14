@@ -59,18 +59,6 @@ version = "149.2.0"
                     windows_source_required(changed_files, "149.2.0", "149.2.0")
                 )
 
-    def test_windows_canary_workflow_changes_require_source_build(self) -> None:
-        for path in (
-            ".github/workflows/v8-canary-metadata.yml",
-            ".github/workflows/v8-canary-windows.yml",
-        ):
-            with self.subTest(path=path):
-                changed_files = {path}
-                self.assertTrue(canary_required(changed_files, "149.2.0", "149.2.0"))
-                self.assertTrue(
-                    windows_source_required(changed_files, "149.2.0", "149.2.0")
-                )
-
     def test_manual_dispatch_requires_source_build(self) -> None:
         self.assertTrue(
             windows_source_required(

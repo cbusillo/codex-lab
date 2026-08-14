@@ -18,6 +18,7 @@ use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::TimeProvider;
+pub use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_core::shell::Shell;
@@ -32,22 +33,27 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_home::CodexHomeUserInstructionsProvider;
-use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
+use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeConversationVersion as RealtimeWsVersion;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
@@ -67,6 +73,7 @@ use crate::responses::output_value_to_text;
 use crate::responses::start_mock_server;
 use crate::streaming_sse::StreamingSseServer;
 use crate::test_environment;
+use crate::wait_for_event;
 use crate::wait_for_event_match;
 use crate::wait_for_event_with_timeout;
 use wiremock::Match;
@@ -305,6 +312,7 @@ pub struct TestCodexBuilder {
     external_time_provider: Option<Arc<dyn TimeProvider>>,
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
+    models_manager: Option<SharedModelsManager>,
     home_backed_auth_manager: bool,
 }
 
@@ -327,15 +335,9 @@ impl TestCodexBuilder {
         self
     }
 
-    fn auth_manager_for_config(&self, auth: CodexAuth, config: &Config) -> Arc<AuthManager> {
-        if self.home_backed_auth_manager {
-            codex_core::test_support::auth_manager_from_auth_with_home(
-                auth,
-                config.auth_home.to_path_buf(),
-            )
-        } else {
-            codex_core::test_support::auth_manager_from_auth(auth)
-        }
+    pub fn with_models_manager(mut self, models_manager: SharedModelsManager) -> Self {
+        self.models_manager = Some(models_manager);
+        self
     }
 
     pub fn with_model(self, model: &str) -> Self {
@@ -565,6 +567,21 @@ impl TestCodexBuilder {
         .await
     }
 
+    pub async fn restart(
+        &mut self,
+        server: &MockServer,
+        previous: &TestCodex,
+    ) -> Result<TestCodex> {
+        let rollout_path = previous
+            .session_configured
+            .rollout_path
+            .clone()
+            .context("rollout path")?;
+        previous.codex.shutdown_and_wait().await?;
+        self.resume(server, Arc::clone(&previous.home), rollout_path)
+            .await
+    }
+
     async fn build_with_home_and_base_url(
         &mut self,
         base_url: String,
@@ -641,11 +658,22 @@ impl TestCodexBuilder {
                     config.codex_home.clone(),
                 ))
             });
-        let auth_manager = self.auth_manager_for_config(auth.clone(), &config);
+        let auth_manager = if self.home_backed_auth_manager {
+            codex_core::test_support::auth_manager_from_auth_with_home(
+                auth.clone(),
+                config.codex_home.to_path_buf(),
+            )
+        } else {
+            codex_core::test_support::auth_manager_from_auth(auth.clone())
+        };
+        let models_manager = self
+            .models_manager
+            .clone()
+            .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
         let thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
-            codex_core::build_models_manager(&config, auth_manager),
+            models_manager,
             codex_core::CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::clone(&environment_manager),
@@ -662,11 +690,6 @@ impl TestCodexBuilder {
             .code_mode_host_program
             .take()
             .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
-        if config.features.enabled(Feature::CodeModeHost) && code_mode_host_program.is_none() {
-            return Err(anyhow!(
-                "Code Mode tests require `codex-code-mode-host`; run `just test -p codex-core` or build it with `cargo build -p codex-code-mode-host` before invoking cargo-nextest directly"
-            ));
-        }
         let thread_manager = if config.features.enabled(Feature::CodeModeHost)
             && let Some(code_mode_host_program) = code_mode_host_program
         {
@@ -680,10 +703,16 @@ impl TestCodexBuilder {
         };
         let thread_manager = Arc::new(thread_manager);
         let user_shell_override = self.user_shell_override.clone();
+        let client_mcp_extensions = || {
+            ClientMcpExtensions::new(
+                self.supports_openai_form_elicitation
+                    .then(|| (OPENAI_FORM_EXTENSION_ID.to_string(), serde_json::json!({}))),
+            )
+        };
 
         let new_conversation = match (resume_from, user_shell_override) {
             (Some(path), Some(user_shell_override)) => {
-                let auth_manager = self.auth_manager_for_config(auth, &config);
+                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
                 Box::pin(
                     codex_core::test_support::resume_thread_from_rollout_with_user_shell_override(
                         thread_manager.as_ref(),
@@ -697,13 +726,13 @@ impl TestCodexBuilder {
                 .await?
             }
             (Some(path), None) => {
-                let auth_manager = self.auth_manager_for_config(auth, &config);
+                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
                 Box::pin(thread_manager.resume_thread_from_rollout(
                     config.clone(),
                     path,
                     auth_manager,
                     /*parent_trace*/ None,
-                    self.supports_openai_form_elicitation,
+                    client_mcp_extensions(),
                 ))
                 .await?
             }
@@ -721,7 +750,7 @@ impl TestCodexBuilder {
             (None, None) => {
                 Box::pin(thread_manager.start_thread(StartThreadOptions {
                     history_mode: self.history_mode,
-                    supports_openai_form_elicitation: self.supports_openai_form_elicitation,
+                    client_mcp_extensions: client_mcp_extensions(),
                     ..StartThreadOptions::new(config.clone())
                 }))
                 .await?
@@ -854,6 +883,19 @@ impl TestCodex {
             .await
     }
 
+    /// Submits a text turn without changing the current thread settings.
+    pub async fn submit_text_turn(&self, prompt: &str) -> Result<()> {
+        self.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: prompt.into(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+
+        wait_for_event(&self.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+        Ok(())
+    }
+
     pub async fn submit_turn_with_permission_profile(
         &self,
         prompt: &str,
@@ -975,31 +1017,28 @@ impl TestCodex {
             TurnEnvironmentSelections::new(self.config.cwd.clone(), environments)
         });
         self.codex
-            .submit(Op::UserInput {
-                items: vec![UserInput::Text {
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
                     text: prompt.into(),
                     text_elements: Vec::new(),
-                }],
-                final_output_json_schema: None,
-                responsesapi_client_metadata: None,
-                additional_context: Default::default(),
-                thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                }])
+                .with_thread_settings(ThreadSettingsOverrides {
                     environments: turn_environment_selections,
                     approval_policy: Some(approval_policy),
                     sandbox_policy: Some(sandbox_policy),
                     permission_profile,
                     service_tier,
-                    collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                        mode: codex_protocol::config_types::ModeKind::Default,
-                        settings: codex_protocol::config_types::Settings {
+                    collaboration_mode: Some(CollaborationMode {
+                        mode: ModeKind::Default,
+                        settings: Settings {
                             model: session_model,
                             reasoning_effort: None,
                             developer_instructions: None,
                         },
                     }),
                     ..Default::default()
-                },
-            })
+                }),
+            )
             .await?;
 
         let turn_id = wait_for_event_match(&self.codex, |event| match event {
@@ -1237,7 +1276,6 @@ fn function_call_output<'a>(bodies: &'a [Value], call_id: &str) -> &'a Value {
 pub fn test_codex() -> TestCodexBuilder {
     TestCodexBuilder {
         config_mutators: vec![Box::new(|config| {
-            config.agents_enabled = false;
             config
                 .features
                 .disable(Feature::Apps)
@@ -1261,6 +1299,7 @@ pub fn test_codex() -> TestCodexBuilder {
         external_time_provider: None,
         code_mode_host_program: None,
         history_mode: None,
+        models_manager: None,
         home_backed_auth_manager: false,
     }
 }

@@ -9,15 +9,9 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
-use super::responses_max_output_tokens;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
-use crate::execution_account::ExecutionAccountLease;
-use crate::execution_account::ExecutionAccountLeasePersistence;
-use crate::execution_account::ExecutionAccountOptions;
-use crate::execution_account::ExecutionAccountPooling;
-use crate::execution_account::ExecutionAccountStart;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -30,7 +24,6 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
-use codex_login::AuthRouteConfig;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
@@ -117,77 +110,6 @@ fn test_model_client_with_thread_id(
     )
 }
 
-fn test_api_provider(base_url: &str) -> codex_api::Provider {
-    codex_api::Provider {
-        name: "test".to_string(),
-        base_url: base_url.to_string(),
-        query_params: None,
-        headers: http::HeaderMap::new(),
-        retry: codex_api::RetryConfig {
-            max_attempts: 1,
-            base_delay: Duration::ZERO,
-            retry_429: false,
-            retry_5xx: false,
-            retry_transport: false,
-        },
-        stream_idle_timeout: Duration::ZERO,
-    }
-}
-
-#[test]
-fn response_output_limit_is_omitted_for_chatgpt_backend() {
-    let prompt = Prompt {
-        max_output_tokens: Some(4_096),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        responses_max_output_tokens(
-            &test_api_provider("https://chatgpt.com/backend-api/codex"),
-            &prompt,
-        ),
-        None
-    );
-    assert_eq!(
-        responses_max_output_tokens(&test_api_provider("https://api.openai.com/v1"), &prompt),
-        Some(4_096)
-    );
-}
-
-#[test]
-fn model_client_session_is_recached_without_invalidation() {
-    let model_client = test_model_client(SessionSource::Exec);
-    let mut session = model_client.new_session();
-    session.websocket_session.last_response_from_untraced_warmup = true;
-
-    drop(session);
-
-    let cached = model_client
-        .state
-        .cached_websocket_session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert!(cached.session.last_response_from_untraced_warmup);
-}
-
-#[test]
-fn invalidated_model_client_session_is_not_recached() {
-    let model_client = test_model_client(SessionSource::Exec);
-    let mut session = model_client.new_session();
-    session.websocket_session.last_response_from_untraced_warmup = true;
-
-    model_client.invalidate_cached_websocket_session();
-    drop(session);
-
-    let cached = model_client
-        .state
-        .cached_websocket_session
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(cached.generation, 1);
-    assert!(!cached.session.last_response_from_untraced_warmup);
-}
-
 #[tokio::test]
 async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -243,6 +165,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
+            provenance: None,
         },
         ..Default::default()
     };
@@ -336,7 +259,6 @@ fn test_model_info() -> ModelInfo {
         "supported_in_api": true,
         "priority": 1,
         "upgrade": null,
-        "base_instructions": "base instructions",
         "model_messages": null,
         "support_verbosity": false,
         "default_verbosity": null,
@@ -349,88 +271,6 @@ fn test_model_info() -> ModelInfo {
         "experimental_supported_tools": []
     }))
     .expect("deserialize test model info")
-}
-
-#[tokio::test]
-async fn model_client_uses_execution_lease_auth_without_changing_control_auth() {
-    let control_auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
-    let execution_auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-execution"));
-    let codex_home = tempfile::tempdir().expect("tempdir");
-    let thread_id = ThreadId::new();
-    let lease = ExecutionAccountLease::resolve(
-        thread_id,
-        Arc::clone(&control_auth_manager),
-        ExecutionAccountOptions {
-            codex_home: codex_home.path().to_path_buf(),
-            auth_home: codex_home.path().to_path_buf(),
-            auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
-            keyring_backend_kind: AuthKeyringBackendKind::default(),
-            forced_chatgpt_workspace_id: None,
-            auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
-                OutboundProxyPolicy::ReqwestDefault,
-            )),
-            chatgpt_base_url: CHATGPT_CODEX_BASE_URL.to_string(),
-            allow_api_key_fallback: false,
-            pooling: ExecutionAccountPooling::Disabled,
-            persistence: ExecutionAccountLeasePersistence::Durable,
-            start: ExecutionAccountStart::New,
-        },
-    )
-    .await;
-    let model_client = ModelClient::new(
-        Some(Arc::clone(&control_auth_manager)),
-        AgentIdentityAuthPolicy::JwtOnly,
-        thread_id,
-        ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
-        SessionSource::Exec,
-        "test_originator".to_string(),
-        /*model_verbosity*/ None,
-        /*enable_request_compression*/ false,
-        /*include_timing_metrics*/ false,
-        /*beta_features_header*/ None,
-        /*concurrent_reasoning_summaries_enabled*/ false,
-        /*attestation_provider*/ None,
-        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-    );
-    model_client.set_execution_account_lease(lease.clone());
-    let responses_metadata = test_responses_metadata_for_client(
-        &model_client,
-        /*turn_id*/ None,
-        "test-window".to_string(),
-        /*parent_thread_id*/ None,
-        TestCodexResponsesRequestKind::Turn,
-    );
-    assert_eq!(
-        model_client.prompt_cache_key(&responses_metadata),
-        thread_id.to_string()
-    );
-
-    lease.replace_with_detached_auth_manager_for_testing(
-        "execution".to_string(),
-        execution_auth_manager,
-    );
-    assert_eq!(
-        model_client.prompt_cache_key(&responses_metadata),
-        format!("{thread_id}:execution")
-    );
-
-    let setup = model_client
-        .current_client_setup()
-        .await
-        .expect("client setup");
-    let mut headers = http::HeaderMap::new();
-    setup.api_auth.add_auth_headers(&mut headers);
-
-    assert_eq!(
-        headers
-            .get(http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok()),
-        Some("Bearer sk-execution")
-    );
-    let control_auth = control_auth_manager.auth_cached().expect("control auth");
-    assert_eq!(control_auth.api_key(), Some("sk-control"));
 }
 
 fn test_session_telemetry() -> SessionTelemetry {

@@ -5,12 +5,9 @@ inputs:
     description: Target triple used for cache namespacing.
     required: true
 outputs:
-  cache-scope:
-    description: Stable cache namespace for this runner instance.
-    value: ${{ steps.setup_ci.outputs.cache-scope }}
   repository-cache-path:
     description: Filesystem path used for the Bazel repository cache.
-    value: ${{ steps.configure_bazel_repository_cache_unix.outputs.repository-cache-path || steps.configure_bazel_repository_cache_windows.outputs.repository-cache-path }}
+    value: ${{ steps.configure_bazel_repository_cache.outputs.repository-cache-path }}
 
 runs:
   using: composite
@@ -28,15 +25,8 @@ runs:
         # BAZEL_OUTPUT_USER_ROOT and leaves Bazel's I/O-heavy trees on C:.
         output-base: ${{ steps.setup_ci.outputs.bazel-output-base }}
 
-    - name: Configure Bazel repository cache (Unix)
-      id: configure_bazel_repository_cache_unix
-      if: runner.os != 'Windows'
-      shell: bash
-      run: echo "repository-cache-path=${BAZEL_REPOSITORY_CACHE}" >> "${GITHUB_OUTPUT}"
-
-    - name: Configure Bazel repository cache (Windows)
-      id: configure_bazel_repository_cache_windows
-      if: runner.os == 'Windows'
+    - name: Configure Bazel repository cache
+      id: configure_bazel_repository_cache
       shell: pwsh
       run: |
         "repository-cache-path=$env:BAZEL_REPOSITORY_CACHE" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

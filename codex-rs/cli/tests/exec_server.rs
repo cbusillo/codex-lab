@@ -48,7 +48,7 @@ use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_home);
+    cmd.env("CODEX_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -86,6 +86,24 @@ fn local_exec_server_ignores_invalid_config_without_strict_config() -> Result<()
         .assert()
         .success()
         .stderr(contains("not valid toml").not());
+
+    Ok(())
+}
+
+/// The standalone exec-server accepts an explicit per-connection concurrency limit.
+#[test]
+fn local_exec_server_accepts_concurrent_requests_flag() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut cmd = codex_command(codex_home.path())?;
+    cmd.args([
+        "exec-server",
+        "--listen",
+        "stdio",
+        "--concurrent-requests",
+        "2",
+    ])
+    .assert()
+    .success();
 
     Ok(())
 }
@@ -159,7 +177,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     )?;
     let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
     command
-        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("CODEX_HOME", codex_home.path())
         .env("CODEX_API_KEY", "test-api-key")
         .env(
             codex_exec_server::CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE_ENV_VAR,
@@ -173,6 +191,8 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
             &registry.uri(),
             "--environment-id",
             ENVIRONMENT_ID,
+            "--concurrent-requests",
+            "2",
         ])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
@@ -380,7 +400,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{base_url}/v1/metrics", protoco
     let subprocess = async move {
         let mut command = tokio::process::Command::new(codex_bin);
         command
-            .env("CODEX_LAB_HOME", codex_home)
+            .env("CODEX_HOME", codex_home)
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .args(["exec-server", "--listen", "stdio"])
@@ -510,7 +530,7 @@ async fn send_json_line(
 fn local_exec_server_exits_successfully_on_sigterm() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut child = std::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?)
-        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("CODEX_HOME", codex_home.path())
         .args(["exec-server", "--listen", "ws://127.0.0.1:0"])
         .stdout(Stdio::piped())
         .spawn()?;

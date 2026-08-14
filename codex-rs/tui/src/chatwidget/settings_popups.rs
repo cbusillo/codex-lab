@@ -4,22 +4,14 @@
 //! orchestration module without changing their event wiring.
 
 use super::*;
-use crate::agent_install_helpers::AgentInstallStatus;
-use crate::agent_install_helpers::external_agent_install_statuses;
-use codex_config::agent_defaults::AgentModelSpec;
-use codex_config::agent_defaults::agent_model_specs;
 
 impl ChatWidget {
     pub(super) fn open_theme_picker(&mut self) {
         let codex_home = codex_utils_home_dir::find_codex_home().ok();
-        let terminal_width = self
-            .last_rendered_width
-            .get()
-            .and_then(|width| u16::try_from(width).ok());
         let params = crate::theme_picker::build_theme_picker_params(
             self.config.tui_theme.as_deref(),
             codex_home.as_deref(),
-            terminal_width,
+            self.last_rendered_width.get(),
         );
         self.bottom_pane.show_selection_view(params);
     }
@@ -94,149 +86,6 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn open_settings_popup(&mut self, automatic_validation_enabled: bool) {
-        let validation_status = if automatic_validation_enabled {
-            "Enabled"
-        } else {
-            "Disabled"
-        };
-        let items = vec![
-            SelectionItem {
-                name: "Manage accounts".to_string(),
-                description: Some("Add, switch, or disconnect stored accounts.".to_string()),
-                actions: vec![Box::new(|tx| {
-                    tx.send(AppEvent::ShowLoginAccounts);
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Account switching".to_string(),
-                description: Some("Configure automatic account switching.".to_string()),
-                actions: vec![Box::new(|tx| {
-                    tx.send(AppEvent::OpenAccountSwitchSettings);
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Automatic Validation".to_string(),
-                description: Some(format!(
-                    "Current: {validation_status}. Configure trusted patch-time and end-of-turn checks."
-                )),
-                actions: vec![Box::new(|tx| {
-                    tx.send(AppEvent::OpenAutomaticValidationSettings);
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-            SelectionItem {
-                name: "Agents".to_string(),
-                description: Some("Check third-party agent CLIs used by spawn_agent.".to_string()),
-                actions: vec![Box::new(|tx| {
-                    tx.send(AppEvent::OpenAgentsSettings);
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            },
-        ];
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Settings".to_string()),
-            subtitle: Some("Configure settings for Codex.".to_string()),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            ..Default::default()
-        });
-    }
-
-    pub(crate) fn open_automatic_validation_settings_popup(&mut self, enabled: bool) {
-        let project_command_note = self
-            .config
-            .validation
-            .project_command
-            .as_ref()
-            .map(|_| " A configured project command is unchanged by this setting.")
-            .unwrap_or_default();
-        let items = [
-            (
-                true,
-                "Enabled",
-                format!(
-                    "Check JSON, TOML, and YAML patches as they are applied, then run applicable bounded Cargo or ShellCheck validation after changed turns, with at most one correction cycle.{project_command_note}"
-                ),
-            ),
-            (
-                false,
-                "Disabled",
-                format!(
-                    "Skip built-in patch-time structural checks and end-of-turn Cargo or ShellCheck validation.{project_command_note}"
-                ),
-            ),
-        ]
-        .into_iter()
-        .map(|(value, name, description)| SelectionItem {
-            name: name.to_string(),
-            description: Some(description),
-            is_current: enabled == value,
-            actions: vec![Box::new(move |tx| {
-                tx.send(AppEvent::SetAutomaticValidationEnabled(value));
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        })
-        .collect();
-
-        self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some("Automatic Validation".to_string()),
-            subtitle: Some(
-                "Run trusted checks during patches and after changed turns.".to_string(),
-            ),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            ..Default::default()
-        });
-    }
-
-    pub(crate) fn open_agents_settings_popup(&mut self) {
-        let specs = agent_model_specs()
-            .iter()
-            .filter(|spec| matches!(spec.family, "antigravity" | "claude" | "copilot" | "qwen"))
-            .collect::<Vec<_>>();
-        let statuses = external_agent_install_statuses(&specs);
-        self.open_agents_settings_popup_with_statuses(&specs, statuses);
-    }
-
-    pub(crate) fn open_agents_settings_popup_with_statuses(
-        &mut self,
-        specs: &[&'static AgentModelSpec],
-        statuses: Vec<AgentInstallStatus>,
-    ) {
-        let params = agents_settings_params(
-            specs,
-            statuses.clone(),
-            &self.config.agent_selector_overrides,
-        );
-        if !self
-            .bottom_pane
-            .replace_selection_view_if_present("agents-settings", params)
-        {
-            self.bottom_pane.show_selection_view(agents_settings_params(
-                specs,
-                statuses,
-                &self.config.agent_selector_overrides,
-            ));
-        }
-    }
-
-    pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
-        self.config
-            .agent_selector_overrides
-            .entry(selector.to_string())
-            .or_default()
-            .enabled = Some(enabled);
-    }
-
     pub(crate) fn open_experimental_popup(&mut self) {
         let features: Vec<ExperimentalFeatureItem> = FEATURES
             .iter()
@@ -274,81 +123,5 @@ impl ChatWidget {
             Personality::Friendly => "Warm, collaborative, and helpful.",
             Personality::Pragmatic => "Concise, task-focused, and direct.",
         }
-    }
-}
-
-fn agents_settings_params(
-    specs: &[&'static AgentModelSpec],
-    statuses: Vec<AgentInstallStatus>,
-    overrides: &std::collections::BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
-) -> SelectionViewParams {
-    let items = specs
-        .iter()
-        .map(|spec| {
-            let status = statuses
-                .iter()
-                .find(|status| status.family == spec.family && status.command == spec.cli);
-            let enabled = overrides
-                .get(spec.slug)
-                .and_then(|override_config| override_config.enabled)
-                .unwrap_or_else(|| spec.is_enabled());
-            agent_selector_selection_item(spec, status, enabled)
-        })
-        .collect();
-    SelectionViewParams {
-        view_id: Some("agents-settings"),
-        title: Some("Agents".to_string()),
-        subtitle: Some(
-            "Enable only the external selectors you want spawn_agent to use.".to_string(),
-        ),
-        footer_hint: Some(standard_popup_hint_line()),
-        items,
-        on_cancel: Some(Box::new(|tx| tx.send(AppEvent::CloseAgentsSettings))),
-        ..Default::default()
-    }
-}
-
-fn agent_selector_selection_item(
-    spec: &'static AgentModelSpec,
-    status: Option<&AgentInstallStatus>,
-    enabled: bool,
-) -> SelectionItem {
-    let enabled_marker = if enabled { "enabled" } else { "disabled" };
-    let install_marker = if status.is_some_and(|status| status.installed) {
-        "installed"
-    } else {
-        "not installed"
-    };
-    let selector = spec.slug.to_string();
-    let next_enabled = !enabled;
-    let selected_description = status.map_or_else(
-        || Some(spec.description.to_string()),
-        |status| {
-            let availability = if status.installed {
-                format!("`{}` is available on PATH.", status.command)
-            } else {
-                status.install_hint.clone()
-            };
-            Some(format!("{} {availability}", spec.description))
-        },
-    );
-
-    SelectionItem {
-        name: format!("{} ({enabled_marker})", spec.slug),
-        description: Some(format!("{install_marker} • provider `{}`", spec.family)),
-        selected_description,
-        search_value: Some(format!(
-            "{} {} {}",
-            spec.slug, spec.family, spec.description
-        )),
-        is_current: enabled,
-        actions: vec![Box::new(move |tx| {
-            tx.send(AppEvent::SetAgentSelectorEnabled {
-                selector: selector.clone(),
-                enabled: next_enabled,
-            });
-        })],
-        dismiss_on_select: true,
-        ..Default::default()
     }
 }

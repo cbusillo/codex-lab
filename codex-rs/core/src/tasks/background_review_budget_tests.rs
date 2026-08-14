@@ -31,6 +31,7 @@ fn prompt(text: &str) -> Prompt {
         }],
         base_instructions: codex_protocol::models::BaseInstructions {
             text: "review directly".to_string(),
+            provenance: None,
         },
         ..Default::default()
     }
@@ -300,7 +301,8 @@ fn prunes_non_review_tools_before_estimating_the_registry() {
     request.tools = vec![
         freeform_tool("exec_command"),
         freeform_tool("mcp__large__lookup"),
-    ];
+    ]
+    .into();
 
     assert!(gate.authorize_request(
         &mut request,
@@ -349,5 +351,6 @@ fn freeform_tool(name: &str) -> ToolSpec {
             syntax: "lark".to_string(),
             definition: "start: /.+/".to_string(),
         },
+        defer_loading: Some(false),
     })
 }

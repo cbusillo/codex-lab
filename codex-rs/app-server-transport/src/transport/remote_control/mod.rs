@@ -89,6 +89,8 @@ pub enum RemoteControlStartupMode {
 pub const REMOTE_CONTROL_DISABLED_ENV_VAR: &str =
     "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED";
 
+const RECONNECT_CHANNEL_CAPACITY: usize = 1;
+
 /// Reads and removes the daemon's internal disabled-start marker before worker threads start.
 pub fn take_remote_control_disabled_env() -> bool {
     let disabled =
@@ -97,8 +99,6 @@ pub fn take_remote_control_disabled_env() -> bool {
     unsafe { std::env::remove_var(REMOTE_CONTROL_DISABLED_ENV_VAR) };
     disabled
 }
-
-const RECONNECT_CHANNEL_CAPACITY: usize = 1;
 
 pub(super) struct QueuedServerEnvelope {
     pub(super) event: ServerEvent,
@@ -255,12 +255,10 @@ impl fmt::Display for RemoteControlReconnectUnavailable {
                 "remote control cannot reconnect because sqlite state db is unavailable"
             ),
             Self::Disabled => write!(f, "remote control cannot reconnect while disabled"),
-            Self::WorkerUnavailable => {
-                write!(
-                    f,
-                    "remote control cannot reconnect because its worker is unavailable"
-                )
-            }
+            Self::WorkerUnavailable => write!(
+                f,
+                "remote control cannot reconnect because its worker is unavailable"
+            ),
         }
     }
 }
@@ -386,6 +384,33 @@ impl RemoteControlHandle {
         self.publish_status(RemoteControlConnectionStatus::Disabled)
     }
 
+    pub fn reconnect(
+        &self,
+    ) -> Result<RemoteControlStatusChangedNotification, RemoteControlReconnectUnavailable> {
+        if self.state_db.is_none() {
+            warn!("remote control cannot reconnect because sqlite state db is unavailable");
+            return Err(RemoteControlReconnectUnavailable::StateDbUnavailable);
+        }
+        if !self.desired_state_tx.borrow().is_enabled() {
+            warn!("remote control cannot reconnect while disabled");
+            return Err(RemoteControlReconnectUnavailable::Disabled);
+        }
+
+        let generation = self
+            .next_reconnect_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        match self.reconnect_tx.try_send(generation) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Closed(_)) => {
+                warn!("remote control cannot reconnect because its worker is unavailable");
+                return Err(RemoteControlReconnectUnavailable::WorkerUnavailable);
+            }
+        }
+
+        Ok(self.publish_status(RemoteControlConnectionStatus::Connecting))
+    }
+
     async fn persist_preference(
         &self,
         app_server_client_name: Option<&str>,
@@ -408,87 +433,6 @@ impl RemoteControlHandle {
             .await
             .map_err(io::Error::other)?;
         Ok(())
-    }
-
-    pub fn reconnect(
-        &self,
-    ) -> Result<RemoteControlStatusChangedNotification, RemoteControlReconnectUnavailable> {
-        if self.state_db.is_none() {
-            warn!("remote control cannot reconnect because sqlite state db is unavailable");
-            return Err(RemoteControlReconnectUnavailable::StateDbUnavailable);
-        }
-        let mut reconnect_generation = None;
-        let mut previous_status = None;
-        let mut response = None;
-        self.status_tx.send_if_modified(|status| {
-            if !self.desired_state_tx.borrow().is_enabled() {
-                response = Some(Err(RemoteControlReconnectUnavailable::Disabled));
-                return false;
-            }
-            let generation = self
-                .next_reconnect_generation
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            match self.reconnect_tx.try_send(generation) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    response = Some(Ok(status.clone()));
-                    return false;
-                }
-                Err(TrySendError::Closed(_)) => {
-                    response = Some(Err(RemoteControlReconnectUnavailable::WorkerUnavailable));
-                    return false;
-                }
-            }
-
-            let next_status = remote_control_status_with_connection_status(
-                status,
-                RemoteControlConnectionStatus::Connecting,
-            );
-            let status_changed = next_status != *status;
-            reconnect_generation = Some(generation);
-            previous_status = Some(status.status);
-            *status = next_status.clone();
-            response = Some(Ok(next_status));
-            status_changed
-        });
-
-        let response = response.unwrap_or_else(|| {
-            warn!("remote control reconnect did not produce a response");
-            Err(RemoteControlReconnectUnavailable::WorkerUnavailable)
-        });
-        let Ok(status) = &response else {
-            match &response {
-                Err(RemoteControlReconnectUnavailable::Disabled) => {
-                    warn!("remote control cannot reconnect while disabled");
-                }
-                Err(RemoteControlReconnectUnavailable::WorkerUnavailable) => {
-                    warn!("remote control cannot reconnect because its worker is unavailable");
-                }
-                Err(RemoteControlReconnectUnavailable::StateDbUnavailable) => {}
-                Ok(_) => unreachable!("reconnect response was already matched as an error"),
-            }
-            return response;
-        };
-        if let Some(reconnect_generation) = reconnect_generation {
-            info!(
-                reconnect_generation,
-                previous_status = ?previous_status,
-                environment_id = ?status.environment_id,
-                installation_id = %status.installation_id,
-                server_name = %status.server_name,
-                "remote control relay reconnect requested"
-            );
-        } else {
-            info!(
-                current_status = ?status.status,
-                environment_id = ?status.environment_id,
-                installation_id = %status.installation_id,
-                server_name = %status.server_name,
-                "remote control reconnect coalesced with a pending request"
-            );
-        }
-        response
     }
 
     pub fn status(&self) -> RemoteControlStatusChangedNotification {

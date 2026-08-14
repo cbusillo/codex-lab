@@ -10,6 +10,18 @@ use codex_app_server_protocol::ExternalAgentSelectorState;
 use std::collections::HashSet;
 
 impl ChatWidget {
+    pub(crate) fn open_agents_settings_popup(&mut self) {
+        self.open_agents_capabilities_popup(&[], true, false, false, None);
+    }
+
+    pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
+        self.config
+            .agent_selector_overrides
+            .entry(selector.to_string())
+            .or_default()
+            .enabled = Some(enabled);
+    }
+
     pub(crate) fn open_agents_capabilities_popup(
         &mut self,
         providers: &[ExternalAgentProviderCapabilities],
@@ -529,6 +541,7 @@ fn origin_source_label(source: &ConfigLayerSource) -> &'static str {
         ConfigLayerSource::Project { .. } => "project config",
         ConfigLayerSource::SessionFlags => "session override",
         ConfigLayerSource::Mdm { .. }
+        | ConfigLayerSource::PackagedDefaults { .. }
         | ConfigLayerSource::System { .. }
         | ConfigLayerSource::EnterpriseManaged { .. }
         | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }

@@ -81,13 +81,20 @@ impl ResponseMock {
 }
 
 pub fn assert_parent_turn(body: &Value, expected: Option<&str>) -> Result<()> {
+    assert_turn_id(body, "parent_turn_id", expected)
+}
+
+pub fn assert_root_turn(body: &Value, expected: Option<&str>) -> Result<()> {
+    assert_turn_id(body, "root_turn_id", expected)
+}
+
+fn assert_turn_id(body: &Value, key: &str, expected: Option<&str>) -> Result<()> {
     let metadata = &body["client_metadata"];
     let payload = metadata["x-codex-turn-metadata"]
         .as_str()
         .expect("canonical turn metadata");
     let canonical: Value = serde_json::from_str(payload)?;
     let expected = expected.map(Value::from);
-    let key = "parent_turn_id";
     let actual = (metadata.get(key), canonical.get(key));
     assert_eq!(actual, (expected.as_ref(), expected.as_ref()));
     Ok(())
@@ -1111,9 +1118,6 @@ where
     M: wiremock::Match + Send + Sync + 'static,
 {
     let response_mock = ResponseMock::new();
-    // Apply the request-specific matcher before recording so the handle only exposes requests
-    // that this mock actually served. Keep invariant validation ahead of the custom matcher so
-    // rejected requests receive the same safety checks as the standard response mocks.
     responses_mock()
         .and(ResponseBodyInvariantMatcher)
         .and(matcher)

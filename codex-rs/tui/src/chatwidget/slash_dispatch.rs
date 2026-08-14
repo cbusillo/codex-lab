@@ -6,10 +6,7 @@
 //! slash-command recall follows the same submitted-input rule as ordinary text.
 
 use super::*;
-use crate::app_event::AuthProfileSelection;
 use crate::app_event::ThreadGoalSetMode;
-use crate::bottom_pane::LoginAccountsFeedback;
-use crate::bottom_pane::LoginAccountsView;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
@@ -17,7 +14,6 @@ use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
-use codex_app_server_protocol::AccountListEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -39,100 +35,10 @@ const SIDE_STARTING_CONTEXT_LABEL: &str = "Side starting...";
 const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
-const LOGIN_USAGE: &str = "Usage: /login [add|default|<profile>|add <profile>]";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
 const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to use /usage.";
 
 impl ChatWidget {
-    pub(crate) fn show_login_accounts_view_with_feedback(
-        &mut self,
-        feedback: Option<LoginAccountsFeedback>,
-    ) {
-        let default_auth_home_is_current = self.config.auth_home == self.config.codex_home;
-        let view = LoginAccountsView::new_with_feedback(
-            &self.config.codex_home,
-            self.app_event_tx.clone(),
-            default_auth_home_is_current,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
-            feedback,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        self.request_redraw();
-    }
-
-    pub(crate) fn show_login_accounts_view_with_loaded_accounts(
-        &mut self,
-        accounts: Vec<AccountListEntry>,
-        feedback: Option<LoginAccountsFeedback>,
-    ) {
-        let view = LoginAccountsView::new_with_loaded_accounts(
-            self.app_event_tx.clone(),
-            accounts,
-            feedback,
-        );
-        self.bottom_pane.show_view(Box::new(view));
-        self.request_redraw();
-    }
-
-    fn handle_login_command_args(&mut self, trimmed: &str) {
-        if trimmed.eq_ignore_ascii_case("add") {
-            self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
-            return;
-        }
-
-        if trimmed.eq_ignore_ascii_case("default") {
-            self.app_event_tx.send(AppEvent::SwitchAuthProfile {
-                selection: AuthProfileSelection::Default,
-            });
-            return;
-        }
-
-        if let Some(profile_name) = trimmed.strip_prefix("add ").map(str::trim) {
-            if profile_name.eq_ignore_ascii_case("default") {
-                self.add_error_message(
-                    "`default` is reserved for the built-in Codex Lab login.".to_string(),
-                );
-                self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
-                return;
-            }
-            match codex_login::validate_profile_name(profile_name) {
-                Ok(profile_name) => {
-                    self.app_event_tx.send(AppEvent::SwitchAuthProfile {
-                        selection: AuthProfileSelection::Named {
-                            profile_name: profile_name.to_string(),
-                            login_after_switch: true,
-                        },
-                    });
-                }
-                Err(err) => {
-                    self.add_error_message(format!("Invalid auth profile `{profile_name}`: {err}"));
-                    self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
-                }
-            }
-            return;
-        }
-
-        let profiles = match codex_login::list_auth_profiles(&self.config.codex_home) {
-            Ok(profiles) => profiles,
-            Err(err) => {
-                self.add_error_message(format!("Failed to list auth profiles: {err}"));
-                return;
-            }
-        };
-        if profiles.iter().any(|profile| profile.name == trimmed) {
-            self.app_event_tx.send(AppEvent::SwitchAuthProfile {
-                selection: AuthProfileSelection::Named {
-                    profile_name: trimmed.to_string(),
-                    login_after_switch: false,
-                },
-            });
-        } else {
-            self.add_error_message(format!("Unknown auth profile `{trimmed}`."));
-            self.add_info_message(LOGIN_USAGE.to_string(), /*hint*/ None);
-        }
-    }
-
     /// Dispatch a bare slash command and record its staged local-history entry.
     ///
     /// The composer stages history before returning `InputResult::Command`; this wrapper commits
@@ -235,6 +141,7 @@ impl ChatWidget {
             || (cmd == SlashCommand::Resume
                 && (self.input_queue.user_turn_pending_start
                     || self.turn_lifecycle.agent_turn_running))
+            || (cmd == SlashCommand::Export && self.input_queue.suppress_queue_autosend)
     }
 
     pub(super) fn dispatch_command(&mut self, cmd: SlashCommand) {
@@ -490,14 +397,11 @@ impl ChatWidget {
             SlashCommand::Logout => {
                 self.app_event_tx.send(AppEvent::Logout);
             }
-            SlashCommand::Login => {
-                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
-            }
-            SlashCommand::Settings => {
-                self.app_event_tx.send(AppEvent::OpenSettings);
-            }
             SlashCommand::Copy => {
                 self.copy_last_agent_markdown();
+            }
+            SlashCommand::Export => {
+                self.show_transcript_export_popup();
             }
             SlashCommand::Raw => {
                 let enabled = self.toggle_raw_output_mode_and_notify();
@@ -781,6 +685,15 @@ impl ChatWidget {
         } = prepared;
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Export if trimmed.is_empty() => self.show_transcript_export_popup(),
+            SlashCommand::Export => {
+                self.set_queue_autosend_suppressed(/*suppressed*/ true);
+                self.app_event_tx.send(AppEvent::ExportTranscript {
+                    destination: crate::app_event::TranscriptExportDestination::File(
+                        PathBuf::from(trimmed),
+                    ),
+                });
+            }
             SlashCommand::Usage => {
                 if self.ensure_usage_command_available() {
                     match tokens::TokenActivityView::parse(trimmed) {
@@ -798,9 +711,6 @@ impl ChatWidget {
                 "verbose" => self.add_mcp_output(McpServerStatusDetail::Full),
                 _ => self.add_error_message("Usage: /mcp [verbose]".to_string()),
             },
-            SlashCommand::Login if !trimmed.is_empty() => {
-                self.handle_login_command_args(trimmed);
-            }
             SlashCommand::Keymap => match trimmed.to_ascii_lowercase().as_str() {
                 "" => self.open_keymap_picker(),
                 "debug" => {
@@ -1193,6 +1103,7 @@ impl ChatWidget {
             | SlashCommand::Rename
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Feedback
+            | SlashCommand::Export
             | SlashCommand::New
             | SlashCommand::Archive
             | SlashCommand::Delete
@@ -1220,8 +1131,6 @@ impl ChatWidget {
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Logout
-            | SlashCommand::Login
-            | SlashCommand::Settings
             | SlashCommand::Mention
             | SlashCommand::Skills
             | SlashCommand::Import

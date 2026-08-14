@@ -9,7 +9,6 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
-use codex_login::AuthManager;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
@@ -58,7 +57,7 @@ pub(super) async fn run_remote_compact_attempt(
     }
     let trace_input_history = compaction_trace
         .is_enabled()
-        .then(|| history.raw_items().to_vec());
+        .then(|| history.raw_items().cloned().collect());
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
@@ -86,12 +85,7 @@ pub(super) async fn run_remote_compact_attempt(
             CompactConversationRequestSettings {
                 effort: turn_context.reasoning_effort.clone(),
                 summary: turn_context.reasoning_summary,
-                service_tier: if turn_context
-                    .auth_manager
-                    .as_deref()
-                    .and_then(AuthManager::auth_mode)
-                    == Some(AuthMode::ApiKey)
-                {
+                service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
                     None
                 } else {
                     turn_context.config.service_tier.clone()

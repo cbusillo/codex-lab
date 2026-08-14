@@ -67,28 +67,13 @@ impl ChatWidget {
         &mut self,
         notification: codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification,
     ) {
-        let updates_snapshot = self.background_auto_review_status_updates_snapshot(&notification);
-        if updates_snapshot {
+        if self.background_auto_review_status_updates_snapshot(&notification) {
             self.review.current_background_review = Some(BackgroundAutoReviewSnapshot {
                 run_id: notification.run_id.clone(),
                 status: notification.status,
                 review_target: notification.review_target.clone(),
                 error_summary: notification.error_summary.clone(),
             });
-            let label = match notification.status {
-                codex_app_server_protocol::BackgroundAutoReviewStatus::Pending => {
-                    Some("Background review queued".to_string())
-                }
-                codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
-                    Some("Background review running".to_string())
-                }
-                codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
-                | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
-                | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
-                | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
-                | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => None,
-            };
-            self.bottom_pane.set_background_review_label(label);
         }
         if background_auto_review_status_is_terminal(notification.status) {
             self.review
@@ -120,42 +105,35 @@ impl ChatWidget {
                     summary.run_id == run_id
                         && background_auto_review_status_is_terminal(summary.status)
                 });
-                if current_matches {
-                    self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
-                } else if let Some(latest) = response.latest.as_ref().filter(|summary| {
+                let latest_matches = response.latest.as_ref().is_some_and(|summary| {
                     summary.run_id == run_id
                         && background_auto_review_status_is_terminal(summary.status)
-                }) {
-                    if latest.status
-                        == codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
-                        && latest.freshness
-                            != codex_app_server_protocol::AutoReviewFreshness::Current
-                    {
-                        self.add_to_history(history_cell::new_hidden_auto_review_run_summary_cell(
-                            latest,
-                            response.diagnostics.as_ref(),
-                        ));
-                    } else {
-                        self.add_to_history(history_cell::new_auto_review_run_summary_cell(
-                            latest,
-                            response.diagnostics.as_ref(),
-                        ));
-                    }
+                });
+                if current_matches {
+                    self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
+                } else if latest_matches {
+                    self.add_to_history(history_cell::new_auto_review_run_summary_cell(
+                        response
+                            .latest
+                            .as_ref()
+                            .expect("latest match checked above"),
+                        response.diagnostics.as_ref(),
+                    ));
                 } else if let Some(fallback) = fallback.as_ref() {
                     self.add_to_history(history_cell::new_auto_review_status_cell(fallback));
                 } else {
                     return;
                 }
             }
-            Err(err) => {
-                if let Some(fallback) = fallback.as_ref() {
-                    self.add_to_history(history_cell::new_auto_review_status_cell(fallback));
-                } else if self.current_background_review_matches_run(&run_id) {
-                    self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
-                } else {
-                    return;
-                }
+            Err(_) if fallback.is_some() => {
+                self.add_to_history(history_cell::new_auto_review_status_cell(
+                    fallback.as_ref().expect("fallback checked above"),
+                ));
             }
+            Err(err) if self.current_background_review_matches_run(&run_id) => {
+                self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
+            }
+            Err(_) => return,
         }
         self.review
             .rendered_terminal_background_reviews

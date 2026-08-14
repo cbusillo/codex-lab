@@ -294,6 +294,8 @@ class PublishR2ReleaseGuardTest(unittest.TestCase):
             "true",
             "--prerelease",
             "false",
+            "--stage",
+            "assets",
         ]
         environment = {
             "GITHUB_REPOSITORY": "cbusillo/codex-lab",

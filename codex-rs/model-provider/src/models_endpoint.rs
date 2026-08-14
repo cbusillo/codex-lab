@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_without_credentials_reports_no_configured_credentials() {
+    fn provider_without_command_auth_reports_no_configured_credentials() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,

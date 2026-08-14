@@ -55,12 +55,21 @@ def unregistered_tests(
     """Return `(path, detail)` for every test file the workflow would not run."""
 
     problems: list[tuple[str, str]] = []
+    repo_root = repo_root.resolve()
+    discovery_roots = {
+        directory: (repo_root / directory).resolve() for directory in registrations
+    }
     for directory, patterns in sorted(registrations.items()):
-        base = repo_root / directory
+        base = discovery_roots[directory]
         if not base.is_dir():
             problems.append((directory, "discovery directory does not exist"))
             continue
         for test_file in sorted(base.rglob(TEST_GLOB)):
+            if any(
+                other_base != base and test_file.is_relative_to(other_base)
+                for other_base in discovery_roots.values()
+            ):
+                continue
             relative = test_file.relative_to(repo_root).as_posix()
             if not any(
                 fnmatch.fnmatchcase(test_file.name, pattern) for pattern in patterns

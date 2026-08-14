@@ -60,9 +60,6 @@ use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
 pub use apply_patch::ApplyPatchHandler;
-pub(crate) use auto_review_disposition::AutoReviewDispositionHandler;
-pub use browser::BrowserHandler;
-pub use code_bridge::CodeBridgeHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use current_time::CurrentTimeHandler;
@@ -97,6 +94,19 @@ where
     serde_json::from_str(arguments).map_err(|err| {
         FunctionCallError::RespondToModel(format!("failed to parse function arguments: {err}"))
     })
+}
+
+fn resolve_sandbox_permissions(
+    sandbox_permissions: Option<SandboxPermissions>,
+    justification: Option<&str>,
+) -> Result<SandboxPermissions, FunctionCallError> {
+    if justification.is_some() && sandbox_permissions.is_none() {
+        return Err(FunctionCallError::RespondToModel(
+            "`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: \"require_escalated\"` for unsandboxed execution, or omit `justification`.".to_string(),
+        ));
+    }
+
+    Ok(sandbox_permissions.unwrap_or_default())
 }
 
 fn updated_hook_command(updated_input: &Value) -> Result<&str, FunctionCallError> {

@@ -1,7 +1,5 @@
 use std::fs;
 use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use codex_protocol::ThreadId;
 use tempfile::TempDir;
@@ -80,34 +78,4 @@ fn first_acquisition_removes_stale_locks_without_removing_active_locks() {
 
     drop(secondary_owner);
     drop(active_owner);
-}
-
-#[test]
-fn writer_acquisition_waits_for_read_only_coordination() {
-    let home = TempDir::new().expect("temp dir");
-    let primary = Arc::new(WriterLockCoordinator::new(home.path()));
-    let initial_owner = primary
-        .acquire(ThreadId::default())
-        .expect("initialize coordination lock");
-    drop(initial_owner);
-    let read_only_coordination = primary
-        .lock_coordination_read_only()
-        .expect("acquire read-only coordination")
-        .expect("coordination lock exists");
-    let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
-    let (sender, receiver) = mpsc::channel();
-
-    let acquire_thread = std::thread::spawn(move || {
-        let result = secondary.acquire(ThreadId::default());
-        sender.send(result).expect("send acquisition result");
-    });
-
-    assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
-    drop(read_only_coordination);
-    let owner = receiver
-        .recv_timeout(Duration::from_secs(5))
-        .expect("writer acquisition completes")
-        .expect("writer acquisition succeeds");
-    drop(owner);
-    acquire_thread.join().expect("join acquisition thread");
 }

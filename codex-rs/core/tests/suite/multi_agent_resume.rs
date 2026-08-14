@@ -1,14 +1,15 @@
 use anyhow::Result;
+use codex_core::TurnInputRequest;
 use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
-use codex_protocol::protocol::Submission;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::assert_parent_turn;
+use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -49,7 +50,7 @@ const SIBLING_FOLLOWUP_TASK: &str = "verify the surviving worker";
 const INTERRUPT_PROMPT: &str = "release the interrupted worker";
 const SIBLING_NAME: &str = "survivor";
 const ROLE_NAME: &str = "durable_worker";
-const ROLE_MODEL: &str = "gpt-5.4";
+const ROLE_MODEL: &str = "gpt-5.6-sol";
 const ROLE_MODEL_PROVIDER_ID: &str = "mock";
 const ROLE_DEVELOPER_INSTRUCTIONS: &str = "Keep the durable worker role configuration.";
 const SUBAGENT_DEVELOPER_INSTRUCTIONS: &str = "Use the default durable worker instructions.";
@@ -307,32 +308,18 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     });
     let initial = initial_builder.build_with_auto_env(&server).await?;
     let root_thread_id = initial.session_configured.thread_id;
-    let home = initial.home.clone();
-    let rollout_path = initial
-        .codex
-        .rollout_path()
-        .expect("root rollout path")
-        .to_path_buf();
-    let mut op = vec![UserInput::Text {
-        text: INITIAL_PROMPT.to_string(),
-        text_elements: Vec::new(),
-    }]
-    .into();
-    if let Op::UserInput {
-        thread_settings, ..
-    } = &mut op
-    {
-        thread_settings.permission_profile = Some(PermissionProfile::Disabled);
-    }
     initial
         .codex
-        .submit_with_id(Submission {
-            id: "spoofed-root-turn".to_string(),
-            op,
-            client_user_message_id: None,
-            trace: None,
-            parent_turn_id: Some("spoofed-parent-turn".to_string()),
-        })
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: INITIAL_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                permission_profile: Some(PermissionProfile::Disabled),
+                ..Default::default()
+            }),
+        )
         .await?;
     wait_for_event(&initial.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -378,6 +365,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     assert!(initial_child_request.requests().iter().any(|request| {
         request.body_contains_text(INITIAL_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
+            && request.body_contains_text("<permission_profile type=\"disabled\">")
             && !request.body_contains_text(SUBAGENT_DEVELOPER_INSTRUCTIONS)
     }));
     let initial_worker_config = worker_thread.config_snapshot().await;
@@ -444,9 +432,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     sibling_thread.flush_rollout().await?;
     worker_thread.flush_rollout().await?;
     initial.codex.flush_rollout().await?;
+    sibling_thread.shutdown_and_wait().await?;
+    worker_thread.shutdown_and_wait().await?;
     drop(sibling_thread);
     drop(worker_thread);
-    drop(initial);
 
     let followup_args = serde_json::to_string(&json!({
         "target": "worker",
@@ -499,7 +488,8 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let mut resume_builder = test_codex().with_config(move |config| {
         configure_multi_agent_v2_with_role(config, &resumed_model_provider_base_url);
     });
-    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    let resumed = resume_builder.restart(&server, &initial).await?;
+    drop(initial);
     assert_eq!(
         resumed.thread_manager.list_thread_ids().await,
         vec![root_thread_id]
@@ -558,6 +548,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     assert!(followup_child_request.requests().iter().any(|request| {
         request.body_contains_text(FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
+            && request.body_contains_text("<permission_profile type=\"disabled\">")
             && !request.body_contains_text(SUBAGENT_DEVELOPER_INSTRUCTIONS)
     }));
     let requests = server
@@ -614,6 +605,16 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
             );
         }
         assert_parent_turn(body, parent_turn)?;
+    }
+    for (body, root_turn) in [
+        (&initial_root, initial_parent),
+        (&queue_root, queue_parent),
+        (&followup_root, followup_parent),
+        (&initial_child, initial_parent),
+        (&followup_child, followup_parent),
+        (&grandchild, initial_parent),
+    ] {
+        assert_root_turn(body, Some(root_turn))?;
     }
     let reloaded_worker_config = reloaded_worker.config_snapshot().await;
     let reloaded_worker_role_config = (

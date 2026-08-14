@@ -119,8 +119,10 @@ it exists to catch. `--current` only adds candidate-side owned paths, so it
 cannot remove protection. Never hand-edit the manifest; add a pattern rule
 instead.
 
-Issue #428 is the durable integration plan. `upstream/convergence-contracts.md`
-defines which Every Code differences may survive the upstream-first default.
+Issue #230 is the durable continuous-maintenance plan.
+`upstream/convergence-contracts.md` defines which Codex Lab differences may
+survive the upstream-first default. Bootstrap history remains available in the
+completed issue #428.
 
 ## Supported command
 

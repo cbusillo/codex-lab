@@ -16,6 +16,18 @@ fn detects_environment_context_fragment() {
 }
 
 #[test]
+fn detects_skill_instructions_fragment_case_insensitively() {
+    for text in [
+        "<skill>\n<name>demo</name>\n</skill>",
+        "  <SKILL>\n<name>demo</name>\n</SKILL>  ",
+    ] {
+        assert!(is_contextual_user_fragment(&ContentItem::InputText {
+            text: text.to_string(),
+        }));
+    }
+}
+
+#[test]
 fn detects_agents_instructions_fragment() {
     for text in [
         "# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>",
@@ -87,14 +99,6 @@ fn detects_recommended_plugins_fragment() {
 fn detects_legacy_goal_context_fragment() {
     assert!(is_contextual_user_fragment(&ContentItem::InputText {
         text: "<goal_context>\nContinue working toward the active thread goal.\n</goal_context>"
-            .to_string(),
-    }));
-}
-
-#[test]
-fn detects_project_validation_failure_fragment() {
-    assert!(is_contextual_user_fragment(&ContentItem::InputText {
-        text: "<project_validation_failure>\nvalidation failed\n</project_validation_failure>"
             .to_string(),
     }));
 }

@@ -2,12 +2,11 @@ use std::collections::HashSet;
 
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
-use codex_config::ConfigLayerStackOrdering;
 use codex_config::SkillConfig;
+pub use codex_config::SkillConfigRule;
+pub use codex_config::SkillConfigRuleSelector;
+pub use codex_config::SkillConfigRules;
 use codex_config::SkillsConfig;
-pub use codex_skills::SkillConfigRule;
-pub use codex_skills::SkillConfigRuleSelector;
-pub use codex_skills::SkillConfigRules;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use tracing::warn;
 
@@ -15,10 +14,7 @@ use crate::SkillMetadata;
 
 pub fn skill_config_rules_from_stack(config_layer_stack: &ConfigLayerStack) -> SkillConfigRules {
     let mut entries = Vec::new();
-    for layer in config_layer_stack.get_layers(
-        ConfigLayerStackOrdering::LowestPrecedenceFirst,
-        /*include_disabled*/ true,
-    ) {
+    for layer in config_layer_stack.all_layers_low_to_high() {
         if !matches!(
             layer.name,
             ConfigLayerSource::User { .. } | ConfigLayerSource::SessionFlags

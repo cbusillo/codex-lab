@@ -6,23 +6,33 @@ use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
+use crate::session::turn_context::TurnEnvironmentConfig;
+use crate::session_models_manager::models_manager_for_execution_account;
 use crate::shell_snapshot::ShellSnapshot;
-use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
+use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -48,12 +58,12 @@ pub(crate) struct Session {
     pub(super) mcp_refresh: McpRefresh,
     pub(super) mcp_elicitation_reviewer_handle: OnceLock<codex_mcp::ElicitationReviewerHandle>,
     pub(super) mcp_elicitation_lifecycle_handle: OnceLock<codex_mcp::ElicitationLifecycle>,
-    pub(super) apps_context: AppsContext,
     pub(super) mcp_prewarm_tx: async_channel::Sender<()>,
     pub(super) mcp_prewarm_shutdown: CancellationToken,
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
@@ -64,8 +74,8 @@ pub(crate) struct Session {
 
 #[derive(Clone)]
 pub(crate) struct SessionConfiguration {
-    /// Provider identifier ("openai", "openrouter", ...).
-    pub(super) provider: ModelProviderInfo,
+    /// Runtime provider and its provider-specific execution policy.
+    pub(super) provider: SharedModelProvider,
 
     pub(super) collaboration_mode: CollaborationMode,
     pub(super) model_reasoning_summary: Option<ReasoningSummaryConfig>,
@@ -79,9 +89,6 @@ pub(crate) struct SessionConfiguration {
 
     /// Base instructions for the session.
     pub(super) base_instructions: String,
-
-    /// Compact prompt override.
-    pub(super) compact_prompt: Option<String>,
 
     /// When to escalate for approval for execution
     pub(super) approval_policy: Constrained<AskForApproval>,
@@ -106,9 +113,10 @@ pub(crate) struct SessionConfiguration {
     pub(super) metrics_service_name: Option<String>,
     pub(super) app_server_client_name: Option<String>,
     pub(super) app_server_client_version: Option<String>,
+    /// Guardian reviewer identity is trusted only when established during an in-memory spawn.
+    pub(super) trusted_guardian_reviewer: bool,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
-    /// Optional external launch provenance supplied by an orchestrator.
     pub(super) session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
@@ -153,6 +161,17 @@ impl SessionConfiguration {
 
     pub(super) fn permission_profile_state(&self) -> &PermissionProfileState {
         &self.permission_profile_state
+    }
+
+    pub(super) fn turn_environment_config(&self) -> TurnEnvironmentConfig {
+        TurnEnvironmentConfig {
+            allow_login_shell: self
+                .original_config_do_not_use
+                .permissions
+                .allow_login_shell,
+            permission_profile: self.permission_profile_state.snapshot(),
+            selected_capability_roots: None,
+        }
     }
 
     pub(super) fn permission_profile(&self) -> PermissionProfile {
@@ -246,6 +265,38 @@ impl SessionConfiguration {
         }
     }
 
+    pub(super) fn validate_auto_review_requirement(&self) -> ConstraintResult<()> {
+        if self.trusted_guardian_reviewer {
+            return Ok(());
+        }
+
+        let requirements = self
+            .original_config_do_not_use
+            .config_layer_stack
+            .requirements();
+        let model = self.collaboration_mode.model();
+        if !requirements.auto_review_required_for_model(model) {
+            return Ok(());
+        }
+
+        if self.approval_policy.value() == AskForApproval::OnRequest
+            && self.approvals_reviewer == ApprovalsReviewer::AutoReview
+            && !self
+                .file_system_sandbox_policy()
+                .has_full_disk_write_access()
+            && self
+                .original_config_do_not_use
+                .features
+                .enabled(Feature::GuardianApproval)
+        {
+            return Ok(());
+        }
+
+        Err(ConstraintError::AutoReviewRequired {
+            model: model.to_string(),
+        })
+    }
+
     pub(crate) fn apply(&self, updates: &SessionSettingsUpdate) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
         let current_sandbox_policy = self.sandbox_policy();
@@ -298,7 +349,36 @@ impl SessionConfiguration {
             next_configuration.approval_policy.set(approval_policy)?;
         }
         if let Some(approvals_reviewer) = updates.approvals_reviewer {
+            next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&approvals_reviewer)?;
             next_configuration.approvals_reviewer = approvals_reviewer;
+        }
+        if !next_configuration.trusted_guardian_reviewer
+            && self.collaboration_mode.model() != next_configuration.collaboration_mode.model()
+            && next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .auto_review_required_for_model(next_configuration.collaboration_mode.model())
+        {
+            if updates.approval_policy.is_none() {
+                next_configuration
+                    .approval_policy
+                    .set(AskForApproval::OnRequest)?;
+            }
+            if updates.approvals_reviewer.is_none() {
+                next_configuration
+                    .original_config_do_not_use
+                    .config_layer_stack
+                    .requirements()
+                    .approvals_reviewer
+                    .can_set(&ApprovalsReviewer::AutoReview)?;
+                next_configuration.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            }
         }
         if let Some(windows_sandbox_level) = updates.windows_sandbox_level {
             next_configuration.windows_sandbox_level = windows_sandbox_level;
@@ -400,6 +480,7 @@ impl SessionConfiguration {
         if let Some(app_server_client_version) = updates.app_server_client_version.clone() {
             next_configuration.app_server_client_version = Some(app_server_client_version);
         }
+        next_configuration.validate_auto_review_requirement()?;
         Ok(next_configuration)
     }
 
@@ -467,18 +548,16 @@ pub(crate) struct AppServerClientMetadata {
 async fn warm_plugins_and_skills_for_session_init(
     config: Arc<Config>,
     plugins_manager: Arc<PluginsManager>,
-    plugin_auth_context: PluginAuthContext,
-    skills_service: Arc<SkillsService>,
+    skills_service: Arc<HostSkillsService>,
     turn_environments: &TurnEnvironmentSnapshot,
 ) -> Vec<SkillError> {
     let fs = turn_environments.primary_filesystem();
     let plugins_input = config.plugins_config_input();
-    let plugin_snapshot = plugins_manager
-        .plugin_snapshot_for_config_with_auth_context(&plugins_input, plugin_auth_context)
-        .await;
-    let effective_skill_roots = plugin_snapshot.outcome.effective_plugin_skill_roots();
+    let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
+    let effective_skill_roots = plugin_outcome.effective_plugin_skill_roots();
+    let plugin_skill_snapshots = plugins_manager.plugin_skill_snapshots_for_config(&plugins_input);
     let skills_input = skills_load_input_from_config(config.as_ref(), effective_skill_roots)
-        .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);
+        .with_plugin_skill_snapshots(plugin_skill_snapshots);
     skills_service
         .snapshot_for_config(&skills_input, fs)
         .await
@@ -510,25 +589,24 @@ impl Session {
         config: Arc<Config>,
         user_instructions: Option<codex_extension_api::UserInstructions>,
         installation_id: String,
-        control_auth_manager: Arc<AuthManager>,
-        execution_account: ExecutionAccountLease,
+        auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
+        model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
-        skills_service: Arc<SkillsService>,
+        skills_service: Arc<HostSkillsService>,
         plugins_manager: Arc<PluginsManager>,
         mcp_manager: Arc<McpManager>,
         code_mode_session_provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
         extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
         mut thread_extension_init: ExtensionDataInit,
-        supports_openai_form_elicitation: bool,
+        client_mcp_extensions: ClientMcpExtensions,
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
-        project_validation_coordinator: Arc<ProjectValidationCoordinator>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
@@ -544,6 +622,27 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        let base_instructions_provenance = if config.base_instructions.is_some() {
+            Some(
+                config
+                    .base_instructions_provenance
+                    .clone()
+                    .unwrap_or(BaseInstructionsProvenance::Custom),
+            )
+        } else if let Some(inherited_base_instructions) = initial_history.get_base_instructions() {
+            let BaseInstructions { text, provenance } = inherited_base_instructions;
+            provenance.or_else(|| {
+                (text == model_info.get_model_instructions(config.personality)).then(|| {
+                    BaseInstructionsProvenance::Model {
+                        model: model_info.slug.clone(),
+                    }
+                })
+            })
+        } else {
+            Some(BaseInstructionsProvenance::Model {
+                model: model_info.slug.clone(),
+            })
+        };
         let forked_from_id = session_configuration
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
@@ -565,7 +664,53 @@ impl Session {
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
-        let thread_id = execution_account.thread_id();
+        let thread_id = match &initial_history {
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+                agent_control.generate_thread_id()
+            }
+            InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
+        };
+        let execution_account = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&auth_manager),
+            ExecutionAccountOptions {
+                codex_home: config.codex_home.to_path_buf(),
+                auth_home: config.codex_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                keyring_backend_kind: config.auth_keyring_backend_kind(),
+                forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+                auth_route_config: config.auth_route_config(),
+                chatgpt_base_url: config.chatgpt_base_url.clone(),
+                allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+                pooling: if config.auto_switch_accounts_on_rate_limit
+                    && codex_login::auth::read_codex_api_key_from_env().is_none()
+                    && config.model_provider.requires_openai_auth
+                {
+                    ExecutionAccountPooling::Enabled
+                } else {
+                    ExecutionAccountPooling::Disabled
+                },
+                persistence: if config.ephemeral {
+                    ExecutionAccountLeasePersistence::Ephemeral
+                } else {
+                    ExecutionAccountLeasePersistence::Durable
+                },
+                start: match &initial_history {
+                    InitialHistory::New => ExecutionAccountStart::New,
+                    InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+                    InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+                    InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+                        source_thread_id: session_configuration.forked_from_thread_id,
+                    },
+                },
+            },
+        )
+        .await;
+        let models_manager = models_manager_for_execution_account(
+            &config,
+            execution_account.clone(),
+            models_manager,
+        );
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -588,6 +733,20 @@ impl Session {
             }
         });
         let initial_auto_compact_window_ids = AutoCompactWindowIds::new_initial();
+        let restore_child_window = matches!(&initial_history, InitialHistory::Forked(_))
+            && session_configuration.session_source.is_non_root_agent()
+            && config.features.enabled(Feature::TokenBudget);
+        if restore_child_window && let InitialHistory::Forked(items) = &mut initial_history {
+            let child_window_id = initial_auto_compact_window_ids.window_id.to_string();
+            for item in items {
+                if let RolloutItem::Compacted(checkpoint) = item {
+                    checkpoint.window_number = Some(0);
+                    checkpoint.first_window_id = Some(child_window_id.clone());
+                    checkpoint.previous_window_id = None;
+                    checkpoint.window_id = Some(child_window_id.clone());
+                }
+            }
+        }
         let agent_control = agent_control.with_session_id(
             session_id,
             config
@@ -640,6 +799,7 @@ impl Session {
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
+                                provenance: base_instructions_provenance.clone(),
                             },
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
@@ -726,15 +886,14 @@ impl Session {
             session_init.ephemeral = config.ephemeral,
         ));
 
-        let control_auth_manager_for_startup = Arc::clone(&control_auth_manager);
-        let execution_auth_manager = execution_account.auth_manager();
-        let execution_account_for_startup = execution_account.clone();
-        let mut mcp_auth_changes = execution_auth_manager.auth_change_receiver();
+        let mut mcp_auth_changes = auth_manager.auth_change_receiver();
+        let auth_manager_clone = Arc::clone(&auth_manager);
         let config_for_mcp = Arc::clone(&config);
         let mcp_manager_for_mcp = Arc::clone(&mcp_manager);
         let mcp_thread_init_for_startup = &mcp_thread_init;
         let thread_extension_data_for_mcp = &thread_extension_data;
         let mcp_originator = session_configuration.originator.clone();
+        let mcp_session_source = session_configuration.session_source.clone();
         let mcp_runtime_cwd = session_configuration
             .environment_selections()
             .first()
@@ -742,22 +901,21 @@ impl Session {
             .map(|cwd| cwd.to_path_buf())
             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
         let auth_and_mcp_fut = async move {
-            let (control_auth, execution_context) = tokio::join!(
-                control_auth_manager_for_startup.auth(),
-                execution_account_for_startup.snapshot()
-            );
+            let auth = auth_manager_clone.auth().await;
             let mcp_projection = mcp_manager_for_mcp
                 .runtime_config_for_step(
                     &config_for_mcp,
                     mcp_thread_init_for_startup,
                     thread_extension_data_for_mcp,
-                    &mcp_originator,
-                    PluginAuthContext::from_auth(execution_context.auth.as_ref()),
+                    McpThreadIdentity {
+                        session_source: &mcp_session_source,
+                        originator: &mcp_originator,
+                    },
                     /*ready_selected_capability_roots*/ &[],
                     /*executor_capability_discovery*/ None,
                 )
                 .await;
-            (control_auth, execution_context, mcp_projection)
+            (auth, mcp_projection)
         }
         .instrument(info_span!(
             "session_init.auth_mcp",
@@ -765,11 +923,8 @@ impl Session {
         ));
 
         // Join all independent futures.
-        let (
-            thread_persistence_result,
-            state_db_ctx,
-            (control_auth, execution_context, mcp_projection),
-        ) = tokio::join!(thread_persistence_fut, state_db_fut, auth_and_mcp_fut);
+        let (thread_persistence_result, state_db_ctx, (auth, mcp_projection)) =
+            tokio::join!(thread_persistence_fut, state_db_fut, auth_and_mcp_fut);
 
         let mut live_thread_init =
             LiveThreadInitGuard::new(thread_persistence_result.map_err(|e| {
@@ -846,7 +1001,7 @@ impl Session {
             ) {
                 post_session_configured_events.push(event);
             }
-            let telemetry_auth = control_auth.as_ref();
+            let telemetry_auth = auth.as_ref();
             let auth_mode = telemetry_auth
                 .map(CodexAuth::auth_mode)
                 .map(TelemetryAuthMode::from);
@@ -856,8 +1011,8 @@ impl Session {
             let terminal_type = user_agent();
             let session_model = session_configuration.collaboration_mode.model().to_string();
             let auth_env_telemetry = collect_auth_env_telemetry(
-                &session_configuration.provider,
-                control_auth_manager.codex_api_key_env_enabled(),
+                session_configuration.provider.info(),
+                auth_manager.codex_api_key_env_enabled(),
             );
             let mut session_telemetry = SessionTelemetry::new(
                 thread_id,
@@ -903,7 +1058,7 @@ impl Session {
             let mcp_server_names =
                 codex_mcp::effective_mcp_servers(
                     &mcp_projection.config,
-                    execution_context.auth.as_ref(),
+                    auth.as_ref(),
                 )
                     .into_keys()
                     .collect::<Vec<_>>();
@@ -956,17 +1111,21 @@ impl Session {
             let turn_environments = Arc::new(ThreadEnvironments::new(
                 environment_manager,
                 default_shell.clone(),
+                // Temporary: preserve thread-level behavior until environments supply config.
+                session_configuration.turn_environment_config(),
                 shell_snapshot,
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
-            turn_environments.update_selections(session_configuration.environment_selections());
+            turn_environments.update_selections(
+                session_configuration.environment_selections(),
+                &session_configuration.turn_environment_config(),
+            );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));
             let plugin_skill_warmup = warm_plugins_and_skills_for_session_init(
                 Arc::clone(&config),
                 Arc::clone(&plugins_manager),
-                PluginAuthContext::from_auth(execution_context.auth.as_ref()),
                 Arc::clone(&skills_service),
                 &resolved_environments,
             )
@@ -993,12 +1152,11 @@ impl Session {
                 );
             }
             session_configuration.thread_name = thread_name.clone();
-            validate_config_lock_if_configured(&session_configuration).await?;
-            export_config_lock_if_configured(&session_configuration, thread_id).await?;
-            let state = SessionState::new_with_auto_compact_window_ids(
+            let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
             );
+            state.base_instructions_provenance = base_instructions_provenance.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack
                 .requirements_toml()
@@ -1054,19 +1212,13 @@ impl Session {
                     (None, None)
                 };
 
-            let hooks = loop {
-                let execution_snapshot = execution_account.snapshot().await;
-                let hooks = build_hooks_for_config(
-                    &config,
-                    plugins_manager.as_ref(),
-                    PluginAuthContext::from_auth(execution_snapshot.auth.as_ref()),
-                    resolved_environments.single_local_environment(),
-                )
-                .await;
-                if execution_account.snapshot_is_current(&execution_snapshot) {
-                    break hooks;
-                }
-            };
+            let hooks_config = build_hooks_config(
+                &config,
+                plugins_manager.as_ref(),
+                resolved_environments.single_local_environment(),
+            )
+            .await;
+            let (hooks, async_hook_results) = Hooks::new(hooks_config, thread_id);
             for warning in hooks.startup_warnings() {
                 post_session_configured_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
@@ -1078,7 +1230,7 @@ impl Session {
 
             let analytics_events_client = analytics_events_client.unwrap_or_else(|| {
                 AnalyticsEventsClient::new(
-                    Arc::clone(&control_auth_manager),
+                    Arc::clone(&auth_manager),
                     config.chatgpt_base_url.trim_end_matches('/').to_string(),
                     config.analytics_enabled,
                 )
@@ -1089,6 +1241,7 @@ impl Session {
             ));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            session_extension_data.insert(analytics_events_client.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
@@ -1105,35 +1258,6 @@ impl Session {
                 }).await;
             }
 
-            let model_client = ModelClient::new(
-                Some(Arc::clone(&control_auth_manager)),
-                if config.features.enabled(Feature::UseAgentIdentity) {
-                    AgentIdentityAuthPolicy::ChatGptAuth
-                } else {
-                    AgentIdentityAuthPolicy::JwtOnly
-                },
-                thread_id,
-                session_configuration.provider.clone(),
-                session_configuration.session_source.clone(),
-                session_configuration.originator.clone(),
-                config.model_verbosity,
-                config.features.enabled(Feature::EnableRequestCompression),
-                config.features.enabled(Feature::RuntimeMetrics),
-                Self::build_model_client_beta_features_header(config.as_ref()),
-                config
-                    .features
-                    .enabled(Feature::ConcurrentReasoningSummaries),
-                attestation_provider.clone(),
-                config.http_client_factory(),
-            )
-            .with_prompt_cache_key_override(
-                crate::guardian::prompt_cache_key_override_for_review_session(
-                    &session_configuration.session_source,
-                    session_configuration.parent_thread_id,
-                ),
-            );
-            model_client.set_execution_account_lease(execution_account.clone());
-
             let executed_tool_calls = config
                 .features
                 .enabled(Feature::ExecutedToolCallMetadata)
@@ -1142,6 +1266,7 @@ impl Session {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
+                mcp_handler_cache: Default::default(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),
@@ -1154,7 +1279,7 @@ impl Session {
                 user_shell: Arc::new(default_shell),
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
-                auth_manager: Arc::clone(&control_auth_manager),
+                auth_manager: Arc::clone(&auth_manager),
                 execution_account,
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
@@ -1176,9 +1301,7 @@ impl Session {
                 thread_extension_data,
                 selected_capability_roots,
                 mcp_thread_init,
-                supports_openai_form_elicitation: std::sync::atomic::AtomicBool::new(
-                    supports_openai_form_elicitation,
-                ),
+                client_mcp_extensions,
                 agent_control,
                 network_proxy: arc_swap::ArcSwapOption::from(network_proxy.map(Arc::new)),
                 network_proxy_audit_metadata,
@@ -1189,17 +1312,41 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client,
+                model_client: ModelClient::new(
+                    Some(Arc::clone(&auth_manager)),
+                    if config.features.enabled(Feature::UseAgentIdentity) {
+                        AgentIdentityAuthPolicy::ChatGptAuth
+                    } else {
+                        AgentIdentityAuthPolicy::JwtOnly
+                    },
+                    thread_id,
+                    session_configuration.provider.info().clone(),
+                    session_configuration.session_source.clone(),
+                    session_configuration.originator.clone(),
+                    config.model_verbosity,
+                    config.features.enabled(Feature::EnableRequestCompression),
+                    config.features.enabled(Feature::RuntimeMetrics),
+                    Self::build_model_client_beta_features_header(config.as_ref()),
+                    /*concurrent_reasoning_summaries_enabled*/ config
+                        .features
+                        .enabled(Feature::ConcurrentReasoningSummaries),
+                    attestation_provider,
+                    config.http_client_factory(),
+                )
+                .with_prompt_cache_key_override(
+                    crate::guardian::prompt_cache_key_override_for_review_session(
+                        &session_configuration.session_source,
+                        session_configuration.parent_thread_id,
+                    ),
+                ),
                 executed_tool_calls,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
-                    &config.features,
+                    &config.code_mode,
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
-                project_validation_coordinator,
             };
-            let apps_context = AppsContext::new(services.execution_account.cache_identity());
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
                 thread_id,
@@ -1214,12 +1361,12 @@ impl Session {
                 mcp_refresh: McpRefresh::new(),
                 mcp_elicitation_reviewer_handle: OnceLock::new(),
                 mcp_elicitation_lifecycle_handle: OnceLock::new(),
-                apps_context,
                 mcp_prewarm_tx,
                 mcp_prewarm_shutdown: CancellationToken::new(),
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
+                async_hook_results,
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
@@ -1231,7 +1378,6 @@ impl Session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
             }
-            let auto_review_recovery_events = sess.recover_auto_review_after_restart().await;
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.
             let initial_messages = initial_history.get_event_msgs();
@@ -1265,8 +1411,7 @@ impl Session {
                     rollout_path,
                 }),
             })
-            .chain(post_session_configured_events.into_iter())
-            .chain(auto_review_recovery_events);
+            .chain(post_session_configured_events.into_iter());
             for event in events {
                 sess.send_event_raw(event).await;
             }
@@ -1276,23 +1421,23 @@ impl Session {
             if startup_auth_changed {
                 mcp_auth_changes.mark_unchanged();
             }
-            let latest_execution_context = sess.services.execution_account.snapshot().await;
-            let execution_account_changed = !sess
-                .services
-                .execution_account
-                .snapshot_is_current(&execution_context);
+            let latest_auth = sess.services.auth_manager.auth().await;
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
-                || execution_account_changed
             {
+                sess.services
+                    .plugins_manager
+                    .set_auth_mode(latest_auth.as_ref().map(CodexAuth::api_auth_mode));
                 sess.services
                     .mcp_manager
                     .runtime_config_for_step(
                         config.as_ref(),
                         &sess.services.mcp_thread_init,
                         &sess.services.thread_extension_data,
-                        &session_configuration.originator,
-                        PluginAuthContext::from_auth(latest_execution_context.auth.as_ref()),
+                        McpThreadIdentity {
+                            session_source: &session_configuration.session_source,
+                            originator: &session_configuration.originator,
+                        },
                         /*ready_selected_capability_roots*/ &[],
                         /*executor_capability_discovery*/ None,
                     )
@@ -1302,7 +1447,7 @@ impl Session {
             };
             sess.install_initial_mcp_runtime(
                 &session_configuration,
-                latest_execution_context,
+                latest_auth,
                 mcp_projection,
                 &resolved_environments,
                 mcp_runtime_cwd,
@@ -1321,9 +1466,16 @@ impl Session {
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
+            if restore_child_window {
+                sess.state.lock().await.restore_auto_compact_window(
+                    /*window_number*/ 0,
+                    initial_auto_compact_window_ids,
+                );
+            }
             if matches!(&sess.fork_persistence, ForkPersistence::Referenced { .. }) {
                 // Keep the source reserved until the child's history reference is durable.
-                sess.try_ensure_rollout_materialized().await?;
+                sess.try_ensure_rollout_materialized(PersistContext::Standard)
+                    .await?;
             }
             {
                 let mut state = sess.state.lock().await;

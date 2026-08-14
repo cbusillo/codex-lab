@@ -1,36 +1,196 @@
 {
   "schemaVersion": 1,
-  "policy": {"dispositions": {"converged_with_upstream": "Upstream adopted the Codex Lab behavior, so the local delta is gone on purpose.", "pending_restore": "The path was lost by an upstream-first merge and restoring it is tracked work.", "upstream_deletion_adopted": "Upstream deleted the path and Codex Lab accepted the deletion."}, "note": "A waiver that no longer matches a violation fails the guard, so restored paths cannot leave dead ledger entries behind.", "rule": "Every waived owned path names a violation, a disposition, a deciding issue, and a reason."},
+  "policy": {
+    "dispositions": {
+      "converged_with_upstream": "Upstream adopted the Codex Lab behavior, so the local delta is gone on purpose.",
+      "pending_restore": "The path was lost by an upstream-first merge and restoring it is tracked work.",
+      "upstream_deletion_adopted": "Upstream deleted the path and Codex Lab accepted the deletion."
+    },
+    "note": "A waiver that no longer matches a violation fails the guard, so restored paths cannot leave dead ledger entries behind.",
+    "rule": "Every waived owned path names a violation, a disposition, a deciding issue, and a reason."
+  },
   "waivers": [
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "README.md", "reason": "Issue #428 keeps the upstream developer README as lineage/reference documentation while IDENTITY-1 and RELEASE-1 isolate the shipped Codex Lab executable, state, auth, installer, telemetry, release authority, package identity, endpoints, and credentials.", "violation": "reverted_to_upstream"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor.rs", "reason": "Issue #307 accepts retirement of this processor path because the compatible API now lives in app-server/src/external_agent_migration/processor.rs and retains the V2 detect, import, history, progress, and completion contracts.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor_tests.rs", "reason": "Issue #307 accepts retirement of this test path because processor_tests.rs plus the app-server V2 external_agent_config suite cover the replacement external-agent migration API.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/agent/control/restore.rs", "reason": "Issue #307 accepts retirement of the standalone restore module because current AgentControl resume and subtree recovery live in agent/control.rs and are covered by agent/control_tests.rs without reopening external live edges.", "violation": "absent"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/core/src/agent/status.rs", "reason": "Issue #307 adopts the current upstream status mapping: protocol errors are emitted through Error or TurnAborted events, while TurnComplete is terminal completion, preserving bounded and actionable final states.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/core/src/session/multi_agents.rs", "reason": "Issue #307 adopts the current upstream V2 session policy and reasoning-aware multi-agent mode; Every Code external-provider routing remains additive in guarded handler and agent-control paths.", "violation": "reverted_to_upstream"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs", "reason": "Issue #307 retires the legacy scheduled agent-jobs tool family in favor of native V2 spawn, list, wait, message, interrupt, close, and resume semantics; restoring the dead parallel job subsystem would duplicate current orchestration.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs/report_agent_job_result.rs", "reason": "Issue #307 retires the legacy agent-jobs result reporter with its superseded job subsystem; current parent-visible terminal output is owned by native multi-agent control and bounded external-agent completion paths.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs/spawn_agents_on_csv.rs", "reason": "Issue #307 retires CSV batch-agent spawning in favor of native typed multi-agent spawning and explicit external-agent selectors, avoiding a second orchestration and accounting path.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec.rs", "reason": "Issue #307 retires the legacy agent-jobs tool schema because current multi-agent V2 schemas are the canonical model-visible contract.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec_tests.rs", "reason": "Issue #307 retires tests for the removed agent-jobs schema; current multi-agent V2 schema and routing tests cover the canonical contract.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/agent_jobs_tests.rs", "reason": "Issue #307 retires unit tests for the removed agent-jobs handler; current multi-agent and external-agent lifecycle suites cover the supported orchestration path.", "violation": "absent"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/core/src/tools/handlers/multi_agents.rs", "reason": "Issue #307 adopts the current upstream multi-agent handler while preserving Every Code external-provider selection, preflight, provenance, and bounded completion in additive guarded modules and tests.", "violation": "reverted_to_upstream"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs", "reason": "Issue #307 accepts this path retirement because close behavior moved to handlers/multi_agents/close_agent.rs and interruption remains explicit in multi_agents_v2/interrupt_agent.rs.", "violation": "absent"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs", "reason": "Issue #307 adopts the upstream V2 follow-up implementation as the canonical continuation path; focused multi-agent control tests cover resumed task delivery.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs", "reason": "Issue #307 adopts the upstream V2 send-message lifecycle because it preserves typed delivery, status, and failure propagation.", "violation": "reverted_to_upstream"},
-    {"disposition": "upstream_deletion_adopted", "issue": 307, "path": "codex-rs/core/tests/suite/agent_jobs.rs", "reason": "Issue #307 retires the integration suite with the superseded agent-jobs subsystem; native V2 multi-agent and external-agent integration suites are the canonical evidence.", "violation": "absent"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/external-agent-migration/Cargo.toml", "reason": "Issue #307 adopts the current upstream migration crate dependencies and lifecycle; Codex Lab's strict V2 API compatibility remains in additive app-server protocol and processor layers.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 307, "path": "codex-rs/external-agent-migration/src/lib.rs", "reason": "Issue #307 adopts the current upstream external-agent migration service, including bounded reporting and session import, while additive Codex Lab API adapters preserve the Every Code client contract.", "violation": "reverted_to_upstream"},
-    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/detect.rs", "reason": "The current external-agent migration facade replaces the legacy detector and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/export.rs", "reason": "The current external-agent migration facade replaces the legacy exporter and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/ledger.rs", "reason": "The current external-agent migration facade owns durable import tracking, so #428 accepts deletion of the superseded standalone session ledger.", "violation": "absent"},
-    {"disposition": "upstream_deletion_adopted", "issue": 428, "path": "codex-rs/external-agent-sessions/src/records.rs", "reason": "The current external-agent migration facade owns source parsing and import state, so #428 accepts deletion of the superseded legacy records module.", "violation": "absent"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/models-manager/Cargo.toml", "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/models-manager/models.json", "reason": "Issue #428 adopts the upstream bundled catalog as MODEL-1 bootstrap metadata while the provider cache remains authoritative; the July 25 live cache confirms the current gpt-5.6 context windows at 272000.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/models-manager/prompt.md", "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/models-manager/src/config.rs", "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/models-manager/src/lib.rs", "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/tui/src/status/rate_limits.rs", "reason": "Issue #428 adopts upstream credit-availability rendering under IDENTITY-1; the broader per-account reset-credit recommendation UX remains tracked by #383.", "violation": "reverted_to_upstream"},
-    {"disposition": "converged_with_upstream", "issue": 428, "path": "codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap", "reason": "Issue #428 adopts the current upstream status implementation and fixtures under IDENTITY-1; these deltas reflect API evolution and test data rather than Codex Lab product identity.", "violation": "reverted_to_upstream"}
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "README.md",
+      "reason": "Issue #428 keeps the upstream developer README as lineage/reference documentation while IDENTITY-1 and RELEASE-1 isolate the shipped Codex Lab executable, state, auth, installer, telemetry, release authority, package identity, endpoints, and credentials.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor.rs",
+      "reason": "Issue #307 accepts retirement of this processor path because the compatible API now lives in app-server/src/external_agent_migration/processor.rs and retains the V2 detect, import, history, progress, and completion contracts.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/app-server/src/request_processors/external_agent_config_processor_tests.rs",
+      "reason": "Issue #307 accepts retirement of this test path because processor_tests.rs plus the app-server V2 external_agent_config suite cover the replacement external-agent migration API.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/agent/control/restore.rs",
+      "reason": "Issue #307 accepts retirement of the standalone restore module because current AgentControl resume and subtree recovery live in agent/control.rs and are covered by agent/control_tests.rs without reopening external live edges.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 307,
+      "path": "codex-rs/core/src/agent/status.rs",
+      "reason": "Issue #307 adopts the current upstream status mapping: protocol errors are emitted through Error or TurnAborted events, while TurnComplete is terminal completion, preserving bounded and actionable final states.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 307,
+      "path": "codex-rs/core/src/session/multi_agents.rs",
+      "reason": "Issue #307 adopts the current upstream V2 session policy and reasoning-aware multi-agent mode; Every Code external-provider routing remains additive in guarded handler and agent-control paths.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs",
+      "reason": "Issue #307 retires the legacy scheduled agent-jobs tool family in favor of native V2 spawn, list, wait, message, interrupt, close, and resume semantics; restoring the dead parallel job subsystem would duplicate current orchestration.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs/report_agent_job_result.rs",
+      "reason": "Issue #307 retires the legacy agent-jobs result reporter with its superseded job subsystem; current parent-visible terminal output is owned by native multi-agent control and bounded external-agent completion paths.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs/spawn_agents_on_csv.rs",
+      "reason": "Issue #307 retires CSV batch-agent spawning in favor of native typed multi-agent spawning and explicit external-agent selectors, avoiding a second orchestration and accounting path.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec.rs",
+      "reason": "Issue #307 retires the legacy agent-jobs tool schema because current multi-agent V2 schemas are the canonical model-visible contract.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs_spec_tests.rs",
+      "reason": "Issue #307 retires tests for the removed agent-jobs schema; current multi-agent V2 schema and routing tests cover the canonical contract.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/agent_jobs_tests.rs",
+      "reason": "Issue #307 retires unit tests for the removed agent-jobs handler; current multi-agent and external-agent lifecycle suites cover the supported orchestration path.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/multi_agents.rs",
+      "reason": "Issue #307 adopts the current upstream multi-agent handler while preserving Every Code external-provider selection, preflight, provenance, and bounded completion in additive guarded modules and tests.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs",
+      "reason": "Issue #307 accepts this path retirement because close behavior moved to handlers/multi_agents/close_agent.rs and interruption remains explicit in multi_agents_v2/interrupt_agent.rs.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs",
+      "reason": "Issue #307 adopts the upstream V2 follow-up implementation as the canonical continuation path; focused multi-agent control tests cover resumed task delivery.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 307,
+      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs",
+      "reason": "Issue #307 adopts the upstream V2 send-message lifecycle because it preserves typed delivery, status, and failure propagation.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 307,
+      "path": "codex-rs/core/tests/suite/agent_jobs.rs",
+      "reason": "Issue #307 retires the integration suite with the superseded agent-jobs subsystem; native V2 multi-agent and external-agent integration suites are the canonical evidence.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 428,
+      "path": "codex-rs/external-agent-sessions/src/detect.rs",
+      "reason": "The current external-agent migration facade replaces the legacy detector and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 428,
+      "path": "codex-rs/external-agent-sessions/src/export.rs",
+      "reason": "The current external-agent migration facade replaces the legacy exporter and is wired through current-binary migration coverage, so #428 accepts the duplicate legacy implementation's deletion.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 428,
+      "path": "codex-rs/external-agent-sessions/src/ledger.rs",
+      "reason": "The current external-agent migration facade owns durable import tracking, so #428 accepts deletion of the superseded standalone session ledger.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "upstream_deletion_adopted",
+      "issue": 428,
+      "path": "codex-rs/external-agent-sessions/src/records.rs",
+      "reason": "The current external-agent migration facade owns source parsing and import state, so #428 accepts deletion of the superseded legacy records module.",
+      "violation": "absent"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "codex-rs/models-manager/Cargo.toml",
+      "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "codex-rs/models-manager/prompt.md",
+      "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "codex-rs/models-manager/src/config.rs",
+      "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "codex-rs/tui/src/status/rate_limits.rs",
+      "reason": "Issue #428 adopts upstream credit-availability rendering under IDENTITY-1; the broader per-account reset-credit recommendation UX remains tracked by #383.",
+      "violation": "reverted_to_upstream"
+    },
+    {
+      "disposition": "converged_with_upstream",
+      "issue": 428,
+      "path": "codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap",
+      "reason": "Issue #428 adopts the current upstream status implementation and fixtures under IDENTITY-1; these deltas reflect API evolution and test data rather than Codex Lab product identity.",
+      "violation": "reverted_to_upstream"
+    }
   ]
 }

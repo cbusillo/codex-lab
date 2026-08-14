@@ -19,6 +19,7 @@ read_query_labels() {
   query_stderr="$(mktemp)"
 
   if ! ./.github/scripts/run-bazel-query-ci.sh \
+    --keep_going \
     --output=label \
     -- "$query" >"$query_stdout" 2>"$query_stderr"; then
     cat "$query_stderr" >&2

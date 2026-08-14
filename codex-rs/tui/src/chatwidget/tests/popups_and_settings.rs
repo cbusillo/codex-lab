@@ -1,18 +1,6 @@
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
 use crate::chatwidget::connectors::ConnectorsCacheState;
-use codex_app_server_protocol::ConfigLayerMetadata;
-use codex_app_server_protocol::ConfigLayerSource;
-use codex_app_server_protocol::ExternalAgentAuthState;
-use codex_app_server_protocol::ExternalAgentCapabilitiesRefreshStatus;
-use codex_app_server_protocol::ExternalAgentCapabilityFailure;
-use codex_app_server_protocol::ExternalAgentCapabilityFailureKind;
-use codex_app_server_protocol::ExternalAgentCapabilityFreshness;
-use codex_app_server_protocol::ExternalAgentCapabilitySource;
-use codex_app_server_protocol::ExternalAgentInstallState;
-use codex_app_server_protocol::ExternalAgentProviderCapabilities;
-use codex_app_server_protocol::ExternalAgentSelectorState;
-use codex_app_server_protocol::ExternalAgentSettingOrigin;
 use codex_app_server_protocol::HookErrorInfo;
 use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
@@ -24,7 +12,6 @@ use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -2909,6 +2896,26 @@ async fn experimental_features_popup_snapshot() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("experimental_features_popup", popup);
+
+    let mut config = codex_config::types::TuiKeymap::default();
+    config.list.accept = Some(codex_config::types::KeybindingsSpec::One(
+        codex_config::types::KeybindingSpec("ctrl-x enter".to_string()),
+    ));
+    let keymap = crate::keymap::RuntimeKeymap::from_config(&config)
+        .expect("valid experimental-feature chord");
+    let view = ExperimentalFeaturesView::new(
+        vec![ExperimentalFeatureItem {
+            feature: Feature::ShellTool,
+            name: "Shell tool".to_string(),
+            description: "Allow the model to run shell commands.".to_string(),
+            enabled: true,
+        }],
+        chat.app_event_tx.clone(),
+        keymap.list,
+    );
+    chat.bottom_pane.show_view(Box::new(view));
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("experimental_features_popup_configured_key_chords", popup);
 }
 
 #[tokio::test]
@@ -2980,373 +2987,6 @@ async fn multi_agent_enable_prompt_snapshot() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("multi_agent_enable_prompt", popup);
-}
-
-#[tokio::test]
-async fn agents_settings_cached_overridden_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let managed_origin = ExternalAgentSettingOrigin {
-        config_path: "agents.selectors.\"antigravity\".model".to_string(),
-        layer: ConfigLayerMetadata {
-            name: ConfigLayerSource::Project {
-                dot_codex_folder: AbsolutePathBuf::try_from("/workspace/.codex")
-                    .expect("absolute project config path"),
-            },
-            version: "project-v1".to_string(),
-        },
-        read_only: true,
-    };
-    let mut provider = agent_capability_provider("antigravity");
-    provider.install = ExternalAgentInstallState::Installed;
-    provider.auth = ExternalAgentAuthState::Authenticated;
-    provider.cli_version = Some("agy 1.2.3".to_string());
-    provider.supports_model_selection = true;
-    provider.supports_effort_selection = true;
-    provider.effort_levels = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
-    provider.source = ExternalAgentCapabilitySource::LocalCli;
-    provider.freshness = ExternalAgentCapabilityFreshness::Cached;
-    provider.selectors = vec![
-        ExternalAgentSelectorState {
-            selector: "antigravity".to_string(),
-            discovered: false,
-            model: None,
-            explicit_only: false,
-            enabled: true,
-            enabled_origin: None,
-            default_model: Some("gemini-3-pro".to_string()),
-            default_model_origin: Some(managed_origin),
-            default_effort: Some("high".to_string()),
-            default_effort_origin: None,
-        },
-        ExternalAgentSelectorState {
-            selector: "antigravity-gemini-3-pro".to_string(),
-            discovered: true,
-            model: Some("gemini-3-pro".to_string()),
-            explicit_only: false,
-            enabled: false,
-            enabled_origin: None,
-            default_model: Some("gemini-3-pro".to_string()),
-            default_model_origin: None,
-            default_effort: Some("high".to_string()),
-            default_effort_origin: None,
-        },
-    ];
-
-    chat.open_agents_capabilities_popup(
-        &[provider],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        Some(ExternalAgentCapabilitiesRefreshStatus::Completed),
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_cached_overridden",
-        render_bottom_popup(&chat, /*width*/ 100)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_fresh_success_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut provider = agent_capability_provider("antigravity");
-    provider.install = ExternalAgentInstallState::Installed;
-    provider.auth = ExternalAgentAuthState::Authenticated;
-    provider.cli_version = Some("agy 1.2.3".to_string());
-    provider.supports_model_selection = true;
-    provider.supports_effort_selection = true;
-    provider.effort_levels = vec!["low".to_string(), "medium".to_string(), "high".to_string()];
-    provider.source = ExternalAgentCapabilitySource::LocalCli;
-    provider.freshness = ExternalAgentCapabilityFreshness::Fresh;
-    provider.selectors = vec![ExternalAgentSelectorState {
-        selector: "antigravity".to_string(),
-        discovered: false,
-        model: None,
-        explicit_only: false,
-        enabled: true,
-        enabled_origin: None,
-        default_model: Some("gemini-3-pro".to_string()),
-        default_model_origin: None,
-        default_effort: Some("high".to_string()),
-        default_effort_origin: None,
-    }];
-
-    chat.open_agents_capabilities_popup(
-        &[provider],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        Some(ExternalAgentCapabilitiesRefreshStatus::Completed),
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_fresh_success",
-        render_bottom_popup(&chat, /*width*/ 100)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_missing_and_auth_failed_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut missing = agent_capability_provider("claude");
-    missing.install = ExternalAgentInstallState::NotInstalled;
-    missing.failure = Some(ExternalAgentCapabilityFailure {
-        kind: ExternalAgentCapabilityFailureKind::CommandMissing,
-        message: "Claude CLI was not found on PATH.".to_string(),
-    });
-    missing.selectors = vec![agent_selector("claude-sonnet-4.6")];
-    let mut signed_out = agent_capability_provider("antigravity");
-    signed_out.install = ExternalAgentInstallState::Installed;
-    signed_out.auth = ExternalAgentAuthState::NotAuthenticated;
-    signed_out.failure = Some(ExternalAgentCapabilityFailure {
-        kind: ExternalAgentCapabilityFailureKind::AuthenticationRequired,
-        message: "Run `agy auth login`, then refresh capabilities.".to_string(),
-    });
-    signed_out.selectors = vec![agent_selector("antigravity")];
-
-    chat.open_agents_capabilities_popup(
-        &[missing, signed_out],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_missing_and_auth_failed",
-        render_bottom_popup(&chat, /*width*/ 100)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_timeout_and_malformed_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let mut timed_out = agent_capability_provider("antigravity");
-    timed_out.install = ExternalAgentInstallState::Installed;
-    timed_out.failure = Some(ExternalAgentCapabilityFailure {
-        kind: ExternalAgentCapabilityFailureKind::TimedOut,
-        message: "Antigravity capability probe timed out.".to_string(),
-    });
-    timed_out.selectors = vec![agent_selector("antigravity")];
-    let mut malformed = agent_capability_provider("claude");
-    malformed.install = ExternalAgentInstallState::Installed;
-    malformed.failure = Some(ExternalAgentCapabilityFailure {
-        kind: ExternalAgentCapabilityFailureKind::MalformedOutput,
-        message: "Claude returned malformed capability output.".to_string(),
-    });
-    malformed.selectors = vec![agent_selector("claude-sonnet-4.6")];
-
-    chat.open_agents_capabilities_popup(
-        &[timed_out, malformed],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        Some(ExternalAgentCapabilitiesRefreshStatus::DeadlineExceeded),
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_timeout_and_malformed",
-        render_bottom_popup(&chat, /*width*/ 100)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_empty_refreshing_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ true,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_empty_refreshing",
-        render_bottom_popup(&chat, /*width*/ 80)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_cache_loading_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ true,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_cache_loading",
-        render_bottom_popup(&chat, /*width*/ 80)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_cancelling_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ true,
-        /*cancelling*/ true,
-        /*refresh_status*/ None,
-    );
-
-    assert_chatwidget_snapshot!(
-        "agents_settings_cancelling",
-        render_bottom_popup(&chat, /*width*/ 80)
-    );
-}
-
-#[tokio::test]
-async fn agents_settings_refresh_and_close_emit_cancellation_events() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ true,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::CancelAgentCapabilitiesRefresh));
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::CloseAgentsSettings));
-    assert!(chat.bottom_pane.active_view_id().is_none());
-}
-
-#[tokio::test]
-async fn agents_settings_rerender_replaces_the_existing_view() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ true,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        Some(ExternalAgentCapabilitiesRefreshStatus::Completed),
-    );
-
-    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::CloseAgentsSettings));
-    assert!(chat.bottom_pane.active_view_id().is_none());
-}
-
-#[tokio::test]
-async fn agents_settings_refresh_does_not_cover_an_open_child_picker() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        /*refresh_status*/ None,
-    );
-    chat.open_agent_selector_model_picker(
-        "antigravity".to_string(),
-        vec!["gemini-3-pro".to_string()],
-        /*current*/ None,
-    );
-
-    chat.open_agents_capabilities_popup(
-        &[],
-        /*loading*/ false,
-        /*refreshing*/ false,
-        /*cancelling*/ false,
-        Some(ExternalAgentCapabilitiesRefreshStatus::Completed),
-    );
-
-    let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert!(popup.contains("Model · antigravity"), "got:\n{popup}");
-    assert!(!popup.contains("Capabilities refreshed."), "got:\n{popup}");
-}
-
-#[tokio::test]
-async fn agent_default_pickers_emit_typed_clear_events() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.open_agent_selector_model_picker(
-        "antigravity".to_string(),
-        vec!["gemini-3-pro".to_string()],
-        Some("gemini-3-pro".to_string()),
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SetAgentSelectorModel { selector, model })
-            if selector == "antigravity" && model.is_none()
-    );
-
-    chat.open_agent_selector_effort_picker(
-        "antigravity".to_string(),
-        vec!["high".to_string()],
-        Some("high".to_string()),
-    );
-    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SetAgentSelectorEffort { selector, effort })
-            if selector == "antigravity" && effort.is_none()
-    );
-}
-
-fn agent_capability_provider(family: &str) -> ExternalAgentProviderCapabilities {
-    ExternalAgentProviderCapabilities {
-        family: family.to_string(),
-        command: family.to_string(),
-        install: ExternalAgentInstallState::Unknown,
-        auth: ExternalAgentAuthState::Unknown,
-        cli_version: None,
-        supports_model_selection: false,
-        supports_effort_selection: false,
-        effort_levels: Vec::new(),
-        source: ExternalAgentCapabilitySource::CacheMiss,
-        freshness: ExternalAgentCapabilityFreshness::Unknown,
-        observed_at: None,
-        failure: None,
-        selectors: Vec::new(),
-    }
-}
-
-fn agent_selector(selector: &str) -> ExternalAgentSelectorState {
-    ExternalAgentSelectorState {
-        selector: selector.to_string(),
-        discovered: false,
-        model: None,
-        explicit_only: false,
-        enabled: true,
-        enabled_origin: None,
-        default_model: None,
-        default_model_origin: None,
-        default_effort: None,
-        default_effort_origin: None,
-    }
 }
 
 #[tokio::test]
@@ -3448,57 +3088,6 @@ async fn memories_settings_toggle_saves_on_enter() {
 }
 
 #[tokio::test]
-async fn settings_popup_includes_automatic_validation() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.validation.groups.functional = false;
-
-    chat.open_settings_popup(/*automatic_validation_enabled*/ false);
-
-    let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert_chatwidget_snapshot!("settings_popup_with_automatic_validation", popup);
-
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAutomaticValidationSettings));
-}
-
-#[tokio::test]
-async fn automatic_validation_settings_command_requests_effective_state() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::Settings);
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenSettings));
-}
-
-#[tokio::test]
-async fn automatic_validation_settings_popup_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.validation.groups.functional = false;
-
-    chat.open_automatic_validation_settings_popup(/*enabled*/ false);
-
-    let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert_chatwidget_snapshot!("automatic_validation_settings_popup", popup);
-}
-
-#[tokio::test]
-async fn automatic_validation_settings_enables_on_select() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.validation.groups.functional = false;
-
-    chat.open_automatic_validation_settings_popup(/*enabled*/ false);
-    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
-    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::SetAutomaticValidationEnabled(true))
-    );
-}
-
-#[tokio::test]
 async fn memories_reset_confirmation_sends_event_on_confirm() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_feature_enabled(Feature::MemoryTool, /*enabled*/ true);
@@ -3552,6 +3141,7 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
         model: slug.to_string(),
         display_name: slug.to_string(),
         description: format!("{slug} description"),
+        model_specialty: None,
         default_reasoning_effort: ReasoningEffortConfig::Medium,
         supported_reasoning_efforts: vec![ReasoningEffortPreset {
             effort: ReasoningEffortConfig::Medium,
@@ -4046,6 +3636,7 @@ async fn single_reasoning_option_skips_selection() {
         model: "model-with-single-reasoning".to_string(),
         display_name: "model-with-single-reasoning".to_string(),
         description: "".to_string(),
+        model_specialty: None,
         default_reasoning_effort: ReasoningEffortConfig::High,
         supported_reasoning_efforts: single_effort,
         supports_personality: false,

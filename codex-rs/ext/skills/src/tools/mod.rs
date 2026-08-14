@@ -4,10 +4,17 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 
+use codex_analytics::AnalyticsEventsClient;
+use codex_analytics::InvocationType;
+use codex_analytics::SkillInvocation;
+use codex_analytics::SkillInvocationLocation;
+use codex_analytics::build_track_events_context;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::JsonToolOutput;
 use codex_extension_api::ResponsesApiTool;
+use codex_extension_api::ThreadOriginator;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolName;
@@ -16,11 +23,9 @@ use codex_extension_api::ToolSpec;
 use codex_extension_api::parse_tool_input_schema;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::default_namespace_description;
-use codex_utils_string::approx_token_count;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -29,10 +34,12 @@ use tokio::sync::OnceCell;
 
 use crate::catalog::SkillAuthority;
 use crate::catalog::SkillCatalog;
+use crate::catalog::SkillCatalogEntry;
 use crate::catalog::SkillSourceKind;
 use crate::provider::SkillListQuery;
 use crate::shadow_selection_experiment::ShadowSelectionExperiment;
 use crate::sources::SkillProviders;
+use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
 
 mod list;
@@ -44,17 +51,25 @@ const MAX_HANDLE_BYTES: usize = 2_048;
 
 pub(crate) fn skill_tools(
     providers: SkillProviders,
-    mcp_resources: Option<Arc<McpResourceClient>>,
-    thread_state: Arc<SkillsThreadState>,
+    session_store: &ExtensionData,
+    thread_store: &ExtensionData,
     orchestrator_available: bool,
     executor_query: Option<SkillListQuery>,
     sandbox_contexts: Option<Arc<HashMap<String, FileSystemSandboxContext>>>,
     shadow_selection: Arc<ShadowSelectionExperiment>,
 ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    let Some(thread_state) = thread_store.get::<SkillsThreadState>() else {
+        return Vec::new();
+    };
+    let mcp_resources = session_store
+        .get::<SkillsSessionState>()
+        .and_then(|state| state.mcp_resources.clone());
+    let analytics = SkillAnalytics::from_stores(session_store, thread_store);
     let context = SkillToolContext {
         providers,
         mcp_resources,
         thread_state,
+        analytics,
         orchestrator_available,
         executor_query,
         sandbox_contexts,
@@ -70,10 +85,63 @@ pub(crate) fn skill_tools(
 }
 
 #[derive(Clone)]
+pub(crate) struct SkillAnalytics {
+    client: AnalyticsEventsClient,
+    thread_id: String,
+    product_client_id: String,
+}
+
+impl SkillAnalytics {
+    pub(crate) fn from_stores(
+        session_store: &ExtensionData,
+        thread_store: &ExtensionData,
+    ) -> Option<Self> {
+        let client = session_store.get::<AnalyticsEventsClient>()?;
+        let originator = thread_store.get::<ThreadOriginator>()?;
+
+        Some(Self {
+            client: client.as_ref().clone(),
+            thread_id: thread_store.level_id().to_string(),
+            product_client_id: originator.0.clone(),
+        })
+    }
+
+    pub(crate) fn track_skill_invocation(
+        &self,
+        skill: &SkillCatalogEntry,
+        model: String,
+        turn_id: String,
+        invocation_type: InvocationType,
+    ) {
+        self.client.track_skill_invocations(
+            build_track_events_context(
+                model,
+                self.thread_id.clone(),
+                turn_id,
+                self.product_client_id.clone(),
+            ),
+            vec![SkillInvocation {
+                skill_name: skill.name.clone(),
+                location: SkillInvocationLocation::Resource {
+                    id: skill.main_prompt.as_str().to_string(),
+                    skill_id: skill.canonical_skill_id.clone(),
+                    scope: skill.analytics_scope,
+                },
+                // TODO: Include plugin identifiers once skills can be attributed to their plugin.
+                plugin_id: None,
+                remote_plugin_id: None,
+                invocation_type,
+            }],
+        );
+    }
+}
+
+#[derive(Clone)]
 struct SkillToolContext {
     providers: SkillProviders,
     mcp_resources: Option<Arc<McpResourceClient>>,
     thread_state: Arc<SkillsThreadState>,
+    analytics: Option<SkillAnalytics>,
     orchestrator_available: bool,
     executor_query: Option<SkillListQuery>,
     sandbox_contexts: Option<Arc<HashMap<String, FileSystemSandboxContext>>>,
@@ -90,8 +158,8 @@ impl SkillToolContext {
                 }
                 self.thread_state
                     .orchestrator_catalog_snapshot(
-                        self.mcp_resources.as_deref(),
-                        self.providers.list_orchestrator_for_turn(SkillListQuery {
+                        &self.providers,
+                        SkillListQuery {
                             turn_id: turn_id.to_string(),
                             executor_roots: Vec::new(),
                             resolved_executor_roots: Vec::new(),
@@ -101,7 +169,7 @@ impl SkillToolContext {
                             include_orchestrator_skills: true,
                             mcp_resources: self.mcp_resources.clone(),
                             executor_capability_discovery: None,
-                        }),
+                        },
                     )
                     .await
             }
@@ -137,7 +205,7 @@ impl SkillToolAuthoritySelector {
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum SkillToolAuthority {
+pub(crate) enum SkillToolAuthority {
     Orchestrator,
     Executor { id: String },
 }
@@ -150,7 +218,7 @@ impl SkillToolAuthority {
         }
     }
 
-    fn from_authority(authority: &SkillAuthority) -> Option<Self> {
+    pub(crate) fn from_authority(authority: &SkillAuthority) -> Option<Self> {
         match &authority.kind {
             SkillSourceKind::Orchestrator if authority.id == CODEX_APPS_MCP_SERVER_NAME => {
                 Some(Self::Orchestrator)
@@ -160,18 +228,6 @@ impl SkillToolAuthority {
             }),
             SkillSourceKind::Host | SkillSourceKind::Orchestrator | SkillSourceKind::Custom(_) => {
                 None
-            }
-        }
-    }
-
-    fn matches(&self, authority: &SkillAuthority) -> bool {
-        match self {
-            Self::Orchestrator => {
-                authority.kind == SkillSourceKind::Orchestrator
-                    && authority.id == CODEX_APPS_MCP_SERVER_NAME
-            }
-            Self::Executor { id } => {
-                authority.kind == SkillSourceKind::Executor && authority.id == *id
             }
         }
     }
@@ -256,23 +312,6 @@ fn serialized_len(value: &impl Serialize) -> Result<usize, FunctionCallError> {
     serde_json::to_vec(value)
         .map(|value| value.len())
         .map_err(|err| FunctionCallError::Fatal(err.to_string()))
-}
-
-fn serialized_fits_output_budget(
-    value: &impl Serialize,
-    truncation_policy: TruncationPolicy,
-    hard_cap_bytes: usize,
-) -> Result<bool, FunctionCallError> {
-    let serialized =
-        serde_json::to_string(value).map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
-    if serialized.len() > hard_cap_bytes {
-        return Ok(false);
-    }
-
-    Ok(match truncation_policy {
-        TruncationPolicy::Bytes(limit) => serialized.len() <= limit,
-        TruncationPolicy::Tokens(limit) => approx_token_count(&serialized) <= limit,
-    })
 }
 
 fn skill_json_output<T: Serialize>(

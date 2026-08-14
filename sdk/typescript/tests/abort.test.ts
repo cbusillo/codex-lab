@@ -1,4 +1,4 @@
-import { describe, expect } from "@jest/globals";
+import { describe, expect, it } from "@jest/globals";
 
 import {
   assistantMessage,
@@ -10,7 +10,6 @@ import {
   startResponsesTestProxy,
 } from "./responsesProxy";
 import { createMockClient } from "./testCodex";
-import { processTest } from "./testTimeouts";
 
 function* infiniteShellCall(): Generator<SseResponseBody> {
   while (true) {
@@ -19,7 +18,7 @@ function* infiniteShellCall(): Generator<SseResponseBody> {
 }
 
 describe("AbortSignal support", () => {
-  processTest("aborts run() when signal is aborted", async () => {
+  it("aborts run() when signal is aborted", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: infiniteShellCall(),
@@ -41,7 +40,7 @@ describe("AbortSignal support", () => {
     }
   });
 
-  processTest("aborts runStreamed() when signal is aborted", async () => {
+  it("aborts runStreamed() when signal is aborted", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: infiniteShellCall(),
@@ -80,7 +79,7 @@ describe("AbortSignal support", () => {
     }
   });
 
-  processTest("aborts run() when signal is aborted during execution", async () => {
+  it("aborts run() when signal is aborted during execution", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: infiniteShellCall(),
@@ -106,7 +105,7 @@ describe("AbortSignal support", () => {
     }
   });
 
-  processTest("aborts runStreamed() when signal is aborted during iteration", async () => {
+  it("aborts runStreamed() when signal is aborted during iteration", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: infiniteShellCall(),
@@ -141,7 +140,7 @@ describe("AbortSignal support", () => {
     }
   });
 
-  processTest("completes normally when signal is not aborted", async () => {
+  it("completes normally when signal is not aborted", async () => {
     const { url, close } = await startResponsesTestProxy({
       statusCode: 200,
       responseBodies: [sse(responseStarted(), assistantMessage("Hi!"), responseCompleted())],

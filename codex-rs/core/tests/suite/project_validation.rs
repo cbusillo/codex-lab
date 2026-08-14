@@ -17,6 +17,7 @@ use codex_config::ProjectValidationCommand;
 use codex_config::ShellcheckValidationProviderConfig;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -297,16 +298,10 @@ async fn submit_user_input_with_permission_profile(
 
 async fn steer_user_input(codex: &CodexThread, text: &str) -> Result<()> {
     codex
-        .steer_input(
-            vec![UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            }],
-            Default::default(),
-            /*expected_turn_id*/ None,
-            /*client_user_message_id*/ None,
-            /*responsesapi_client_metadata*/ None,
-        )
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .map_err(|error| anyhow::anyhow!("failed to steer input: {error:?}"))?;
     Ok(())

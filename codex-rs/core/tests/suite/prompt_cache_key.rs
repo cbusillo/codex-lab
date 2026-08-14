@@ -19,7 +19,7 @@ use serde_json::json;
 const ROOT_PROMPT: &str = "delegate the cache audit";
 const CHILD_TASK: &str = "inspect the repository";
 const SPAWN_CALL_ID: &str = "spawn-worker";
-const COLLABORATION_NAMESPACE: &str = "agents";
+const COLLABORATION_NAMESPACE: &str = "collaboration";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| body.to_string().contains(text))
@@ -88,7 +88,6 @@ async fn api_key_subagent_uses_session_id_as_prompt_cache_key() -> Result<()> {
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("dummy"))
         .with_config(|config| {
-            config.agents_enabled = true;
             config
                 .features
                 .enable(Feature::Collab)

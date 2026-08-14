@@ -21,6 +21,8 @@ V8_CANARY_WORKFLOW = ROOT / ".github/workflows/v8-canary.yml"
 V8_CANARY_WINDOWS_WORKFLOW = ROOT / ".github/workflows/v8-canary-windows.yml"
 V8_CANARY_METADATA_WORKFLOW = ROOT / ".github/workflows/v8-canary-metadata.yml"
 CODEX_LAB_RELEASE_WORKFLOW = ROOT / ".github/workflows/codex-lab-release.yml"
+CODEX_LAB_APP_WORKFLOW = ROOT / ".github/workflows/codex-lab-app.yml"
+SETUP_RUSTY_V8_ACTION = ROOT / ".github/actions/setup-rusty-v8/action.yml"
 FULL_CI_MATRIX_WORKFLOWS = (
     ROOT / ".github/workflows/sdk-integration.yml",
     ROOT / ".github/workflows/bazel.yml",
@@ -319,6 +321,43 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn(f"$f == {workflow_path}", blocking_workflow)
         self.assertIn(f"'{workflow_path}'", blocking_workflow)
         self.assertIn(f"'{workflow_path}'", full_workflow)
+
+    def test_codex_lab_app_tracks_rusty_v8_consumer_inputs(self) -> None:
+        workflow = CODEX_LAB_APP_WORKFLOW.read_text()
+
+        for path in (
+            ".github/actions/setup-rusty-v8/**",
+            ".github/scripts/run_bazel_with_buildbuddy.py",
+            ".github/scripts/rusty_v8_bazel.py",
+            ".github/scripts/rusty_v8_module_bazel.py",
+            "third_party/v8/rusty_v8_*_codex_release.sha256",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f'- "{path}"', workflow)
+
+    def test_rusty_v8_consumers_use_reviewed_release_checksums(self) -> None:
+        action = SETUP_RUSTY_V8_ACTION.read_text()
+        release_workflow = CODEX_LAB_RELEASE_WORKFLOW.read_text()
+
+        self.assertIn("write-release-checksums", action)
+        self.assertNotIn(
+            'curl -fsSL "${base_url}/${checksums_name}"',
+            action,
+        )
+        self.assertIn("uses: ./.github/actions/setup-rusty-v8", release_workflow)
+
+    def test_rust_ci_tracks_rusty_v8_consumer_inputs(self) -> None:
+        workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
+
+        for path in (
+            ".github/actions/setup-rusty-v8/*",
+            ".github/scripts/run_bazel_with_buildbuddy.py",
+            ".github/scripts/rusty_v8_bazel.py",
+            ".github/scripts/rusty_v8_module_bazel.py",
+            "third_party/v8/rusty_v8_*_codex_release.sha256",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"$f == {path}", workflow)
 
 
 if __name__ == "__main__":

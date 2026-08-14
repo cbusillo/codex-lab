@@ -16,7 +16,6 @@ pub(super) struct ThreadEventSnapshot {
     pub(super) input_state: Option<ThreadInputState>,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(super) enum ThreadBufferedEvent {
     Notification(Box<ServerNotification>),
@@ -209,7 +208,7 @@ impl ThreadEventStore {
             && let ThreadBufferedEvent::Request(request) = &removed
         {
             self.pending_interactive_replay
-                .note_evicted_server_request(request);
+                .note_evicted_server_request(request.as_ref());
         }
     }
 

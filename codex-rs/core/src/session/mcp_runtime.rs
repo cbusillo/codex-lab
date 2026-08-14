@@ -8,30 +8,49 @@ use super::session::SessionConfiguration;
 use super::*;
 use crate::mcp::McpRuntimeProjection;
 use codex_mcp::ElicitationReviewerHandle;
-use codex_mcp::McpStartupReconnectPolicy;
+use codex_mcp::McpStartupPolicy;
+use codex_mcp::PreparedMcpCall;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
-    pub(super) execution_context: crate::execution_account::ExecutionAccountSnapshot,
+    pub(super) auth: Option<CodexAuth>,
     pub(super) submit_id: String,
     pub(super) originator: String,
+    pub(super) session_source: SessionSource,
     pub(super) environments: TurnEnvironmentSnapshot,
+    pub(super) local_process_cwd: PathBuf,
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
 }
 
-impl McpDesiredState {
-    pub(super) fn local_stdio_fallback_cwd(&self) -> PathBuf {
-        self.environments
-            .primary()
-            .and_then(|environment| environment.cwd().to_abs_path().ok())
-            .map(|cwd| cwd.to_path_buf())
-            .unwrap_or_else(|| self.config.cwd.to_path_buf())
-    }
-}
-
 impl Session {
-    pub(super) async fn latest_mcp_desired_state(&self) -> McpDesiredState {
+    /// Waits on this session's refreshed server before tool execution is admitted.
+    pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
+        self.refresh_mcp_if_dirty().await;
+        self.services
+            .mcp_runtime
+            .wait_for_server_startup(server)
+            .await;
+    }
+
+    /// Captures this session's current MCP client and catalog for one tool call.
+    pub(crate) async fn prepare_mcp_call(
+        self: &Arc<Self>,
+        server: &str,
+        tool: &str,
+    ) -> Option<PreparedMcpCall> {
+        self.refresh_mcp_if_dirty().await;
+        self.services
+            .mcp_runtime
+            .current_binding_for_call(server)
+            .await?
+            .prepare_call(server, tool)
+    }
+
+    pub(super) async fn latest_mcp_desired_state(
+        &self,
+        auth: Option<CodexAuth>,
+    ) -> McpDesiredState {
         let session_configuration = {
             let state = self.state.lock().await;
             state.session_configuration.clone()
@@ -41,15 +60,20 @@ impl Session {
             .primary()
             .and_then(|environment| environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
-        let mut config = Self::build_per_turn_config(&session_configuration, cwd);
-        config.permissions.approval_policy = session_configuration.approval_policy.clone();
+        let config = Self::build_per_turn_config(&session_configuration, cwd);
+        let local_process_cwd = environments
+            .local_environment_cwd()
+            .unwrap_or_else(|| session_configuration.cwd().clone())
+            .to_path_buf();
 
         McpDesiredState {
             config: Arc::new(config),
-            execution_context: self.services.execution_account.snapshot().await,
+            auth,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
+            session_source: session_configuration.session_source.clone(),
             environments,
+            local_process_cwd,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
         }
     }
@@ -57,21 +81,26 @@ impl Session {
     pub(super) async fn install_initial_mcp_runtime(
         self: &Arc<Self>,
         session_configuration: &SessionConfiguration,
-        execution_context: crate::execution_account::ExecutionAccountSnapshot,
+        auth: Option<CodexAuth>,
         mcp_projection: McpRuntimeProjection,
         resolved_environments: &TurnEnvironmentSnapshot,
-        local_stdio_fallback_cwd: PathBuf,
+        mcp_runtime_cwd: PathBuf,
     ) -> anyhow::Result<()> {
-        let cwd = AbsolutePathBuf::from_absolute_path(local_stdio_fallback_cwd)
+        let cwd = AbsolutePathBuf::from_absolute_path(mcp_runtime_cwd)
             .unwrap_or_else(|_| session_configuration.cwd().clone());
-        let mut config = Self::build_per_turn_config(session_configuration, cwd);
-        config.permissions.approval_policy = session_configuration.approval_policy.clone();
+        let config = Self::build_per_turn_config(session_configuration, cwd);
+        let local_process_cwd = resolved_environments
+            .local_environment_cwd()
+            .unwrap_or_else(|| session_configuration.cwd().clone())
+            .to_path_buf();
         let desired = McpDesiredState {
             config: Arc::new(config),
-            execution_context,
+            auth,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
+            session_source: session_configuration.session_source.clone(),
             environments: resolved_environments.clone(),
+            local_process_cwd,
             windows_sandbox_level: session_configuration.windows_sandbox_level,
         };
         self.publish_mcp_runtime(
@@ -97,22 +126,13 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
-        let (input, cache_identity) = self.build_mcp_runtime_input(
+        let input = self.build_mcp_runtime_input(
             desired,
             mcp_projection,
             ready_selected_capability_roots,
             elicitation_reviewer,
         );
         self.services.mcp_runtime.replace(input).await;
-        self.apps_context
-            .set_mcp_cache_identity(cache_identity.clone());
-        if !self
-            .services
-            .execution_account
-            .snapshot_is_current(&desired.execution_context)
-        {
-            self.mark_mcp_runtime_dirty();
-        }
     }
 
     pub(super) fn build_mcp_runtime_input(
@@ -121,15 +141,8 @@ impl Session {
         mcp_projection: McpRuntimeProjection,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
-    ) -> (
-        McpRuntimeInput,
-        crate::execution_account::ExecutionAccountCacheIdentity,
-    ) {
-        let auth = desired.execution_context.auth.clone();
-        let supports_openai_form_elicitation = self
-            .services
-            .supports_openai_form_elicitation
-            .load(std::sync::atomic::Ordering::Acquire);
+    ) -> McpRuntimeInput {
+        let auth = desired.auth.clone();
         let McpRuntimeProjection {
             mut config,
             plugins_available,
@@ -153,45 +166,36 @@ impl Session {
             .or_insert_with(|| PathUri::from_abs_path(&desired.config.cwd));
         let mcp_config = Arc::new(config);
         let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
-        let local_stdio_fallback_cwd = desired.local_stdio_fallback_cwd();
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
-            local_stdio_fallback_cwd,
+            desired.local_process_cwd.clone(),
         );
-        let codex_apps_auth = codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-            .then(|| {
-                codex_mcp::CodexAppsAuthContext::new(
-                    Arc::clone(&desired.execution_context.auth_provider),
-                    desired
-                        .execution_context
-                        .cache_identity
-                        .connection_discriminator(),
-                )
-            });
+        let codex_apps_auth_manager =
+            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+                .then(|| Arc::clone(&self.services.auth_manager));
 
-        (
-            McpRuntimeInput {
-                config: mcp_config,
-                // The thread runtime outlives any single Apps outage, so let a
-                // failed Codex Apps startup recover in the background.
-                startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
-                plugins_available,
-                ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),
-                mcp_servers,
-                submit_id: desired.submit_id.clone(),
-                tx_event: Some(self.get_tx_event()),
-                startup_cancellation_token: CancellationToken::new(),
-                runtime_context,
-                codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
-                tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
-                codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
-                supports_openai_form_elicitation,
-                auth,
-                codex_apps_auth,
-                elicitation_reviewer,
-                elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
+        McpRuntimeInput {
+            startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
+                McpStartupPolicy::LazyWhenCached
+            } else {
+                McpStartupPolicy::Eager
             },
-            desired.execution_context.cache_identity.clone(),
-        )
+            config: mcp_config,
+            plugins_available,
+            ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),
+            mcp_servers,
+            submit_id: desired.submit_id.clone(),
+            tx_event: Some(self.get_tx_event()),
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context,
+            codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
+            tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
+            codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
+            client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
+            auth,
+            codex_apps_auth_manager,
+            elicitation_reviewer,
+            elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
+        }
     }
 }

@@ -228,7 +228,7 @@ impl RequestPluginInstallHandler {
             .as_ref()
             .is_some_and(|response| response.action == ElicitationAction::Accept);
 
-        let auth = turn.auth().await;
+        let auth = session.services.auth_manager.auth().await;
         let completed = if user_confirmed {
             verify_request_plugin_install_completed(&session, &turn, mcp, &tool, auth.as_ref())
                 .await
@@ -456,20 +456,15 @@ async fn refresh_missing_requested_connectors(
     }
 
     let mcp_tools = mcp.tools();
-    let accessible_connectors = connectors::with_app_enabled_state(
-        connectors::accessible_connectors_from_mcp_tools(mcp_tools),
-        &turn.config,
-    );
+    let accessible_connectors = connectors::accessible_connectors_from_mcp_tools(mcp_tools);
     if all_requested_connectors_picked_up(expected_connector_ids, &accessible_connectors) {
         return Some(accessible_connectors);
     }
 
     match session.hard_refresh_latest_codex_apps_tools().await {
         Ok(mcp_tools) => {
-            let accessible_connectors = connectors::with_app_enabled_state(
-                connectors::accessible_connectors_from_mcp_tools(&mcp_tools),
-                &turn.config,
-            );
+            let accessible_connectors =
+                connectors::accessible_connectors_from_mcp_tools(&mcp_tools);
             connectors::refresh_accessible_connectors_cache_from_mcp_tools(
                 &turn.config,
                 auth,

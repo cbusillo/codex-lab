@@ -8,18 +8,20 @@ use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_info::app_info_from_api;
+use crate::chatwidget::ThreadUsageOutcome;
 use crate::config_update::format_config_error;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+use codex_app_server_protocol::GetAccountTokenUsageParams;
+use codex_app_server_protocol::GetAccountTokenUsageResponse;
 use codex_app_server_protocol::MarketplaceAddParams;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
-
 use codex_app_server_protocol::RequestId;
 
 use crate::hooks_rpc::fetch_hooks_list;
@@ -29,6 +31,8 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 
 const TOKEN_ACTIVITY_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 15);
+const THREAD_USAGE_FETCH_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(/*secs*/ 65);
 const RATE_LIMIT_RESET_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(/*secs*/ 15);
 const AUTO_REVIEW_SUMMARY_FETCH_TIMEOUT: std::time::Duration =
@@ -75,18 +79,6 @@ impl App {
     ) -> bool {
         self.pending_auto_review_summary_fetches
             .insert((thread_id, run_id.to_string()))
-    }
-
-    pub(super) fn fetch_auto_review_summary(
-        &mut self,
-        app_server: &AppServerSession,
-        thread_id: ThreadId,
-        run_id: String,
-    ) {
-        if !self.try_claim_auto_review_summary_fetch(thread_id, &run_id) {
-            return;
-        }
-        self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
     }
 
     pub(super) fn spawn_auto_review_summary_fetch(
@@ -197,6 +189,30 @@ impl App {
             .map_err(|_| "account/usage/read timed out in TUI".to_string())
             .and_then(|result| result.map_err(|err| err.to_string()));
             app_event_tx.send(AppEvent::TokenActivityLoaded { request_id, result });
+        });
+    }
+
+    pub(super) fn refresh_thread_usage(
+        &mut self,
+        app_server: &AppServerSession,
+        thread_id: ThreadId,
+        request_id: u64,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                THREAD_USAGE_FETCH_TIMEOUT,
+                fetch_thread_usage(request_handle, thread_id),
+            )
+            .await
+            .map_err(|_| "thread usage request timed out in TUI".to_string())
+            .and_then(|result| result.map_err(|err| err.to_string()));
+            app_event_tx.send(AppEvent::ThreadUsageLoaded {
+                thread_id,
+                request_id,
+                result,
+            });
         });
     }
 
@@ -859,6 +875,26 @@ pub(super) async fn fetch_account_token_activity(
         .wrap_err("account/usage/read failed in TUI")
 }
 
+async fn fetch_thread_usage(
+    request_handle: AppServerRequestHandle,
+    thread_id: ThreadId,
+) -> Result<ThreadUsageOutcome> {
+    let request_id = RequestId::String(format!("thread-usage-{}", Uuid::new_v4()));
+    let response: GetAccountTokenUsageResponse = request_handle
+        .request_typed(ClientRequest::GetAccountTokenUsage {
+            request_id,
+            params: Some(GetAccountTokenUsageParams {
+                thread_id: Some(thread_id.to_string()),
+            }),
+        })
+        .await
+        .wrap_err("account/usage/read failed for thread usage in TUI")?;
+    Ok(response
+        .thread_usage
+        .map(ThreadUsageOutcome::Available)
+        .unwrap_or(ThreadUsageOutcome::Disabled))
+}
+
 pub(super) async fn consume_rate_limit_reset_credit_request(
     request_handle: AppServerRequestHandle,
     idempotency_key: String,
@@ -941,16 +977,6 @@ pub(super) async fn fetch_auto_review_summary(
         .wrap_err("review/summary/read failed in TUI")
 }
 
-fn auto_review_summary_status_is_terminal(
-    status: codex_app_server_protocol::BackgroundAutoReviewStatus,
-) -> bool {
-    !matches!(
-        status,
-        codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Running
-    )
-}
-
 fn latest_terminal_background_auto_review_run_id(
     response: &AutoReviewSummaryReadResponse,
 ) -> Option<&str> {
@@ -960,7 +986,7 @@ fn latest_terminal_background_auto_review_run_id(
         .chain(response.latest.iter())
         .find(|summary| {
             summary.source == codex_app_server_protocol::AutoReviewRunSource::Background
-                && auto_review_summary_status_is_terminal(summary.status)
+                && background_auto_review_status_has_summary(summary.status)
         })
         .map(|summary| summary.run_id.as_str())
 }
@@ -1250,6 +1276,7 @@ pub(super) async fn fetch_plugin_install(
             params: PluginInstallParams {
                 marketplace_path,
                 remote_marketplace_name,
+                install_attempt_id: None,
                 plugin_name,
             },
         })
@@ -1400,83 +1427,81 @@ pub(super) fn mcp_inventory_maps_from_statuses(statuses: Vec<McpServerStatus>) -
 mod tests {
     use super::*;
     use crate::app::test_support::make_test_app;
-    use codex_app_server_protocol::AutoReviewFreshness;
-    use codex_app_server_protocol::AutoReviewRunSource;
-    use codex_app_server_protocol::AutoReviewRunSummary;
-    use codex_app_server_protocol::BackgroundAutoReviewStatus;
+    use app_test_support::ChatGptAuthFixture;
+    use app_test_support::write_chatgpt_auth;
     use codex_app_server_protocol::PluginMarketplaceEntry;
+    use codex_app_server_protocol::ThreadUsage;
+    use codex_config::types::AuthCredentialsStoreMode;
     use codex_protocol::mcp::Tool;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
 
+    #[tokio::test]
+    async fn fetch_thread_usage_uses_app_server_auth_after_persisted_account_changes() {
+        let mut app = make_test_app().await;
+        let server = wiremock::MockServer::start().await;
+        let thread_id = ThreadId::new();
+        app.config.chatgpt_base_url = server.uri();
+        app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        write_chatgpt_auth(
+            app.config.codex_home.as_path(),
+            ChatGptAuthFixture::new("chatgpt-token").account_id("account-123"),
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("write ChatGPT authentication");
+        let app_server = crate::start_embedded_app_server_for_picker(&app.config)
+            .await
+            .expect("start authenticated embedded app server");
+        write_chatgpt_auth(
+            app.config.codex_home.as_path(),
+            ChatGptAuthFixture::new("different-token").account_id("different-account"),
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("replace persisted ChatGPT authentication");
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/api/codex/usage/thread_usage/query",
+            ))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer chatgpt-token",
+            ))
+            .and(wiremock::matchers::header(
+                "chatgpt-account-id",
+                "account-123",
+            ))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "thread_ids": [thread_id.to_string()]
+            })))
+            .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_json(
+                serde_json::json!({
+                    "threads": [{
+                        "thread_id": thread_id.to_string(),
+                        "estimated_usage_credits_micros": 46_000_000,
+                        "estimated_usage_usd_micros": 1_820_000
+                    }]
+                }),
+            ))
+            .expect(/*r*/ 1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            fetch_thread_usage(app_server.request_handle(), thread_id)
+                .await
+                .expect("read thread usage through the authenticated app server"),
+            ThreadUsageOutcome::Available(ThreadUsage {
+                thread_id: thread_id.to_string(),
+                estimated_usage_credits_micros: 46_000_000,
+                estimated_usage_usd_micros: Some(1_820_000),
+                groups: Vec::new(),
+            })
+        );
+    }
+
     fn test_absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
-    }
-
-    fn auto_review_summary(
-        run_id: &str,
-        source: AutoReviewRunSource,
-        status: BackgroundAutoReviewStatus,
-    ) -> AutoReviewRunSummary {
-        AutoReviewRunSummary {
-            run_id: run_id.to_string(),
-            status,
-            source,
-            freshness: AutoReviewFreshness::Current,
-            started_at: 1,
-            completed_at: Some(2),
-            model: None,
-            error_summary: None,
-            rendered_findings: 0,
-            omitted_findings: 0,
-            truncated: false,
-            content: String::new(),
-            budget: None,
-            usage: Default::default(),
-            terminal_reason: None,
-            finding_disposition: None,
-        }
-    }
-
-    #[test]
-    fn resume_summary_selection_ignores_manual_and_running_reviews() {
-        let response = AutoReviewSummaryReadResponse {
-            current: Some(auto_review_summary(
-                "manual-complete",
-                AutoReviewRunSource::Manual,
-                BackgroundAutoReviewStatus::Completed,
-            )),
-            latest: Some(auto_review_summary(
-                "background-failed",
-                AutoReviewRunSource::Background,
-                BackgroundAutoReviewStatus::Failed,
-            )),
-            status_counts: Vec::new(),
-            diagnostics: None,
-        };
-        assert_eq!(
-            latest_terminal_background_auto_review_run_id(&response),
-            Some("background-failed")
-        );
-
-        let response = AutoReviewSummaryReadResponse {
-            current: Some(auto_review_summary(
-                "background-running",
-                AutoReviewRunSource::Background,
-                BackgroundAutoReviewStatus::Running,
-            )),
-            latest: Some(auto_review_summary(
-                "manual-complete",
-                AutoReviewRunSource::Manual,
-                BackgroundAutoReviewStatus::Completed,
-            )),
-            status_counts: Vec::new(),
-            diagnostics: None,
-        };
-        assert_eq!(
-            latest_terminal_background_auto_review_run_id(&response),
-            None
-        );
     }
 
     #[test]
@@ -1628,6 +1653,7 @@ mod tests {
         let statuses = vec![
             McpServerStatus {
                 name: "docs".to_string(),
+                plugin_id: None,
                 server_info: None,
                 tools: HashMap::from([(
                     "list".to_string(),
@@ -1648,6 +1674,7 @@ mod tests {
             },
             McpServerStatus {
                 name: "disabled".to_string(),
+                plugin_id: None,
                 server_info: None,
                 tools: HashMap::new(),
                 resources: Vec::new(),

@@ -79,15 +79,14 @@ impl OutgoingMessageSender {
         }
     }
 
-    pub(crate) async fn send_response<T: Serialize>(&self, id: RequestId, response: T) {
+    pub(crate) fn send_response<T: Serialize>(&self, id: RequestId, response: T) {
         let mut result = match serde_json::to_value(response) {
             Ok(result) => result,
             Err(err) => {
                 self.send_error(
                     id,
                     ErrorData::internal_error(format!("failed to serialize response: {err}"), None),
-                )
-                .await;
+                );
                 return;
             }
         };
@@ -109,7 +108,7 @@ impl OutgoingMessageSender {
     /// This is used with the MCP server, but not the more general JSON-RPC app
     /// server. Prefer [`OutgoingMessageSender::send_server_notification`] where
     /// possible.
-    pub(crate) async fn send_event_as_notification(
+    pub(crate) fn send_event_as_notification(
         &self,
         event: &Event,
         meta: Option<OutgoingNotificationMeta>,
@@ -129,17 +128,16 @@ impl OutgoingMessageSender {
 
         self.send_notification(OutgoingNotification {
             method: "codex/event".to_string(),
-            params: Some(params.clone()),
-        })
-        .await;
+            params: Some(params),
+        });
     }
 
-    pub(crate) async fn send_notification(&self, notification: OutgoingNotification) {
+    pub(crate) fn send_notification(&self, notification: OutgoingNotification) {
         let outgoing_message = OutgoingMessage::Notification(notification);
         let _ = self.sender.send(outgoing_message);
     }
 
-    pub(crate) async fn send_error(&self, id: RequestId, error: ErrorData) {
+    pub(crate) fn send_error(&self, id: RequestId, error: ErrorData) {
         let outgoing_message = OutgoingMessage::Error(OutgoingError { id, error });
         let _ = self.sender.send(outgoing_message);
     }
@@ -246,7 +244,6 @@ mod tests {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::SessionConfiguredEvent;
-    use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
@@ -302,12 +299,10 @@ mod tests {
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<OutgoingMessage>();
         let outgoing_message_sender = OutgoingMessageSender::new(outgoing_tx);
 
-        outgoing_message_sender
-            .send_response(
-                RequestId::Number(1),
-                rmcp::model::CallToolResult::success(Vec::new()),
-            )
-            .await;
+        outgoing_message_sender.send_response(
+            RequestId::Number(1),
+            rmcp::model::CallToolResult::success(Vec::new()),
+        );
 
         let Some(OutgoingMessage::Response(response)) = outgoing_rx.recv().await else {
             panic!("expected a tool-call response");
@@ -332,7 +327,7 @@ mod tests {
                 parent_thread_id: None,
                 thread_source: None,
                 thread_name: None,
-                history_mode: ThreadHistoryMode::default(),
+                history_mode: Default::default(),
                 model: "gpt-4o".to_string(),
                 model_provider_id: "test-provider".to_string(),
                 service_tier: None,
@@ -348,9 +343,7 @@ mod tests {
             }),
         };
 
-        outgoing_message_sender
-            .send_event_as_notification(&event, /*meta*/ None)
-            .await;
+        outgoing_message_sender.send_event_as_notification(&event, /*meta*/ None);
 
         let result = outgoing_rx.recv().await.unwrap();
         let OutgoingMessage::Notification(OutgoingNotification { method, params }) = result else {
@@ -379,7 +372,7 @@ mod tests {
             parent_thread_id: None,
             thread_source: None,
             thread_name: None,
-            history_mode: ThreadHistoryMode::default(),
+            history_mode: Default::default(),
             model: "gpt-4o".to_string(),
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
@@ -402,9 +395,7 @@ mod tests {
             thread_id: None,
         };
 
-        outgoing_message_sender
-            .send_event_as_notification(&event, Some(meta))
-            .await;
+        outgoing_message_sender.send_event_as_notification(&event, Some(meta));
 
         let result = outgoing_rx.recv().await.unwrap();
         let OutgoingMessage::Notification(OutgoingNotification { method, params }) = result else {
@@ -449,7 +440,7 @@ mod tests {
             parent_thread_id: None,
             thread_source: None,
             thread_name: None,
-            history_mode: ThreadHistoryMode::default(),
+            history_mode: Default::default(),
             model: "gpt-4o".to_string(),
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
@@ -472,9 +463,7 @@ mod tests {
             thread_id: Some(thread_id),
         };
 
-        outgoing_message_sender
-            .send_event_as_notification(&event, Some(meta))
-            .await;
+        outgoing_message_sender.send_event_as_notification(&event, Some(meta));
 
         let result = outgoing_rx.recv().await.unwrap();
         let OutgoingMessage::Notification(OutgoingNotification { method, params }) = result else {

@@ -12,6 +12,14 @@ Selected Cargo CI, release, and package builds override
 sets those variables independently in `MODULE.bazel` to select source-built
 local archives and bindings for its consumer builds.
 
+Cargo consumers verify Codex release assets against the reviewed
+`rusty_v8_<version>_codex_release.sha256` manifest in this directory. The
+per-target checksum files uploaded beside GitHub Release assets are publication
+outputs only and are not a trust anchor for consumer builds. The aggregate
+manifest tracks the authoritative `openai/codex` release assets consumed by the
+setup action; if those assets are amended, consumers fail closed until a
+reviewed manifest update lands.
+
 The Bazel `v8` crate feature selection enables V8's in-process sandbox for
 Darwin, Linux, and Windows GNU. Windows MSVC remains on upstream non-sandboxed
 prebuilts.
@@ -29,9 +37,12 @@ Use this as the maintainer flow for a version bump:
 2. Update the Bazel versioned inputs in `MODULE.bazel`, then refresh the
    matching checksum manifest and generated checksums as described below.
 3. Publish a release-candidate PR and validate that `v8-canary` passes.
-4. If the canary is green, publish the release tag and release build.
-5. Once the release build completes, rerun the build on the candidate branch
-   and verify that the final artifact builds and tests pass.
+4. If the canary is green, publish the authoritative `openai/codex` release tag
+   and release build.
+5. Once the release build completes, update the checked-in Codex release asset
+   checksum manifest from the published per-target manifests.
+6. Rerun the build on the candidate branch and verify that the final artifact
+   builds and tests pass.
 
 When changing the remaining prebuilt `rusty_v8` `http_file` inputs, keep the
 checked-in checksum manifest and `MODULE.bazel` in sync:
@@ -107,12 +118,10 @@ it cannot truthfully reproduce upstream's `*-pc-windows-msvc` archives until we
 add a real MSVC-targeting C++ toolchain to the Bazel graph.
 
 Release and CI Cargo builds for Darwin and Linux use `RUSTY_V8_ARCHIVE` plus a
-downloaded `RUSTY_V8_SRC_BINDING_PATH`. Release builds keep the current
-repository's fail-closed artifact source; `rust-ci-full.yml` explicitly opts
-into the matching `openai/codex` artifacts because it publishes nothing. We do
-not use `RUSTY_V8_MIRROR` because the upstream `v8` crate hardcodes a
-`v<crate_version>` tag layout, while our artifacts are published under
-`rusty-v8-v<crate_version>`.
+downloaded `RUSTY_V8_SRC_BINDING_PATH` to point at those `openai/codex` release
+assets directly. We do not use `RUSTY_V8_MIRROR` because the upstream `v8` crate
+hardcodes a `v<crate_version>` tag layout, while our artifacts are published
+under `rusty-v8-v<crate_version>`.
 
 Do not mix artifacts across crate versions. The archive and binding must match
 the exact resolved `v8` crate version in `codex-rs/Cargo.lock`.

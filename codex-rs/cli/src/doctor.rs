@@ -487,7 +487,7 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
-        codex_version: codex_version::CODE_VERSION.to_string(),
+        codex_version: env!("CARGO_PKG_VERSION").to_string(),
         checks,
     }
 }
@@ -1081,7 +1081,7 @@ where
 
 fn config_check(config: &Config) -> DoctorCheck {
     let mut details = Vec::new();
-    details.push(format!("CODEX_HOME: {}", config.codex_home.display()));
+    details.push(format!("CODEX_LAB_HOME: {}", config.codex_home.display()));
     details.push(format!("cwd: {}", config.cwd.display()));
     details.push(format!(
         "model: {}",
@@ -2410,10 +2410,6 @@ async fn websocket_reachability_check(
             details.push(format!("handshake result: HTTP {}", probe.status));
             details.push(format!("reasoning header: {}", probe.reasoning_included));
             details.push(format!(
-                "models etag present: {}",
-                probe.models_etag_present
-            ));
-            details.push(format!(
                 "server model present: {}",
                 probe.server_model_present
             ));
@@ -2532,14 +2528,14 @@ fn fallback_state_check() -> DoctorCheck {
             "state.paths",
             "state",
             CheckStatus::Ok,
-            "CODEX_HOME was resolved without config",
+            "CODEX_LAB_HOME was resolved without config",
         )
-        .detail(format!("CODEX_HOME: {}", path.display())),
+        .detail(format!("CODEX_LAB_HOME: {}", path.display())),
         Err(err) => DoctorCheck::new(
             "state.paths",
             "state",
             CheckStatus::Warning,
-            "CODEX_HOME could not be resolved",
+            "CODEX_LAB_HOME could not be resolved",
         )
         .detail(err.to_string()),
     }
@@ -3102,7 +3098,6 @@ mod tests {
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::Mutex;
-    use std::sync::mpsc;
 
     use clap::Parser;
     use codex_protocol::config_types::SandboxMode;
@@ -3873,15 +3868,12 @@ mod tests {
     async fn mcp_http_probe_falls_back_to_get_when_head_times_out() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener address");
-        let (release_head_tx, release_head_rx) = mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut head_stream, _) = listener.accept().expect("accept HEAD probe request");
             let head = std::thread::spawn(move || {
                 let mut request = [0; 1024];
                 let _ = head_stream.read(&mut request);
-                release_head_rx
-                    .recv()
-                    .expect("GET response should release HEAD holder");
+                std::thread::sleep(Duration::from_millis(50));
             });
 
             let (mut get_stream, _) = listener.accept().expect("accept GET probe request");
@@ -3892,15 +3884,12 @@ mod tests {
                     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .expect("write response");
-            release_head_tx
-                .send(())
-                .expect("release HEAD holder after GET response");
             head.join().expect("HEAD holder should finish");
         });
 
         let status = mcp_http_probe_url_with_timeout(
             &format!("http://{addr}/mcp"),
-            Duration::from_secs(/*secs*/ 2),
+            Duration::from_millis(10),
         )
         .await;
         server.join().expect("probe server thread should finish");

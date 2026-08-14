@@ -59,7 +59,6 @@ mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
 mod remote_control_cmd;
-mod retention_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
 mod state_db_recovery;
@@ -70,7 +69,6 @@ use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
 use crate::remote_control_cmd::RemoteControlCommand;
-use crate::retention_cmd::RetentionCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
@@ -192,9 +190,6 @@ enum Subcommand {
 
     /// Unarchive a saved session by id or session name.
     Unarchive(SessionArchiveCommand),
-
-    /// Preview local rollout-retention candidates without modifying session data.
-    Retention(RetentionCommand),
 
     /// Fork a previous interactive session (picker by default; use --last to fork the most recent).
     Fork(ForkCommand),
@@ -1030,6 +1025,9 @@ async fn cli_main(
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
     let root_strict_config = interactive.strict_config;
+    interactive
+        .shared
+        .take_auto_review_config_overrides(&mut root_config_overrides);
     reject_root_strict_config_for_subcommand(root_strict_config, &subcommand)?;
     if let Some(subcommand) = subcommand.as_ref() {
         profile_v2_for_subcommand(&interactive, subcommand)?;
@@ -1376,22 +1374,6 @@ async fn cli_main(
             )
             .await?;
             println!("{output}");
-        }
-        Some(Subcommand::Retention(cmd)) => {
-            reject_remote_mode_for_subcommand(
-                root_remote.as_deref(),
-                root_remote_auth_token_env.as_deref(),
-                "retention",
-            )?;
-            let loader_overrides =
-                loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
-            retention_cmd::run(
-                cmd,
-                root_config_overrides,
-                loader_overrides,
-                root_strict_config,
-            )
-            .await?;
         }
         Some(Subcommand::Fork(ForkCommand {
             session_id,
@@ -1772,7 +1754,6 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Archive(_)
         | Subcommand::Delete(_)
         | Subcommand::Unarchive(_)
-        | Subcommand::Retention(_)
         | Subcommand::Fork(_)
         | Subcommand::Mcp(_)
         | Subcommand::Sandbox(_)
@@ -1866,6 +1847,7 @@ async fn run_exec_server_command(
                     runtime_paths,
                     telemetry,
                     http_client_factory,
+                    codex_exec_server::RequestDispatchMode::Inline,
                 )
                 .await
             },
@@ -2341,7 +2323,6 @@ fn unsupported_subcommand_name_for_strict_config(
         | Some(Subcommand::Archive(_))
         | Some(Subcommand::Delete(_))
         | Some(Subcommand::Unarchive(_))
-        | Some(Subcommand::Retention(_))
         | Some(Subcommand::Fork(_))
         | Some(Subcommand::Doctor(_)) => None,
         Some(Subcommand::AppServer(app_server)) if app_server.subcommand.is_none() => None,
@@ -2702,13 +2683,19 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         approval_policy,
         web_search,
         prompt,
-        config_overrides,
+        mut config_overrides,
         ..
     } = subcommand_cli;
+    let subcommand_auto_review = shared.auto_review;
     interactive
         .shared
         .apply_subcommand_overrides(shared.into_inner());
-    if let Some(approval) = approval_policy {
+    interactive
+        .shared
+        .take_auto_review_config_overrides(&mut config_overrides);
+    if subcommand_auto_review {
+        interactive.approval_policy = None;
+    } else if let Some(approval) = approval_policy {
         interactive.approval_policy = Some(approval);
     }
     if web_search {

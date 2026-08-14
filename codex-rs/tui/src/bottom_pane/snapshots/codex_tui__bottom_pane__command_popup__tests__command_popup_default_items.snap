@@ -26,6 +26,7 @@ expression: commands
 /agent - switch the active agent thread
 /side - start a side conversation in an ephemeral fork
 /copy - copy last response as markdown
+/export - export the conversation as markdown
 /raw - toggle raw scrollback mode for copy-friendly terminal selection
 /diff - show git diff (including untracked files)
 /mention - mention a file
@@ -35,7 +36,6 @@ expression: commands
 /theme - choose a syntax highlighting theme
 /pets - choose or hide the terminal pet
 /mcp - list configured MCP tools; use /mcp verbose for details
-/login - choose the account for this session
 /logout - log out of Codex
 /exit - exit Codex
 /feedback - send logs to maintainers
@@ -43,6 +43,5 @@ expression: commands
 /ps - list background terminals
 /stop - stop all background terminals
 /clear - clear the terminal and start a new chat
-/settings - configure accounts and third-party agents
 /test-approval - test approval request
 /subagents - switch the active agent thread

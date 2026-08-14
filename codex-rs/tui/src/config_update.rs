@@ -204,20 +204,13 @@ pub(crate) async fn read_effective_config(
     request_handle: AppServerRequestHandle,
     cwd: String,
 ) -> Result<ConfigReadResponse> {
-    read_effective_config_at_cwd(request_handle, Some(cwd)).await
-}
-
-pub(crate) async fn read_effective_config_at_cwd(
-    request_handle: AppServerRequestHandle,
-    cwd: Option<String>,
-) -> Result<ConfigReadResponse> {
     let request_id = RequestId::String(format!("tui-config-read-{}", Uuid::new_v4()));
     request_handle
         .request_typed(ClientRequest::ConfigRead {
             request_id,
             params: ConfigReadParams {
                 include_layers: false,
-                cwd,
+                cwd: Some(cwd),
             },
         })
         .await

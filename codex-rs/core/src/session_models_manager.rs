@@ -221,7 +221,3 @@ fn scoped_models_cache_home(
         .join(provider_key)
         .join(execution_account_key)
 }
-
-#[cfg(test)]
-#[path = "session_models_manager_tests.rs"]
-mod tests;

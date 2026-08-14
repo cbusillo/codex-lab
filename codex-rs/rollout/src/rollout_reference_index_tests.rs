@@ -50,11 +50,6 @@ async fn scans_active_archived_and_compressed_history_bases() -> anyhow::Result<
         index.history_base(compressed_child_id),
         Some(&compressed_base)
     );
-    assert!(index.is_complete());
-    assert_eq!(index.scanned_rollouts(), 3);
-    assert_eq!(index.unreadable_rollouts(), 0);
-    assert_eq!(index.duplicate_thread_ids(), 0);
-    assert!(!index.scan_truncated());
     Ok(())
 }
 
@@ -82,50 +77,34 @@ async fn active_duplicate_wins_without_double_counting() -> anyhow::Result<()> {
     assert_eq!(index.history_base(child_id), Some(&active_base));
     assert_eq!(index.reference_count(active_source_id), 1);
     assert_eq!(index.reference_count(archived_source_id), 0);
-    assert!(!index.is_complete());
-    assert_eq!(index.scanned_rollouts(), 2);
-    assert_eq!(index.duplicate_thread_ids(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn bounded_scan_reports_truncation() -> anyhow::Result<()> {
+async fn indexes_multiple_rollouts_for_the_same_thread() -> anyhow::Result<()> {
     let home = TempDir::new()?;
+    let source_rollout_id = thread_id(Uuid::from_u128(21))?;
+    let replacement_rollout_id = thread_id(Uuid::from_u128(22))?;
+    let thread_id = thread_id(Uuid::from_u128(20))?;
+    let history_base = history_position(source_rollout_id);
     write_rollout(
-        active_rollout_path(home.path(), Uuid::from_u128(12)),
-        thread_id(Uuid::from_u128(12))?,
-        /*history_base*/ None,
+        active_rollout_path(home.path(), Uuid::from_u128(21)),
+        thread_id,
+        Some(history_base),
     )?;
     write_rollout(
-        active_rollout_path(home.path(), Uuid::from_u128(13)),
-        thread_id(Uuid::from_u128(13))?,
-        /*history_base*/ None,
+        active_rollout_path(home.path(), Uuid::from_u128(22)),
+        thread_id,
+        Some(history_base),
     )?;
-
-    let index = RolloutReferenceIndex::scan_bounded(home.path(), /*max_rollouts*/ 1).await?;
-
-    assert!(!index.is_complete());
-    assert_eq!(index.scanned_rollouts(), 1);
-    assert_eq!(index.unreadable_rollouts(), 0);
-    assert_eq!(index.duplicate_thread_ids(), 0);
-    assert!(index.scan_truncated());
-    Ok(())
-}
-
-#[tokio::test]
-async fn scan_reports_unreadable_metadata() -> anyhow::Result<()> {
-    let home = TempDir::new()?;
-    let malformed_path = active_rollout_path(home.path(), Uuid::from_u128(14));
-    fs::create_dir_all(malformed_path.parent().expect("rollout parent"))?;
-    fs::write(malformed_path, b"not-json\n")?;
 
     let index = RolloutReferenceIndex::scan(home.path()).await?;
-
-    assert!(!index.is_complete());
-    assert_eq!(index.scanned_rollouts(), 1);
-    assert_eq!(index.unreadable_rollouts(), 1);
-    assert_eq!(index.duplicate_thread_ids(), 0);
-    assert!(!index.scan_truncated());
+    assert_eq!(index.history_base(source_rollout_id), Some(&history_base));
+    assert_eq!(
+        index.history_base(replacement_rollout_id),
+        Some(&history_base)
+    );
+    assert_eq!(index.reference_count(source_rollout_id), 1);
     Ok(())
 }
 
@@ -193,9 +172,9 @@ fn write_rollout(
     Ok(())
 }
 
-fn history_position(thread_id: ThreadId) -> HistoryPosition {
+fn history_position(rollout_id: ThreadId) -> HistoryPosition {
     HistoryPosition {
-        thread_id,
+        thread_id: rollout_id,
         end_ordinal_exclusive: 2,
         end_byte_offset: 100,
     }

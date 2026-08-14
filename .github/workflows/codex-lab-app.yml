@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - ".github/actions/setup-rusty-v8/**"
+      - ".github/scripts/run_bazel_with_buildbuddy.py"
+      - ".github/scripts/rusty_v8_bazel.py"
+      - ".github/scripts/rusty_v8_module_bazel.py"
       - ".github/workflows/codex-lab-app.yml"
       - ".github/workflows/codex-lab-release.yml"
       - "scripts/github/configure-codex-lab-cargo-cache.sh"
@@ -13,6 +17,7 @@ on:
       - "scripts/codex_lab_package/**"
       - "scripts/codex_package/**"
       - "codex-rs/**"
+      - "third_party/v8/rusty_v8_*_codex_release.sha256"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -42,6 +47,11 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+
+      - name: Configure rusty_v8 artifact overrides
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
 
       - name: Configure build cache
         shell: bash

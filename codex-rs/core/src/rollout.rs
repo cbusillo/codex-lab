@@ -43,17 +43,6 @@ impl codex_rollout::RolloutConfigView for Config {
     fn generate_memories(&self) -> bool {
         self.memories.generate_memories
     }
-
-    fn rollout_compression_mode(&self) -> codex_rollout::RolloutCompressionMode {
-        if self
-            .features
-            .enabled(codex_features::Feature::LocalThreadStoreCompression)
-        {
-            codex_rollout::RolloutCompressionMode::Enabled
-        } else {
-            codex_rollout::RolloutCompressionMode::Disabled
-        }
-    }
 }
 
 pub(crate) mod list {

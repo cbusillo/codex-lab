@@ -16,6 +16,11 @@ doctest = false
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+# Retained compatibility test source for older approval-response clients; it is
+# intentionally not wired into the current downstream test target.
+ignored-paths = ["src/approval_response_compat_tests.rs"]
+
 [dependencies]
 anyhow = { workspace = true }
 codex-arg0 = { workspace = true }
@@ -25,9 +30,12 @@ codex-home = { workspace = true }
 codex-image-generation-extension = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
+codex-features = { workspace = true }
 codex-git-attribution = { workspace = true }
 codex-login = { workspace = true }
+codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
+codex-skills-extension = { workspace = true }
 codex-utils-cli = { workspace = true }
 codex-utils-json-to-toml = { workspace = true }
 rmcp = { workspace = true }

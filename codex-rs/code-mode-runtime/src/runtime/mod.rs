@@ -344,8 +344,6 @@ mod tests {
     use super::spawn_supervised_runtime_thread;
     use crate::FunctionCallOutputContentItem;
 
-    const RUNTIME_THREAD_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
-
     fn execute_request(source: &str) -> ExecuteRequest {
         ExecuteRequest {
             tool_call_id: "call_1".to_string(),
@@ -354,6 +352,19 @@ mod tests {
             yield_time_ms: Some(1),
             max_output_tokens: None,
         }
+    }
+
+    #[test]
+    fn linked_v8_has_sandbox_enabled() {
+        unsafe extern "C" {
+            fn v8__V8__IsSandboxEnabled() -> bool;
+        }
+
+        // `rusty_v8` exposes this symbol for verifying linked sandbox support.
+        assert!(
+            unsafe { v8__V8__IsSandboxEnabled() },
+            "code mode must link against sandbox-enabled V8"
+        );
     }
 
     #[tokio::test]
@@ -370,7 +381,7 @@ mod tests {
         );
 
         assert_eq!(
-            tokio::time::timeout(RUNTIME_THREAD_EVENT_TIMEOUT, failure_rx.recv())
+            tokio::time::timeout(Duration::from_secs(1), failure_rx.recv())
                 .await
                 .expect("runtime failure timeout")
                 .expect("runtime failure"),
@@ -388,7 +399,7 @@ mod tests {
         );
 
         assert!(matches!(
-            tokio::time::timeout(RUNTIME_THREAD_EVENT_TIMEOUT, event_rx.recv())
+            tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
                 .await
                 .expect("runtime panic event timeout"),
             Some(RuntimeEvent::ThreadPanicked)

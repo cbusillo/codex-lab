@@ -9,6 +9,7 @@ use super::*;
 use crate::app_server_session::ForkGoalContinuation;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
+use crate::pager_overlay::TranscriptHistoryState;
 #[cfg(target_os = "windows")]
 use codex_config::types::WindowsSandboxModeToml;
 
@@ -32,6 +33,47 @@ impl App {
             AppEvent::StartupThreadStarted { result } => {
                 self.handle_startup_thread_started(app_server, result)
                     .await?;
+            }
+            AppEvent::RequestOlderScrollbackHistory { thread_id } => {
+                if self.chat_widget.thread_id() == Some(thread_id)
+                    && self.overlay.is_none()
+                    && self.scrollback_has_older_history
+                {
+                    self.request_older_history_page(app_server, thread_id);
+                }
+            }
+            AppEvent::OlderThreadHistoryLoaded {
+                thread_id,
+                cursor,
+                result,
+            } => {
+                if let Err(err) = self
+                    .handle_older_history_page(tui, app_server, thread_id, &cursor, result)
+                    .await
+                {
+                    app_server.cancel_older_history_page(thread_id);
+                    if self.chat_widget.thread_id() == Some(thread_id)
+                        && let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut()
+                    {
+                        overlay.set_history_state(TranscriptHistoryState::Failed);
+                        tui.frame_requester().schedule_frame();
+                    }
+                    tracing::warn!(%thread_id, error = %err, "failed to load older transcript history");
+                }
+            }
+            AppEvent::OpenTranscriptExportFilePrompt => {
+                self.chat_widget.show_transcript_export_file_prompt();
+            }
+            AppEvent::ExportTranscript { destination } => {
+                if let Err(error) = self.export_transcript(app_server, destination).await {
+                    self.chat_widget
+                        .add_error_message(format!("Export failed: {error}"));
+                }
+                if self.chat_widget.no_modal_or_popup_active() {
+                    self.chat_widget
+                        .set_queue_autosend_suppressed(/*suppressed*/ false);
+                    self.chat_widget.maybe_send_next_queued_input();
+                }
             }
             AppEvent::ClearUi { name } => {
                 self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
@@ -90,6 +132,9 @@ impl App {
                     /*show_all*/ false,
                     /*include_non_interactive*/ false,
                     picker_app_server,
+                    app_server.request_handle(),
+                    self.primary_thread_id
+                        .or(self.current_displayed_thread_id()),
                 )
                 .await?
                 {
@@ -269,27 +314,83 @@ impl App {
                 self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
                     .await;
                 let config = self.fresh_session_config();
-                let started = match app_server
-                    .thread_read(thread_id, /*include_turns*/ true)
-                    .await
-                {
-                    Ok(thread) => match crate::app_backtrack::backtrack_fork_before_turn_id(
-                        &thread.turns,
+                let turns = match self.thread_event_channels.get(&thread_id) {
+                    Some(channel) => {
+                        let store = channel.store.lock().await;
+                        let mut turns = store.turns.clone();
+                        // Snapshot turns contain loaded history; newer live turns remain in
+                        // the replay buffer and must also be visible to prompt-edit lookups.
+                        for event in &store.buffer {
+                            let ThreadBufferedEvent::Notification(notification) = event else {
+                                continue;
+                            };
+                            match notification.as_ref() {
+                                ServerNotification::TurnStarted(notification)
+                                    if !turns
+                                        .iter()
+                                        .any(|turn| turn.id == notification.turn.id) =>
+                                {
+                                    turns.push(notification.turn.clone());
+                                }
+                                ServerNotification::ItemCompleted(notification) => {
+                                    if matches!(
+                                        notification.item,
+                                        ThreadItem::UserMessage { .. }
+                                            | ThreadItem::EnteredReviewMode { .. }
+                                            | ThreadItem::ExitedReviewMode { .. }
+                                    ) && let Some(turn) = turns
+                                        .iter_mut()
+                                        .find(|turn| turn.id == notification.turn_id)
+                                        && !turn
+                                            .items
+                                            .iter()
+                                            .any(|item| item.id() == notification.item.id())
+                                    {
+                                        turn.items.push(notification.item.clone());
+                                    }
+                                }
+                                ServerNotification::TurnCompleted(notification) => {
+                                    if let Some(turn) = turns
+                                        .iter_mut()
+                                        .find(|turn| turn.id == notification.turn.id)
+                                    {
+                                        turn.status = notification.turn.status.clone();
+                                        turn.error = notification.turn.error.clone();
+                                        turn.started_at = notification.turn.started_at;
+                                        turn.completed_at = notification.turn.completed_at;
+                                        turn.duration_ms = notification.turn.duration_ms;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        Some(turns)
+                    }
+                    None => None,
+                };
+                let started = match turns {
+                    Some(turns) => match crate::app_backtrack::backtrack_fork_before_turn_id(
+                        &turns,
                         nth_user_message,
                         &mut prompt,
                     ) {
-                        Ok(Some(before_turn_id)) => {
+                        Ok(before_turn_id)
+                            if before_turn_id.is_some()
+                                || app_server.has_older_history(thread_id) =>
+                        {
+                            let before_turn_id = before_turn_id
+                                .or_else(|| turns.first().map(|turn| turn.id.clone()));
                             app_server
                                 .fork_thread_at(
                                     config.clone(),
                                     thread_id,
                                     /*last_turn_id*/ None,
-                                    /*before_turn_id*/ Some(before_turn_id),
+                                    before_turn_id,
                                     ForkGoalContinuation::StartIfIdle,
                                 )
                                 .await
                         }
-                        Ok(None) => {
+                        Ok(_) => {
                             app_server
                                 .start_thread_with_session_start_source(
                                     &config, /*session_start_source*/ None,
@@ -298,7 +399,9 @@ impl App {
                         }
                         Err(err) => Err(err),
                     },
-                    Err(err) => Err(err),
+                    None => Err(color_eyre::eyre::eyre!(
+                        "the selected thread is no longer available for prompt editing"
+                    )),
                 };
                 match started {
                     Ok(forked) => {
@@ -334,6 +437,10 @@ impl App {
                 self.insert_history_cell(tui, cell);
             }
             AppEvent::EndInitialHistoryReplayBuffer => {
+                self.scrollback_has_older_history = self
+                    .chat_widget
+                    .thread_id()
+                    .is_some_and(|thread_id| app_server.has_older_history(thread_id));
                 self.finish_initial_history_replay_buffer(tui);
             }
             AppEvent::ConsolidateAgentMessage {
@@ -431,51 +538,20 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
-            AppEvent::ShowLoginAccounts => {
-                self.show_login_accounts_view(app_server).await;
-            }
-            AppEvent::ShowLoginAddAccount => {
-                self.chat_widget.open_login_add_account_view();
-            }
-            AppEvent::LoginStartChatGpt => {
-                self.start_login_add_account_chatgpt(app_server).await;
-            }
-            AppEvent::LoginAddAccountApiKey { api_key } => {
-                self.save_login_add_account_api_key(app_server, api_key.expose_secret())
-                    .await;
-            }
-            AppEvent::LoginStartDeviceCode => {
-                self.start_login_add_account_device_code(app_server).await;
-            }
-            AppEvent::LoginCancelChatGpt => {
-                self.cancel_login_add_account_chatgpt(app_server).await;
-            }
-            AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
-                self.complete_login_add_account_chatgpt(attempt_id, result)
-                    .await;
-            }
-            AppEvent::SwitchAuthProfile { selection } => {
-                self.switch_auth_profile(tui, app_server, selection).await;
-            }
-            AppEvent::SwitchAuthAccount { selection } => {
-                self.switch_auth_account(tui, app_server, selection).await;
-            }
-            AppEvent::RemoveAuthAccount { selection } => {
-                self.remove_auth_account(tui, app_server, selection).await;
-            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
             AppEvent::CodexOp(op) => {
                 let is_user_turn = matches!(&op, AppCommand::UserTurn { .. });
                 if is_user_turn {
-                    self.handle_draw_pre_render(tui)?;
+                    let screen_size = tui.terminal.last_known_screen_size;
+                    self.handle_draw_pre_render(tui, screen_size)?;
                     if self.transcript_reflow.has_pending_reflow() {
                         self.transcript_reflow.schedule_immediate();
-                        self.maybe_run_resize_reflow(tui)?;
+                        self.maybe_run_resize_reflow(tui, screen_size)?;
                     }
                     self.chat_widget.pre_draw_tick();
-                    self.render_chat_widget_frame(tui)?;
+                    self.render_chat_widget_frame(tui, screen_size)?;
                 }
                 self.chat_widget.prepare_local_op_submission(&op);
                 if let Err(err) = self.submit_active_thread_op(app_server, op).await {
@@ -551,24 +627,6 @@ impl App {
             AppEvent::ThreadHistoryEntryResponse { thread_id, event } => {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
-            }
-            AppEvent::AutoReviewSummaryLoaded {
-                thread_id,
-                run_id,
-                result,
-            } => {
-                self.pending_auto_review_summary_fetches
-                    .remove(&(thread_id, run_id.clone()));
-                if self.primary_thread_id.is_none() || self.primary_thread_id == Some(thread_id) {
-                    self.enqueue_primary_thread_auto_review_summary(thread_id, run_id, result)
-                        .await?;
-                } else {
-                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
-                        .await?;
-                }
-            }
-            AppEvent::FetchAutoReviewSummary { thread_id, run_id } => {
-                self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
             }
             AppEvent::DiffResult(text) => {
                 // Clear the in-progress state in the bottom pane
@@ -919,6 +977,12 @@ impl App {
             AppEvent::RefreshTokenActivity { request_id } => {
                 self.refresh_token_activity(app_server, request_id);
             }
+            AppEvent::RefreshThreadUsage {
+                thread_id,
+                request_id,
+            } => {
+                self.refresh_thread_usage(app_server, thread_id, request_id);
+            }
             AppEvent::RefreshStatusLineWorkspaceHeadline { request_id } => {
                 self.refresh_status_line_workspace_headline(app_server, request_id);
             }
@@ -1144,6 +1208,13 @@ impl App {
                     self.insert_pending_usage_output_if_ready(tui);
                 }
             }
+            AppEvent::ThreadUsageLoaded {
+                thread_id,
+                request_id,
+                result,
+            } => {
+                self.finish_thread_usage_refresh(tui, thread_id, request_id, result)?;
+            }
             AppEvent::CommitPendingUsageOutput => {
                 self.insert_pending_usage_output_if_ready(tui);
             }
@@ -1159,11 +1230,15 @@ impl App {
                     .await;
             }
             AppEvent::UpdateModel(model) => {
-                self.chat_widget.set_model(&model);
-                self.sync_active_thread_model_setting(app_server, model)
-                    .await;
-                self.sync_active_thread_service_tier_to_cached_session()
-                    .await;
+                let model_changed = self.chat_widget.current_model() != model
+                    || self.chat_widget.current_collaboration_mode().model() != model;
+                if model_changed {
+                    self.chat_widget.set_model(&model);
+                    self.sync_active_thread_model_setting(app_server, model, /*effort*/ None)
+                        .await;
+                    self.sync_active_thread_service_tier_to_cached_session()
+                        .await;
+                }
             }
             AppEvent::UpdatePersonality(personality) => {
                 self.on_update_personality(personality);
@@ -1187,12 +1262,22 @@ impl App {
                 self.chat_widget.open_advanced_reasoning_popup(model);
             }
             AppEvent::ApplyAdvancedReasoning { model, effort } => {
+                let model_changed = self.chat_widget.current_model() != model
+                    || self.chat_widget.current_collaboration_mode().model() != model;
                 let default_effort =
                     self.on_apply_advanced_reasoning(model.as_str(), effort.clone());
-                if let Some(mut params) =
-                    self.active_thread_model_setting_update_params(model.clone())
+                if model_changed {
+                    self.sync_active_thread_model_setting(
+                        app_server,
+                        model.clone(),
+                        Some(effort.clone()),
+                    )
+                    .await;
+                } else if let Some(mut params) =
+                    self.active_thread_reasoning_setting_update_params(Some(effort.clone()))
                 {
-                    params.effort = Some(effort.clone());
+                    params.collaboration_mode =
+                        Some(self.chat_widget.effective_collaboration_mode());
                     self.send_thread_settings_update(app_server, params).await;
                 }
                 self.sync_active_thread_service_tier_to_cached_session()
@@ -1765,6 +1850,11 @@ impl App {
                     }
                 }
             }
+            AppEvent::CyberModelAutoReviewNotice => {
+                self.chat_widget.add_warning_message(
+                    "Cyber models default to \"Approve for me\" for safety reasons.".to_string(),
+                );
+            }
             AppEvent::PluginUninstallLoaded {
                 cwd,
                 plugin_id: _plugin_id,
@@ -1979,68 +2069,6 @@ impl App {
                 )
                 .await;
             }
-            AppEvent::OpenAccountSwitchSettings => {
-                self.chat_widget.open_account_switch_settings_popup();
-            }
-            AppEvent::OpenSettings => {
-                self.open_settings_with_effective_validation(app_server)
-                    .await;
-            }
-            AppEvent::OpenAutomaticValidationSettings => {
-                self.open_automatic_validation_settings(app_server).await;
-            }
-            AppEvent::OpenAgentsSettings => {
-                self.open_agents_settings(app_server).await;
-            }
-            AppEvent::RefreshAgentCapabilities => {
-                self.refresh_agent_capabilities(app_server).await;
-            }
-            AppEvent::CancelAgentCapabilitiesRefresh => {
-                self.cancel_agent_capabilities_refresh(app_server).await;
-            }
-            AppEvent::CloseAgentsSettings => {
-                self.close_agents_settings(app_server).await;
-            }
-            AppEvent::OpenAgentSelectorModelPicker {
-                selector,
-                models,
-                current,
-            } => {
-                self.chat_widget
-                    .open_agent_selector_model_picker(selector, models, current);
-            }
-            AppEvent::OpenAgentSelectorEffortPicker {
-                selector,
-                efforts,
-                current,
-            } => {
-                self.chat_widget
-                    .open_agent_selector_effort_picker(selector, efforts, current);
-            }
-            AppEvent::SetAgentSelectorEnabled { selector, enabled } => {
-                self.update_agent_selector_enabled(app_server, &selector, enabled)
-                    .await;
-            }
-            AppEvent::SetAgentSelectorModel { selector, model } => {
-                self.update_agent_selector_model(app_server, selector, model)
-                    .await;
-            }
-            AppEvent::SetAgentSelectorEffort { selector, effort } => {
-                self.update_agent_selector_effort(app_server, selector, effort)
-                    .await;
-            }
-            AppEvent::SetAutomaticValidationEnabled(enabled) => {
-                self.update_automatic_validation_enabled(app_server, enabled)
-                    .await;
-            }
-            AppEvent::SetAutoSwitchAccountsOnRateLimit(enabled) => {
-                self.update_auto_switch_accounts_on_rate_limit(app_server, enabled)
-                    .await;
-            }
-            AppEvent::SetApiKeyFallbackOnAllAccountsLimited(enabled) => {
-                self.update_api_key_fallback_on_all_accounts_limited(app_server, enabled)
-                    .await;
-            }
             AppEvent::ResetMemories => {
                 self.reset_memories_with_app_server(app_server).await;
             }
@@ -2159,6 +2187,64 @@ impl App {
             }
             AppEvent::OpenSkillsList => {
                 self.chat_widget.open_skills_list();
+            }
+            AppEvent::OpenAgentsSettings => {
+                self.open_agents_settings(app_server).await;
+            }
+            AppEvent::RefreshAgentCapabilities => {
+                self.refresh_agent_capabilities(app_server).await;
+            }
+            AppEvent::CancelAgentCapabilitiesRefresh => {
+                self.cancel_agent_capabilities_refresh(app_server).await;
+            }
+            AppEvent::CloseAgentsSettings => {
+                self.close_agents_settings(app_server).await;
+            }
+            AppEvent::OpenAgentSelectorModelPicker {
+                selector,
+                models,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_model_picker(selector, models, current);
+            }
+            AppEvent::OpenAgentSelectorEffortPicker {
+                selector,
+                efforts,
+                current,
+            } => {
+                self.chat_widget
+                    .open_agent_selector_effort_picker(selector, efforts, current);
+            }
+            AppEvent::SetAgentSelectorEnabled { selector, enabled } => {
+                self.update_agent_selector_enabled(app_server, &selector, enabled)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorModel { selector, model } => {
+                self.update_agent_selector_model(app_server, selector, model)
+                    .await;
+            }
+            AppEvent::SetAgentSelectorEffort { selector, effort } => {
+                self.update_agent_selector_effort(app_server, selector, effort)
+                    .await;
+            }
+            AppEvent::FetchAutoReviewSummary { thread_id, run_id } => {
+                self.spawn_auto_review_summary_fetch(app_server, thread_id, run_id);
+            }
+            AppEvent::AutoReviewSummaryLoaded {
+                thread_id,
+                run_id,
+                result,
+            } => {
+                self.pending_auto_review_summary_fetches
+                    .remove(&(thread_id, run_id.clone()));
+                if self.primary_thread_id.is_none() || self.primary_thread_id == Some(thread_id) {
+                    self.enqueue_primary_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                } else {
+                    self.enqueue_thread_auto_review_summary(thread_id, run_id, result)
+                        .await?;
+                }
             }
             AppEvent::OpenManageSkillsPopup => {
                 self.chat_widget.open_manage_skills_popup();
@@ -2460,9 +2546,15 @@ impl App {
                 context,
                 action,
                 intent,
+                capture_mode,
             } => {
-                self.chat_widget
-                    .open_keymap_capture(context, action, intent, &self.keymap);
+                self.chat_widget.open_keymap_capture(
+                    context,
+                    action,
+                    intent,
+                    capture_mode,
+                    &self.keymap,
+                );
             }
             AppEvent::OpenKeymapDebug => {
                 self.chat_widget.open_keymap_debug(&self.keymap);
@@ -2535,6 +2627,7 @@ impl App {
             .await
         {
             Ok(()) => {
+                self.cancel_pending_key_chord();
                 self.config.tui_keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget
@@ -2586,6 +2679,7 @@ impl App {
             .await
         {
             Ok(()) => {
+                self.cancel_pending_key_chord();
                 self.config.tui_keymap = keymap_config.clone();
                 self.keymap = runtime_keymap.clone();
                 self.chat_widget

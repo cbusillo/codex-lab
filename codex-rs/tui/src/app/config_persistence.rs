@@ -15,12 +15,6 @@ pub(super) struct WindowsSetupPermissions {
     pub(super) workspace_roots: Vec<AbsolutePathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AutomaticValidationState {
-    configured_enabled: bool,
-    active_thread_enabled: bool,
-}
-
 async fn build_config_on_runtime_worker(
     builder: ConfigBuilder,
     error_context: String,
@@ -36,22 +30,18 @@ pub(super) fn resume_model_settings_for_overrides(
     config: &Config,
     harness_overrides: &ConfigOverrides,
 ) -> crate::app_server_session::ResumeModelSettings {
-    let has_layer_override = config
-        .config_layer_stack
-        .layers_high_to_low()
-        .into_iter()
-        .any(|layer| {
-            matches!(
-                &layer.name,
-                ConfigLayerSource::SessionFlags
-                    | ConfigLayerSource::User {
-                        profile: Some(_),
-                        ..
-                    }
-            ) && ["model", "model_provider", "model_reasoning_effort"]
-                .iter()
-                .any(|key| layer.config.get(*key).is_some())
-        });
+    let has_layer_override = config.config_layer_stack.layers_high_to_low().any(|layer| {
+        matches!(
+            &layer.name,
+            ConfigLayerSource::SessionFlags
+                | ConfigLayerSource::User {
+                    profile: Some(_),
+                    ..
+                }
+        ) && ["model", "model_provider", "model_reasoning_effort"]
+            .iter()
+            .any(|key| layer.config.get(*key).is_some())
+    });
     if harness_overrides.model.is_some()
         || harness_overrides.model_provider.is_some()
         || has_layer_override
@@ -63,6 +53,45 @@ pub(super) fn resume_model_settings_for_overrides(
 }
 
 impl App {
+    pub(super) async fn update_agent_selector_enabled(
+        &mut self,
+        app_server: &mut AppServerSession,
+        selector: &str,
+        enabled: bool,
+    ) {
+        let write_response = match crate::config_update::write_config_batch(
+            app_server.request_handle(),
+            vec![crate::config_update::agent_selector_enabled_edit(
+                selector, enabled,
+            )],
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to save `{selector}` selector setting: {err}"
+                ));
+                return;
+            }
+        };
+        if write_response.status == WriteStatus::OkOverridden {
+            self.chat_widget.add_error_message(format!(
+                "`{selector}` was saved but a higher-precedence setting remains effective."
+            ));
+            self.open_agents_settings(app_server).await;
+            return;
+        }
+        self.config
+            .agent_selector_overrides
+            .entry(selector.to_string())
+            .or_default()
+            .enabled = Some(enabled);
+        self.chat_widget
+            .set_agent_selector_enabled(selector, enabled);
+        self.open_agents_settings(app_server).await;
+    }
+
     pub(super) async fn rebuild_config_for_cwd(&self, cwd: PathBuf) -> Result<Config> {
         let mut overrides = self.harness_overrides.clone();
         overrides.cwd = Some(cwd.clone());
@@ -700,353 +729,6 @@ impl App {
         true
     }
 
-    pub(super) async fn update_auto_switch_accounts_on_rate_limit(
-        &mut self,
-        app_server: &mut AppServerSession,
-        enabled: bool,
-    ) {
-        if self
-            .update_account_switch_setting(
-                app_server,
-                "auto_switch_accounts_on_rate_limit",
-                enabled,
-                "Auto-switch account setting",
-                |effective| {
-                    account_switch_bool_from_effective_config(
-                        effective,
-                        "auto_switch_accounts_on_rate_limit",
-                        /*default*/ true,
-                    )
-                },
-                |app, enabled| {
-                    app.config.auto_switch_accounts_on_rate_limit = enabled;
-                    app.chat_widget
-                        .set_auto_switch_accounts_on_rate_limit(enabled);
-                },
-            )
-            .await
-        {
-            let message = if enabled {
-                "Auto-switch accounts enabled"
-            } else {
-                "Auto-switch accounts disabled"
-            };
-            self.chat_widget
-                .add_info_message(message.to_string(), /*hint*/ None);
-        }
-    }
-
-    async fn read_automatic_validation_state(
-        &mut self,
-        app_server: &mut AppServerSession,
-    ) -> Result<AutomaticValidationState> {
-        let active_thread =
-            if let Some(thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) {
-                Some(
-                    app_server
-                        .thread_read(thread_id, /*include_turns*/ false)
-                        .await?,
-                )
-            } else {
-                None
-            };
-        let cwd = automatic_validation_config_read_cwd(
-            active_thread.as_ref().map(|thread| &thread.cwd),
-            app_server.uses_remote_workspace(),
-            app_server.remote_cwd_override(),
-            &self.chat_widget.config_ref().cwd,
-        );
-        let effective_config =
-            crate::config_update::read_effective_config_at_cwd(app_server.request_handle(), cwd)
-                .await?;
-        let configured_enabled =
-            automatic_validation_enabled_from_effective_config(&effective_config);
-        let Some(thread) = active_thread else {
-            return Ok(AutomaticValidationState {
-                configured_enabled,
-                active_thread_enabled: configured_enabled,
-            });
-        };
-        let active_thread_enabled = thread
-            .extra
-            .map(|extra| extra.automatic_validation_enabled)
-            .ok_or_else(|| {
-                color_eyre::eyre::eyre!(
-                    "app server did not return the thread-effective Automatic Validation state"
-                )
-            })?;
-        Ok(AutomaticValidationState {
-            configured_enabled,
-            active_thread_enabled,
-        })
-    }
-
-    pub(super) async fn open_settings_with_effective_validation(
-        &mut self,
-        app_server: &mut AppServerSession,
-    ) {
-        let enabled = match self.read_automatic_validation_state(app_server).await {
-            Ok(state) => state.active_thread_enabled,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to load thread-effective Automatic Validation state"
-                );
-                self.chat_widget.add_error_message(format!(
-                    "Could not verify the current Automatic Validation state: {err}"
-                ));
-                self.chat_widget.config_ref().validation.groups.functional
-            }
-        };
-        self.chat_widget.open_settings_popup(enabled);
-    }
-
-    pub(super) async fn open_automatic_validation_settings(
-        &mut self,
-        app_server: &mut AppServerSession,
-    ) {
-        let enabled = match self.read_automatic_validation_state(app_server).await {
-            Ok(state) => state.active_thread_enabled,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to load thread-effective Automatic Validation state"
-                );
-                self.chat_widget.add_error_message(format!(
-                    "Could not verify the current Automatic Validation state: {err}"
-                ));
-                self.chat_widget.config_ref().validation.groups.functional
-            }
-        };
-        self.chat_widget
-            .open_automatic_validation_settings_popup(enabled);
-    }
-
-    pub(super) async fn update_agent_selector_enabled(
-        &mut self,
-        app_server: &mut AppServerSession,
-        selector: &str,
-        enabled: bool,
-    ) {
-        let write_response = match crate::config_update::write_config_batch(
-            app_server.request_handle(),
-            vec![crate::config_update::agent_selector_enabled_edit(
-                selector, enabled,
-            )],
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    selector,
-                    "failed to persist agent selector setting"
-                );
-                self.chat_widget.add_error_message(format!(
-                    "Failed to save `{selector}` selector setting: {err}"
-                ));
-                return;
-            }
-        };
-
-        if write_response.status == WriteStatus::OkOverridden {
-            self.chat_widget.add_error_message(format!(
-                "`{selector}` was saved but not applied: {}",
-                overridden_write_message(&write_response)
-            ));
-            self.open_agents_settings(app_server).await;
-            return;
-        }
-
-        self.config
-            .agent_selector_overrides
-            .entry(selector.to_string())
-            .or_default()
-            .enabled = Some(enabled);
-        self.chat_widget
-            .set_agent_selector_enabled(selector, enabled);
-        self.open_agents_settings(app_server).await;
-    }
-
-    pub(super) async fn update_automatic_validation_enabled(
-        &mut self,
-        app_server: &mut AppServerSession,
-        enabled: bool,
-    ) {
-        let write_response = match crate::config_update::write_config_batch(
-            app_server.request_handle(),
-            vec![crate::config_update::replace_config_value(
-                "validation.groups.functional",
-                serde_json::json!(enabled),
-            )],
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::error!(error = %err, "failed to persist Automatic Validation setting");
-                self.chat_widget.add_error_message(format!(
-                    "Failed to save Automatic Validation setting: {err}"
-                ));
-                return;
-            }
-        };
-
-        let state = match self.read_automatic_validation_state(app_server).await {
-            Ok(state) => state,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to verify effective Automatic Validation setting"
-                );
-                self.chat_widget.add_error_message(format!(
-                    "Automatic Validation was saved, but Codex could not verify the effective setting: {err}"
-                ));
-                return;
-            }
-        };
-        self.config.validation.groups.functional = state.configured_enabled;
-        self.chat_widget
-            .set_automatic_validation_enabled(state.configured_enabled);
-        if state.configured_enabled != enabled {
-            let effective_state = if state.configured_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
-            let message = write_response
-                .overridden_metadata
-                .as_ref()
-                .map(|_| overridden_write_message(&write_response).to_string())
-                .unwrap_or_else(|| {
-                    format!(
-                        "a higher-precedence project or managed setting keeps it {effective_state}"
-                    )
-                });
-            tracing::warn!(message, "Automatic Validation config write was overridden");
-            self.chat_widget.add_error_message(format!(
-                "Automatic Validation was saved but not applied: {message}"
-            ));
-            return;
-        }
-
-        if state.active_thread_enabled != enabled {
-            let effective_state = if state.active_thread_enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
-            tracing::warn!(
-                effective_state,
-                "Automatic Validation config write was overridden for the active thread"
-            );
-            self.chat_widget.add_error_message(format!(
-                "Automatic Validation was saved for future threads, but a higher-precedence setting keeps the current thread {effective_state}"
-            ));
-            return;
-        }
-
-        let state = if state.active_thread_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        self.chat_widget.add_info_message(
-            format!("Automatic Validation {state} for the next and future turns"),
-            /*hint*/ None,
-        );
-    }
-
-    pub(super) async fn update_api_key_fallback_on_all_accounts_limited(
-        &mut self,
-        app_server: &mut AppServerSession,
-        enabled: bool,
-    ) {
-        if self
-            .update_account_switch_setting(
-                app_server,
-                "api_key_fallback_on_all_accounts_limited",
-                enabled,
-                "API key fallback setting",
-                |effective| {
-                    account_switch_bool_from_effective_config(
-                        effective,
-                        "api_key_fallback_on_all_accounts_limited",
-                        /*default*/ false,
-                    )
-                },
-                |app, enabled| {
-                    app.config.api_key_fallback_on_all_accounts_limited = enabled;
-                    app.chat_widget
-                        .set_api_key_fallback_on_all_accounts_limited(enabled);
-                },
-            )
-            .await
-        {
-            let message = if enabled {
-                "API key fallback enabled"
-            } else {
-                "API key fallback disabled"
-            };
-            self.chat_widget
-                .add_info_message(message.to_string(), /*hint*/ None);
-        }
-    }
-
-    async fn update_account_switch_setting(
-        &mut self,
-        app_server: &mut AppServerSession,
-        key_path: &'static str,
-        enabled: bool,
-        label: &'static str,
-        effective_value: impl Fn(&ConfigReadResponse) -> bool,
-        apply: impl Fn(&mut Self, bool),
-    ) -> bool {
-        let write_response = match crate::config_update::write_config_batch(
-            app_server.request_handle(),
-            vec![crate::config_update::replace_config_value(
-                key_path,
-                serde_json::json!(enabled),
-            )],
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::error!(error = %err, key_path, "failed to persist account switch setting");
-                self.chat_widget
-                    .add_error_message(format!("Failed to save {label}: {err}"));
-                self.chat_widget.dismiss_account_switch_settings_popup();
-                return false;
-            }
-        };
-
-        if write_response.status == WriteStatus::OkOverridden {
-            let message = overridden_write_message(&write_response);
-            tracing::warn!(
-                message,
-                key_path,
-                "account switch config write was overridden"
-            );
-            self.chat_widget
-                .add_error_message(format!("{label} was saved but not applied: {message}"));
-            let Some(effective_config) = self
-                .read_effective_config_after_overridden_write(app_server, label)
-                .await
-            else {
-                self.chat_widget.dismiss_account_switch_settings_popup();
-                return false;
-            };
-            apply(self, effective_value(&effective_config));
-            self.chat_widget.dismiss_account_switch_settings_popup();
-            return false;
-        }
-
-        apply(self, enabled);
-        true
-    }
-
     pub(super) async fn update_memory_settings_with_app_server(
         &mut self,
         app_server: &mut AppServerSession,
@@ -1468,49 +1150,6 @@ fn feature_enabled_from_effective_config(
         .as_ref()
         .and_then(|features| features.entries().get(feature.key()).copied())
         .unwrap_or_else(|| feature.default_enabled())
-}
-
-fn account_switch_bool_from_effective_config(
-    effective_config: &ConfigReadResponse,
-    key: &str,
-    default: bool,
-) -> bool {
-    effective_config
-        .config
-        .additional
-        .get(key)
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(default)
-}
-
-fn automatic_validation_enabled_from_effective_config(
-    effective_config: &ConfigReadResponse,
-) -> bool {
-    effective_config
-        .config
-        .additional
-        .get("validation")
-        .and_then(|validation| validation.get("groups"))
-        .and_then(|groups| groups.get("functional"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or_default()
-}
-
-fn automatic_validation_config_read_cwd(
-    active_thread_cwd: Option<&AbsolutePathBuf>,
-    uses_remote_workspace: bool,
-    remote_cwd_override: Option<&std::path::Path>,
-    local_cwd: &AbsolutePathBuf,
-) -> Option<String> {
-    if let Some(active_thread_cwd) = active_thread_cwd {
-        return Some(active_thread_cwd.display().to_string());
-    }
-    if !uses_remote_workspace {
-        return Some(local_cwd.display().to_string());
-    }
-    remote_cwd_override
-        .filter(|cwd| cwd.is_absolute())
-        .map(|cwd| cwd.display().to_string())
 }
 
 fn approvals_reviewer_from_effective_config(
@@ -2055,76 +1694,6 @@ terminal_resize_reflow_max_rows = 9000
         assert_eq!(
             app.config.permissions.approval_policy.value(),
             original_policy
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn automatic_validation_enabled_reads_nested_effective_config() -> Result<()> {
-        let effective_config: ConfigReadResponse = serde_json::from_value(serde_json::json!({
-            "config": {
-                "validation": {
-                    "groups": {
-                        "functional": true,
-                    },
-                },
-            },
-            "origins": {},
-        }))?;
-
-        assert!(automatic_validation_enabled_from_effective_config(
-            &effective_config
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn automatic_validation_config_read_cwd_uses_server_safe_paths() -> Result<()> {
-        let local_dir = tempdir()?;
-        let active_dir = tempdir()?;
-        let local_cwd = local_dir.path().to_path_buf().abs();
-        let active_thread_cwd = active_dir.path().to_path_buf().abs();
-
-        assert_eq!(
-            automatic_validation_config_read_cwd(
-                Some(&active_thread_cwd),
-                /*uses_remote_workspace*/ true,
-                Some(std::path::Path::new("relative/project")),
-                &local_cwd,
-            ),
-            Some(active_thread_cwd.display().to_string())
-        );
-        assert_eq!(
-            automatic_validation_config_read_cwd(
-                /*active_thread_cwd*/ None, /*uses_remote_workspace*/ true,
-                /*remote_cwd_override*/ None, &local_cwd,
-            ),
-            None
-        );
-        assert_eq!(
-            automatic_validation_config_read_cwd(
-                /*active_thread_cwd*/ None,
-                /*uses_remote_workspace*/ true,
-                Some(std::path::Path::new("relative/project")),
-                &local_cwd,
-            ),
-            None
-        );
-        assert_eq!(
-            automatic_validation_config_read_cwd(
-                /*active_thread_cwd*/ None,
-                /*uses_remote_workspace*/ true,
-                Some(active_thread_cwd.as_path()),
-                &local_cwd,
-            ),
-            Some(active_thread_cwd.display().to_string())
-        );
-        assert_eq!(
-            automatic_validation_config_read_cwd(
-                /*active_thread_cwd*/ None, /*uses_remote_workspace*/ false,
-                /*remote_cwd_override*/ None, &local_cwd,
-            ),
-            Some(local_cwd.display().to_string())
         );
         Ok(())
     }

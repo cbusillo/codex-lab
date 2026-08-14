@@ -65,9 +65,6 @@ fn spawn_http_listener(
                 }
             };
             stream
-                .set_nonblocking(false)
-                .expect("HTTP stream should become blocking");
-            stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("HTTP stream should get a read timeout");
             requests.push(read_http_message(&mut stream));
@@ -120,6 +117,28 @@ fn read_http_message(stream: &mut impl Read) -> String {
         }
     }
     String::from_utf8_lossy(&buffer).into_owned()
+}
+
+#[test]
+fn cloned_factories_share_chatgpt_cookie_stores_without_changing_value_equality() {
+    let factory =
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault).with_chatgpt_cookies([
+            HeaderValue::from_static("first=true"),
+            HeaderValue::from_static("second=true"),
+        ]);
+    let cloned = factory.clone();
+
+    assert!(Arc::ptr_eq(
+        &factory.chatgpt_cookie_store().expect("configured store"),
+        &cloned.chatgpt_cookie_store().expect("shared store"),
+    ));
+    assert_eq!(
+        factory,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault).with_chatgpt_cookies([
+            HeaderValue::from_static("first=true"),
+            HeaderValue::from_static("second=true"),
+        ])
+    );
 }
 
 #[test]

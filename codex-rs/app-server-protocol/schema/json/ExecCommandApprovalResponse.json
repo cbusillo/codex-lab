@@ -66,6 +66,13 @@
           "type": "string"
         },
         {
+          "description": "User has approved this MCP tool call and wants the corresponding MCP policy amendment persisted for future matching calls.",
+          "enum": [
+            "approved_mcp_policy_amendment"
+          ],
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
           "description": "User chose to persist a network policy rule (allow/deny) for future requests to the same host.",
           "properties": {

@@ -11,10 +11,6 @@ name = "codex"
 path = "src/main.rs"
 
 [[bin]]
-name = "codex-lab"
-path = "src/bin/codex-lab.rs"
-
-[[bin]]
 name = "logs_client"
 path = "src/bin/logs_client.rs"
 
@@ -44,6 +40,7 @@ codex-utils-cli = { workspace = true }
 codex-config = { workspace = true }
 codex-core = { workspace = true }
 codex-core-plugins = { workspace = true }
+codex-history = { workspace = true }
 codex-home = { workspace = true }
 codex-http-client = { workspace = true }
 codex-exec = { workspace = true }
@@ -71,6 +68,7 @@ codex-skills-extension = { workspace = true }
 codex-state = { workspace = true }
 codex-stdio-to-uds = { workspace = true }
 codex-terminal-detection = { workspace = true }
+codex-thread-store = { workspace = true }
 codex-tui = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path = { workspace = true }
@@ -125,6 +123,9 @@ wiremock = { workspace = true }
 zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
-# These Rust sources are intentionally Bazel-only macrobenchmarks rather than
-# Cargo targets.
-ignored-paths = ["e2e_benches/*.rs"]
+# These Rust sources are intentionally not Cargo targets. The e2e benches are
+# Bazel-only, while migrate_rollouts is retained as upstream reference material.
+ignored-paths = [
+    "e2e_benches/*.rs",
+    "src/migrate_rollouts.rs",
+]

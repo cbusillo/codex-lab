@@ -43,7 +43,7 @@ class InstallError(Exception):
 
 
 def _codex_home() -> str:
-    return os.environ.get("CODEX_LAB_HOME", os.path.expanduser("~/.codex-lab"))
+    return os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
 
 
 def _tmp_root() -> str:

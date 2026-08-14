@@ -4,25 +4,36 @@ use super::App;
 use super::app_server_event_targets::ServerNotificationThreadTarget;
 use super::app_server_event_targets::server_notification_thread_target;
 use super::app_server_event_targets::server_request_thread_id;
-use super::background_auto_review_status_has_summary;
 use crate::app_command::AppCommand;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
-use crate::bottom_pane::LoginAddAccountState;
 use codex_app_server_client::AppServerEvent;
-use codex_app_server_protocol::AccountLoginCompletedNotification;
-use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
-use codex_protocol::ThreadId;
 
 impl App {
     pub(super) fn refresh_mcp_startup_expected_servers_from_config(&mut self) {
+        if self
+            .current_displayed_thread_id()
+            .zip(self.primary_thread_id)
+            .is_some_and(|(thread_id, primary_thread_id)| {
+                self.agent_navigation.is_parent_owned(thread_id)
+                    || (thread_id != primary_thread_id
+                        && !self.side_threads.contains_key(&thread_id))
+            })
+        {
+            // Subagents can defer cached servers indefinitely, so only servers
+            // that actually report startup should keep their status running.
+            self.chat_widget
+                .set_mcp_startup_expected_servers(std::iter::empty());
+            return;
+        }
+
         let enabled_config_mcp_servers: Vec<String> = self
             .config
             .mcp_servers
@@ -99,12 +110,11 @@ impl App {
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
-            ServerNotification::AccountLoginCompleted(notification) => {
-                self.handle_login_add_account_completed(notification);
-                self.handle_auth_profile_login_completed(notification);
-                return;
-            }
             ServerNotification::AccountUpdated(notification) => {
+                // Deferred terminal writes must never carry the previous account's billing into
+                // the newly authenticated identity, even when both accounts share one thread.
+                self.last_thread_usage_status_cell = None;
+                self.pending_thread_usage_history_refresh = false;
                 let has_codex_backend_auth = matches!(
                     notification.auth_mode,
                     Some(
@@ -125,8 +135,6 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
-                self.maybe_record_completed_auth_profile_login(notification);
-                self.maybe_complete_login_add_account(notification);
                 return;
             }
             ServerNotification::ExternalAgentCapabilitiesUpdated(notification) => {
@@ -170,17 +178,6 @@ impl App {
             _ => {}
         }
 
-        let auto_review_summary_target = match &notification {
-            ServerNotification::BackgroundAutoReviewStatusChanged(notification)
-                if background_auto_review_status_has_summary(notification.status) =>
-            {
-                ThreadId::from_string(&notification.thread_id)
-                    .ok()
-                    .map(|thread_id| (thread_id, notification.run_id.clone()))
-            }
-            _ => None,
-        };
-
         match server_notification_thread_target(&notification) {
             ServerNotificationThreadTarget::Thread(thread_id) => {
                 let result = if self.primary_thread_id == Some(thread_id)
@@ -194,11 +191,6 @@ impl App {
 
                 if let Err(err) = result {
                     tracing::warn!("failed to enqueue app-server notification: {err}");
-                }
-                if let Some((summary_thread_id, run_id)) = auto_review_summary_target
-                    && summary_thread_id == thread_id
-                {
-                    self.fetch_auto_review_summary(app_server_client, thread_id, run_id);
                 }
                 return;
             }
@@ -280,159 +272,5 @@ impl App {
         if let Err(err) = result {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }
-    }
-
-    fn handle_auth_profile_login_completed(
-        &mut self,
-        notification: &AccountLoginCompletedNotification,
-    ) {
-        let Some(login_id) = notification.login_id.as_deref() else {
-            return;
-        };
-        let Some(pending) = self.pending_auth_profile_login.as_ref() else {
-            return;
-        };
-        if pending.login_id != login_id {
-            return;
-        }
-        if !notification.success
-            && let Some(pending) = self.pending_auth_profile_login.take()
-        {
-            self.chat_widget.add_error_message(format!(
-                "Login for auth profile {} failed.",
-                pending.profile_label
-            ));
-            if let Some(error) = notification.error.as_ref() {
-                self.chat_widget
-                    .add_info_message(error.clone(), /*hint*/ None);
-            }
-        }
-    }
-
-    fn handle_login_add_account_completed(
-        &mut self,
-        notification: &AccountLoginCompletedNotification,
-    ) {
-        let Some(login_id) = notification.login_id.as_deref() else {
-            return;
-        };
-        if self.pending_login_add_account_id.as_deref() != Some(login_id) {
-            return;
-        }
-        if self.chat_widget.active_login_add_account_id() != Some(login_id) {
-            return;
-        }
-        if notification.success {
-            self.completed_login_add_account_id = Some(login_id.to_string());
-            return;
-        }
-
-        self.pending_login_add_account_id = None;
-        self.completed_login_add_account_id = None;
-        let message = notification
-            .error
-            .clone()
-            .unwrap_or_else(|| "ChatGPT login did not complete.".to_string());
-        self.chat_widget
-            .update_login_add_account_view(LoginAddAccountState::Failed(message));
-    }
-
-    fn maybe_complete_login_add_account(&mut self, notification: &AccountUpdatedNotification) {
-        let Some(login_id) = self.pending_login_add_account_id.as_deref() else {
-            return;
-        };
-        if self.completed_login_add_account_id.as_deref() != Some(login_id) {
-            return;
-        }
-        if self.chat_widget.active_login_add_account_id() != Some(login_id) {
-            return;
-        }
-        if !notification
-            .auth_mode
-            .is_some_and(AuthMode::has_chatgpt_account)
-        {
-            return;
-        }
-
-        self.pending_login_add_account_id = None;
-        self.completed_login_add_account_id = None;
-        if !self
-            .chat_widget
-            .update_login_add_account_view(LoginAddAccountState::Complete)
-        {
-            self.chat_widget
-                .add_info_message("ChatGPT account added.".to_string(), /*hint*/ None);
-        }
-    }
-
-    fn maybe_record_completed_auth_profile_login(
-        &mut self,
-        notification: &AccountUpdatedNotification,
-    ) {
-        if !notification
-            .auth_mode
-            .is_some_and(AuthMode::has_chatgpt_account)
-        {
-            return;
-        }
-        let Some(pending) = self.pending_auth_profile_login.take() else {
-            return;
-        };
-        let auth_home =
-            match codex_login::profile_home(&self.config.codex_home, &pending.profile_name) {
-                Ok(auth_home) => auth_home,
-                Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Logged in, but failed to resolve auth profile {}: {err}",
-                        pending.profile_label
-                    ));
-                    return;
-                }
-            };
-        let (account_id, email) = match codex_login::load_auth_dot_json(
-            &auth_home,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
-        ) {
-            Ok(Some(auth)) => {
-                let account_id = auth.tokens.as_ref().and_then(|tokens| {
-                    tokens
-                        .account_id
-                        .clone()
-                        .or_else(|| tokens.id_token.chatgpt_account_id.clone())
-                });
-                let email = auth
-                    .tokens
-                    .as_ref()
-                    .and_then(|tokens| tokens.id_token.email.clone());
-                (account_id, email)
-            }
-            Ok(None) => (None, None),
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Logged in, but failed to read auth profile {}: {err}",
-                    pending.profile_label
-                ));
-                return;
-            }
-        };
-
-        if let Err(err) = codex_login::record_auth_profile_login(
-            &self.config.codex_home,
-            &pending.profile_name,
-            account_id,
-            email,
-        ) {
-            self.chat_widget.add_error_message(format!(
-                "Logged in, but failed to update auth profile {}: {err}",
-                pending.profile_label
-            ));
-            return;
-        }
-
-        self.chat_widget.add_info_message(
-            format!("Logged in to auth profile {}.", pending.profile_label),
-            /*hint*/ None,
-        );
     }
 }

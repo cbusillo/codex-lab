@@ -86,59 +86,6 @@ impl WriterLockCoordinator {
         })
     }
 
-    pub(super) fn is_active_read_only(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
-        let Some(_coordination_lock) = self.lock_coordination_read_only()? else {
-            return Ok(false);
-        };
-        let path = self.directory.join(format!("{thread_id}.lock"));
-        let file = match OpenOptions::new().read(true).open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => {
-                return Err(ThreadStoreError::Internal {
-                    message: format!(
-                        "failed to inspect thread writer lock {}: {err}",
-                        path.display()
-                    ),
-                });
-            }
-        };
-        match file.try_lock_shared() {
-            Ok(()) => Ok(false),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
-            Err(std::fs::TryLockError::Error(err)) => Err(ThreadStoreError::Internal {
-                message: format!(
-                    "failed to inspect thread writer lock {}: {err}",
-                    path.display()
-                ),
-            }),
-        }
-    }
-
-    fn lock_coordination_read_only(&self) -> ThreadStoreResult<Option<File>> {
-        let path = self.directory.join(COORDINATION_LOCK_FILE);
-        let file = match OpenOptions::new().read(true).open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(ThreadStoreError::Internal {
-                    message: format!(
-                        "failed to inspect thread writer coordination lock {}: {err}",
-                        path.display()
-                    ),
-                });
-            }
-        };
-        file.lock_shared()
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!(
-                    "failed to acquire shared thread writer coordination lock {}: {err}",
-                    path.display()
-                ),
-            })?;
-        Ok(Some(file))
-    }
-
     fn lock_coordination(&self) -> ThreadStoreResult<File> {
         fs::create_dir_all(&self.directory).map_err(|err| ThreadStoreError::Internal {
             message: format!(

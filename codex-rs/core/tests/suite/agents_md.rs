@@ -2,15 +2,16 @@ use anyhow::Result;
 use anyhow::anyhow;
 use codex_core::ForkSnapshot;
 use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_features::Feature;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -47,6 +48,7 @@ const PROJECT_INSTRUCTIONS: &str = "project instructions";
 const PROJECT_SEPARATOR: &str = "--- project-doc ---";
 const SPAWN_CALL_ID: &str = "spawn-global-instructions-child";
 const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
+const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
 const SPAWN_PARENT_PROMPT: &str = "spawn a child with the parent context";
 const SPAWN_SEED_PROMPT: &str = "seed parent history";
 
@@ -90,8 +92,9 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item
                 && let Some(state) = world_state.state.as_object_mut()
+                && state.remove("agents_md").is_some()
             {
-                removed_section |= state.remove("agents_md").is_some();
+                removed_section = true;
             }
             serde_json::to_string(&line)
         })
@@ -148,16 +151,10 @@ fn assert_single_instruction_fragment(request: &responses::ResponsesRequest, exp
 
 async fn submit_thread_turn(thread: &Arc<codex_core::CodexThread>, prompt: &str) -> Result<()> {
     thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     Ok(())
@@ -495,16 +492,10 @@ async fn loads_user_instructions_without_a_primary_environment() -> Result<()> {
 
     no_environment_thread
         .thread
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "inspect global instructions without an environment".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "inspect global instructions without an environment".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(&no_environment_thread.thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -628,6 +619,67 @@ async fn fresh_thread_composes_global_before_project_and_reports_sources() -> Re
         Some(first_input.as_slice()),
         "the ordinary second turn should retain the cached prefix"
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_environment_project_instructions_share_one_byte_budget() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_no_remote_env!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("multi-env-budget-response"),
+            responses::ev_completed("multi-env-budget-response"),
+        ]),
+    )
+    .await;
+    let local_root = TempDir::new()?;
+    std::fs::write(local_root.path().join(GLOBAL_AGENTS_FILENAME), "VWXYZ")?;
+    let mut builder = test_codex()
+        .with_config(|config| config.project_doc_max_bytes = 7)
+        .with_workspace_setup(|cwd, fs| async move {
+            fs.write_file(
+                &PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?,
+                b"ABCDE".to_vec(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        });
+    let test = builder.build_with_remote_and_local_env(&server).await?;
+    let thread = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![
+                TurnEnvironmentSelection {
+                    environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+                    cwd: PathUri::from_abs_path(&test.config.cwd),
+                    workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
+                },
+                TurnEnvironmentSelection {
+                    environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
+                    cwd: PathUri::from_host_native_path(local_root.path())?,
+                    workspace_roots: vec![PathUri::from_host_native_path(local_root.path())?],
+                },
+            ]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+
+    submit_thread_turn(&thread.thread, "inspect the shared AGENTS.md budget").await?;
+
+    let contents = format!(
+        "for `{REMOTE_ENVIRONMENT_ID}` with root {}\n\nABCDE\n\nfor `{LOCAL_ENVIRONMENT_ID}` with root {}\n\nVW",
+        PathUri::from_abs_path(&test.config.cwd).inferred_native_path_string(),
+        local_root.path().display(),
+    );
+    let expected =
+        format!("# AGENTS.md instructions\n\n<INSTRUCTIONS>\n{contents}\n</INSTRUCTIONS>");
+    assert_single_instruction_fragment(&response_mock.single_request(), &expected);
 
     Ok(())
 }
@@ -976,12 +1028,23 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forked_subagent_replays_one_creation_time_global_instruction_fragment() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    run_subagent_global_instruction_case().await
+    run_subagent_global_instruction_case(/*fork_context*/ true).await
 }
 
-async fn run_subagent_global_instruction_case() -> Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_subagent_uses_creation_time_instructions_without_parent_history() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    run_subagent_global_instruction_case(/*fork_context*/ false).await
+}
+
+async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> {
     // Set up matched responses for the parent seed, spawn call, child turn, and parent follow-up.
     let server = responses::start_mock_server().await;
+    let parent_prompt = if fork_context {
+        SPAWN_PARENT_PROMPT
+    } else {
+        SPAWN_FRESH_PARENT_PROMPT
+    };
     let seed_mock = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| request_body_contains(request, SPAWN_SEED_PROMPT),
@@ -994,17 +1057,16 @@ async fn run_subagent_global_instruction_case() -> Result<()> {
     .await;
     let spawn_args = serde_json::to_string(&json!({
         "message": SPAWN_CHILD_PROMPT,
-        "task_name": "child",
-        "fork_turns": "all",
+        "fork_context": fork_context,
     }))?;
     let spawn_mock = responses::mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, SPAWN_PARENT_PROMPT),
+        move |request: &wiremock::Request| request_body_contains(request, parent_prompt),
         responses::sse(vec![
             responses::ev_response_created("spawn-response"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "agents",
+                "multi_agent_v1",
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -1046,7 +1108,6 @@ async fn run_subagent_global_instruction_case() -> Result<()> {
     let mut builder = test_codex()
         .with_home(Arc::clone(&home))
         .with_config(|config| {
-            config.agents_enabled = true;
             let _ = config.features.enable(Feature::Collab);
             let _ = config.features.disable(Feature::EnableRequestCompression);
         });
@@ -1069,7 +1130,7 @@ async fn run_subagent_global_instruction_case() -> Result<()> {
     )?;
     assert_ne!(source, new_source);
     let mut created_threads = test.thread_manager.subscribe_thread_created();
-    test.submit_turn(SPAWN_PARENT_PROMPT).await?;
+    test.submit_turn(parent_prompt).await?;
     let child_thread_id = tokio::time::timeout(Duration::from_secs(10), created_threads.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for the subagent thread"))??;
@@ -1077,7 +1138,12 @@ async fn run_subagent_global_instruction_case() -> Result<()> {
     let spawn_request = spawn_mock.single_request();
     let child_request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(request) = child_mock.requests().into_iter().next() {
+            if let Some(request) = child_mock.requests().into_iter().find(|request| {
+                request
+                    .message_input_texts("user")
+                    .iter()
+                    .any(|text| text == SPAWN_CHILD_PROMPT)
+            }) {
                 break request;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1101,13 +1167,33 @@ async fn run_subagent_global_instruction_case() -> Result<()> {
         vec![PathUri::from_abs_path(&source)],
         "subagent reports the parent's creation-time source"
     );
-    let seed_input = seed_request.input();
-    let child_input = child_request.input();
-    assert_eq!(
-        child_input.get(..seed_input.len()),
-        Some(seed_input.as_slice()),
-        "forked subagent should replay the parent's original structured input prefix"
-    );
+    if fork_context {
+        let seed_input = seed_request.input();
+        let child_input = child_request.input();
+        assert_eq!(
+            child_input.get(..seed_input.len()),
+            Some(seed_input.as_slice()),
+            "forked subagent should replay the parent's original structured input prefix"
+        );
+    } else {
+        let child_user_texts = child_request.message_input_texts("user");
+        assert_eq!(
+            child_user_texts
+                .iter()
+                .filter(|text| text.as_str() == SPAWN_SEED_PROMPT)
+                .count(),
+            0,
+            "fresh-context subagent should omit parent user history; observed: {child_user_texts:?}"
+        );
+        assert_eq!(
+            child_user_texts
+                .iter()
+                .filter(|text| text.as_str() == SPAWN_CHILD_PROMPT)
+                .count(),
+            1,
+            "fresh-context subagent should contain its own prompt exactly once; observed: {child_user_texts:?}"
+        );
+    }
 
     Ok(())
 }

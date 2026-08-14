@@ -79,9 +79,9 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
             },
         )
 
-    def test_red_lane_wins_when_contracts_overlap(self) -> None:
+    def test_identity_lane_wins_when_contracts_overlap(self) -> None:
         classified = inventory.classify("codex-rs/cli/src/login.rs", "content")
-        self.assertEqual(classified["lane"], "red_manual_review")
+        self.assertEqual(classified["lane"], "intentionally_owned")
         self.assertEqual(classified["contracts"], ["IDENTITY-1"])
 
     def test_protocol_path_is_contract_adapted(self) -> None:
@@ -143,9 +143,6 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
     def test_current_policy_preserves_product_classification(self) -> None:
         for path in (
             "AGENTS.md",
-            "README.md",
-            "codex-rs/cli/src/login.rs",
-            "codex-rs/models-manager/src/manager.rs",
             "codex-rs/core/src/agent/control.rs",
             "codex-rs/browser/src/manager.rs",
             ".github/workflows/codex-lab-app.yml",
@@ -153,9 +150,37 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertEqual(
-                    inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION),
+                    inventory.classify_path(path, inventory.PREVIOUS_POLICY_VERSION),
                     inventory.classify_path(path, inventory.POLICY_VERSION),
                 )
+
+    def test_current_policy_makes_codex_lab_identity_invariant(self) -> None:
+        for path in (
+            "README.md",
+            "codex-rs/cli/src/login.rs",
+            "codex-rs/tui/src/status/helpers.rs",
+        ):
+            with self.subTest(path=path):
+                classified = inventory.classify_path(path)
+                self.assertEqual("intentionally_owned", classified["lane"])
+                self.assertEqual(["IDENTITY-1"], classified["contracts"])
+                self.assertEqual(
+                    "red_manual_review",
+                    inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)[
+                        "lane"
+                    ],
+                )
+
+    def test_current_policy_adopts_upstream_model_defaults(self) -> None:
+        path = "codex-rs/models-manager/src/manager.rs"
+        classified = inventory.classify_path(path)
+
+        self.assertEqual("amber_contract_adapt", classified["lane"])
+        self.assertEqual(["MODEL-1"], classified["contracts"])
+        self.assertEqual(
+            "red_manual_review",
+            inventory.classify_path(path, inventory.LEGACY_POLICY_VERSION)["lane"],
+        )
 
     def test_rejects_unsupported_policy_version(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported policy version"):
