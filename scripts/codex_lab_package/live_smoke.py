@@ -19,6 +19,8 @@ from typing import Any, Callable
 PROVENANCE_FIELDS = (
     "schema_version",
     "version",
+    "release_version",
+    "compatibility_version",
     "source_commit",
     "dirty_state",
     "build_profile",
@@ -183,6 +185,9 @@ def read_cli_provenance(cli_path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ValueError("Codex Lab CLI emitted invalid provenance JSON") from exc
     validate_cli_provenance(provenance, cli_path)
+    if provenance["schema_version"] == 1:
+        provenance["release_version"] = provenance["version"]
+        provenance["compatibility_version"] = provenance["version"]
     return {field: provenance[field] for field in PROVENANCE_FIELDS}
 
 
@@ -238,7 +243,10 @@ def _bounded_file_tail(path: Path, limit: int) -> str:
 
 
 def validate_cli_provenance(provenance: Any, cli_path: Path) -> None:
-    if not isinstance(provenance, dict) or provenance.get("schema_version") != 1:
+    if not isinstance(provenance, dict) or provenance.get("schema_version") not in {
+        1,
+        2,
+    }:
         raise ValueError("Codex Lab CLI provenance schema is unsupported")
     source_commit = provenance.get("source_commit")
     if not isinstance(source_commit, str) or not SOURCE_COMMIT_PATTERN.fullmatch(
@@ -255,6 +263,13 @@ def validate_cli_provenance(provenance: Any, cli_path: Path) -> None:
         value = provenance.get(field)
         if not isinstance(value, str) or not value or len(value) > max_length:
             raise ValueError(f"Codex Lab CLI {field} is unavailable or unbounded")
+    if provenance["schema_version"] == 2:
+        for field in ("release_version", "compatibility_version"):
+            value = provenance.get(field)
+            if not isinstance(value, str) or not value or len(value) > 128:
+                raise ValueError(f"Codex Lab CLI {field} is unavailable or unbounded")
+        if provenance["version"] != provenance["compatibility_version"]:
+            raise ValueError("Codex Lab CLI compatibility version aliases disagree")
     executable_path = provenance.get("executable_path")
     if (
         not isinstance(executable_path, str)

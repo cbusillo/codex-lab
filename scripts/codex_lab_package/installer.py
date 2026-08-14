@@ -1274,6 +1274,7 @@ def write_install_state(
         "listenHost": supervisor_paths.listen_host,
         "listenPort": supervisor_paths.listen_port,
         "releaseTag": manifest["release"]["tag"],
+        "releaseVersion": manifest.get("releaseVersion", manifest["version"]),
         "shimPath": str(shim_path) if shim_path is not None else None,
         "source": manifest["source"],
         "supervisorLabel": supervisor_paths.label,

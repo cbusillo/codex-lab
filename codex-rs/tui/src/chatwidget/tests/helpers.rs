@@ -183,6 +183,7 @@ pub(super) async fn make_chatwidget_manual_with_auth(
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let model_catalog = test_model_catalog(&cfg);
     let common = ChatWidgetInit {
+        product_identity: codex_version::ProductIdentity::Codex,
         config: cfg,
         frame_requester,
         app_event_tx,

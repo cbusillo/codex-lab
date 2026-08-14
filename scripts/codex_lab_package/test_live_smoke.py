@@ -80,8 +80,10 @@ class LiveSmokeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             cli_path = Path(temp_dir) / "codex-lab"
             provenance = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "version": "0.0.0",
+                "release_version": "0.0.0-lab.5",
+                "compatibility_version": "0.0.0",
                 "source_commit": "a" * 40,
                 "dirty_state": "clean",
                 "build_profile": "release",
@@ -93,8 +95,17 @@ class LiveSmokeTest(unittest.TestCase):
                     validate_cli_provenance(
                         {**provenance, "source_commit": source_commit}, cli_path
                     )
+            validate_cli_provenance(
+                {
+                    key: value
+                    for key, value in provenance.items()
+                    if key not in {"release_version", "compatibility_version"}
+                }
+                | {"schema_version": 1},
+                cli_path,
+            )
             for field, value, message in (
-                ("schema_version", 2, "schema"),
+                ("schema_version", 3, "schema"),
                 ("source_commit", "bad", "malformed"),
                 ("source_commit", "a" * 39, "malformed"),
                 ("source_commit", "a" * 65, "malformed"),
@@ -116,6 +127,8 @@ class LiveSmokeTest(unittest.TestCase):
                 for field in (
                     "schema_version",
                     "version",
+                    "release_version",
+                    "compatibility_version",
                     "source_commit",
                     "dirty_state",
                     "build_profile",

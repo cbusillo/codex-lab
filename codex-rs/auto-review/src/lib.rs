@@ -1552,6 +1552,11 @@ pub struct AutoReviewBuildProvenance {
     pub executable_path: String,
 }
 
+impl AutoReviewBuildProvenance {
+    /// Schema version for the persisted auto-review build identity shape.
+    pub const SCHEMA_VERSION: u32 = 1;
+}
+
 impl AutoReviewRunTarget {
     pub fn freshness(&self, active: &Self) -> AutoReviewFreshness {
         self.freshness_with_worktree(active, /*compare_worktree_fingerprint*/ true)

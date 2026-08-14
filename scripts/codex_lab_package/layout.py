@@ -43,6 +43,7 @@ class CodexLabAppOptions:
     bundle_identifier: str = DEFAULT_BUNDLE_IDENTIFIER
     display_name: str = DEFAULT_DISPLAY_NAME
     short_version: str = "0.0.0"
+    release_version: str | None = None
     bundle_version: str = "1"
     embedded_cli_version: str | None = None
     source_commit: str | None = None
@@ -95,7 +96,9 @@ def build_codex_lab_app(options: CodexLabAppOptions) -> CodexLabAppResult:
                 expected_cli_sha256=embedded_cli_sha256,
                 expected_source_commit=options.source_commit,
                 expected_cli_version=options.embedded_cli_version
+                or options.release_version
                 or options.short_version,
+                expected_compatibility_version=options.short_version,
             ),
             end="",
             file=handle,
@@ -148,6 +151,7 @@ def _launcher_script(
     expected_cli_sha256: str,
     expected_source_commit: str | None,
     expected_cli_version: str,
+    expected_compatibility_version: str,
     codesign_path: Path = Path("/usr/bin/codesign"),
     id_path: Path = Path("/usr/bin/id"),
     launchctl_path: Path = Path("/bin/launchctl"),
@@ -168,6 +172,7 @@ CONFIGURED_CODEX_APP={_shell_quote(str(codex_app_path))}
 EXPECTED_CLI_SHA256={_shell_quote(expected_cli_sha256)}
 EXPECTED_SOURCE_COMMIT={_shell_quote(expected_source_commit or "")}
 EXPECTED_CLI_VERSION={_shell_quote(expected_cli_version)}
+EXPECTED_COMPATIBILITY_VERSION={_shell_quote(expected_compatibility_version)}
 OFFICIAL_BUNDLE_IDENTIFIER={_shell_quote(OFFICIAL_APP_BUNDLE_IDENTIFIER)}
 OFFICIAL_TEAM_IDENTIFIER={_shell_quote(OFFICIAL_APP_TEAM_IDENTIFIER)}
 SUPERVISOR_LABEL={_shell_quote(APP_SERVER_LABEL)}
@@ -301,7 +306,8 @@ provenance_field() {{
   "$PLUTIL" -extract "$1" raw -o - "$PROVENANCE_FILE" 2>/dev/null || true
 }}
 schema_version=$(provenance_field schema_version)
-version=$(provenance_field version)
+release_version=$(provenance_field release_version)
+compatibility_version=$(provenance_field compatibility_version)
 source_commit=$(provenance_field source_commit)
 dirty_state=$(provenance_field dirty_state)
 build_profile=$(provenance_field build_profile)
@@ -314,7 +320,7 @@ case "$source_commit" in
     exit 1
     ;;
 esac
-if [ "$schema_version" != "1" ]; then
+if [ "$schema_version" != "2" ]; then
   echo "Codex Lab CLI provenance schema or source commit is invalid." >&2
   exit 1
 fi
@@ -329,15 +335,20 @@ if [ -n "$EXPECTED_SOURCE_COMMIT" ] && [ "$source_commit" != "$EXPECTED_SOURCE_C
   echo "Codex Lab CLI source commit does not match the packaged candidate." >&2
   exit 1
 fi
-if [ "$version" != "$EXPECTED_CLI_VERSION" ]; then
+if [ "$release_version" != "$EXPECTED_CLI_VERSION" ]; then
   echo "Codex Lab CLI version does not match the packaged candidate." >&2
+  exit 1
+fi
+if [ "$compatibility_version" != "$EXPECTED_COMPATIBILITY_VERSION" ]; then
+  echo "Codex Lab CLI compatibility version does not match the packaged candidate." >&2
   exit 1
 fi
 if [ "$dirty_state" != "clean" ]; then
   echo "Codex Lab CLI was not built from clean tracked source." >&2
   exit 1
 fi
-if [ -z "$version" ] || [ "${{#version}}" -gt 128 ] \
+if [ -z "$release_version" ] || [ "${{#release_version}}" -gt 128 ] \
+  || [ -z "$compatibility_version" ] || [ "${{#compatibility_version}}" -gt 128 ] \
   || [ -z "$build_profile" ] || [ "${{#build_profile}}" -gt 64 ] \
   || [ -z "$build_channel" ] || [ "${{#build_channel}}" -gt 64 ]; then
   echo "Codex Lab CLI build metadata is unavailable or unbounded." >&2
@@ -378,7 +389,8 @@ managed_provenance_field() {{
   "$PLUTIL" -extract "$1" raw -o - "$MANAGED_PROVENANCE_FILE" 2>/dev/null || true
 }}
 managed_schema_version=$(managed_provenance_field schema_version)
-managed_version=$(managed_provenance_field version)
+managed_release_version=$(managed_provenance_field release_version)
+managed_compatibility_version=$(managed_provenance_field compatibility_version)
 managed_source_commit=$(managed_provenance_field source_commit)
 managed_dirty_state=$(managed_provenance_field dirty_state)
 managed_build_profile=$(managed_provenance_field build_profile)
@@ -386,7 +398,8 @@ managed_build_channel=$(managed_provenance_field build_channel)
 managed_executable_path=$(managed_provenance_field executable_path)
 
 if [ "$managed_schema_version" != "$schema_version" ] \
-  || [ "$managed_version" != "$version" ] \
+  || [ "$managed_release_version" != "$release_version" ] \
+  || [ "$managed_compatibility_version" != "$compatibility_version" ] \
   || [ "$managed_source_commit" != "$source_commit" ] \
   || [ "$managed_dirty_state" != "$dirty_state" ] \
   || [ "$managed_build_profile" != "$build_profile" ] \
@@ -466,7 +479,7 @@ if ! "$LSOF" -nP -a -p "$server_pid" \
 fi
 
 echo "Selected OpenAI coding desktop app: $CODEX_APP" >&2
-echo "Codex Lab CLI provenance: commit=$source_commit dirty=$dirty_state profile=$build_profile channel=$build_channel version=$version" >&2
+echo "Codex Lab CLI provenance: commit=$source_commit dirty=$dirty_state profile=$build_profile channel=$build_channel release=$release_version compatibility=$compatibility_version" >&2
 unset CODEX_CLI_PATH CODEX_APP_SERVER_FORCE_CLI CODEX_APP_SERVER_USE_LOCAL_DAEMON CODEX_APP_SERVER_WS_URL
 exec "$OPEN" -n \
   --env "CODEX_CLI_PATH=" \
@@ -493,6 +506,9 @@ def _write_info_plist(path: Path, options: CodexLabAppOptions) -> None:
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": options.short_version,
         "CFBundleVersion": options.bundle_version,
+        "CodexLabReleaseVersion": options.release_version
+        or options.embedded_cli_version
+        or options.short_version,
         "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
     }

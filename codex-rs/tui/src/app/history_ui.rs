@@ -233,6 +233,7 @@ impl App {
         );
     }
 
+    #[cfg(test)]
     pub(super) fn clear_ui_header_lines_with_version(
         &self,
         width: u16,
@@ -253,7 +254,18 @@ impl App {
     }
 
     pub(super) fn clear_ui_header_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.clear_ui_header_lines_with_version(width, CODEX_CLI_VERSION)
+        history_cell::SessionHeaderHistoryCell::new_with_identity(
+            self.product_identity,
+            self.chat_widget.current_model().to_string(),
+            self.chat_widget.current_reasoning_effort(),
+            self.chat_widget.should_show_fast_status(
+                self.chat_widget.current_model(),
+                self.chat_widget.current_service_tier(),
+            ),
+            self.config.cwd.to_path_buf(),
+        )
+        .with_yolo_mode(history_cell::is_yolo_mode(&self.config))
+        .display_lines(width)
     }
 
     pub(super) fn queue_clear_ui_header(&mut self, tui: &mut tui::Tui) {

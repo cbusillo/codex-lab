@@ -1699,6 +1699,19 @@ fn session_header_includes_reasoning_level_when_present() {
 }
 
 #[test]
+fn session_header_uses_codex_lab_release_identity() {
+    let cell = SessionHeaderHistoryCell::new_with_identity(
+        codex_version::ProductIdentity::CodexLab,
+        "gpt-5.6-sol".to_string(),
+        Some(ReasoningEffortConfig::High),
+        /*show_fast_status*/ false,
+        PathBuf::from("project"),
+    );
+
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 80)).join("\n"));
+}
+
+#[test]
 fn session_header_hides_fast_status_when_disabled() {
     let cell = SessionHeaderHistoryCell::new(
         "gpt-4o".to_string(),

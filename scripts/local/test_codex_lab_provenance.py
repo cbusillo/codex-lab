@@ -29,8 +29,10 @@ from pathlib import Path
 executable = str(Path(__file__).resolve())
 if sys.argv[1:] == ["debug", "provenance", "--json"]:
     print(json.dumps({{
-        "schema_version": 1,
+        "schema_version": 2,
         "version": "test",
+        "release_version": "test-lab.1",
+        "compatibility_version": "test",
         "source_commit": "{commit}",
         "dirty_state": "{dirty_state}",
         "build_profile": "debug",
@@ -221,6 +223,18 @@ class CodexLabProvenanceTest(unittest.TestCase):
                 PROVENANCE.stage_candidate(repo, invalid, root / "invalid-artifacts")
             provenance = PROVENANCE.reported_provenance(stale)
             provenance["source_commit"] = commit
+            legacy_provenance = {
+                key: value
+                for key, value in provenance.items()
+                if key not in {"release_version", "compatibility_version"}
+            }
+            legacy_provenance["schema_version"] = 1
+            self.assertEqual(
+                "current",
+                PROVENANCE.verification_report(
+                    PROVENANCE.checkout_identity(repo), stale, legacy_provenance
+                )["status"],
+            )
             for executable_path in (str(root / "other"), "bad\0path"):
                 provenance["executable_path"] = executable_path
                 report = PROVENANCE.verification_report(

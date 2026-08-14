@@ -29,6 +29,9 @@ def parse_args() -> argparse.Namespace:
         "--expected-source-commit",
         help="Expected source commit reported by the embedded CLI.",
     )
+    parser.add_argument("--expected-release-version")
+    parser.add_argument("--expected-compatibility-version")
+    parser.add_argument("--expected-bundle-version")
     return parser.parse_args()
 
 
@@ -38,6 +41,9 @@ def main() -> int:
         args.app_dir.resolve(),
         args.shim_path.resolve() if args.shim_path else None,
         args.expected_source_commit,
+        args.expected_release_version,
+        args.expected_compatibility_version,
+        args.expected_bundle_version,
     )
     return 0
 
@@ -46,6 +52,9 @@ def smoke_check(
     app_dir: Path,
     shim_path: Path | None,
     expected_source_commit: str | None = None,
+    expected_release_version: str | None = None,
+    expected_compatibility_version: str | None = None,
+    expected_bundle_version: str | None = None,
 ) -> None:
     contents_dir = app_dir / "Contents"
     launcher_path = contents_dir / "MacOS" / "Codex Lab Launcher"
@@ -59,14 +68,40 @@ def smoke_check(
     _require_file(icon_path)
     _check_icns(icon_path)
     _require_file(info_plist_path)
-    _check_plist(info_plist_path)
+    _check_plist(
+        info_plist_path,
+        expected_release_version=expected_release_version,
+        expected_compatibility_version=expected_compatibility_version,
+        expected_bundle_version=expected_bundle_version,
+    )
     _check_shell_syntax(launcher_path)
 
-    if expected_source_commit is not None:
+    if (
+        expected_source_commit is not None
+        or expected_release_version is not None
+        or expected_compatibility_version is not None
+    ):
         provenance = read_cli_provenance(embedded_cli_path)
-        if provenance["source_commit"] != expected_source_commit:
+        if (
+            expected_source_commit is not None
+            and provenance["source_commit"] != expected_source_commit
+        ):
             raise ValueError(
                 "embedded CLI source commit does not match the expected package commit"
+            )
+        if (
+            expected_release_version is not None
+            and provenance["release_version"] != expected_release_version
+        ):
+            raise ValueError(
+                "embedded CLI release version does not match the expected package release"
+            )
+        if (
+            expected_compatibility_version is not None
+            and provenance["compatibility_version"] != expected_compatibility_version
+        ):
+            raise ValueError(
+                "embedded CLI compatibility version does not match the expected package version"
             )
 
     launcher = launcher_path.read_text(encoding="utf-8")
@@ -137,7 +172,13 @@ def _require_executable(path: Path) -> None:
         raise PermissionError(f"Expected executable file: {path}")
 
 
-def _check_plist(path: Path) -> None:
+def _check_plist(
+    path: Path,
+    *,
+    expected_release_version: str | None = None,
+    expected_compatibility_version: str | None = None,
+    expected_bundle_version: str | None = None,
+) -> None:
     with path.open("rb") as handle:
         info = plistlib.load(handle)
 
@@ -150,6 +191,13 @@ def _check_plist(path: Path) -> None:
     }
     for key, value in expected.items():
         if info.get(key) != value:
+            raise ValueError(f"{path}: expected {key}={value!r}, got {info.get(key)!r}")
+    for key, value in (
+        ("CodexLabReleaseVersion", expected_release_version),
+        ("CFBundleShortVersionString", expected_compatibility_version),
+        ("CFBundleVersion", expected_bundle_version),
+    ):
+        if value is not None and info.get(key) != value:
             raise ValueError(f"{path}: expected {key}={value!r}, got {info.get(key)!r}")
 
 

@@ -18,7 +18,8 @@ try:
 except ImportError:
     fcntl = None
 
-SCHEMA_VERSION = 1
+REPORT_SCHEMA_VERSION = 1
+SUPPORTED_PROVENANCE_SCHEMA_VERSIONS = {1, 2}
 COMMAND_TIMEOUT_SECONDS = 30
 COMMIT_LENGTHS = {40, 64}
 DIRTY_STATES = {"clean", "dirty"}
@@ -119,7 +120,7 @@ def unavailable_report(
     except (OSError, RuntimeError, ValueError):
         display_path = str(binary_path)
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "status": "unverifiable",
         "binary_path": display_path,
         "expected": expected,
@@ -138,13 +139,23 @@ def verification_report(
     dirty_state = provenance.get("dirty_state")
     executable_path = provenance.get("executable_path")
 
+    provenance_schema_version = provenance.get("schema_version")
     if (
-        type(provenance.get("schema_version")) is not int
-        or provenance["schema_version"] != SCHEMA_VERSION
+        type(provenance_schema_version) is not int
+        or provenance_schema_version not in SUPPORTED_PROVENANCE_SCHEMA_VERSIONS
     ):
         invalid.append("binary did not report the supported provenance schema")
     if not isinstance(provenance.get("version"), str) or not provenance["version"]:
         invalid.append("binary version is unavailable")
+    if provenance_schema_version == 2:
+        release_version = provenance.get("release_version")
+        compatibility_version = provenance.get("compatibility_version")
+        if not isinstance(release_version, str) or not release_version:
+            invalid.append("binary release version is unavailable")
+        if not isinstance(compatibility_version, str) or not compatibility_version:
+            invalid.append("binary compatibility version is unavailable")
+        elif provenance.get("version") != compatibility_version:
+            invalid.append("binary compatibility version aliases disagree")
     if not is_commit(source_commit):
         invalid.append("binary source commit is unavailable")
     elif source_commit.lower() != expected["source_commit"]:
@@ -180,7 +191,7 @@ def verification_report(
 
     status = "unverifiable" if invalid else "stale" if mismatches else "current"
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "status": status,
         "binary_path": str(binary_path),
         "expected": expected,

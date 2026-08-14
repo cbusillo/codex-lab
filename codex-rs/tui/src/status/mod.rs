@@ -18,8 +18,10 @@ pub(crate) use account::StatusAccountDisplay;
 pub(crate) use card::StatusHistoryHandle;
 #[cfg(test)]
 pub(crate) use card::new_status_output;
+pub(crate) use card::new_status_output_with_identity_and_rate_limits_handle;
 #[cfg(test)]
 pub(crate) use card::new_status_output_with_rate_limits;
+#[cfg(test)]
 pub(crate) use card::new_status_output_with_rate_limits_handle;
 pub(crate) use helpers::compose_agents_summary;
 pub(crate) use helpers::format_directory_display;

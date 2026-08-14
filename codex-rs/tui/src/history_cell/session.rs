@@ -122,6 +122,7 @@ impl HistoryCell for SessionInfoCell {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn new_session_info(
     config: &Config,
     requested_model: &str,
@@ -131,13 +132,36 @@ pub(crate) fn new_session_info(
     auth_plan: Option<PlanType>,
     show_fast_status: bool,
 ) -> SessionInfoCell {
+    new_session_info_with_identity(
+        codex_version::ProductIdentity::Codex,
+        config,
+        requested_model,
+        session,
+        is_first_event,
+        tooltip_override,
+        auth_plan,
+        show_fast_status,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn new_session_info_with_identity(
+    product_identity: codex_version::ProductIdentity,
+    config: &Config,
+    requested_model: &str,
+    session: &ThreadSessionState,
+    is_first_event: bool,
+    tooltip_override: Option<String>,
+    auth_plan: Option<PlanType>,
+    show_fast_status: bool,
+) -> SessionInfoCell {
     // Header box rendered as history (so it appears at the very top)
-    let header = SessionHeaderHistoryCell::new(
+    let header = SessionHeaderHistoryCell::new_with_identity(
+        product_identity,
         session.model.clone(),
         session.reasoning_effort.clone(),
         show_fast_status,
         config.cwd.to_path_buf(),
-        CODEX_CLI_VERSION,
     )
     .with_yolo_mode(has_yolo_permissions(
         session.approval_policy,
@@ -224,6 +248,7 @@ pub(crate) fn has_yolo_permissions(
 }
 #[derive(Debug)]
 pub(crate) struct SessionHeaderHistoryCell {
+    product_name: &'static str,
     version: &'static str,
     model: String,
     model_style: Style,
@@ -234,6 +259,7 @@ pub(crate) struct SessionHeaderHistoryCell {
 }
 
 impl SessionHeaderHistoryCell {
+    #[cfg(test)]
     pub(crate) fn new(
         model: String,
         reasoning_effort: Option<ReasoningEffortConfig>,
@@ -251,6 +277,24 @@ impl SessionHeaderHistoryCell {
         )
     }
 
+    pub(crate) fn new_with_identity(
+        product_identity: codex_version::ProductIdentity,
+        model: String,
+        reasoning_effort: Option<ReasoningEffortConfig>,
+        show_fast_status: bool,
+        directory: PathBuf,
+    ) -> Self {
+        Self::new_with_identity_and_style(
+            product_identity,
+            model,
+            Style::default(),
+            reasoning_effort,
+            show_fast_status,
+            directory,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn new_with_style(
         model: String,
         model_style: Style,
@@ -260,7 +304,28 @@ impl SessionHeaderHistoryCell {
         version: &'static str,
     ) -> Self {
         Self {
+            product_name: codex_version::ProductIdentity::Codex.display_name(),
             version,
+            model,
+            model_style,
+            reasoning_effort,
+            show_fast_status,
+            directory,
+            yolo_mode: false,
+        }
+    }
+
+    pub(crate) fn new_with_identity_and_style(
+        product_identity: codex_version::ProductIdentity,
+        model: String,
+        model_style: Style,
+        reasoning_effort: Option<ReasoningEffortConfig>,
+        show_fast_status: bool,
+        directory: PathBuf,
+    ) -> Self {
+        Self {
+            product_name: product_identity.display_name(),
+            version: product_identity.version(),
             model,
             model_style,
             reasoning_effort,
@@ -320,7 +385,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from("OpenAI Codex").bold(),
+            Span::from(self.product_name).bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
@@ -391,7 +456,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!("OpenAI Codex (v{})", self.version)),
+            Line::from(format!("{} (v{})", self.product_name, self.version)),
             Line::from(format!(
                 "model: {}{}",
                 self.model,

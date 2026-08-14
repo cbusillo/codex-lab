@@ -12,6 +12,7 @@ impl ChatWidget {
         codex_op_target: CodexOpTarget,
     ) -> Self {
         let ChatWidgetInit {
+            product_identity,
             config,
             frame_requester,
             app_event_tx,
@@ -60,7 +61,10 @@ impl ChatWidget {
             settings: fallback_default,
         };
 
-        let active_cell = Some(Self::placeholder_session_header_cell(&config));
+        let active_cell = Some(Self::placeholder_session_header_cell(
+            &config,
+            product_identity,
+        ));
 
         let current_cwd = Some(config.cwd.to_path_buf());
         let effective_service_tier = crate::service_tier_resolution::effective_service_tier(
@@ -95,6 +99,7 @@ impl ChatWidget {
             pet_http_client.clone(),
         );
         let mut widget = Self {
+            product_identity,
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_target,

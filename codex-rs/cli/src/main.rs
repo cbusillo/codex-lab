@@ -1010,6 +1010,7 @@ async fn cli_main(
     remote_control_disabled: bool,
     command_name: &'static str,
 ) -> anyhow::Result<()> {
+    let product_identity = product_identity(command_name);
     let cli = named_multitool_command(command_name);
     let MultitoolCli {
         config_overrides: mut root_config_overrides,
@@ -1044,6 +1045,7 @@ async fn cli_main(
                 root_remote.clone(),
                 root_remote_auth_token_env.clone(),
                 arg0_paths.clone(),
+                product_identity,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -1062,7 +1064,7 @@ async fn cli_main(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+            codex_exec::run_main(exec_cli, arg0_paths.clone(), product_identity).await?;
         }
         Some(Subcommand::Review(ReviewCommand {
             strict_config,
@@ -1083,7 +1085,7 @@ async fn cli_main(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+            codex_exec::run_main(exec_cli, arg0_paths.clone(), product_identity).await?;
         }
         Some(Subcommand::McpServer(McpServerCommand { strict_config })) => {
             reject_remote_mode_for_subcommand(
@@ -1331,6 +1333,7 @@ async fn cli_main(
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
                 arg0_paths.clone(),
+                product_identity,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -1398,6 +1401,7 @@ async fn cli_main(
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
                 arg0_paths.clone(),
+                product_identity,
             )
             .await?;
             handle_app_exit(exit_info)?;
@@ -2214,7 +2218,11 @@ fn run_debug_provenance_command(cmd: DebugProvenanceCommand) -> anyhow::Result<(
     }
 
     println!("Codex Lab build provenance");
-    println!("  version: {}", provenance.version);
+    println!("  release version: {}", provenance.release_version);
+    println!(
+        "  compatibility version: {}",
+        provenance.compatibility_version
+    );
     println!("  source commit: {}", provenance.source_commit);
     println!("  dirty state: {}", provenance.dirty_state.as_str());
     println!("  build profile: {}", provenance.build_profile);
@@ -2460,6 +2468,7 @@ async fn run_interactive_tui(
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
     arg0_paths: Arg0DispatchPaths,
+    product_identity: codex_version::ProductIdentity,
 ) -> std::io::Result<AppExitInfo> {
     if let Some(prompt) = interactive.prompt.take() {
         // Normalize CRLF/CR to LF so CLI-provided text can't leak `\r` into TUI state.
@@ -2497,6 +2506,7 @@ async fn run_interactive_tui(
             arg0_paths.clone(),
             codex_config::LoaderOverrides::default(),
             remote_endpoint.clone(),
+            product_identity,
         )
     };
     let mut attempted_backups = HashSet::new();
@@ -2722,8 +2732,11 @@ fn print_completion(cmd: CompletionCommand, command_name: &'static str) {
 }
 
 fn named_multitool_command(command_name: &'static str) -> Command {
+    let product_identity = product_identity(command_name);
     let command = MultitoolCli::command()
+        .name(command_name)
         .bin_name(command_name)
+        .version(product_identity.version())
         .override_usage(format!(
             "{command_name} [OPTIONS] [PROMPT]\n       {command_name} [OPTIONS] <COMMAND> [ARGS]"
         ));
@@ -2731,6 +2744,14 @@ fn named_multitool_command(command_name: &'static str) -> Command {
         command.about("Codex Lab CLI")
     } else {
         command
+    }
+}
+
+fn product_identity(command_name: &str) -> codex_version::ProductIdentity {
+    if command_name == "codex-lab" {
+        codex_version::ProductIdentity::CodexLab
+    } else {
+        codex_version::ProductIdentity::Codex
     }
 }
 
@@ -3188,9 +3209,12 @@ mod tests {
 
     #[test]
     fn codex_lab_command_name_updates_help_usage() {
-        let help = named_multitool_command("codex-lab")
-            .render_help()
-            .to_string();
+        let mut command = named_multitool_command("codex-lab");
+        assert_eq!(
+            command.get_version(),
+            Some(codex_version::CODEX_LAB_RELEASE_VERSION)
+        );
+        let help = command.render_help().to_string();
 
         assert!(help.contains("Codex Lab CLI"));
         assert!(help.contains("codex-lab [OPTIONS] [PROMPT]"));
@@ -3199,7 +3223,9 @@ mod tests {
 
     #[test]
     fn codex_command_name_keeps_upstream_usage() {
-        let help = named_multitool_command("codex").render_help().to_string();
+        let mut command = named_multitool_command("codex");
+        assert_eq!(command.get_version(), Some(codex_version::CODE_VERSION));
+        let help = command.render_help().to_string();
 
         assert!(help.contains("Codex CLI"));
         assert!(help.contains("codex [OPTIONS] [PROMPT]"));

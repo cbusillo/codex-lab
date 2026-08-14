@@ -83,7 +83,6 @@ use crate::transcript_reflow::TranscriptReflowState;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
 use crate::workspace_command::AppServerWorkspaceCommandRunner;
 use crate::workspace_command::WorkspaceCommandRunner;
 use codex_ansi_escape::ansi_escape_line;
@@ -527,6 +526,7 @@ struct InitialHistoryReplayBuffer {
 }
 
 pub(crate) struct App {
+    product_identity: codex_version::ProductIdentity,
     model_catalog: Arc<ModelCatalog>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) app_event_tx: AppEventSender,
@@ -839,6 +839,7 @@ impl App {
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: self.terminal_title_invalid_items_warned.clone(),
             session_telemetry: self.session_telemetry.clone(),
+            product_identity: self.product_identity,
         }
     }
 
@@ -866,6 +867,7 @@ impl App {
         startup_elapsed_before_app: Duration,
         startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<HooksListEntry>,
+        product_identity: codex_version::ProductIdentity,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let startup_started_at = Instant::now();
@@ -1012,6 +1014,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 let mut chat_widget = ChatWidget::new_with_app_event(init);
                 chat_widget.set_queue_submissions_until_session_configured(/*queue*/ true);
@@ -1052,6 +1055,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(resumed))
             }
@@ -1091,6 +1095,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
@@ -1113,6 +1118,7 @@ See the Codex keymap documentation for supported actions and examples."
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
+            product_identity,
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,

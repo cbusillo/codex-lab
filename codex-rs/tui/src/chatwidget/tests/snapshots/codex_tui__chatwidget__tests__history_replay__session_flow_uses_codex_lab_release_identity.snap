@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/history_replay.rs
+expression: identity_line
+---
+│ >_ Codex Lab (v0.0.0)                           │

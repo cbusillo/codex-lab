@@ -391,7 +391,7 @@ verify_engine() {{
   dirty_state=$(json_field "$PROVENANCE_FILE" dirty_state)
   executable_path=$(json_field "$PROVENANCE_FILE" executable_path)
   discard_provenance
-  [ "$schema_version" = 1 ] \
+  [ "$schema_version" = 2 ] \
     && [ "$version" = "$EXPECTED_VERSION" ] \
     && [ "$source_commit" = "$EXPECTED_SOURCE_COMMIT" ] \
     && [ "$dirty_state" = clean ] \

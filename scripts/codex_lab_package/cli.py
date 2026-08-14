@@ -64,6 +64,10 @@ def parse_args() -> argparse.Namespace:
         help="CFBundleShortVersionString for the GUI bundle. Defaults to the embedded CLI version.",
     )
     parser.add_argument(
+        "--release-version",
+        help="Full Codex Lab release identity stored in bundle metadata. Defaults to embedded CLI provenance.",
+    )
+    parser.add_argument(
         "--embedded-cli-version",
         help="Expected version reported by the embedded CLI provenance. Defaults to the inspected CLI version.",
     )
@@ -93,12 +97,20 @@ def main() -> int:
         print(f"Could not inspect Codex Lab CLI provenance: {error}", file=sys.stderr)
         return 2
 
-    short_version = args.short_version or provenance["version"]
-    embedded_cli_version = args.embedded_cli_version or provenance["version"]
-    if embedded_cli_version != provenance["version"]:
+    short_version = args.short_version or provenance["compatibility_version"]
+    release_version = args.release_version or provenance["release_version"]
+    embedded_cli_version = args.embedded_cli_version or provenance["release_version"]
+    if release_version != provenance["release_version"]:
+        print(
+            "Requested release version does not match the embedded CLI provenance: "
+            f"{release_version} != {provenance['release_version']}",
+            file=sys.stderr,
+        )
+        return 2
+    if embedded_cli_version != provenance["release_version"]:
         print(
             "Requested embedded CLI version does not match the embedded CLI provenance: "
-            f"{embedded_cli_version} != {provenance['version']}",
+            f"{embedded_cli_version} != {provenance['release_version']}",
             file=sys.stderr,
         )
         return 2
@@ -127,6 +139,7 @@ def main() -> int:
             bundle_identifier=args.bundle_id,
             display_name=args.display_name,
             short_version=short_version,
+            release_version=release_version,
             bundle_version=args.bundle_version,
             embedded_cli_version=embedded_cli_version,
             source_commit=source_commit,
