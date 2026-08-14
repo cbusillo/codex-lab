@@ -1359,6 +1359,26 @@ impl ExternalAuth for StaticExternalAuth {
     }
 }
 
+#[derive(Clone)]
+struct PermanentStaticExternalAuth(CodexAuth);
+
+impl ExternalAuth for PermanentStaticExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+
+    fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
+        RefreshTokenError::Permanent(RefreshTokenFailedError::new(
+            RefreshTokenFailedReason::Other,
+            error.to_string(),
+        ))
+    }
+}
+
 struct FailingExternalAuth {
     auth: CodexAuth,
     resolve_count: AtomicUsize,
@@ -1442,6 +1462,38 @@ async fn replacing_external_auth_clears_permanent_failure() {
         .await
         .expect("replacement external auth should refresh");
     assert_eq!(manager.auth_cached(), Some(auth));
+}
+
+#[tokio::test]
+async fn external_auth_does_not_fall_back_after_workspace_policy_changes() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = AuthManager::new(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::Ephemeral,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+        crate::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    let access_token = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("enterprise".to_string()),
+        chatgpt_account_id: Some("workspace-one".to_string()),
+    })
+    .expect("fake access token");
+    let auth =
+        CodexAuth::from_external_chatgpt_tokens(&access_token, "workspace-one", Some("enterprise"))
+            .expect("external ChatGPT auth");
+
+    manager
+        .set_external_auth(Arc::new(PermanentStaticExternalAuth(auth)))
+        .await
+        .expect("external auth should install");
+    manager.set_forced_chatgpt_workspace_id(Some(vec!["workspace-two".to_string()]));
+
+    assert_eq!(manager.auth().await, None);
 }
 
 #[tokio::test]

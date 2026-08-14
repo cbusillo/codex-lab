@@ -2940,7 +2940,22 @@ impl AuthManager {
                             if let Some(auth) = cached_auth.as_ref() {
                                 self.record_permanent_refresh_failure_if_unchanged(auth, &error);
                             }
-                            cached_auth
+                            let allowed_login_methods = self.allowed_login_methods();
+                            let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
+                            let fallback_auth = cached_auth.filter(|auth| {
+                                validate_auth_restrictions(
+                                    Some(&allowed_login_methods),
+                                    effective_chatgpt_workspaces.as_deref(),
+                                    auth,
+                                )
+                                .is_ok()
+                            });
+                            if fallback_auth.is_none() {
+                                tracing::warn!(
+                                    "Discarding cached external auth that no longer satisfies managed auth policy"
+                                );
+                            }
+                            fallback_auth
                         }
                         RefreshTokenError::Transient(_) => None,
                     }
