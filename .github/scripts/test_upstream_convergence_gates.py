@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,6 +97,44 @@ class GateManifestTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("'fn proof()' is absent from proof.rs", report["errors"][0])
 
+    def test_reports_missing_file_evidence(self) -> None:
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                {"kind": "file", "path": "missing.rs", "ciTier": "nightly"}
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("file is missing: missing.rs" in error for error in report["errors"])
+        )
+
+    def test_reports_unregistered_suite_proof(self) -> None:
+        suite = self.root / "tests" / "suite"
+        suite.mkdir(parents=True)
+        (suite / "proof.rs").write_text("fn proof() {}\n", encoding="utf-8")
+        (suite / "mod.rs").write_text("", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                {
+                    "kind": "file",
+                    "path": "tests/suite/proof.rs",
+                    "ciTier": "nightly",
+                }
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("suite proof is not registered" in error for error in report["errors"])
+        )
+
     def test_reports_missing_and_extra_contract_ids(self) -> None:
         manifest, contracts = write_fixture(self.root, contract_id="AUTH-1")
         contracts.write_text(
@@ -140,6 +180,26 @@ class GateManifestTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("missing ['issue']", report["errors"][0])
 
+    def test_rejects_narrative_only_contract(self) -> None:
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                {
+                    "kind": "narrative",
+                    "description": "External proof.",
+                    "issue": 1,
+                    "ciTier": "release",
+                }
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("must retain at least one file-backed" in error for error in report["errors"])
+        )
+
     def test_rejects_unknown_schema_version(self) -> None:
         manifest, contracts = write_fixture(self.root)
         document = json.loads(manifest.read_text(encoding="utf-8"))
@@ -150,6 +210,29 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertIn("unsupported schemaVersion 2", report["errors"][0])
+
+    def test_cli_returns_nonzero_for_invalid_manifest(self) -> None:
+        manifest, contracts = write_fixture(self.root)
+        (self.root / "proof.rs").unlink()
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(gates.REPO_ROOT / ".github/scripts/upstream_convergence_gates.py"),
+                "--repo-root",
+                str(self.root),
+                "--manifest",
+                str(manifest),
+                "--contracts",
+                str(contracts),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("file is missing", result.stderr)
 
 
 class CheckedInGateManifestTest(unittest.TestCase):

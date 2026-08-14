@@ -155,6 +155,24 @@ def verify_evidence(
             raise GateManifestError(f"{location}.path: file is missing: {relative}")
         if path.is_symlink():
             raise GateManifestError(f"{location}.path: file must not be a symlink: {relative}")
+        relative_path = PurePosixPath(relative)
+        parts = relative_path.parts
+        if (
+            "tests" in parts
+            and parts.index("tests") + 1 < len(parts)
+            and parts[parts.index("tests") + 1] == "suite"
+            and relative_path.suffix == ".rs"
+            and relative_path.name != "mod.rs"
+        ):
+            registry = path.parent / "mod.rs"
+            module_token = f"mod {relative_path.stem};"
+            if not registry.is_file() or module_token not in registry.read_text(
+                encoding="utf-8"
+            ):
+                raise GateManifestError(
+                    f"{location}.path: suite proof is not registered with "
+                    f"{module_token!r} in {registry.relative_to(repo_root)}"
+                )
         if kind == "symbol":
             token = require_string(evidence["token"], f"{location}.token")
             if path.stat().st_size > MAX_EVIDENCE_FILE_BYTES:
@@ -229,12 +247,23 @@ def verify(
                 raise GateManifestError(
                     f"{location}.evidence: expected a non-empty array"
                 )
+            executable_evidence = 0
             for evidence_index, evidence in enumerate(evidence_items):
                 evidence_count += 1
+                if isinstance(evidence, dict) and evidence.get("kind") in {
+                    "file",
+                    "symbol",
+                }:
+                    executable_evidence += 1
                 if tier := verify_evidence(
                     repo_root, contract_id, evidence, evidence_index, errors
                 ):
                     tiers[tier] += 1
+            if executable_evidence == 0:
+                errors.append(
+                    f"{location}.evidence: contract {contract_id} must retain at least "
+                    "one file-backed evidence item"
+                )
         except GateManifestError as error:
             errors.append(str(error))
     missing = sorted(markdown_ids - manifest_ids)
