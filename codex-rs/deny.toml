@@ -249,7 +249,6 @@ deny = [
         "codex-code-bridge-client",
         "codex-code-bridge-service",
         "codex-core",
-        "codex-ollama",
         "codex-otel",
         # Third-party crates that own their reqwest integration. These are not part of the
         # first-party migration count above.

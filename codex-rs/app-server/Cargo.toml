@@ -25,6 +25,8 @@ doctest = false
 workspace = true
 
 [package.metadata.cargo-shear]
+# These files are retained convergence references for behavior that is not wired
+# into this downstream app-server test target. They are not compiled modules.
 ignored-paths = [
     "tests/suite/v2/account_thread_usage.rs",
     "tests/suite/v2/external_agent_import_sync.rs",

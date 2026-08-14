@@ -181,6 +181,9 @@ zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["openssl-sys"]
+# The source entries below are retained convergence/reference files that are not
+# wired into the current downstream module graph. The Windows fixtures are
+# compiled only on Windows and remain invisible to this host-side analysis.
 ignored-paths = [
     "src/session/background_auto_review.rs",
     "src/session/cargo_validation_provider.rs",

@@ -13,6 +13,8 @@ doctest = false
 workspace = true
 
 [package.metadata.cargo-shear]
+# Retained reference implementation for the removed retention CLI surface; it
+# is intentionally not wired into the current downstream thread-store module.
 ignored-paths = ["src/local/retention_preview.rs"]
 
 [dependencies]

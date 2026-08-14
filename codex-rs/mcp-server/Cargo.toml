@@ -17,6 +17,8 @@ doctest = false
 workspace = true
 
 [package.metadata.cargo-shear]
+# Retained compatibility test source for older approval-response clients; it is
+# intentionally not wired into the current downstream test target.
 ignored-paths = ["src/approval_response_compat_tests.rs"]
 
 [dependencies]
