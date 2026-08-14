@@ -931,13 +931,20 @@ impl ModelClient {
         );
         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
         let service_tier = model_info.service_tier_for_request(service_tier);
+        let has_model_visible_tools = !prompt.tools.is_empty();
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
             input,
             tools,
-            tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+            tool_choice: if has_model_visible_tools {
+                "auto".to_string()
+            } else {
+                String::new()
+            },
+            parallel_tool_calls: has_model_visible_tools
+                && prompt.parallel_tool_calls
+                && !model_info.use_responses_lite,
             reasoning: Some(reasoning),
             store: false,
             stream: true,

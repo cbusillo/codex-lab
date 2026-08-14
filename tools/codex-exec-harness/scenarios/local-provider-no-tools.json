@@ -43,7 +43,7 @@
       {
         "request": 0,
         "scope": "body",
-        "absent_keys": ["tools"]
+          "absent_keys": ["tools", "tool_choice"]
       }
     ]
   },

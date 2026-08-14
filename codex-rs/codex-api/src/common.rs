@@ -256,6 +256,7 @@ pub struct ResponsesApiRequest {
     pub input: Vec<ResponseItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ResponsesApiTools>,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub tool_choice: String,
     pub parallel_tool_calls: bool,
     pub reasoning: Option<Reasoning>,
@@ -310,6 +311,7 @@ pub struct ResponseCreateWsRequest<'a> {
     pub input: &'a [ResponseItem],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<&'a RawValue>,
+    #[serde(skip_serializing_if = "str::is_empty")]
     pub tool_choice: &'a str,
     pub parallel_tool_calls: bool,
     pub reasoning: Option<&'a Reasoning>,
