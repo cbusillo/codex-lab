@@ -370,7 +370,7 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
     let script_path = temp_dir.path().join("claude-plaintext.sh");
     tokio::fs::write(
         &script_path,
-        "case \" $* \" in\n  *\" --verbose --output-format stream-json -p inspect this repo \"*) printf '%s\\n' '{\"answer\":\"plain wrapper result\"}' ;;\n  *) printf 'missing stream flags\\n' >&2; exit 2 ;;\nesac\n",
+        "case \" $* \" in\n  *\" --verbose --output-format stream-json -p inspect this repo \"*) printf '%s\\n' '{\"type\":\"result\",\"message\":\"plain wrapper result\"}' ;;\n  *) printf 'missing stream flags\\n' >&2; exit 2 ;;\nesac\n",
     )
     .await
     .expect("fake Claude wrapper should be written");
@@ -396,7 +396,9 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
         response,
         ExternalAgentResponse {
             status: ExternalAgentResponseStatus::Completed,
-            final_message: Some("{\"answer\":\"plain wrapper result\"}".to_string()),
+            final_message: Some(
+                "{\"type\":\"result\",\"message\":\"plain wrapper result\"}".to_string(),
+            ),
             quota_diagnostic: None,
         }
     );
@@ -407,7 +409,10 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
 async fn claude_stream_json_falls_back_to_successful_malformed_json_like_output() {
     let temp_dir = TempDir::new().expect("tempdir");
     let script_path = temp_dir.path().join("claude-plaintext.sh");
-    tokio::fs::write(&script_path, "printf '%s\\n' '[done]' '{not-json}'\n")
+    tokio::fs::write(
+        &script_path,
+        "printf '%s\\n' '[done]' '{not-json}' '{\"type\":\"result\",\"message\":\"partial wrapper result\"'\n",
+    )
         .await
         .expect("fake Claude wrapper should be written");
     let mut launch = test_launch(
@@ -432,10 +437,46 @@ async fn claude_stream_json_falls_back_to_successful_malformed_json_like_output(
         response,
         ExternalAgentResponse {
             status: ExternalAgentResponseStatus::Completed,
-            final_message: Some("[done]\n{not-json}".to_string()),
+            final_message: Some(
+                "[done]\n{not-json}\n{\"type\":\"result\",\"message\":\"partial wrapper result\""
+                    .to_string(),
+            ),
             quota_diagnostic: None,
         }
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_incomplete_assistant_stream_is_not_accepted_as_success() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-incomplete-stream.sh");
+    tokio::fs::write(
+        &script_path,
+        "printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial response\"}]}}'\n",
+    )
+    .await
+    .expect("fake Claude stream should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let err = run_external_agent_inner(&launch)
+        .await
+        .expect_err("incomplete Claude stream should not complete successfully");
+
+    assert_eq!(err.detail.kind, ExternalAgentFailureKind::MalformedOutput);
+    assert!(!err.to_string().contains("partial response"));
 }
 
 #[cfg(unix)]
@@ -1665,11 +1706,11 @@ async fn head_tail_reader_preserves_initial_quota_and_trailing_result_events() {
 #[test]
 fn claude_plaintext_output_omits_json_transport_events() {
     let output = claude_plaintext_output(
-        b"authentication required\n{\"type\":\"rate_limit_event\"}\n{\"type\": \"rate_limit_event\",\"rate_limit_info\":{\n{\"answer\":\"use cached result\"}\n[done]\n{not-json}\nretry login\n",
+        b"authentication required\n{\"type\":\"rate_limit_event\",\"rate_limit_info\":{}}\n{\"type\": \"rate_limit_event\",\"rate_limit_info\":{\n{\"type\":\"result\",\"message\":\"use cached result\"}\n{\"type\":\"result\",\"message\":\"partial cached result\"\n[done]\n{not-json}\nretry login\n",
     );
 
     assert_eq!(
-        b"authentication required\n{\"answer\":\"use cached result\"}\n[done]\n{not-json}\nretry login\n",
+        b"authentication required\n{\"type\":\"result\",\"message\":\"use cached result\"}\n{\"type\":\"result\",\"message\":\"partial cached result\"\n[done]\n{not-json}\nretry login\n",
         output.as_slice()
     );
 }

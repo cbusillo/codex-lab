@@ -1,5 +1,6 @@
 use crate::agent::AgentControl;
 use crate::agent::AgentStatus;
+use crate::agent::claude_stream::is_claude_transport_event;
 use crate::agent::claude_stream::parse_claude_stream_json;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentFailureKind;
@@ -539,7 +540,7 @@ async fn run_external_agent_inner(
             Ok(response)
         }
         ExternalCommandProtocol::RawCli => {
-            if let Some(stream) = claude_stream {
+            if let Some(stream) = claude_stream.filter(|stream| stream.has_result) {
                 let final_message = stream
                     .final_message
                     .as_deref()
@@ -558,12 +559,10 @@ async fn run_external_agent_inner(
                         quota_diagnostic: stream.quota_diagnostic,
                     });
                 }
-                if stream.has_result {
-                    return Err(ExternalAgentRunError::new(
-                        ExternalAgentFailureKind::EmptyOutput,
-                        anyhow::anyhow!("external agent completed without output"),
-                    ));
-                }
+                return Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::EmptyOutput,
+                    anyhow::anyhow!("external agent completed without output"),
+                ));
             }
             let plaintext_stdout;
             let stdout = if claude_stream_json_enabled {
@@ -995,12 +994,6 @@ async fn read_limited_output_with_head<R: AsyncRead + Unpin>(
 }
 
 fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
-    let is_transport_event_type = |event_type: &str| {
-        matches!(
-            event_type,
-            "assistant" | "rate_limit_event" | "result" | "stream_event" | "system" | "user"
-        )
-    };
     let mut plaintext = Vec::new();
     for line in output.split_inclusive(|byte| *byte == b'\n') {
         let trimmed = line.trim_ascii();
@@ -1009,7 +1002,9 @@ fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
                 if event
                     .get("type")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(&is_transport_event_type) =>
+                    .is_some_and(|event_type| {
+                        is_claude_transport_event(event_type, |field| event.contains_key(field))
+                    }) =>
             {
                 continue;
             }
@@ -1024,9 +1019,10 @@ fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
                         let value = after_type_key[colon_offset + 1..].trim_ascii_start();
                         if let Some(value) = value.strip_prefix(b"\"")
                             && let Some(end_quote) = value.iter().position(|byte| *byte == b'\"')
-                            && std::str::from_utf8(&value[..end_quote])
-                                .ok()
-                                .is_some_and(&is_transport_event_type)
+                            && let Ok(event_type) = std::str::from_utf8(&value[..end_quote])
+                            && is_claude_transport_event(event_type, |field| {
+                                json_object_has_field(trimmed, field)
+                            })
                         {
                             continue;
                         }
@@ -1038,6 +1034,21 @@ fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
         plaintext.extend_from_slice(line);
     }
     plaintext
+}
+
+fn json_object_has_field(output: &[u8], field: &str) -> bool {
+    let field = format!("\"{field}\"");
+    output
+        .windows(field.len())
+        .enumerate()
+        .any(|(field_start, window)| {
+            if window != field.as_bytes() {
+                return false;
+            }
+            output[field_start + field.len()..]
+                .trim_ascii_start()
+                .starts_with(b":")
+        })
 }
 
 async fn send_completion_to_parent(

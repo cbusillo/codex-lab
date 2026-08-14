@@ -39,6 +39,9 @@ pub(crate) fn parse_claude_stream_json(output: &[u8]) -> Option<ClaudeStreamJson
         let Some(event_type) = object.get("type").and_then(Value::as_str) else {
             continue;
         };
+        if !is_claude_transport_event(event_type, |field| object.contains_key(field)) {
+            continue;
+        }
         match event_type {
             "assistant" => {
                 let Some(content) = event.pointer("/message/content").and_then(Value::as_array)
@@ -98,6 +101,20 @@ pub(crate) fn parse_claude_stream_json(output: &[u8]) -> Option<ClaudeStreamJson
         error_subtype,
         quota_diagnostic,
     })
+}
+
+pub(crate) fn is_claude_transport_event(
+    event_type: &str,
+    has_field: impl Fn(&str) -> bool,
+) -> bool {
+    match event_type {
+        "assistant" | "user" => has_field("message"),
+        "rate_limit_event" => true,
+        "result" => ["is_error", "result", "subtype"].into_iter().any(has_field),
+        "stream_event" => has_field("event"),
+        "system" => ["subtype", "session_id"].into_iter().any(has_field),
+        _ => false,
+    }
 }
 
 fn parse_rate_limit_info(value: &Value) -> Result<ExternalAgentQuotaDiagnostic, ()> {
