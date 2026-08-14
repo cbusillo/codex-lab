@@ -213,6 +213,7 @@ def test_isolated_environment_drops_model_credentials(
 
     env = _isolated_environment(tmp_path)
 
+    assert env["CODEX_LAB_HOME"] == str(tmp_path)
     assert env["CODEX_HOME"] == str(tmp_path)
     assert "CODEX_API_KEY" not in env
     assert "CODEX_ACCESS_TOKEN" not in env
