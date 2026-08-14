@@ -1136,9 +1136,32 @@ enum QuotaMetadataExposure {
     Hidden,
 }
 
-async fn claude_stream_quota_agent_status(exposure: QuotaMetadataExposure) -> Result<Value> {
+#[derive(Clone, Copy)]
+enum ClaudeStreamScenario {
+    Success,
+    QuotaRejected,
+}
+
+struct ClaudeStreamAgentStatus {
+    agent: Value,
+    request_texts: Vec<String>,
+}
+
+async fn claude_stream_agent_status(
+    scenario: ClaudeStreamScenario,
+    exposure: QuotaMetadataExposure,
+) -> Result<ClaudeStreamAgentStatus> {
     let stub_dir = TempDir::new()?;
-    let fixture = include_str!("../../src/agent/fixtures/claude_stream/five_hour_rejected.jsonl");
+    let (fixture, exit_status) = match scenario {
+        ClaudeStreamScenario::Success => (
+            include_str!("../../src/agent/fixtures/claude_stream/assistant_success.jsonl"),
+            0,
+        ),
+        ClaudeStreamScenario::QuotaRejected => (
+            include_str!("../../src/agent/fixtures/claude_stream/five_hour_rejected.jsonl"),
+            1,
+        ),
+    };
     let script = format!(
         r#"if [ "${{1:-}}" = "--version" ]; then printf 'Claude Code 2.1.220\n'; exit 0; fi
 if [ "${{1:-}}" = "auth" ] && [ "${{2:-}}" = "status" ]; then printf '{{"loggedIn":true}}\n'; exit 0; fi
@@ -1150,7 +1173,7 @@ esac
 cat <<'EOF'
 {fixture}
 EOF
-exit 1
+exit {exit_status}
 "#
     );
     let mut backend = stub_cli(&stub_dir, "fake-claude.sh", &script);
@@ -1230,9 +1253,13 @@ exit 1
     let test = builder.build(&server).await?;
     test.submit_turn(PROMPT).await?;
 
-    let output_item = final_response
-        .single_request()
-        .function_call_output(LIST_CALL_ID);
+    let final_request = final_response.single_request();
+    let request_texts = final_request
+        .input()
+        .iter()
+        .flat_map(input_item_texts)
+        .collect();
+    let output_item = final_request.function_call_output(LIST_CALL_ID);
     let listed = serde_json::from_str::<Value>(
         output_item["output"]
             .as_str()
@@ -1253,12 +1280,20 @@ exit 1
         .remove("duration_ms")
         .expect("completed external agent should report a duration");
 
-    Ok(agent)
+    Ok(ClaudeStreamAgentStatus {
+        agent,
+        request_texts,
+    })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Result<()> {
-    let agent = claude_stream_quota_agent_status(QuotaMetadataExposure::Visible).await?;
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::QuotaRejected,
+        QuotaMetadataExposure::Visible,
+    )
+    .await?;
+    let agent = status.agent;
 
     assert_eq!(
         agent["agent_status"]["errored"].as_str(),
@@ -1284,10 +1319,14 @@ async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Re
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn claude_stream_quota_diagnostic_is_redacted_with_provider_metadata() -> Result<()> {
-    let agent = claude_stream_quota_agent_status(QuotaMetadataExposure::Hidden).await?;
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::QuotaRejected,
+        QuotaMetadataExposure::Hidden,
+    )
+    .await?;
 
     assert_eq!(
-        agent,
+        status.agent,
         json!({
             "agent_name": "/root/external_probe",
             "agent_status": { "errored": "external agent failed: quota_or_rate_limited" },
@@ -1295,6 +1334,43 @@ async fn claude_stream_quota_diagnostic_is_redacted_with_provider_metadata() -> 
             "failure": { "kind": "quota_or_rate_limited" },
         })
     );
+    assert!(
+        status
+            .request_texts
+            .iter()
+            .any(|text| text.contains("external agent failed: quota_or_rate_limited"))
+    );
+    assert!(status.request_texts.iter().all(|text| {
+        !text.contains("five_hour")
+            && !text.contains("org_level_disabled_until")
+            && !text.contains("2026-07-12T04:20:00")
+    }));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_success_reaches_agent_status_without_transport_events() -> Result<()> {
+    let status = claude_stream_agent_status(
+        ClaudeStreamScenario::Success,
+        QuotaMetadataExposure::Visible,
+    )
+    .await?;
+
+    assert_eq!(
+        status.agent["agent_status"],
+        json!({ "completed": "Repository inspection complete." })
+    );
+    assert_eq!(status.agent["quota_diagnostic"]["status"], "allowed");
+    assert!(
+        status
+            .request_texts
+            .iter()
+            .any(|text| text.contains("Repository inspection complete."))
+    );
+    assert!(status.request_texts.iter().all(|text| {
+        !text.contains("rate_limit_event") && !text.contains("\"type\":\"assistant\"")
+    }));
 
     Ok(())
 }

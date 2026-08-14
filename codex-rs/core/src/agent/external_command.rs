@@ -998,11 +998,27 @@ fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
     let mut plaintext = Vec::new();
     for line in output.split_inclusive(|byte| *byte == b'\n') {
         let trimmed = line.trim_ascii();
-        if trimmed.starts_with(b"{")
-            || trimmed.starts_with(b"[")
-            || serde_json::from_slice::<serde_json::Value>(trimmed).is_ok()
-        {
-            continue;
+        match serde_json::from_slice::<serde_json::Value>(trimmed) {
+            Ok(serde_json::Value::Object(event))
+                if event
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|event_type| {
+                        matches!(
+                            event_type,
+                            "assistant"
+                                | "rate_limit_event"
+                                | "result"
+                                | "stream_event"
+                                | "system"
+                                | "user"
+                        )
+                    }) =>
+            {
+                continue;
+            }
+            Err(_) if trimmed.starts_with(b"{") || trimmed.starts_with(b"[") => continue,
+            _ => {}
         }
         plaintext.extend_from_slice(line);
     }

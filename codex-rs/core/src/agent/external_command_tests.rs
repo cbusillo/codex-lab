@@ -365,12 +365,12 @@ async fn claude_stream_json_preserves_assistant_result_without_transport_events(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn claude_stream_json_falls_back_to_successful_plaintext_output() {
+async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
     let temp_dir = TempDir::new().expect("tempdir");
     let script_path = temp_dir.path().join("claude-plaintext.sh");
     tokio::fs::write(
         &script_path,
-        "case \" $* \" in\n  *\" --verbose --output-format stream-json -p inspect this repo \"*) printf 'plain wrapper result\\n' ;;\n  *) printf 'missing stream flags\\n' >&2; exit 2 ;;\nesac\n",
+        "case \" $* \" in\n  *\" --verbose --output-format stream-json -p inspect this repo \"*) printf '%s\\n' '{\"answer\":\"plain wrapper result\"}' ;;\n  *) printf 'missing stream flags\\n' >&2; exit 2 ;;\nesac\n",
     )
     .await
     .expect("fake Claude wrapper should be written");
@@ -390,13 +390,13 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_output() {
 
     let response = run_external_agent_inner(&launch)
         .await
-        .expect("successful plaintext wrapper output should remain compatible");
+        .expect("successful JSON wrapper output should remain compatible");
 
     assert_eq!(
         response,
         ExternalAgentResponse {
             status: ExternalAgentResponseStatus::Completed,
-            final_message: Some("plain wrapper result".to_string()),
+            final_message: Some("{\"answer\":\"plain wrapper result\"}".to_string()),
             quota_diagnostic: None,
         }
     );
@@ -1629,10 +1629,13 @@ async fn head_tail_reader_preserves_initial_quota_and_trailing_result_events() {
 #[test]
 fn claude_plaintext_output_omits_json_transport_events() {
     let output = claude_plaintext_output(
-        b"authentication required\n{\"type\":\"rate_limit_event\"}\nretry login\n",
+        b"authentication required\n{\"type\":\"rate_limit_event\"}\n{\"answer\":\"use cached result\"}\nretry login\n",
     );
 
-    assert_eq!(b"authentication required\nretry login\n", output.as_slice());
+    assert_eq!(
+        b"authentication required\n{\"answer\":\"use cached result\"}\nretry login\n",
+        output.as_slice()
+    );
 }
 
 #[cfg(unix)]
