@@ -1144,6 +1144,8 @@ pub async fn login_with_access_token(
             }
         }
         CodexAccessToken::AgentIdentityJwt(jwt) => {
+            let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
+            ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
             let base_url = chatgpt_base_url
                 .unwrap_or(ChatGptEnvironment::default().chatgpt_base_url())
                 .trim_end_matches('/')
@@ -1168,12 +1170,36 @@ pub async fn login_with_access_token(
     )
 }
 
+fn ensure_auth_workspace_allowed(
+    expected_workspace_ids: Option<&[String]>,
+    account_id: &str,
+) -> std::io::Result<()> {
+    crate::server::ensure_workspace_account_allowed(expected_workspace_ids, account_id)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::PermissionDenied, message))
+}
+
 fn ensure_personal_access_token_workspace_allowed(
     expected_workspace_ids: Option<&[String]>,
     auth: &PersonalAccessTokenAuth,
 ) -> std::io::Result<()> {
-    crate::server::ensure_workspace_account_allowed(expected_workspace_ids, auth.account_id())
-        .map_err(|message| std::io::Error::new(std::io::ErrorKind::PermissionDenied, message))
+    ensure_auth_workspace_allowed(expected_workspace_ids, auth.account_id())
+}
+
+fn ensure_agent_identity_workspace_allowed(
+    expected_workspace_ids: Option<&[String]>,
+    agent_identity: &AgentIdentityStorage,
+) -> std::io::Result<()> {
+    let Some(expected_workspace_ids) = expected_workspace_ids else {
+        return Ok(());
+    };
+
+    let account_id = match agent_identity {
+        AgentIdentityStorage::Jwt(jwt) => {
+            AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?.account_id
+        }
+        AgentIdentityStorage::Record(record) => record.account_id.clone(),
+    };
+    ensure_auth_workspace_allowed(Some(expected_workspace_ids), &account_id)
 }
 
 /// Writes an in-memory auth payload for externally managed ChatGPT tokens.
@@ -1465,13 +1491,15 @@ impl AuthConfig {
         &self,
         enable_codex_api_key_env: bool,
     ) -> std::io::Result<Option<CodexAuth>> {
+        let allowed_login_methods = self.allowed_login_methods();
         let workspaces = self.effective_chatgpt_workspaces();
         let agent_identity_authapi_base_url =
             agent_identity_authapi_base_url(self.chatgpt_base_url.as_deref()).ok();
-        let auth = load_auth(
+        let auth = load_auth_with_restrictions(
             &self.codex_home,
             enable_codex_api_key_env,
             self.auth_credentials_store_mode,
+            Some(&allowed_login_methods),
             workspaces.as_deref(),
             self.chatgpt_base_url.as_deref(),
             self.keyring_backend_kind,
@@ -1740,8 +1768,37 @@ async fn load_auth(
     agent_identity_authapi_base_url: Option<&str>,
     auth_route_config: &AuthRouteConfig,
 ) -> std::io::Result<Option<CodexAuth>> {
+    load_auth_with_restrictions(
+        codex_home,
+        enable_codex_api_key_env,
+        auth_credentials_store_mode,
+        /*allowed_login_methods*/ None,
+        forced_chatgpt_workspace_id,
+        chatgpt_base_url,
+        keyring_backend_kind,
+        agent_identity_authapi_base_url,
+        auth_route_config,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn load_auth_with_restrictions(
+    codex_home: &Path,
+    enable_codex_api_key_env: bool,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    allowed_login_methods: Option<&[ForcedLoginMethod]>,
+    forced_chatgpt_workspace_id: Option<&[String]>,
+    chatgpt_base_url: Option<&str>,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    agent_identity_authapi_base_url: Option<&str>,
+    auth_route_config: &AuthRouteConfig,
+) -> std::io::Result<Option<CodexAuth>> {
     // API key via env var takes precedence over any other auth method.
-    if enable_codex_api_key_env && let Some(api_key) = read_codex_api_key_from_env() {
+    if enable_codex_api_key_env
+        && auth_mode_is_allowed(allowed_login_methods, AuthMode::ApiKey)
+        && let Some(api_key) = read_codex_api_key_from_env()
+    {
         return Ok(Some(CodexAuth::from_api_key(api_key.as_str())));
     }
 
@@ -1752,7 +1809,12 @@ async fn load_auth(
         AuthCredentialsStoreMode::Ephemeral,
         AuthKeyringBackendKind::default(),
     );
-    if let Some(auth_dot_json) = ephemeral_storage.load()? {
+    if let Some(auth_dot_json) = ephemeral_storage.load()?
+        && auth_mode_is_allowed(allowed_login_methods, auth_dot_json.resolved_mode())
+    {
+        if let Some(agent_identity) = auth_dot_json.agent_identity.as_ref() {
+            ensure_agent_identity_workspace_allowed(forced_chatgpt_workspace_id, agent_identity)?;
+        }
         let auth = CodexAuth::from_auth_dot_json(
             AuthLoadContext {
                 codex_home,
@@ -1771,7 +1833,9 @@ async fn load_auth(
         return Ok(Some(auth));
     }
 
-    if let Some(access_token) = read_codex_access_token_from_env() {
+    if auth_mode_is_allowed(allowed_login_methods, AuthMode::AgentIdentity)
+        && let Some(access_token) = read_codex_access_token_from_env()
+    {
         return match classify_codex_access_token(&access_token) {
             CodexAccessToken::PersonalAccessToken(access_token) => {
                 let auth = PersonalAccessTokenAuth::load(access_token, auth_route_config).await?;
@@ -1779,6 +1843,8 @@ async fn load_auth(
                 Ok(Some(CodexAuth::PersonalAccessToken(auth)))
             }
             CodexAccessToken::AgentIdentityJwt(jwt) => {
+                let record = AgentIdentityAuthRecord::from_agent_identity_jwt(jwt)?;
+                ensure_auth_workspace_allowed(forced_chatgpt_workspace_id, &record.account_id)?;
                 CodexAuth::from_agent_identity_jwt_with_authapi_base_url(
                     jwt,
                     chatgpt_base_url,
@@ -1806,6 +1872,12 @@ async fn load_auth(
         Some(auth) => auth,
         None => return Ok(None),
     };
+    if !auth_mode_is_allowed(allowed_login_methods, auth_dot_json.resolved_mode()) {
+        return Ok(None);
+    }
+    if let Some(agent_identity) = auth_dot_json.agent_identity.as_ref() {
+        ensure_agent_identity_workspace_allowed(forced_chatgpt_workspace_id, agent_identity)?;
+    }
 
     let auth = CodexAuth::from_auth_dot_json(
         AuthLoadContext {
@@ -2852,11 +2924,26 @@ impl AuthManager {
 
     async fn load_auth(&self) -> Option<CodexAuth> {
         if let Some(external_auth) = self.external_auth() {
+            let cached_auth = self.auth_cached();
+            if cached_auth
+                .as_ref()
+                .is_some_and(|auth| self.refresh_failure_for_auth(auth).is_some())
+            {
+                return cached_auth;
+            }
             return match self.resolve_external_auth(&external_auth).await {
                 Ok(auth) => Some(auth),
                 Err(err) => {
                     tracing::error!("Failed to resolve external auth: {err}");
-                    None
+                    match err {
+                        RefreshTokenError::Permanent(error) => {
+                            if let Some(auth) = cached_auth.as_ref() {
+                                self.record_permanent_refresh_failure_if_unchanged(auth, &error);
+                            }
+                            cached_auth
+                        }
+                        RefreshTokenError::Transient(_) => None,
+                    }
                 }
             };
         }
@@ -2875,11 +2962,13 @@ impl AuthManager {
             .ok()
             .flatten();
         }
+        let allowed_login_methods = self.allowed_login_methods();
         let forced_chatgpt_workspace_id = self.forced_chatgpt_workspace_id();
-        load_auth(
+        load_auth_with_restrictions(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
+            Some(&allowed_login_methods),
             forced_chatgpt_workspace_id.as_deref(),
             self.chatgpt_base_url.as_deref(),
             self.keyring_backend_kind,
@@ -2915,15 +3004,25 @@ impl AuthManager {
         &self,
         external_auth: Arc<dyn ExternalAuth>,
     ) -> Result<(), RefreshTokenError> {
-        if self.workload_identity_selected && self.has_external_auth() {
+        if self.workload_identity_selected {
             return Err(permanent_external_auth_error(
                 "workload identity auth cannot be replaced at runtime",
             ));
         }
+        self.install_external_auth(external_auth).await
+    }
+
+    async fn install_external_auth(
+        &self,
+        external_auth: Arc<dyn ExternalAuth>,
+    ) -> Result<(), RefreshTokenError> {
         let auth = self.resolve_external_auth(&external_auth).await?;
         *self.external_auth.write().map_err(|_| {
             RefreshTokenError::Transient(std::io::Error::other("external auth lock is poisoned"))
         })? = Some(external_auth);
+        if let Ok(mut guard) = self.inner.write() {
+            guard.permanent_refresh_failure = None;
+        }
         self.commit_external_auth(auth)
     }
 
@@ -3046,7 +3145,9 @@ impl AuthManager {
         manager.workload_identity_selected = external_auth.is_some();
         let manager = Arc::new(manager);
         if let Some(external_auth) = external_auth {
-            manager.set_external_auth(Arc::new(external_auth)).await?;
+            manager
+                .install_external_auth(Arc::new(external_auth))
+                .await?;
         }
         Ok(manager)
     }
@@ -3226,6 +3327,7 @@ impl AuthManager {
     /// reloads the in‑memory auth cache so callers immediately observe the
     /// unauthenticated state.
     pub async fn logout(&self) -> std::io::Result<bool> {
+        self.ensure_logout_allowed()?;
         let removed = logout_all_stores(
             &self.codex_home,
             self.auth_credentials_store_mode,
@@ -3238,6 +3340,7 @@ impl AuthManager {
     }
 
     pub async fn logout_with_revoke(&self) -> std::io::Result<bool> {
+        self.ensure_logout_allowed()?;
         let auth_dot_json = self
             .auth_cached()
             .and_then(|auth| auth.get_current_auth_json());
@@ -3254,6 +3357,16 @@ impl AuthManager {
         self.clear_external_auth();
         self.reload().await;
         Ok(result)
+    }
+
+    fn ensure_logout_allowed(&self) -> std::io::Result<()> {
+        if self.workload_identity_selected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "workload identity auth is managed by the host and cannot be logged out",
+            ));
+        }
+        Ok(())
     }
 
     /// Returns the precise kind of credentials backing the current authentication.
