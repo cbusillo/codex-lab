@@ -90,22 +90,13 @@ class StageNpmPackagesTest(unittest.TestCase):
 
             def fake_run_command(command: list[str]) -> None:
                 package = command[command.index("--package") + 1]
-                version = command[command.index("--release-version") + 1]
-                staging_dir = Path(command[command.index("--staging-dir") + 1])
-                pack_output = Path(command[command.index("--pack-output") + 1])
-                build_module.stage_sources(staging_dir, version, package)
-                if "--vendor-src" in command:
-                    vendor_src = Path(command[command.index("--vendor-src") + 1])
-                    target = build_module.PACKAGE_TARGET_FILTERS.get(package)
-                    build_module.copy_native_binaries(
-                        vendor_src,
-                        staging_dir,
-                        list(stage_npm_packages.native_components_for_package(package)),
-                        target_filter={target} if target else None,
-                    )
-                pack_output.parent.mkdir(parents=True, exist_ok=True)
-                pack_output.write_text(package, encoding="utf-8")
-                staged[package] = staging_dir
+                self.assertEqual(0, build_module.main(command[1:]))
+                staged[package] = Path(command[command.index("--staging-dir") + 1])
+
+            def fake_run_npm_pack(staging_dir: Path, output_path: Path) -> Path:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(staging_dir.name, encoding="utf-8")
+                return output_path
 
             argv = [
                 str(SCRIPT),
@@ -133,6 +124,11 @@ class StageNpmPackagesTest(unittest.TestCase):
                     stage_npm_packages,
                     "run_command",
                     side_effect=fake_run_command,
+                ),
+                mock.patch.object(
+                    build_module,
+                    "run_npm_pack",
+                    side_effect=fake_run_npm_pack,
                 ),
             ):
                 self.assertEqual(0, stage_npm_packages.main())

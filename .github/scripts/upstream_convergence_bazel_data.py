@@ -24,6 +24,7 @@ SQLX_MIGRATE = re.compile(
     re.DOTALL,
 )
 STRING_LITERAL = re.compile(r'"((?:\\.|[^"\\])*)"')
+RAW_STRING_START = re.compile(r'(?:br|r)(?P<hashes>#{0,255})"')
 ALLOWED_DYNAMIC_INCLUDE_COUNTS = {
     "codex-rs/tui/src/frames.rs": 36,
 }
@@ -36,7 +37,24 @@ class Failure:
     message: str
 
 
+@dataclass(frozen=True)
+class DataSpec:
+    values: frozenset[str]
+    excludes: frozenset[str]
+
+
 def decode_string(value: str) -> str:
+    value = re.sub(
+        r"\\u\{([0-9a-fA-F]{1,6})\}",
+        lambda match: chr(int(match.group(1), 16)),
+        value,
+    )
+    value = re.sub(
+        r"\\x([0-9a-fA-F]{2})",
+        lambda match: chr(int(match.group(1), 16)),
+        value,
+    )
+    value = value.replace("\\'", "'")
     return json.loads(f'"{value}"')
 
 
@@ -70,37 +88,62 @@ def expression_end(text: str, start: int) -> int:
     return len(text)
 
 
-def assignment_expression(text: str, name: str) -> str | None:
-    match = re.search(rf"\b{re.escape(name)}\s*=", text)
-    if match is None:
-        return None
-    start = match.end()
-    return text[start : expression_end(text, start)].strip()
+def assignment_expressions(text: str, name: str) -> list[str]:
+    expressions: list[str] = []
+    for match in re.finditer(rf"\b{re.escape(name)}\s*=", text):
+        start = match.end()
+        expressions.append(text[start : expression_end(text, start)].strip())
+    return expressions
 
 
 def string_values(expression: str) -> set[str]:
     return {decode_string(match.group(1)) for match in STRING_LITERAL.finditer(expression)}
 
 
-def compile_data_values(build_text: str) -> set[str]:
-    expression = assignment_expression(build_text, "compile_data")
-    if expression is None:
-        return set()
-    values = string_values(expression)
-    if values:
-        return values
-    alias = expression.strip()
-    if re.fullmatch(r"[A-Z][A-Z0-9_]*", alias):
-        alias_expression = assignment_expression(build_text, alias)
-        if alias_expression is not None:
-            return string_values(alias_expression)
-    return set()
+def keyword_argument_expressions(text: str, name: str) -> list[tuple[int, int, str]]:
+    expressions: list[tuple[int, int, str]] = []
+    for match in re.finditer(rf"\b{re.escape(name)}\s*=", text):
+        start = match.end()
+        end = expression_end(text, start)
+        expressions.append((match.start(), end, text[start:end].strip()))
+    return expressions
+
+
+def without_keyword_arguments(text: str, name: str) -> str:
+    result = text
+    for start, end, _expression in reversed(keyword_argument_expressions(text, name)):
+        while end < len(result) and result[end] in {",", " ", "\t"}:
+            end += 1
+        result = result[:start] + result[end:]
+    return result
+
+
+def compile_data_spec(build_text: str) -> DataSpec:
+    values: set[str] = set()
+    excludes: set[str] = set()
+    pending = assignment_expressions(build_text, "compile_data")
+    seen_aliases: set[str] = set()
+    while pending:
+        expression = pending.pop()
+        excludes.update(
+            value
+            for _start, _end, exclude_expression in keyword_argument_expressions(
+                expression, "exclude"
+            )
+            for value in string_values(exclude_expression)
+        )
+        values.update(string_values(without_keyword_arguments(expression, "exclude")))
+        alias = expression.strip()
+        if re.fullmatch(r"[A-Z][A-Z0-9_]*", alias) and alias not in seen_aliases:
+            seen_aliases.add(alias)
+            pending.extend(assignment_expressions(build_text, alias))
+    return DataSpec(frozenset(values), frozenset(excludes))
 
 
 def call_expressions(text: str, name: str) -> list[str]:
     expressions: list[str] = []
     for match in re.finditer(rf"\b{re.escape(name)}\s*\(", text):
-        start = match.end()
+        start = match.end() - 1
         end = expression_end(text, start)
         expressions.append(text[start:end])
     return expressions
@@ -128,6 +171,21 @@ def nearest_bazel_package(path: Path, repo_root: Path) -> Path | None:
         current = current.parent
 
 
+def nearest_cargo_package(path: Path, repo_root: Path) -> Path | None:
+    current = path if path.is_dir() else path.parent
+    root = repo_root.resolve()
+    while True:
+        if (current / "Cargo.toml").is_file():
+            return current
+        if current == root:
+            return None
+        try:
+            current.relative_to(root)
+        except ValueError:
+            return None
+        current = current.parent
+
+
 def bazel_label(repo_root: Path, package_root: Path, target: Path) -> str:
     package = package_root.relative_to(repo_root).as_posix()
     if package == ".":
@@ -145,6 +203,64 @@ def pattern_covers(pattern: str, target: str, *, directory: bool) -> bool:
     return any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates)
 
 
+def mask_comments_and_raw_strings(text: str) -> str:
+    masked = list(text)
+    index = 0
+    block_depth = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(text):
+        if block_depth:
+            if text.startswith("/*", index):
+                block_depth += 1
+                masked[index : index + 2] = "  "
+                index += 2
+            elif text.startswith("*/", index):
+                block_depth -= 1
+                masked[index : index + 2] = "  "
+                index += 2
+            else:
+                if text[index] != "\n":
+                    masked[index] = " "
+                index += 1
+            continue
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif text[index] == "\\":
+                escaped = True
+            elif text[index] == quote:
+                quote = None
+            index += 1
+            continue
+        raw_match = (
+            RAW_STRING_START.match(text, index) if text[index] in {"b", "r"} else None
+        )
+        if raw_match is not None:
+            terminator = '"' + raw_match.group("hashes")
+            end = text.find(terminator, index + raw_match.end())
+            end = len(text) if end < 0 else end + len(terminator)
+            for position in range(index, end):
+                if text[position] != "\n":
+                    masked[position] = " "
+            index = end
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            masked[index:end] = " " * (end - index)
+            index = end
+        elif text.startswith("/*", index):
+            block_depth = 1
+            masked[index : index + 2] = "  "
+            index += 2
+        elif text[index] == '"':
+            quote = text[index]
+            index += 1
+        else:
+            index += 1
+    return "".join(masked)
+
+
 def verify(repo_root: Path) -> dict[str, object]:
     root = repo_root.resolve()
     rust_root = root / "codex-rs"
@@ -152,18 +268,26 @@ def verify(repo_root: Path) -> dict[str, object]:
     include_count = 0
     cross_package_count = 0
     migration_count = 0
+    observed_dynamic_counts: dict[str, int] = {}
 
     for source in sorted(rust_root.rglob("*.rs")):
         if source.name == "build.rs":
             continue
-        text = source.read_text(encoding="utf-8")
+        raw_text = source.read_text(encoding="utf-8")
+        text = mask_comments_and_raw_strings(raw_text)
         source_relative = source.relative_to(root).as_posix()
         direct_positions: set[int] = set()
 
         for match in DIRECT_INCLUDE.finditer(text):
             direct_positions.add(match.start())
             include_count += 1
-            requested = decode_string(match.group("path"))
+            try:
+                requested = decode_string(match.group("path"))
+            except (json.JSONDecodeError, ValueError) as error:
+                failures.append(
+                    Failure(source_relative, line_number(text, match.start()), f"invalid Rust path literal: {error}")
+                )
+                continue
             target = (source.parent / requested).resolve()
             line = line_number(text, match.start())
             if not target.is_file():
@@ -183,7 +307,7 @@ def verify(repo_root: Path) -> dict[str, object]:
             cross_package_count += 1
             label = bazel_label(root, producer, target)
             consumer_build = (consumer / "BUILD.bazel").read_text(encoding="utf-8")
-            if label not in compile_data_values(consumer_build):
+            if label not in compile_data_spec(consumer_build).values:
                 failures.append(
                     Failure(
                         source_relative,
@@ -193,7 +317,10 @@ def verify(repo_root: Path) -> dict[str, object]:
                 )
             target_name = target.relative_to(producer).as_posix()
             producer_build = (producer / "BUILD.bazel").read_text(encoding="utf-8")
-            if target_name not in exported_files(producer_build):
+            if not any(
+                pattern_covers(pattern, target_name, directory=False)
+                for pattern in exported_files(producer_build)
+            ):
                 failures.append(
                     Failure(
                         source_relative,
@@ -208,6 +335,8 @@ def verify(repo_root: Path) -> dict[str, object]:
             if match.start() not in direct_positions
         ]
         expected_dynamic_count = ALLOWED_DYNAMIC_INCLUDE_COUNTS.get(source_relative)
+        if expected_dynamic_count is not None:
+            observed_dynamic_counts[source_relative] = len(dynamic_positions)
         if dynamic_positions and expected_dynamic_count != len(dynamic_positions):
             failures.append(
                 Failure(
@@ -222,13 +351,20 @@ def verify(repo_root: Path) -> dict[str, object]:
             migration_count += 1
             line = line_number(text, match.start())
             consumer = nearest_bazel_package(source, root)
-            if consumer is None:
+            cargo_package = nearest_cargo_package(source, root)
+            if consumer is None or cargo_package is None:
                 failures.append(
-                    Failure(source_relative, line, "cannot resolve Bazel package boundary")
+                    Failure(source_relative, line, "cannot resolve Cargo and Bazel package boundaries")
                 )
                 continue
-            requested = decode_string(match.group("path"))
-            target = (consumer / requested).resolve()
+            try:
+                requested = decode_string(match.group("path"))
+            except (json.JSONDecodeError, ValueError) as error:
+                failures.append(
+                    Failure(source_relative, line, f"invalid Rust path literal: {error}")
+                )
+                continue
+            target = (cargo_package / requested).resolve()
             if not target.is_dir():
                 failures.append(
                     Failure(source_relative, line, f"migration directory is missing: {target}")
@@ -236,10 +372,15 @@ def verify(repo_root: Path) -> dict[str, object]:
                 continue
             target_name = target.relative_to(consumer).as_posix()
             build_text = (consumer / "BUILD.bazel").read_text(encoding="utf-8")
-            if not any(
+            data_spec = compile_data_spec(build_text)
+            covered = any(
                 pattern_covers(pattern, target_name, directory=True)
-                for pattern in compile_data_values(build_text)
-            ):
+                for pattern in data_spec.values
+            ) and not any(
+                pattern_covers(pattern, target_name, directory=True)
+                for pattern in data_spec.excludes
+            )
+            if not covered:
                 failures.append(
                     Failure(
                         source_relative,
@@ -247,6 +388,18 @@ def verify(repo_root: Path) -> dict[str, object]:
                         f"consumer BUILD.bazel does not cover migration directory {target_name}",
                     )
                 )
+
+    for source_relative, expected_count in ALLOWED_DYNAMIC_INCLUDE_COUNTS.items():
+        source = root / source_relative
+        if source.is_file() and observed_dynamic_counts.get(source_relative, 0) != expected_count:
+            failures.append(
+                Failure(
+                    source_relative,
+                    1,
+                    "dynamic include allowlist is stale: expected "
+                    f"{expected_count}, found {observed_dynamic_counts.get(source_relative, 0)}",
+                )
+            )
 
     errors = [
         f"{failure.source}:{failure.line}: {failure.message}"

@@ -63,8 +63,28 @@ class BazelDataFixture(unittest.TestCase):
 
         self.assertTrue(any("does not export" in error for error in report["errors"]))
 
+    def test_multiline_glob_export_covers_cross_package_target(self) -> None:
+        self.write(
+            "codex-rs/consumer/BUILD.bazel",
+            'codex_rust_crate(compile_data = ["//codex-rs/producer:templates/asset.txt"])\n',
+        )
+        self.write(
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/templates/asset.txt");\n',
+        )
+        self.write(
+            "codex-rs/producer/BUILD.bazel",
+            'exports_files(\n    glob(["templates/*.txt"]),\n)\n',
+        )
+        self.write("codex-rs/producer/templates/asset.txt", "asset\n")
+
+        report = bazel_data.verify(self.root)
+
+        self.assertEqual([], report["errors"])
+
     def test_migration_directory_requires_compile_data_glob(self) -> None:
         self.write("codex-rs/state/BUILD.bazel", "codex_rust_crate()\n")
+        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -82,6 +102,41 @@ class BazelDataFixture(unittest.TestCase):
             "codex-rs/state/BUILD.bazel",
             'codex_rust_crate(compile_data = glob(["migrations/**"]))\n',
         )
+        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write(
+            "codex-rs/state/src/migrations.rs",
+            'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
+        )
+        self.write("codex-rs/state/migrations/001.sql", "select 1;\n")
+
+        report = bazel_data.verify(self.root)
+
+        self.assertEqual([], report["errors"])
+
+    def test_migration_directory_excluded_from_glob_is_reported(self) -> None:
+        self.write(
+            "codex-rs/state/BUILD.bazel",
+            'codex_rust_crate(compile_data = glob(["**"], exclude = ["migrations/**"]))\n',
+        )
+        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write(
+            "codex-rs/state/src/migrations.rs",
+            'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
+        )
+        self.write("codex-rs/state/migrations/001.sql", "select 1;\n")
+
+        report = bazel_data.verify(self.root)
+
+        self.assertTrue(
+            any("does not cover migration directory" in error for error in report["errors"])
+        )
+
+    def test_migration_uses_cargo_root_when_bazel_package_is_parent(self) -> None:
+        self.write(
+            "codex-rs/BUILD.bazel",
+            'codex_rust_crate(compile_data = glob(["state/migrations/**"]))\n',
+        )
+        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -113,6 +168,25 @@ class BazelDataFixture(unittest.TestCase):
         report = bazel_data.verify(self.root)
 
         self.assertTrue(any("expected 36, found 1" in error for error in report["errors"]))
+
+    def test_comments_and_raw_strings_do_not_create_include_sites(self) -> None:
+        self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")
+        self.write(
+            "codex-rs/sample/src/lib.rs",
+            '// include_str!("missing.txt")\nconst DOC: &str = r#"include_str!("also-missing.txt")"#;\n',
+        )
+
+        report = bazel_data.verify(self.root)
+
+        self.assertEqual([], report["errors"])
+
+    def test_multiple_compile_data_assignments_are_aggregated(self) -> None:
+        spec = bazel_data.compile_data_spec(
+            'codex_rust_crate(compile_data = ["one.txt"])\n'
+            'codex_rust_crate(compile_data = ["two.txt"])\n'
+        )
+
+        self.assertEqual(frozenset({"one.txt", "two.txt"}), spec.values)
 
     def test_missing_local_include_target_is_reported(self) -> None:
         self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")
