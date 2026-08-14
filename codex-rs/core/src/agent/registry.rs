@@ -1,5 +1,6 @@
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -40,6 +41,7 @@ struct ExternalAgentRuntime {
     cancellation_token: CancellationToken,
     provider: ExternalAgentProviderProvenance,
     failure: Option<ExternalAgentFailureDetail>,
+    quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
     started_at: Instant,
     completed_at: Option<Instant>,
 }
@@ -49,6 +51,7 @@ pub(crate) struct ExternalAgentRuntimeSnapshot {
     pub(crate) status: AgentStatus,
     pub(crate) provider: ExternalAgentProviderProvenance,
     pub(crate) failure: Option<ExternalAgentFailureDetail>,
+    pub(crate) quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
     pub(crate) duration_ms: u64,
 }
 
@@ -224,6 +227,7 @@ impl AgentRegistry {
                     cancellation_token: cancellation_token.clone(),
                     provider,
                     failure: None,
+                    quota_diagnostic: None,
                     started_at: Instant::now(),
                     completed_at: None,
                 },
@@ -250,6 +254,7 @@ impl AgentRegistry {
                     status: runtime.status_tx.borrow().clone(),
                     provider: runtime.provider.clone(),
                     failure: runtime.failure.clone(),
+                    quota_diagnostic: runtime.quota_diagnostic.clone(),
                     duration_ms,
                 }
             })
@@ -321,6 +326,25 @@ impl AgentRegistry {
             })
     }
 
+    pub(crate) fn update_external_agent_status_with_quota(
+        &self,
+        thread_id: ThreadId,
+        status: AgentStatus,
+        quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
+    ) -> bool {
+        self.external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&thread_id)
+            .is_some_and(|runtime| {
+                runtime.quota_diagnostic = quota_diagnostic;
+                if crate::agent::status::is_final(&status) {
+                    runtime.completed_at.get_or_insert_with(Instant::now);
+                }
+                runtime.status_tx.send(status).is_ok()
+            })
+    }
+
     pub(crate) fn update_external_agent_failure(
         &self,
         thread_id: ThreadId,
@@ -332,6 +356,7 @@ impl AgentRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&thread_id)
             .is_some_and(|runtime| {
+                runtime.quota_diagnostic = failure.quota_diagnostic.clone();
                 runtime.failure = Some(failure);
                 runtime.completed_at.get_or_insert_with(Instant::now);
                 runtime.status_tx.send(status).is_ok()

@@ -153,6 +153,14 @@ pub(crate) async fn preflight_external_agent_backend(
         probe.capabilities.cli_version,
     );
     provenance.set_capability_observation(probe.capabilities.source, probe.capabilities.freshness);
+    provenance.set_supports_claude_stream_json(
+        probe.capabilities.cli_family == "claude"
+            && probe.capabilities.supported_flags.contains("--verbose")
+            && probe
+                .capabilities
+                .supported_flags
+                .contains("--output-format"),
+    );
     provenance.set_resolved_command(resolved_command);
     Ok(provenance)
 }

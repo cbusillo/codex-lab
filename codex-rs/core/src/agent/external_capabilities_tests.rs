@@ -12,12 +12,14 @@ fn backend(args: &[&str]) -> ExternalCommandAgentBackendConfig {
 fn claude_capabilities_use_current_catalog_and_mark_fable_explicit() {
     let capabilities = claude_capabilities(
         Some("2.1.220 (Claude Code)".to_string()),
-        b"--model <model>\n--effort <level>\n",
+        b"--model <model>\n--effort <level>\n--verbose\n--output-format <format>\n",
         /*help_truncated*/ false,
     );
 
     assert!(capabilities.supports_model_selection);
     assert!(capabilities.supports_effort_selection);
+    assert!(capabilities.supported_flags.contains("--verbose"));
+    assert!(capabilities.supported_flags.contains("--output-format"));
     assert_eq!(
         capabilities.effort_levels,
         ["low", "medium", "high", "xhigh", "max"].map(str::to_string)
@@ -28,6 +30,22 @@ fn claude_capabilities_use_current_catalog_and_mark_fable_explicit() {
     assert!(capabilities.models.iter().any(|model| {
         model.selector == "claude-fable-5" && model.model == "claude-fable-5" && model.explicit_only
     }));
+}
+
+#[test]
+fn claude_stream_json_requires_both_capability_flags() {
+    for help_output in [b"--verbose\n".as_slice(), b"--output-format <format>\n"] {
+        let capabilities = claude_capabilities(
+            /*cli_version*/ None,
+            help_output,
+            /*help_truncated*/ false,
+        );
+
+        assert_ne!(
+            capabilities.supported_flags.contains("--verbose"),
+            capabilities.supported_flags.contains("--output-format")
+        );
+    }
 }
 
 #[test]

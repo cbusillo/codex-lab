@@ -416,6 +416,7 @@ async fn production_cancel_path_finishes_run_before_releasing_runtime_state() {
             is_read_only: true,
             preflight_completed: false,
             resolved_command: None,
+            claude_stream_json_enabled: false,
             hide_provider_metadata: false,
         },
         harness.control.clone(),

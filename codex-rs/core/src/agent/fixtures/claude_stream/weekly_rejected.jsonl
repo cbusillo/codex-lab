@@ -1,0 +1,2 @@
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"weekly","resetsAt":1784434800,"overageStatus":"not_available","isUsingOverage":false}}
+{"type":"result","is_error":true,"result":"Request rejected."}

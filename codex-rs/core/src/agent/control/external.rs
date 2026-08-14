@@ -3,12 +3,14 @@ use super::*;
 use crate::agent::external_command::ExternalAgentLaunch;
 use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
 use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
+use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
 use crate::agent::external_diagnostics::permission_profile_is_read_only;
 use crate::agent::external_diagnostics::redact_external_agent_status;
 use crate::agent::provider_routing::ProviderRoutingKind;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::registry::SpawnReservation;
 use crate::config::ExternalCommandAgentBackendConfig;
+use crate::config::ExternalCommandProtocol;
 use codex_agent_graph_store::ExternalAgentRunOutcome;
 use codex_agent_graph_store::ExternalAgentRunStart;
 use std::collections::HashSet;
@@ -47,6 +49,7 @@ impl ListedAgent {
             .failure
             .as_ref()
             .map(ExternalAgentFailureDetail::redacted);
+        self.quota_diagnostic = None;
         self
     }
 }
@@ -126,6 +129,8 @@ impl AgentControl {
                 /*cli_version*/ None,
             )
         });
+        let claude_stream_json_enabled = backend.protocol == ExternalCommandProtocol::RawCli
+            && provider.supports_claude_stream_json();
         let routing = external_agent_routing.unwrap_or_else(|| ProviderRoutingSummary {
             kind: ProviderRoutingKind::Explicit,
             requested: agent_role.clone(),
@@ -167,6 +172,7 @@ impl AgentControl {
             is_read_only,
             preflight_completed,
             resolved_command,
+            claude_stream_json_enabled,
             hide_provider_metadata: config.multi_agent_v2.hide_spawn_agent_metadata,
         };
         self.spawn_external_agent_task(launch);
@@ -201,6 +207,17 @@ impl AgentControl {
 
     pub(crate) fn update_external_agent_status(&self, agent_id: ThreadId, status: AgentStatus) {
         let _ = self.state.update_external_agent_status(agent_id, status);
+    }
+
+    pub(crate) fn update_external_agent_status_with_quota(
+        &self,
+        agent_id: ThreadId,
+        status: AgentStatus,
+        quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
+    ) {
+        let _ =
+            self.state
+                .update_external_agent_status_with_quota(agent_id, status, quota_diagnostic);
     }
 
     pub(crate) fn update_external_agent_failure(
