@@ -343,6 +343,18 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             action,
         )
 
+    def test_rust_ci_tracks_rusty_v8_consumer_inputs(self) -> None:
+        workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
+
+        for path in (
+            ".github/actions/setup-rusty-v8/*",
+            ".github/scripts/rusty_v8_bazel.py",
+            ".github/scripts/rusty_v8_module_bazel.py",
+            "third_party/v8/rusty_v8_*_codex_release.sha256",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(f"$f == {path}", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
