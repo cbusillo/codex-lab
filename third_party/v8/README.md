@@ -15,7 +15,10 @@ local archives and bindings for its consumer builds.
 Cargo consumers verify Codex release assets against the reviewed
 `rusty_v8_<version>_codex_release.sha256` manifest in this directory. The
 per-target checksum files uploaded beside GitHub Release assets are publication
-outputs only and are not a trust anchor for consumer builds.
+outputs only and are not a trust anchor for consumer builds. The aggregate
+manifest tracks the authoritative `openai/codex` release assets consumed by the
+setup action; if those assets are amended, consumers fail closed until a
+reviewed manifest update lands.
 
 The Bazel `v8` crate feature selection enables V8's in-process sandbox for
 Darwin, Linux, and Windows GNU. Windows MSVC remains on upstream non-sandboxed
@@ -34,7 +37,8 @@ Use this as the maintainer flow for a version bump:
 2. Update the Bazel versioned inputs in `MODULE.bazel`, then refresh the
    matching checksum manifest and generated checksums as described below.
 3. Publish a release-candidate PR and validate that `v8-canary` passes.
-4. If the canary is green, publish the release tag and release build.
+4. If the canary is green, publish the authoritative `openai/codex` release tag
+   and release build.
 5. Once the release build completes, update the checked-in Codex release asset
    checksum manifest from the published per-target manifests.
 6. Rerun the build on the candidate branch and verify that the final artifact

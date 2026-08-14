@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/actions/setup-rusty-v8/**"
+      - ".github/scripts/run_bazel_with_buildbuddy.py"
       - ".github/scripts/rusty_v8_bazel.py"
       - ".github/scripts/rusty_v8_module_bazel.py"
       - ".github/workflows/codex-lab-app.yml"

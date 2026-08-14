@@ -327,6 +327,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
         for path in (
             ".github/actions/setup-rusty-v8/**",
+            ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",
             "third_party/v8/rusty_v8_*_codex_release.sha256",
@@ -336,18 +337,21 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
     def test_rusty_v8_consumers_use_reviewed_release_checksums(self) -> None:
         action = SETUP_RUSTY_V8_ACTION.read_text()
+        release_workflow = CODEX_LAB_RELEASE_WORKFLOW.read_text()
 
         self.assertIn("write-release-checksums", action)
         self.assertNotIn(
             'curl -fsSL "${base_url}/${checksums_name}"',
             action,
         )
+        self.assertIn("uses: ./.github/actions/setup-rusty-v8", release_workflow)
 
     def test_rust_ci_tracks_rusty_v8_consumer_inputs(self) -> None:
         workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
 
         for path in (
             ".github/actions/setup-rusty-v8/*",
+            ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",
             "third_party/v8/rusty_v8_*_codex_release.sha256",

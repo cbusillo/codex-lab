@@ -196,6 +196,41 @@ class RustyV8BazelTest(unittest.TestCase):
                 output.read_text(encoding="utf-8"),
             )
 
+    def test_codex_release_manifest_covers_supported_targets(self) -> None:
+        version = rusty_v8_bazel.resolved_v8_crate_version()
+        manifest = (
+            rusty_v8_bazel.RUSTY_V8_CHECKSUMS_DIR
+            / f"rusty_v8_{version.replace('.', '_')}_codex_release.sha256"
+        )
+        checksums = rusty_v8_module_bazel.parse_checksum_manifest(manifest)
+        targets = (
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "x86_64-unknown-linux-musl",
+            "aarch64-pc-windows-msvc",
+            "x86_64-pc-windows-msvc",
+        )
+        expected_names = {
+            name
+            for target in targets
+            for name in (
+                rusty_v8_bazel.staged_archive_name(
+                    target,
+                    Path(),
+                    rusty_v8_bazel.SANDBOX_ARTIFACT_PROFILE,
+                ),
+                rusty_v8_bazel.staged_binding_name(
+                    target,
+                    rusty_v8_bazel.SANDBOX_ARTIFACT_PROFILE,
+                ),
+            )
+        }
+
+        self.assertEqual(expected_names, set(checksums))
+
     def test_stage_artifacts(self) -> None:
         with TemporaryDirectory() as source_dir, TemporaryDirectory() as output_dir:
             source_root = Path(source_dir)

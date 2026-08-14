@@ -43,7 +43,7 @@ jobs:
           workflows=false
           for f in "${files[@]}"; do
             [[ $f == codex-rs/* || $f == justfile ]] && codex=true
-            [[ $f == .github/actions/setup-rusty-v8/* || $f == .github/scripts/rusty_v8_bazel.py || $f == .github/scripts/rusty_v8_module_bazel.py || $f == third_party/v8/rusty_v8_*_codex_release.sha256 ]] && codex=true
+            [[ $f == .github/actions/setup-rusty-v8/* || $f == .github/scripts/run_bazel_with_buildbuddy.py || $f == .github/scripts/rusty_v8_bazel.py || $f == .github/scripts/rusty_v8_module_bazel.py || $f == third_party/v8/rusty_v8_*_codex_release.sha256 ]] && codex=true
             [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml || $f == .github/workflows/rust-ci-full-argument-comment-lint.yml ]] && argument_comment_lint_package=true
             [[ $f == .github/* ]] && workflows=true
           done
