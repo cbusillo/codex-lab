@@ -40,6 +40,12 @@ app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
+# Remove rebuildable local build and harness artifacts. Defaults to a dry run.
+[no-cd]
+[unix]
+local-cleanup-space *args:
+    {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
+
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py

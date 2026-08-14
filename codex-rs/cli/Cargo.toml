@@ -125,4 +125,7 @@ zstd = { workspace = true }
 [package.metadata.cargo-shear]
 # These Rust sources are intentionally Bazel-only macrobenchmarks rather than
 # Cargo targets.
-ignored-paths = ["e2e_benches/*.rs"]
+ignored-paths = [
+    "e2e_benches/*.rs",
+    "src/migrate_rollouts.rs",
+]

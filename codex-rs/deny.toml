@@ -245,6 +245,11 @@ deny = [
         "codex-responses-api-proxy",
         # Temporary migration exceptions.
         "codex-app-server",
+        "codex-browser",
+        "codex-code-bridge-client",
+        "codex-code-bridge-service",
+        "codex-core",
+        "codex-ollama",
         "codex-otel",
         # Third-party crates that own their reqwest integration. These are not part of the
         # first-party migration count above.
@@ -253,7 +258,7 @@ deny = [
         "opentelemetry-otlp",
         "rmcp",
         "sentry",
-        "webrtc-sys-build",
+        "chromiumoxide",
     ], reason = "new direct reqwest dependencies must use codex-http-client; temporary wrappers track migration debt" },
 ]
 
@@ -313,7 +318,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/dzbarsky/rules_rust",
     "https://github.com/helix-editor/nucleo.git",
-    "https://github.com/juberti-oai/rust-sdks.git",
     "https://github.com/openai-oss-forks/crossterm",
     "https://github.com/openai-oss-forks/tokio-tungstenite",
     "https://github.com/openai-oss-forks/tungstenite-rs",

@@ -116,7 +116,6 @@ serde_yaml = { workspace = true }
 sha1 = { workspace = true }
 shlex = { workspace = true }
 similar = { workspace = true }
-symphonia = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
@@ -182,4 +181,17 @@ zstd = { workspace = true }
 
 [package.metadata.cargo-shear]
 ignored = ["openssl-sys"]
-ignored-paths = ["tests/remote_env_windows/*.rs"]
+ignored-paths = [
+    "src/session/background_auto_review.rs",
+    "src/session/cargo_validation_provider.rs",
+    "src/session/config_lock.rs",
+    "src/session/project_validation.rs",
+    "src/session/project_validation_coordinator.rs",
+    "src/session/validation_provider.rs",
+    "src/tools/handlers/apply_patch_validation.rs",
+    "tests/suite/cloud_config.rs",
+    "tests/suite/cyber_exec_policy.rs",
+    "tests/suite/injected_models_cache.rs",
+    "tests/remote_env_windows/*.rs",
+    "tests/suite/turn_input_submission.rs",
+]

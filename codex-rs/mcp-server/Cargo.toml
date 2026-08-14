@@ -16,6 +16,9 @@ doctest = false
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+ignored-paths = ["src/approval_response_compat_tests.rs"]
+
 [dependencies]
 anyhow = { workspace = true }
 codex-arg0 = { workspace = true }

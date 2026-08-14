@@ -12,6 +12,9 @@ doctest = false
 [lints]
 workspace = true
 
+[package.metadata.cargo-shear]
+ignored-paths = ["src/local/retention_preview.rs"]
+
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
