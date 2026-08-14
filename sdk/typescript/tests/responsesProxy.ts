@@ -1,4 +1,5 @@
 import http from "node:http";
+import { Socket } from "node:net";
 
 const DEFAULT_RESPONSE_ID = "resp_mock";
 const DEFAULT_MESSAGE_ID = "msg_mock";
@@ -76,6 +77,7 @@ export async function startResponsesTestProxy(
     : options.responseBodies;
 
   const requests: RecordedRequest[] = [];
+  const sockets = new Set<Socket>();
 
   function readRequestBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
@@ -118,6 +120,10 @@ export async function startResponsesTestProxy(
       res.end();
     });
   });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
 
   const url = await new Promise<string>((resolve, reject) => {
     server.listen(0, "127.0.0.1", () => {
@@ -142,6 +148,9 @@ export async function startResponsesTestProxy(
         }
         resolve();
       });
+      for (const socket of sockets) {
+        socket.destroy();
+      }
     });
   }
   return { url, close, requests };
@@ -191,6 +200,18 @@ export function shell_call(): SseEvent {
         command: "echo 'Hello, world!'",
         timeout_ms: 100,
       }),
+    },
+  };
+}
+
+export function customToolCall(callId: string, name: string, input: string): SseEvent {
+  return {
+    type: "response.output_item.done",
+    item: {
+      type: "custom_tool_call",
+      call_id: callId,
+      name,
+      input,
     },
   };
 }
