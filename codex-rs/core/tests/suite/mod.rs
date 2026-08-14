@@ -150,6 +150,7 @@ mod token_budget;
 mod tool_harness;
 mod tool_parallelism;
 mod tools;
+mod tools_disabled;
 mod truncation;
 mod turn_context_environments;
 mod turn_state;

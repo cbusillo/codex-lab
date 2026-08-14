@@ -3486,6 +3486,11 @@
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Whether model-visible tools are available for turns using this config.",
+          "type": "boolean"
+        },
         "experimental_request_user_input": {
           "$ref": "#/definitions/ExperimentalRequestUserInput"
         },

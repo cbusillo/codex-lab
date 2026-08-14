@@ -872,16 +872,19 @@ impl ModelClient {
             }
         }
         let (instructions, tools) = if model_info.use_responses_lite {
-            let tools = if self.state.provider.capabilities().namespace_tools {
-                create_tools_json_for_responses_lite(&prompt.tools)?
-            } else {
-                create_tools_json_for_responses_api(&prompt.tools)?
-            };
-            let mut prefix = vec![ResponseItem::AdditionalTools {
-                id: None,
-                role: "developer".to_string(),
-                tools,
-            }];
+            let mut prefix = Vec::new();
+            if !prompt.tools.is_empty() {
+                let tools = if self.state.provider.capabilities().namespace_tools {
+                    create_tools_json_for_responses_lite(&prompt.tools)?
+                } else {
+                    create_tools_json_for_responses_api(&prompt.tools)?
+                };
+                prefix.push(ResponseItem::AdditionalTools {
+                    id: None,
+                    role: "developer".to_string(),
+                    tools,
+                });
+            }
             if !prompt.base_instructions.text.is_empty() {
                 prefix.push(ResponseItem::Message {
                     id: None,
@@ -896,10 +899,11 @@ impl ModelClient {
             input.splice(0..0, prefix);
             (String::new(), None)
         } else {
-            (
-                prompt.base_instructions.text.clone(),
-                Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
-            )
+            let tools = (!prompt.tools.is_empty())
+                .then(|| create_tools_raw_json_for_responses_api(&prompt.tools))
+                .transpose()?
+                .map(Into::into);
+            (prompt.base_instructions.text.clone(), tools)
         };
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
@@ -927,13 +931,20 @@ impl ModelClient {
         );
         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
         let service_tier = model_info.service_tier_for_request(service_tier);
+        let has_model_visible_tools = !prompt.tools.is_empty();
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
             input,
             tools,
-            tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+            tool_choice: if has_model_visible_tools {
+                "auto".to_string()
+            } else {
+                String::new()
+            },
+            parallel_tool_calls: has_model_visible_tools
+                && prompt.parallel_tool_calls
+                && !model_info.use_responses_lite,
             reasoning: Some(reasoning),
             store: false,
             stream: true,

@@ -125,6 +125,9 @@ pub(crate) fn build_tool_router(
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
 ) -> CodexResult<ToolRouter> {
+    if !turn_context.config.tools_enabled {
+        return Ok(ToolRouter::from_parts(ToolRegistry::default(), Vec::new()));
+    }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let wait_for_environment_tool_config = session
@@ -255,6 +258,9 @@ pub(crate) fn build_core_tool_registry(
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
     wait_for_environment_tool_config: Option<&Arc<crate::WaitForEnvironmentToolConfig>>,
 ) -> ToolRegistry {
+    if !turn_context.config.tools_enabled {
+        return ToolRegistry::default();
+    }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let context = CoreToolPlanContext {
@@ -280,6 +286,9 @@ pub(crate) fn append_source_tools(
     extension_tool_executors: impl IntoIterator<Item = Arc<dyn ToolExecutor<ExtensionToolCall>>>,
     dynamic_tools: &[DynamicToolSpec],
 ) -> Vec<ToolSpec> {
+    if !turn_context.config.tools_enabled {
+        return Vec::new();
+    }
     if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
         return Vec::new();
     }

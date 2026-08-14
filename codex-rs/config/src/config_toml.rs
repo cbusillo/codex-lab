@@ -617,9 +617,12 @@ pub struct RealtimeAudioToml {
     pub speaker: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolsToml {
+    /// Whether model-visible tools are available for turns using this config.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_web_search_tool_config"
@@ -627,6 +630,17 @@ pub struct ToolsToml {
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
     pub update_plan: Option<UpdatePlanToolConfig>,
+}
+
+impl Default for ToolsToml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            web_search: None,
+            experimental_request_user_input: None,
+            update_plan: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
