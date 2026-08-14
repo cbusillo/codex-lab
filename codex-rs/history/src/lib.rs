@@ -90,6 +90,10 @@ impl Borrow<ResponseItem> for ResponseItemEnvelope {
 }
 
 /// Persisted rollout item used by core history and rollout storage.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "RolloutItem mirrors persisted rollout payloads; boxing would add API churn without changing serialization"
+)]
 #[derive(Debug, Clone)]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),

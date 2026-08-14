@@ -11,7 +11,13 @@ use std::collections::HashSet;
 
 impl ChatWidget {
     pub(crate) fn open_agents_settings_popup(&mut self) {
-        self.open_agents_capabilities_popup(&[], true, false, false, None);
+        self.open_agents_capabilities_popup(
+            &[],
+            /*loading*/ true,
+            /*refreshing*/ false,
+            /*cancelling*/ false,
+            /*refresh_status*/ None,
+        );
     }
 
     pub(crate) fn set_agent_selector_enabled(&mut self, selector: &str, enabled: bool) {
