@@ -995,6 +995,12 @@ async fn read_limited_output_with_head<R: AsyncRead + Unpin>(
 }
 
 fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
+    let is_transport_event_type = |event_type: &str| {
+        matches!(
+            event_type,
+            "assistant" | "rate_limit_event" | "result" | "stream_event" | "system" | "user"
+        )
+    };
     let mut plaintext = Vec::new();
     for line in output.split_inclusive(|byte| *byte == b'\n') {
         let trimmed = line.trim_ascii();
@@ -1003,21 +1009,30 @@ fn claude_plaintext_output(output: &[u8]) -> Vec<u8> {
                 if event
                     .get("type")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|event_type| {
-                        matches!(
-                            event_type,
-                            "assistant"
-                                | "rate_limit_event"
-                                | "result"
-                                | "stream_event"
-                                | "system"
-                                | "user"
-                        )
-                    }) =>
+                    .is_some_and(&is_transport_event_type) =>
             {
                 continue;
             }
-            Err(_) if trimmed.starts_with(b"{") || trimmed.starts_with(b"[") => continue,
+            Err(_) => {
+                if let Some(type_key_start) = trimmed
+                    .windows(b"\"type\"".len())
+                    .position(|window| window == b"\"type\"")
+                {
+                    let after_type_key = &trimmed[type_key_start + b"\"type\"".len()..];
+                    if let Some(colon_offset) = after_type_key.iter().position(|byte| *byte == b':')
+                    {
+                        let value = after_type_key[colon_offset + 1..].trim_ascii_start();
+                        if let Some(value) = value.strip_prefix(b"\"")
+                            && let Some(end_quote) = value.iter().position(|byte| *byte == b'\"')
+                            && std::str::from_utf8(&value[..end_quote])
+                                .ok()
+                                .is_some_and(&is_transport_event_type)
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
         plaintext.extend_from_slice(line);

@@ -404,6 +404,42 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn claude_stream_json_falls_back_to_successful_malformed_json_like_output() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-plaintext.sh");
+    tokio::fs::write(&script_path, "printf '%s\\n' '[done]' '{not-json}'\n")
+        .await
+        .expect("fake Claude wrapper should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let response = run_external_agent_inner(&launch)
+        .await
+        .expect("successful JSON-like wrapper output should remain compatible");
+
+    assert_eq!(
+        response,
+        ExternalAgentResponse {
+            status: ExternalAgentResponseStatus::Completed,
+            final_message: Some("[done]\n{not-json}".to_string()),
+            quota_diagnostic: None,
+        }
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn claude_stream_quota_rejection_outranks_contradictory_result_prose() {
     let temp_dir = TempDir::new().expect("tempdir");
     let fixture = include_str!("fixtures/claude_stream/five_hour_rejected.jsonl");
@@ -1629,11 +1665,11 @@ async fn head_tail_reader_preserves_initial_quota_and_trailing_result_events() {
 #[test]
 fn claude_plaintext_output_omits_json_transport_events() {
     let output = claude_plaintext_output(
-        b"authentication required\n{\"type\":\"rate_limit_event\"}\n{\"answer\":\"use cached result\"}\nretry login\n",
+        b"authentication required\n{\"type\":\"rate_limit_event\"}\n{\"type\": \"rate_limit_event\",\"rate_limit_info\":{\n{\"answer\":\"use cached result\"}\n[done]\n{not-json}\nretry login\n",
     );
 
     assert_eq!(
-        b"authentication required\n{\"answer\":\"use cached result\"}\nretry login\n",
+        b"authentication required\n{\"answer\":\"use cached result\"}\n[done]\n{not-json}\nretry login\n",
         output.as_slice()
     );
 }
