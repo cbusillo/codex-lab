@@ -23,7 +23,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          files=()
+          files=("__no_changes__")
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base_sha='${{ github.event.pull_request.base.sha }}'
             head_sha='${{ github.event.pull_request.head.sha }}'
@@ -41,7 +41,7 @@ jobs:
           relevant=false
           for file in "${files[@]}"; do
             case "$file" in
-              codex-rs/*|third_party/v8/*|announcement_tip.toml|BUILD.bazel|MODULE.bazel|MODULE.bazel.lock|defs.bzl|.bazelrc|.bazelversion|justfile|scripts/list-bazel-release-targets.sh|.github/actions/setup-ci/*|.github/actions/setup-bazel-ci/*|.github/actions/prepare-bazel-ci/*|.github/scripts/run-bazel-ci.sh|.github/workflows/bazel.yml|.github/workflows/blocking-ci.yml|.github/workflows/codex-lab-bazel-analysis.yml)
+              codex-rs/*|third_party/v8/*|bazel/*|*.bzl|announcement_tip.toml|BUILD.bazel|MODULE.bazel|MODULE.bazel.lock|.bazelrc|.bazelversion|justfile|scripts/list-bazel-release-targets.sh|.github/actions/setup-ci/*|.github/actions/setup-bazel-ci/*|.github/actions/prepare-bazel-ci/*|.github/scripts/run-bazel-ci.sh|.github/workflows/bazel.yml|.github/workflows/blocking-ci.yml|.github/workflows/codex-lab-bazel-analysis.yml)
                 relevant=true
                 break
                 ;;
@@ -119,24 +119,3 @@ jobs:
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
-
-  results:
-    name: CI results (required)
-    needs: [changed, analysis]
-    if: always()
-    runs-on: macos-26
-    steps:
-      - name: Require analysis when relevant
-        env:
-          ANALYSIS_RESULT: ${{ needs.analysis.result }}
-          RELEVANT: ${{ needs.changed.outputs.relevant }}
-        run: |
-          set -euo pipefail
-          if [[ "$RELEVANT" != "true" ]]; then
-            echo "No Bazel-relevant changes; analysis not required."
-            exit 0
-          fi
-          if [[ "$ANALYSIS_RESULT" != "success" ]]; then
-            echo "Bazel release-target analysis failed: $ANALYSIS_RESULT" >&2
-            exit 1
-          fi

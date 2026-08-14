@@ -24,7 +24,11 @@ class BazelAnalysisWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/list-bazel-release-targets.sh", contents)
         self.assertIn("elapsed_seconds > 1500", contents)
         self.assertIn("codex-rs/*", contents)
+        self.assertIn("bazel/*", contents)
+        self.assertIn("*.bzl", contents)
+        self.assertIn("files=(\"__no_changes__\")", contents)
         self.assertIn("MODULE.bazel.lock", contents)
+        self.assertNotIn("name: CI results (required)", contents)
 
     def test_repository_cache_failures_are_non_blocking(self) -> None:
         contents = WORKFLOW.read_text(encoding="utf-8")

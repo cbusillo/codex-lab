@@ -39,8 +39,9 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   Silicon, uses non-fatal repository-cache restore/save, and feeds the existing
   `blocking-ci / CI required` check instead of adding another required status.
   The initial August 14, 2026 measurement on 718 targets was 11.11 seconds with
-  an empty repository cache and 0.91 seconds warm, below the 25-minute cold and
-  10-minute warm limits recorded in issue #651.
+  an empty repository cache and 0.91 seconds warm, below the decision thresholds
+  recorded in issue #651. The workflow enforces the 25-minute analysis ceiling;
+  the warm timing remains measurement evidence rather than a second CI run.
 - `sdk.yml` runs the Python SDK suite plus TypeScript SDK build and lint checks.
   The TypeScript tests that spawn a real Codex binary run in the full suite
   instead of compiling the full Bazel/V8 graph on an ephemeral PR runner.
