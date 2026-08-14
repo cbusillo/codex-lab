@@ -27,6 +27,9 @@ class BazelAnalysisWorkflowTest(unittest.TestCase):
         self.assertIn("bazel/*", contents)
         self.assertIn("*.bzl", contents)
         self.assertIn("files=(\"__no_changes__\")", contents)
+        self.assertIn('changed_files="$(git diff', contents)
+        self.assertIn("Unable to diff pull request base", contents)
+        self.assertIn("timeout-minutes: 5", contents)
         self.assertIn("MODULE.bazel.lock", contents)
         self.assertNotIn("name: CI results (required)", contents)
 

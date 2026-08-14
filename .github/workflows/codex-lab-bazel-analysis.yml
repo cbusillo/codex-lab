@@ -8,6 +8,7 @@ jobs:
   changed:
     name: Detect Bazel-relevant changes
     runs-on: macos-26
+    timeout-minutes: 5
     outputs:
       relevant: ${{ steps.detect.outputs.relevant }}
     steps:
@@ -27,16 +28,22 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             base_sha='${{ github.event.pull_request.base.sha }}'
             head_sha='${{ github.event.pull_request.head.sha }}'
-            while IFS= read -r file; do
-              files+=("$file")
-            done < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
+            changed_files="$(git diff --name-only --no-renames "$base_sha" "$head_sha")" || {
+              echo "::error::Unable to diff pull request base $base_sha and head $head_sha."
+              exit 1
+            }
           elif [[ "${{ github.event_name }}" == "push" && '${{ github.event.before }}' =~ ^[0-9a-f]{40}$ && '${{ github.event.before }}' != '0000000000000000000000000000000000000000' ]]; then
-            while IFS= read -r file; do
-              files+=("$file")
-            done < <(git diff --name-only --no-renames '${{ github.event.before }}' '${{ github.sha }}')
+            changed_files="$(git diff --name-only --no-renames '${{ github.event.before }}' '${{ github.sha }}')" || {
+              echo "::error::Unable to diff push range ${{ github.event.before }}..${{ github.sha }}."
+              exit 1
+            }
           else
-            files=("codex-rs/force")
+            changed_files="codex-rs/force"
           fi
+
+          while IFS= read -r file; do
+            [[ -n "$file" ]] && files+=("$file")
+          done <<< "$changed_files"
 
           relevant=false
           for file in "${files[@]}"; do
