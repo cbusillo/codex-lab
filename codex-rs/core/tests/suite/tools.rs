@@ -74,7 +74,7 @@ fn tool_names(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Spawns a Code Bridge service rooted at the test's `CODEX_HOME` so the `code_bridge` tool
+/// Spawns a Code Bridge service rooted at the test's `CODEX_LAB_HOME` so the `code_bridge` tool
 /// handler discovers the same descriptor the producer fixture registers against.
 async fn start_test_bridge(
     codex_home: &Path,
