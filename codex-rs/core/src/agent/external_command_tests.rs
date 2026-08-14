@@ -365,6 +365,45 @@ async fn claude_stream_json_preserves_assistant_result_without_transport_events(
 
 #[cfg(unix)]
 #[tokio::test]
+async fn claude_stream_json_falls_back_to_successful_plaintext_output() {
+    let temp_dir = TempDir::new().expect("tempdir");
+    let script_path = temp_dir.path().join("claude-plaintext.sh");
+    tokio::fs::write(
+        &script_path,
+        "case \" $* \" in\n  *\" --verbose --output-format stream-json -p inspect this repo \"*) printf 'plain wrapper result\\n' ;;\n  *) printf 'missing stream flags\\n' >&2; exit 2 ;;\nesac\n",
+    )
+    .await
+    .expect("fake Claude wrapper should be written");
+    let mut launch = test_launch(
+        &temp_dir,
+        ExternalCommandAgentBackendConfig {
+            command: format!("/bin/sh {}", script_path.display()),
+            protocol: ExternalCommandProtocol::RawCli,
+            launch_family: Some("claude".to_string()),
+            timeout_ms: 5_000,
+            ..Default::default()
+        },
+        /*is_read_only*/ true,
+    );
+    launch.preflight_completed = true;
+    launch.claude_stream_json_enabled = true;
+
+    let response = run_external_agent_inner(&launch)
+        .await
+        .expect("successful plaintext wrapper output should remain compatible");
+
+    assert_eq!(
+        response,
+        ExternalAgentResponse {
+            status: ExternalAgentResponseStatus::Completed,
+            final_message: Some("plain wrapper result".to_string()),
+            quota_diagnostic: None,
+        }
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn claude_stream_quota_rejection_outranks_contradictory_result_prose() {
     let temp_dir = TempDir::new().expect("tempdir");
     let fixture = include_str!("fixtures/claude_stream/five_hour_rejected.jsonl");
@@ -1552,6 +1591,39 @@ async fn head_tail_reader_preserves_under_limit_output_exactly() {
     writer_task.await.expect("writer task should finish");
 
     assert_eq!(expected, output);
+}
+
+#[tokio::test]
+async fn head_tail_reader_preserves_initial_quota_and_trailing_result_events() {
+    let quota = b"{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"rateLimitType\":\"five_hour\"}}\n";
+    let result = b"{\"type\":\"result\",\"is_error\":false,\"result\":\"done\"}\n";
+    let filler = vec![b'x'; 128];
+    let (mut writer, reader) = tokio::io::duplex(512);
+    let writer_task = tokio::spawn(async move {
+        writer.write_all(quota).await.expect("write quota event");
+        writer.write_all(&filler).await.expect("write filler");
+        writer.write_all(result).await.expect("write result event");
+    });
+
+    let limit = quota.len() + result.len();
+    let output = read_limited_output_with_head(reader, limit, quota.len(), "stdout")
+        .await
+        .expect("oversized stream should preserve its contract events");
+    writer_task.await.expect("writer task should finish");
+
+    let parsed = parse_claude_stream_json(&output).expect("preserved events should parse");
+    assert_eq!(parsed.final_message.as_deref(), Some("done"));
+    assert_eq!(
+        parsed.quota_diagnostic,
+        Some(ExternalAgentQuotaDiagnostic {
+            status: "allowed".to_string(),
+            window: "five_hour".to_string(),
+            resets_at: None,
+            overage_state: "unknown".to_string(),
+            overage_reason: None,
+            is_using_overage: false,
+        })
+    );
 }
 
 #[test]

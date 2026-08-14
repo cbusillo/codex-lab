@@ -1130,12 +1130,28 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Result<()> {
+#[derive(Clone, Copy)]
+enum QuotaMetadataExposure {
+    Visible,
+    Hidden,
+}
+
+async fn claude_stream_quota_agent_status(exposure: QuotaMetadataExposure) -> Result<Value> {
     let stub_dir = TempDir::new()?;
     let fixture = include_str!("../../src/agent/fixtures/claude_stream/five_hour_rejected.jsonl");
     let script = format!(
-        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'Claude Code 2.1.220\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"auth\" ] && [ \"${{2:-}}\" = \"status\" ]; then printf '{{\"loggedIn\":true}}\\n'; exit 0; fi\nif [ \"${{1:-}}\" = \"--help\" ]; then printf '%s\\n' '--model <model>' '--verbose' '--output-format <format>'; exit 0; fi\ncat <<'EOF'\n{fixture}\nEOF\nexit 1\n"
+        r#"if [ "${{1:-}}" = "--version" ]; then printf 'Claude Code 2.1.220\n'; exit 0; fi
+if [ "${{1:-}}" = "auth" ] && [ "${{2:-}}" = "status" ]; then printf '{{"loggedIn":true}}\n'; exit 0; fi
+if [ "${{1:-}}" = "--help" ]; then printf '%s\n' '--model <model>' '--verbose' '--output-format <format>'; exit 0; fi
+case " $* " in
+  *" --verbose --output-format stream-json "*) ;;
+  *) printf 'missing stream-json flags\n' >&2; exit 2 ;;
+esac
+cat <<'EOF'
+{fixture}
+EOF
+exit 1
+"#
     );
     let mut backend = stub_cli(&stub_dir, "fake-claude.sh", &script);
     backend.launch_family = Some("claude".to_string());
@@ -1203,7 +1219,14 @@ async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Re
     )
     .await;
 
-    let mut builder = builder_with_external_role(backend);
+    let mut builder = match exposure {
+        QuotaMetadataExposure::Visible => builder_with_external_role(backend),
+        QuotaMetadataExposure::Hidden => {
+            builder_with_external_role(backend).with_config(|config| {
+                config.multi_agent_v2.hide_spawn_agent_metadata = true;
+            })
+        }
+    };
     let test = builder.build(&server).await?;
     test.submit_turn(PROMPT).await?;
 
@@ -1215,14 +1238,27 @@ async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Re
             .as_str()
             .expect("list_agents output string"),
     )?;
-    let agent = listed["agents"]
+    let mut agent = listed["agents"]
         .as_array()
         .and_then(|agents| {
             agents
                 .iter()
                 .find(|agent| agent["agent_name"] == "/root/external_probe")
         })
-        .expect("external agent should be listed");
+        .expect("external agent should be listed")
+        .clone();
+    agent
+        .as_object_mut()
+        .expect("listed agent object")
+        .remove("duration_ms")
+        .expect("completed external agent should report a duration");
+
+    Ok(agent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Result<()> {
+    let agent = claude_stream_quota_agent_status(QuotaMetadataExposure::Visible).await?;
 
     assert_eq!(
         agent["agent_status"]["errored"].as_str(),
@@ -1240,6 +1276,23 @@ async fn claude_stream_quota_diagnostic_is_authoritative_in_agent_status() -> Re
             "overage_state": "rejected",
             "overage_reason": "org_level_disabled_until",
             "is_using_overage": false,
+        })
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_stream_quota_diagnostic_is_redacted_with_provider_metadata() -> Result<()> {
+    let agent = claude_stream_quota_agent_status(QuotaMetadataExposure::Hidden).await?;
+
+    assert_eq!(
+        agent,
+        json!({
+            "agent_name": "/root/external_probe",
+            "agent_status": { "errored": "external agent failed: quota_or_rate_limited" },
+            "supports_followup_messages": false,
+            "failure": { "kind": "quota_or_rate_limited" },
         })
     );
 

@@ -84,7 +84,7 @@ struct ExternalAgentRequest {
     message: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct ExternalAgentResponse {
     status: ExternalAgentResponseStatus,
@@ -565,14 +565,21 @@ async fn run_external_agent_inner(
                     ));
                 }
             }
-            if claude_stream_json_enabled {
-                return Err(ExternalAgentRunError::new(
-                    ExternalAgentFailureKind::MalformedOutput,
-                    anyhow::anyhow!("Claude Code did not emit a usable stream-json response"),
-                ));
-            }
-            let final_message = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let plaintext_stdout;
+            let stdout = if claude_stream_json_enabled {
+                plaintext_stdout = claude_plaintext_output(&output.stdout);
+                plaintext_stdout.as_slice()
+            } else {
+                output.stdout.as_slice()
+            };
+            let final_message = String::from_utf8_lossy(stdout).trim().to_string();
             if final_message.is_empty() {
+                if claude_stream_json_enabled {
+                    return Err(ExternalAgentRunError::new(
+                        ExternalAgentFailureKind::MalformedOutput,
+                        anyhow::anyhow!("Claude Code did not emit a usable stream-json response"),
+                    ));
+                }
                 let diagnostic = bounded_preflight_output(&output.stdout, &output.stderr);
                 let (kind, message) = if diagnostic.is_empty() {
                     (
