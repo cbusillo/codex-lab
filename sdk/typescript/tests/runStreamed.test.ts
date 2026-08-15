@@ -45,6 +45,19 @@ describe("Codex", () => {
           },
         },
         {
+          type: "validation.completed",
+          turn_id: expect.any(String),
+          item_id: expect.any(String),
+          command: [],
+          command_truncated: false,
+          cwd: process.cwd(),
+          status: "skipped",
+          skip_reason: "validation_disabled",
+          output: "automatic validation skipped: validation is disabled",
+          output_truncated: false,
+          duration_ms: 0,
+        },
+        {
           type: "turn.completed",
           usage: {
             cache_write_input_tokens: 0,
