@@ -11022,6 +11022,42 @@ max_concurrent_threads_per_session = 9
 }
 
 #[tokio::test]
+async fn multi_agent_v2_migrates_legacy_collaboration_namespace() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[features.multi_agent_v2]
+enabled = true
+tool_namespace = "collaboration"
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(
+        config.multi_agent_v2.tool_namespace.as_deref(),
+        Some("agents")
+    );
+    assert!(
+        config
+            .multi_agent_v2
+            .root_agent_usage_hint_text
+            .as_deref()
+            .is_some_and(|hint| hint.contains("to=functions.agents.spawn_agent"))
+    );
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("tool namespace `collaboration` is reserved")
+            && warning.contains("using `agents` instead")
+    }));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn multi_agent_v2_default_session_thread_cap_counts_root() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
@@ -11063,9 +11099,12 @@ max_concurrent_threads_per_session = 17
     .expect("multi-agent v2 config should parse");
 
     let config = resolve_multi_agent_v2_config(&config_toml);
+    assert_eq!(config.tool_namespace.as_deref(), Some("agents"));
     let concurrency_guidance = "There are 17 available concurrency slots, meaning that up to 17 agents can be active at once, including you.";
+    let shared_usage_hint_text =
+        default_multi_agent_v2_shared_usage_hint_text(Some(DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE));
     let expected_suffix = format!(
-        "{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT}\n\n{concurrency_guidance}"
+        "{shared_usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT}\n\n{concurrency_guidance}"
     );
     assert!(
         [
@@ -11074,6 +11113,29 @@ max_concurrent_threads_per_session = 17
         ]
         .into_iter()
         .all(|hint| hint.is_some_and(|hint| hint.contains(expected_suffix.as_str())))
+    );
+}
+
+#[test]
+fn multi_agent_v2_default_usage_hints_follow_configured_namespace() {
+    let config_toml = toml::from_str(
+        r#"[features.multi_agent_v2]
+tool_namespace = "delegation"
+"#,
+    )
+    .expect("multi-agent v2 config should parse");
+
+    let config = resolve_multi_agent_v2_config(&config_toml);
+    assert!(
+        [
+            config.root_agent_usage_hint_text,
+            config.subagent_usage_hint_text,
+        ]
+        .into_iter()
+        .all(|hint| hint.is_some_and(|hint| {
+            hint.contains("to=functions.delegation.spawn_agent")
+                && !hint.contains("to=functions.agents.spawn_agent")
+        }))
     );
 }
 

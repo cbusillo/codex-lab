@@ -8,6 +8,7 @@ use crate::agent::user_agent_intent::record_user_agent_intent;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::compact::CompactionJobConfig;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
@@ -68,6 +69,7 @@ use crate::util::error_or_panic;
 use codex_analytics::AppInvocation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
+use codex_analytics::CompactionTrigger;
 use codex_analytics::InvocationType;
 use codex_analytics::TurnResolvedConfigFact;
 use codex_analytics::build_track_events_context;
@@ -512,13 +514,17 @@ pub(crate) async fn run_turn(
                         Arc::clone(&step_context),
                         /*fallback_step_context*/ None,
                         &mut client_session,
-                        InitialContextInjection::BeforeLastUserMessage {
-                            world_state: Arc::clone(&world_state),
-                            step_context: Arc::clone(&step_context),
+                        CompactionJobConfig {
+                            initial_context_injection:
+                                InitialContextInjection::BeforeLastUserMessage {
+                                    world_state: Arc::clone(&world_state),
+                                    step_context: Arc::clone(&step_context),
+                                },
+                            model_request_history_mode,
+                            trigger: CompactionTrigger::Auto,
+                            reason: CompactionReason::ContextLimit,
+                            phase: CompactionPhase::MidTurn,
                         },
-                        model_request_history_mode,
-                        CompactionReason::ContextLimit,
-                        CompactionPhase::MidTurn,
                     )
                     .await
                     {
@@ -1208,10 +1214,13 @@ async fn run_pre_sampling_compact(
             step_context,
             /*fallback_step_context*/ None,
             client_session,
-            InitialContextInjection::DoNotInject,
-            model_request_history_mode,
-            CompactionReason::ContextLimit,
-            CompactionPhase::PreTurn,
+            CompactionJobConfig {
+                initial_context_injection: InitialContextInjection::DoNotInject,
+                model_request_history_mode,
+                trigger: CompactionTrigger::Auto,
+                reason: CompactionReason::ContextLimit,
+                phase: CompactionPhase::PreTurn,
+            },
         )
         .await?;
     }
@@ -1292,10 +1301,13 @@ async fn maybe_run_previous_model_inline_compact(
             step_context,
             fallback_step_context,
             client_session,
-            InitialContextInjection::DoNotInject,
-            model_request_history_mode,
-            CompactionReason::CompHashChanged,
-            CompactionPhase::PreTurn,
+            CompactionJobConfig {
+                initial_context_injection: InitialContextInjection::DoNotInject,
+                model_request_history_mode,
+                trigger: CompactionTrigger::Auto,
+                reason: CompactionReason::CompHashChanged,
+                phase: CompactionPhase::PreTurn,
+            },
         )
         .await?;
         return Ok(());
@@ -1341,10 +1353,13 @@ async fn maybe_run_previous_model_inline_compact(
             step_context,
             fallback_step_context,
             client_session,
-            InitialContextInjection::DoNotInject,
-            model_request_history_mode,
-            CompactionReason::ModelDownshift,
-            CompactionPhase::PreTurn,
+            CompactionJobConfig {
+                initial_context_injection: InitialContextInjection::DoNotInject,
+                model_request_history_mode,
+                trigger: CompactionTrigger::Auto,
+                reason: CompactionReason::ModelDownshift,
+                phase: CompactionPhase::PreTurn,
+            },
         )
         .await?;
     }
@@ -1354,21 +1369,23 @@ async fn maybe_run_previous_model_inline_compact(
 #[instrument(
     level = "trace",
     skip_all,
-    fields(reason = ?reason, phase = ?phase)
+    fields(reason = ?config.reason, phase = ?config.phase)
 )]
 async fn run_auto_compact(
     sess: &Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    config: CompactionJobConfig,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     if turn_context.config.features.enabled(Feature::TokenBudget) {
+        let CompactionJobConfig {
+            initial_context_injection,
+            model_request_history_mode,
+            ..
+        } = config;
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1397,10 +1414,7 @@ async fn run_auto_compact(
                 step_context,
                 fallback_step_context,
                 client_session,
-                initial_context_injection,
-                model_request_history_mode,
-                reason,
-                phase,
+                config,
             )
             .await?;
             return Ok(());
@@ -1415,10 +1429,7 @@ async fn run_auto_compact(
             step_context,
             fallback_step_context,
             client_session.turn_state(),
-            initial_context_injection,
-            model_request_history_mode,
-            reason,
-            phase,
+            config,
         )
         .await?;
     } else {
@@ -1427,15 +1438,7 @@ async fn run_auto_compact(
             "local",
             /*manual*/ false,
         );
-        run_inline_auto_compact_task(
-            Arc::clone(sess),
-            Arc::clone(turn_context),
-            initial_context_injection,
-            model_request_history_mode,
-            reason,
-            phase,
-        )
-        .await?;
+        run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), config).await?;
     }
     Ok(())
 }

@@ -96,7 +96,8 @@ impl AgentControl {
             .unwrap_or_else(AgentPath::root);
         let initial_operation = match initial_input {
             SpawnInitialInput::UserInput(input) => input.into(),
-            SpawnInitialInput::InterAgentCommunication(communication, _) => {
+            SpawnInitialInput::InterAgentCommunication(communication) => {
+                let (communication, _) = *communication;
                 if communication
                     .encrypted_content
                     .as_ref()

@@ -115,13 +115,18 @@ pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bo
     provider.supports_remote_compaction()
 }
 
+pub(crate) struct CompactionJobConfig {
+    pub(crate) initial_context_injection: InitialContextInjection,
+    pub(crate) model_request_history_mode: ModelRequestHistoryMode,
+    pub(crate) trigger: CompactionTrigger,
+    pub(crate) reason: CompactionReason,
+    pub(crate) phase: CompactionPhase,
+}
+
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    config: CompactionJobConfig,
 ) -> CodexResult<()> {
     let prompt = turn_context
         .config
@@ -135,17 +140,7 @@ pub(crate) async fn run_inline_auto_compact_task(
         text_elements: Vec::new(),
     }];
 
-    run_compact_task_inner(
-        sess,
-        turn_context,
-        input,
-        initial_context_injection,
-        model_request_history_mode,
-        CompactionTrigger::Auto,
-        reason,
-        phase,
-    )
-    .await?;
+    run_compact_task_inner(sess, turn_context, input, config).await?;
     Ok(())
 }
 
@@ -166,11 +161,13 @@ pub(crate) async fn run_compact_task(
         sess.clone(),
         turn_context,
         input,
-        InitialContextInjection::DoNotInject,
-        ModelRequestHistoryMode::Normal,
-        CompactionTrigger::Manual,
-        CompactionReason::UserRequested,
-        CompactionPhase::StandaloneTurn,
+        CompactionJobConfig {
+            initial_context_injection: InitialContextInjection::DoNotInject,
+            model_request_history_mode: ModelRequestHistoryMode::Normal,
+            trigger: CompactionTrigger::Manual,
+            reason: CompactionReason::UserRequested,
+            phase: CompactionPhase::StandaloneTurn,
+        },
     )
     .await?;
     Ok(())
@@ -180,12 +177,15 @@ async fn run_compact_task_inner(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
-    trigger: CompactionTrigger,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    config: CompactionJobConfig,
 ) -> CodexResult<()> {
+    let CompactionJobConfig {
+        initial_context_injection,
+        model_request_history_mode,
+        trigger,
+        reason,
+        phase,
+    } = config;
     let compaction_metadata =
         CompactionTurnMetadata::new(trigger, reason, CompactionImplementation::Responses, phase);
     let attempt = CompactionAnalyticsAttempt::begin(

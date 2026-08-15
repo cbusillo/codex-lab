@@ -43,6 +43,15 @@ use super::ToolCallSource;
 use super::ToolRouter;
 use super::tool_log_payload;
 
+const MULTI_AGENT_V2_TOOL_NAMES: [&str; 6] = [
+    "spawn_agent",
+    "send_message",
+    "followup_task",
+    "wait_agent",
+    "interrupt_agent",
+    "list_agents",
+];
+
 struct ExtensionEchoContributor;
 
 #[test]
@@ -58,6 +67,24 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
         tool_log_payload(&payload, &ToolCallSource::Direct),
         payload.log_payload()
     );
+}
+
+#[test]
+fn direct_source_redacts_plaintext_multi_agent_messages_in_any_namespace() {
+    for namespace in [Some("agents"), Some("collaboration"), None] {
+        for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+            let call = ToolCall {
+                tool_name: ToolName::new(namespace.map(str::to_string), tool_name),
+                call_id: "call-plaintext-message".to_string(),
+                payload: ToolPayload::Function {
+                    arguments: json!({"message": "secret message"}).to_string(),
+                },
+                encrypted_function_args: Some(Vec::new()),
+            };
+
+            assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
+        }
+    }
 }
 
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
@@ -234,6 +261,55 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
             assert_eq!(arguments, "{}");
         }
         other => panic!("expected function payload, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_multi_agent_v2_calls_use_the_registered_namespace() -> anyhow::Result<()> {
+    for configured_namespace in ["agents", "delegation"] {
+        let (_, mut turn) = make_session_and_context().await;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(codex_features::Feature::MultiAgentV2)
+            .expect("test feature should be enableable in config");
+        config.multi_agent_v2.tool_namespace = Some(configured_namespace.to_string());
+        turn.multi_agent_version = config.multi_agent_version_from_features();
+        turn.config = Arc::new(config);
+        let turn = Arc::new(turn);
+        let step_context = StepContext::for_test(Arc::clone(&turn));
+        let router = test_tool_router(
+            step_context.as_ref(),
+            Vec::new(),
+            Vec::new(),
+            &turn.dynamic_tools,
+        );
+
+        for tool_name in MULTI_AGENT_V2_TOOL_NAMES {
+            let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
+                id: None,
+                name: tool_name.to_string(),
+                namespace: Some("collaboration".to_string()),
+                arguments: "{}".to_string(),
+                encrypted_function_args: None,
+                call_id: format!("call-{tool_name}"),
+                internal_chat_message_metadata_passthrough: None,
+            })?
+            .expect("function_call should produce a tool call");
+
+            assert_eq!(
+                call.tool_name,
+                ToolName::namespaced("collaboration", tool_name)
+            );
+            assert_eq!(
+                router
+                    .tool_runtime(&call)
+                    .map(|runtime| runtime.tool_name()),
+                Some(ToolName::namespaced("collaboration", tool_name))
+            );
+        }
     }
 
     Ok(())

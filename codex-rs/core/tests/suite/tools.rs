@@ -282,6 +282,60 @@ async fn code_bridge_status_tool_is_model_visible_and_bounded_when_unavailable()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn browser_cdp_is_denied_without_full_access() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "browser-cdp-denied";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    "browser",
+                    r#"{"action":"cdp","method":"Page.getFrameTree"}"#,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex();
+    builder = builder.with_config(|config| {
+        let _ = config.features.enable(Feature::InAppBrowser);
+        let _ = config.features.enable(Feature::BrowserUse);
+        let _ = config.features.disable(Feature::BrowserUseFullCdpAccess);
+    });
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run a browser CDP command").await?;
+
+    let requests = responses.requests();
+    assert!(
+        tool_names(&requests[0].body_json()).contains(&"browser".to_string()),
+        "browser should be visible to the model"
+    );
+    let output = responses
+        .function_call_output_text(call_id)
+        .context("function_call_output present for browser CDP denial")?;
+    let output: Value = serde_json::from_str(&output)?;
+    assert_eq!(output["status"], "failed");
+    assert_eq!(
+        output["error"]["message"],
+        "CDP access is disabled by browser-use policy"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_bridge_javascript_returns_bounded_control_output() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
