@@ -5,6 +5,8 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::world_state::WorldState;
+use crate::context_manager::ModelRequestHistoryMode;
+use crate::context_manager::ProjectValidationCorrectionPair;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -117,6 +119,7 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
@@ -137,6 +140,7 @@ pub(crate) async fn run_inline_auto_compact_task(
         turn_context,
         input,
         initial_context_injection,
+        model_request_history_mode,
         CompactionTrigger::Auto,
         reason,
         phase,
@@ -163,6 +167,7 @@ pub(crate) async fn run_compact_task(
         turn_context,
         input,
         InitialContextInjection::DoNotInject,
+        ModelRequestHistoryMode::Normal,
         CompactionTrigger::Manual,
         CompactionReason::UserRequested,
         CompactionPhase::StandaloneTurn,
@@ -176,6 +181,7 @@ async fn run_compact_task_inner(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     trigger: CompactionTrigger,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -212,6 +218,7 @@ async fn run_compact_task_inner(
         Arc::clone(&turn_context),
         input,
         initial_context_injection,
+        model_request_history_mode,
         compaction_metadata,
     )
     .await;
@@ -247,6 +254,7 @@ async fn run_compact_task_inner_impl(
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
@@ -255,6 +263,7 @@ async fn run_compact_task_inner_impl(
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
     let mut history = sess.clone_history().await;
+    let correction_pair = history.apply_model_request_history_mode(model_request_history_mode);
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.model_info.truncation_policy.into(),
@@ -358,6 +367,8 @@ async fn run_compact_task_inner_impl(
     let user_messages = collect_annotated_user_messages(history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
+    new_history =
+        preserve_project_validation_correction_pair(new_history, correction_pair.as_ref());
     if let Some(summary_item) = new_history.last_mut() {
         // This replacement history skips `record_conversation_items`; only the appended summary
         // belongs to this compaction turn.
@@ -639,6 +650,35 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
         compacted_history.extend(initial_context);
     }
 
+    compacted_history
+}
+
+pub(crate) fn preserve_project_validation_correction_pair(
+    mut compacted_history: Vec<ResponseItemEnvelope>,
+    correction_pair: Option<&ProjectValidationCorrectionPair>,
+) -> Vec<ResponseItemEnvelope> {
+    let Some(correction_pair) = correction_pair else {
+        return compacted_history;
+    };
+    compacted_history
+        .retain(|item| item != &correction_pair.failure && item != &correction_pair.consumed);
+    let insertion_index = compacted_history.last().and_then(|item| {
+        let is_terminal_item = matches!(
+            &item.item,
+            ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+        ) || crate::event_mapping::parse_turn_item(&item.item)
+            .is_some_and(|item| matches!(item, TurnItem::UserMessage(user) if is_summary_message(&user.message())));
+        is_terminal_item.then_some(compacted_history.len().saturating_sub(1))
+    });
+    let correction_items = [
+        correction_pair.failure.clone(),
+        correction_pair.consumed.clone(),
+    ];
+    if let Some(insertion_index) = insertion_index {
+        compacted_history.splice(insertion_index..insertion_index, correction_items);
+    } else {
+        compacted_history.extend(correction_items);
+    }
     compacted_history
 }
 

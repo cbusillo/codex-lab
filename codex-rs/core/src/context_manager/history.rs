@@ -1,5 +1,6 @@
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
+use crate::context::ProjectValidationFailure;
 use crate::context::is_project_validation_correction_consumed;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
@@ -47,6 +48,25 @@ pub(crate) enum ImageSanitizationSource {
     User,
     /// A tool produced the image, so the turn can be retried transparently.
     Tool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ModelRequestHistoryMode {
+    #[default]
+    Normal,
+    ProjectValidationCorrection,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ProjectValidationCorrectionPair {
+    pub(crate) failure: ResponseItemEnvelope,
+    pub(crate) consumed: ResponseItemEnvelope,
+}
+
+impl ProjectValidationCorrectionPair {
+    pub(crate) fn into_items(self) -> Vec<ResponseItemEnvelope> {
+        vec![self.failure, self.consumed]
+    }
 }
 
 /// Transcript of thread history
@@ -210,6 +230,29 @@ impl ContextManager {
     /// Returns annotated history items without cloning their response payloads.
     pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
         &self.items
+    }
+
+    pub(crate) fn apply_model_request_history_mode(
+        &mut self,
+        mode: ModelRequestHistoryMode,
+    ) -> Option<ProjectValidationCorrectionPair> {
+        if mode == ModelRequestHistoryMode::Normal {
+            return None;
+        }
+        let items = Arc::make_mut(&mut self.items);
+        let consumed_index = items
+            .iter()
+            .rposition(|item| is_project_validation_correction_consumed_item(&item.item))?;
+        let failure_index = consumed_index.checked_sub(1)?;
+        if !is_project_validation_failure_item(&items[failure_index].item) {
+            return None;
+        }
+        let pair = ProjectValidationCorrectionPair {
+            failure: items[failure_index].clone(),
+            consumed: items[consumed_index].clone(),
+        };
+        items.remove(consumed_index);
+        Some(pair)
     }
 
     /// Returns raw items in the history and consumes the snapshot.
@@ -597,6 +640,27 @@ fn is_project_validation_correction_consumed_content(content: &[ContentItem]) ->
         };
         is_project_validation_correction_consumed(text)
     })
+}
+
+fn is_project_validation_correction_consumed_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "user" && is_project_validation_correction_consumed_content(content)
+    )
+}
+
+fn is_project_validation_failure_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "user"
+                && content.iter().any(|item| matches!(
+                    item,
+                    ContentItem::InputText { text }
+                        if ProjectValidationFailure::matches_text(text)
+                ))
+    )
 }
 
 pub(crate) fn truncate_function_output_payload(

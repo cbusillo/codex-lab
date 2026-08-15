@@ -3235,7 +3235,11 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     );
 
     session
-        .start_new_context_window(&step_context, world_state)
+        .start_new_context_window(
+            &step_context,
+            world_state,
+            /*preserved_history*/ Vec::new(),
+        )
         .await;
 
     let live_history = session.clone_history().await;

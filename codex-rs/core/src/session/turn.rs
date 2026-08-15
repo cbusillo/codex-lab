@@ -15,8 +15,8 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
-use crate::context::is_project_validation_correction_consumed;
 use crate::context_manager::ImageSanitizationSource;
+use crate::context_manager::ModelRequestHistoryMode;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -174,16 +174,9 @@ enum RunTurnMode {
     Continuation,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SamplingHistoryExclusion {
-    None,
-    ProjectValidationCorrectionConsumed,
-}
-
 pub(crate) struct RunTurnState {
     turn_diff_tracker: tokio::sync::OnceCell<SharedTurnDiffTracker>,
     mode: RunTurnMode,
-    next_sampling_start_context_item: Option<ResponseItem>,
 }
 
 impl RunTurnState {
@@ -191,12 +184,7 @@ impl RunTurnState {
         Self {
             turn_diff_tracker: tokio::sync::OnceCell::new(),
             mode: RunTurnMode::Initial,
-            next_sampling_start_context_item: None,
         }
-    }
-
-    pub(crate) fn set_next_sampling_start_context_item(&mut self, item: ResponseItem) {
-        self.next_sampling_start_context_item = Some(item);
     }
 
     fn begin_run(&mut self) -> RunTurnMode {
@@ -224,27 +212,11 @@ pub(crate) async fn run_turn(
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
     run_state: &mut RunTurnState,
+    model_request_history_mode: ModelRequestHistoryMode,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
     let run_mode = run_state.begin_run();
-    let mut sampling_start_context_item = run_state.next_sampling_start_context_item.take();
-    let sampling_history_exclusion = if sampling_start_context_item.as_ref().is_some_and(|item| {
-        matches!(
-            item,
-            ResponseItem::Message { role, content, .. }
-                if role == "user"
-                    && content.iter().any(|content| matches!(
-                        content,
-                        ContentItem::InputText { text }
-                            if is_project_validation_correction_consumed(text)
-                    ))
-        )
-    }) {
-        SamplingHistoryExclusion::ProjectValidationCorrectionConsumed
-    } else {
-        SamplingHistoryExclusion::None
-    };
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -258,6 +230,7 @@ pub(crate) async fn run_turn(
         &sess,
         &turn_context,
         &mut client_session,
+        model_request_history_mode,
         &cancellation_token,
     )
     .await
@@ -426,9 +399,11 @@ pub(crate) async fn run_turn(
 
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
-                sess.prepare_model_visible_history(turn_context.as_ref())
-                    .await
-                    .for_prompt(&turn_context.model_info.input_modalities)
+                let mut history = sess
+                    .prepare_model_visible_history(turn_context.as_ref())
+                    .await;
+                history.apply_model_request_history_mode(model_request_history_mode);
+                history.for_prompt(&turn_context.model_info.input_modalities)
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
@@ -449,8 +424,7 @@ pub(crate) async fn run_turn(
                 &responses_metadata,
                 sampling_request_input,
                 auto_review_awareness_input_item,
-                &mut sampling_start_context_item,
-                sampling_history_exclusion,
+                model_request_history_mode,
                 cancellation_token.child_token(),
             )
             .await
@@ -542,6 +516,7 @@ pub(crate) async fn run_turn(
                             world_state: Arc::clone(&world_state),
                             step_context: Arc::clone(&step_context),
                         },
+                        model_request_history_mode,
                         CompactionReason::ContextLimit,
                         CompactionPhase::MidTurn,
                     )
@@ -1208,10 +1183,17 @@ async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
-        .await?;
+    maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        model_request_history_mode,
+        cancellation_token,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1227,6 +1209,7 @@ async fn run_pre_sampling_compact(
             /*fallback_step_context*/ None,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
         )
@@ -1276,6 +1259,7 @@ async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
@@ -1309,6 +1293,7 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::CompHashChanged,
             CompactionPhase::PreTurn,
         )
@@ -1357,6 +1342,7 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::ModelDownshift,
             CompactionPhase::PreTurn,
         )
@@ -1376,6 +1362,7 @@ async fn run_auto_compact(
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
@@ -1388,6 +1375,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             step_context,
             initial_context_injection,
+            model_request_history_mode,
         )
         .await?;
         return Ok(());
@@ -1410,6 +1398,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session,
                 initial_context_injection,
+                model_request_history_mode,
                 reason,
                 phase,
             )
@@ -1427,6 +1416,7 @@ async fn run_auto_compact(
             fallback_step_context,
             client_session.turn_state(),
             initial_context_injection,
+            model_request_history_mode,
             reason,
             phase,
         )
@@ -1441,6 +1431,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            model_request_history_mode,
             reason,
             phase,
         )
@@ -1539,8 +1530,7 @@ async fn run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     request_only_input_item: Option<ResponseItem>,
-    sampling_start_context_item: &mut Option<ResponseItem>,
-    sampling_history_exclusion: SamplingHistoryExclusion,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1567,27 +1557,12 @@ async fn run_sampling_request(
         let mut prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.prepare_model_visible_history(turn_context.as_ref())
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            let mut history = sess
+                .prepare_model_visible_history(turn_context.as_ref())
+                .await;
+            history.apply_model_request_history_mode(model_request_history_mode);
+            history.for_prompt(&turn_context.model_info.input_modalities)
         };
-        if sampling_history_exclusion
-            == SamplingHistoryExclusion::ProjectValidationCorrectionConsumed
-            && let Some(index) = prompt_input.iter().rposition(|item| {
-                matches!(
-                    item,
-                    ResponseItem::Message { role, content, .. }
-                        if role == "user"
-                            && content.iter().any(|content| matches!(
-                                content,
-                                ContentItem::InputText { text }
-                                    if is_project_validation_correction_consumed(text)
-                            ))
-                )
-            })
-        {
-            prompt_input.remove(index);
-        }
         let original_prompt_input = prompt_input.clone();
         if let Some(request_only_input_item) = &request_only_input_item {
             prompt_input.push(request_only_input_item.clone());
@@ -1620,11 +1595,6 @@ async fn run_sampling_request(
             ) {
                 return Err(CodexErr::TurnAborted);
             }
-        }
-        if let Some(item) = sampling_start_context_item.take() {
-            sess.record_conversation_items(turn_context.as_ref(), std::slice::from_ref(&item))
-                .await;
-            sess.flush_rollout().await?;
         }
         let err = match try_run_sampling_request(
             tool_runtime.clone(),

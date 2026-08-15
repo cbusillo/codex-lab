@@ -8,12 +8,14 @@ use crate::compact::InitialContextInjection;
 use crate::compact::build_compaction_initial_context;
 use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
+use crate::compact::preserve_project_validation_correction_pair;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
 use crate::context::world_state::WorldState;
 use crate::context_manager::ContextManager;
+use crate::context_manager::ModelRequestHistoryMode;
 use crate::context_manager::estimate_item_token_count;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
@@ -56,6 +58,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     fallback_step_context: Option<Arc<StepContext>>,
     turn_state: Arc<OnceLock<String>>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
@@ -71,6 +74,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         fallback_step_context.as_ref(),
         Some(turn_state),
         initial_context_injection,
+        model_request_history_mode,
         compaction_metadata,
     )
     .await?;
@@ -106,6 +110,7 @@ pub(crate) async fn run_remote_compact_task(
         /*fallback_step_context*/ None,
         /*turn_state*/ None,
         InitialContextInjection::DoNotInject,
+        ModelRequestHistoryMode::Normal,
         compaction_metadata,
     )
     .await?;
@@ -118,6 +123,7 @@ async fn run_remote_compact_task_inner(
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
@@ -160,6 +166,7 @@ async fn run_remote_compact_task_inner(
         fallback_step_context,
         turn_state,
         initial_context_injection,
+        model_request_history_mode,
         compaction_metadata,
         &mut analytics_details,
     )
@@ -195,6 +202,7 @@ async fn run_remote_compact_task_inner_impl(
     fallback_step_context: Option<&Arc<StepContext>>,
     turn_state: Option<Arc<OnceLock<String>>>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<()> {
@@ -216,6 +224,7 @@ async fn run_remote_compact_task_inner_impl(
         sess,
         step_context,
         turn_state.clone(),
+        model_request_history_mode,
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -242,6 +251,7 @@ async fn run_remote_compact_task_inner_impl(
                 sess,
                 fallback_step_context,
                 turn_state,
+                model_request_history_mode,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
@@ -264,10 +274,17 @@ async fn run_remote_compact_task_inner_impl(
     let RemoteCompactAttempt {
         new_history,
         trace_input_history,
+        correction_pair,
     } = attempt;
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
     let (new_history, world_state_baseline) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
+    let new_history = new_history
+        .into_iter()
+        .map(ResponseItemEnvelope::new)
+        .collect();
+    let new_history =
+        preserve_project_validation_correction_pair(new_history, correction_pair.as_ref());
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
@@ -279,17 +296,17 @@ async fn run_remote_compact_task_inner_impl(
     // thread history. Keep it distinct from the later inference request so the reducer can
     // still represent repeated developer/context prefix items exactly as the model saw them.
     if let Some(trace_input_history) = trace_input_history.as_deref() {
+        let replacement_history = new_history
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>();
         compaction_trace.record_installed(&CompactionCheckpointTracePayload {
             input_history: trace_input_history,
-            replacement_history: &new_history,
+            replacement_history: &replacement_history,
         });
     }
     // Legacy `/responses/compact` returns provider-normalized items without a stable link to their
     // original envelopes, so it does not preserve harness metadata. Compaction-trigger/v2 does.
-    let new_history = new_history
-        .into_iter()
-        .map(ResponseItemEnvelope::new)
-        .collect();
     sess.replace_compacted_history(
         new_history,
         reference_context_item,

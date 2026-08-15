@@ -3763,6 +3763,7 @@ impl Session {
         &self,
         step_context: &StepContext,
         world_state: Arc<WorldState>,
+        preserved_history: Vec<ResponseItemEnvelope>,
     ) -> u64 {
         let turn_context = step_context.turn.as_ref();
         let window = {
@@ -3770,12 +3771,13 @@ impl Session {
             state.start_new_context_window()
         };
         let (window_number, window_ids) = window;
-        let context_items = self
+        let mut context_items = self
             .build_initial_context_with_world_state(turn_context, world_state.as_ref())
             .await
             .into_iter()
             .map(ResponseItemEnvelope::new)
-            .collect();
+            .collect::<Vec<_>>();
+        context_items.extend(preserved_history);
         let turn_context_item = turn_context.to_turn_context_item();
         self.replace_compacted_history(
             context_items,

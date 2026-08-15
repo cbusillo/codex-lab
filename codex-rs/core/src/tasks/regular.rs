@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::context::ContextualUserFragment;
 use crate::context::ProjectValidationCorrectionConsumed;
 use crate::context::ProjectValidationFailure;
+use crate::context_manager::ModelRequestHistoryMode;
 use crate::session::TurnInput;
 use crate::session::project_validation::ProjectValidationAttempt;
 use crate::session::project_validation::ProjectValidationRun;
@@ -103,12 +104,19 @@ impl SessionTask for RegularTask {
         let mut project_validation_model_used_tools = false;
         let mut run_turn_state = RunTurnState::new();
         loop {
+            let model_request_history_mode = match next_project_validation_attempt {
+                NextProjectValidationAttempt::Initial => ModelRequestHistoryMode::Normal,
+                NextProjectValidationAttempt::CorrectionRerun => {
+                    ModelRequestHistoryMode::ProjectValidationCorrection
+                }
+            };
             let turn_result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 Arc::clone(&ctx.extension_data),
                 next_input,
                 &mut run_turn_state,
+                model_request_history_mode,
                 prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
@@ -157,14 +165,14 @@ impl SessionTask for RegularTask {
                             return Ok(None);
                         }
                         let correction_item = ContextualUserFragment::into(correction);
+                        let correction_consumed_item =
+                            ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
                         sess.record_conversation_items(
                             &ctx,
-                            std::slice::from_ref(&correction_item),
+                            &[correction_item, correction_consumed_item],
                         )
                         .await;
-                        run_turn_state.set_next_sampling_start_context_item(
-                            ContextualUserFragment::into(ProjectValidationCorrectionConsumed),
-                        );
+                        sess.flush_rollout().await?;
                         correction_available = false;
                         next_project_validation_attempt =
                             NextProjectValidationAttempt::CorrectionRerun;

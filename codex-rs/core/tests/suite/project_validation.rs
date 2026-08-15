@@ -21,7 +21,9 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -3473,7 +3475,7 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
     skip_if_no_network!(Ok(()));
 
     let command = shell_command_with_args(
-        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; printf validation-fail >&2; exit 7",
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then printf validation-fail >&2; exit 7; fi; printf validation-pass",
         &["project-validation", "validation-count"],
         /*timeout_ms*/ 5_000,
     );
@@ -3502,7 +3504,29 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         first_validation,
         EventMsg::ProjectValidationCompleted(_)
     ));
-    server.wait_for_request_count(/*count*/ 2).await;
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::RawResponseItem(event)
+                if matches!(
+                    &event.item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "user"
+                            && content.iter().any(|content| matches!(
+                                content,
+                                ContentItem::InputText { text }
+                                    if text.starts_with("<project_validation_failure>")
+                            ))
+                )
+        )
+    })
+    .await;
+
+    test.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
 
     test.codex.flush_rollout().await?;
     let in_flight_rollout =
@@ -3510,29 +3534,31 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
     assert!(in_flight_rollout.contains("<project_validation_failure>"));
     assert!(in_flight_rollout.contains("<project_validation_correction_consumed>"));
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
-    let correction_request: Value = serde_json::from_slice(&requests[1])?;
-    let correction_user_texts = request_message_input_texts(&correction_request, "user");
-    assert!(
-        correction_user_texts
-            .iter()
-            .any(|text| text.starts_with("<project_validation_failure>"))
-    );
-    assert!(
-        correction_user_texts
-            .iter()
-            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
-    );
-
-    test.codex.submit(Op::Interrupt).await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnAborted(_))
-    })
-    .await;
+    assert_eq!(requests.len(), 1);
     let _ = correction_gate_tx.send(());
-    sleep(Duration::from_millis(100)).await;
-    assert_eq!(server.requests().await.len(), 2);
-    assert_eq!(std::fs::read_to_string(&count_path)?, "1");
+
+    submit_user_input(&test.codex, &test, "continue after interruption").await?;
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let resumed_request: Value = serde_json::from_slice(&requests[1])?;
+    let resumed_user_texts = request_message_input_texts(&resumed_request, "user");
+    let failure_index = resumed_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("interrupted correction should preserve historical failure context");
+    let consumed_index = resumed_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("interrupted correction should persist its consumed marker");
+    let next_input_index = resumed_user_texts
+        .iter()
+        .position(|text| text == "continue after interruption")
+        .expect("resumed request should include the next user input");
+    assert!(failure_index < consumed_index);
+    assert!(consumed_index < next_input_index);
+    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
 
     test.codex.flush_rollout().await?;
     let rollout = std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
