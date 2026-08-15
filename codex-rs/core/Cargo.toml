@@ -185,7 +185,6 @@ ignored = ["openssl-sys"]
 # wired into the current downstream module graph. The Windows fixtures are
 # compiled only on Windows and remain invisible to this host-side analysis.
 ignored-paths = [
-    "src/session/background_auto_review.rs",
     "src/session/config_lock.rs",
     "src/tools/handlers/apply_patch_validation.rs",
     "tests/suite/cloud_config.rs",

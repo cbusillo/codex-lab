@@ -201,6 +201,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod background_auto_review;
 mod cargo_validation_cache;
 mod cargo_validation_cache_key;
 mod cargo_validation_probe;

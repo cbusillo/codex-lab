@@ -1383,6 +1383,7 @@ impl Session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
             }
+            let auto_review_recovery_events = sess.recover_auto_review_after_restart().await;
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.
             let initial_messages = initial_history.get_event_msgs();
@@ -1416,7 +1417,8 @@ impl Session {
                     rollout_path,
                 }),
             })
-            .chain(post_session_configured_events.into_iter());
+            .chain(post_session_configured_events.into_iter())
+            .chain(auto_review_recovery_events);
             for event in events {
                 sess.send_event_raw(event).await;
             }

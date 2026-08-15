@@ -12,6 +12,7 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 use tokio::sync::watch;
 
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
@@ -86,6 +87,18 @@ struct PendingMailboxCommunication {
     _diagnostics_guard: GaugeGuard,
 }
 
+pub(crate) struct TriggerTurnMailboxGuard<'a> {
+    mailbox_pending_mails: MutexGuard<'a, VecDeque<PendingMailboxCommunication>>,
+}
+
+impl TriggerTurnMailboxGuard<'_> {
+    pub(crate) fn has_trigger_turn_items(&self) -> bool {
+        self.mailbox_pending_mails
+            .iter()
+            .any(|mail| mail.communication.trigger_turn)
+    }
+}
+
 impl InputQueue {
     pub(crate) fn new() -> Self {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
@@ -146,6 +159,12 @@ impl InputQueue {
             .await
             .iter()
             .any(|mail| mail.communication.trigger_turn)
+    }
+
+    pub(crate) async fn lock_trigger_turn_mailbox_items(&self) -> TriggerTurnMailboxGuard<'_> {
+        TriggerTurnMailboxGuard {
+            mailbox_pending_mails: self.mailbox_pending_mails.lock().await,
+        }
     }
 
     pub(crate) async fn drain_mailbox_input_items(

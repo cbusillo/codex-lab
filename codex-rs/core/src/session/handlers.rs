@@ -390,6 +390,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
     }
     let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.cancel_background_auto_review().await;
     sess.hooks().shutdown().await;
     sess.async_hook_results.close();
     while sess.async_hook_results.try_recv().is_ok() {}
@@ -657,6 +658,15 @@ pub(super) async fn submission_loop(
                     persistence,
                 } => {
                     review(&sess, &config, sub.id.clone(), review_request, persistence).await;
+                    false
+                }
+                Op::BackgroundAutoReviewControl {
+                    run_id,
+                    action,
+                    reason,
+                } => {
+                    sess.control_background_auto_review(&run_id, action, reason)
+                        .await;
                     false
                 }
                 Op::ApproveGuardianDeniedAction { event } => {

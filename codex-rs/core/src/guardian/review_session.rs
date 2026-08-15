@@ -764,6 +764,7 @@ async fn spawn_guardian_review_session(
         cancel_token.clone(),
         SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()),
         initial_history,
+        codex_extension_api::ExtensionDataInit::default(),
         GitEnrichmentPolicy::Skip,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
     ))

@@ -162,6 +162,18 @@
       "evidence": [
         {
           "kind": "symbol",
+          "path": "codex-rs/core/src/session/mod.rs",
+          "token": "mod background_auto_review;",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/session/handlers.rs",
+          "token": "Op::BackgroundAutoReviewControl {",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
           "path": "codex-rs/core/tests/suite/external_agent_preflight.rs",
           "token": "async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance()",
           "ciTier": "nightly"
