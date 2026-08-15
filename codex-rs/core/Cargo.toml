@@ -186,11 +186,7 @@ ignored = ["openssl-sys"]
 # compiled only on Windows and remain invisible to this host-side analysis.
 ignored-paths = [
     "src/session/background_auto_review.rs",
-    "src/session/cargo_validation_provider.rs",
     "src/session/config_lock.rs",
-    "src/session/project_validation.rs",
-    "src/session/project_validation_coordinator.rs",
-    "src/session/validation_provider.rs",
     "src/tools/handlers/apply_patch_validation.rs",
     "tests/suite/cloud_config.rs",
     "tests/suite/cyber_exec_policy.rs",
