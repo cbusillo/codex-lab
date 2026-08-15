@@ -1,3 +1,6 @@
+use crate::context::world_state::environment_limits::MAX_RENDERED_NETWORK_DOMAINS;
+use crate::context::world_state::environment_limits::MAX_RENDERED_WORKSPACE_ROOTS;
+use crate::context::world_state::environment_limits::bound_entries;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -10,6 +13,7 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSystemContext {
     workspace_roots: Vec<String>,
+    omitted_workspace_roots: usize,
     permission_profile: FileSystemPermissionProfileContext,
 }
 
@@ -41,10 +45,16 @@ impl FileSystemContext {
         let permission_profile = permission_profile
             .clone()
             .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
-        let workspace_roots = workspace_roots
-            .iter()
-            .map(PathUri::inferred_native_path_string)
-            .collect();
+        let omitted_workspace_roots = workspace_roots
+            .len()
+            .saturating_sub(MAX_RENDERED_WORKSPACE_ROOTS);
+        let workspace_roots = bound_entries(
+            workspace_roots
+                .iter()
+                .map(PathUri::inferred_native_path_string)
+                .collect(),
+            MAX_RENDERED_WORKSPACE_ROOTS,
+        );
         let permission_profile = match permission_profile {
             PermissionProfile::Managed { file_system, .. } => {
                 FileSystemPermissionProfileContext::Managed(ManagedFileSystemContext::from(
@@ -56,6 +66,7 @@ impl FileSystemContext {
         };
         Self {
             workspace_roots,
+            omitted_workspace_roots,
             permission_profile,
         }
     }
@@ -63,7 +74,9 @@ impl FileSystemContext {
     pub(super) fn render(&self) -> String {
         let mut rendered = "<filesystem>".to_string();
         if !self.workspace_roots.is_empty() {
-            rendered.push_str("<workspace_roots>");
+            rendered.push_str("<workspace_roots");
+            push_truncation_attributes(&mut rendered, self.omitted_workspace_roots);
+            rendered.push('>');
             for root in &self.workspace_roots {
                 push_text_element(&mut rendered, "root", root);
             }
@@ -217,31 +230,64 @@ pub(crate) fn push_xml_escaped_text(rendered: &mut String, value: &str) {
 pub(crate) struct NetworkContext {
     allowed_domains: Vec<String>,
     denied_domains: Vec<String>,
+    omitted_allowed_domains: usize,
+    omitted_denied_domains: usize,
 }
 
 impl NetworkContext {
     pub(crate) fn new(allowed_domains: Vec<String>, denied_domains: Vec<String>) -> Self {
+        let omitted_allowed_domains = allowed_domains
+            .len()
+            .saturating_sub(MAX_RENDERED_NETWORK_DOMAINS);
+        let omitted_denied_domains = denied_domains
+            .len()
+            .saturating_sub(MAX_RENDERED_NETWORK_DOMAINS);
         Self {
-            allowed_domains,
-            denied_domains,
+            allowed_domains: bound_entries(allowed_domains, MAX_RENDERED_NETWORK_DOMAINS),
+            denied_domains: bound_entries(denied_domains, MAX_RENDERED_NETWORK_DOMAINS),
+            omitted_allowed_domains,
+            omitted_denied_domains,
         }
     }
 
     pub(super) fn render(&self) -> String {
         let mut rendered = "<network enabled=\"true\">".to_string();
-        Self::push_rendered_domain_element(&mut rendered, "allowed", &self.allowed_domains);
-        Self::push_rendered_domain_element(&mut rendered, "denied", &self.denied_domains);
+        Self::push_rendered_domain_element(
+            &mut rendered,
+            "allowed",
+            &self.allowed_domains,
+            self.omitted_allowed_domains,
+        );
+        Self::push_rendered_domain_element(
+            &mut rendered,
+            "denied",
+            &self.denied_domains,
+            self.omitted_denied_domains,
+        );
         rendered.push_str("</network>");
         rendered
     }
 
-    fn push_rendered_domain_element(rendered_network: &mut String, name: &str, domains: &[String]) {
+    fn push_rendered_domain_element(
+        rendered_network: &mut String,
+        name: &str,
+        domains: &[String],
+        omitted_domains: usize,
+    ) {
         if domains.is_empty() {
             return;
         }
 
-        rendered_network.push_str(&format!("<{name}>"));
+        rendered_network.push_str(&format!("<{name}"));
+        push_truncation_attributes(rendered_network, omitted_domains);
+        rendered_network.push('>');
         rendered_network.push_str(&domains.join(","));
         rendered_network.push_str(&format!("</{name}>"));
+    }
+}
+
+fn push_truncation_attributes(rendered: &mut String, omitted: usize) {
+    if omitted > 0 {
+        rendered.push_str(&format!(" truncated=\"true\" omitted=\"{omitted}\""));
     }
 }

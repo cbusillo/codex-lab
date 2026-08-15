@@ -404,6 +404,18 @@ fn environment_context_render_bounds_workspace_roots_network_and_subagents() {
         rendered.matches("denied-").count(),
         MAX_RENDERED_NETWORK_DOMAINS
     );
+    assert!(rendered.contains(&format!(
+        "<workspace_roots truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_WORKSPACE_ROOTS * 2
+    )));
+    assert!(rendered.contains(&format!(
+        "<allowed truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_NETWORK_DOMAINS * 2
+    )));
+    assert!(rendered.contains(&format!(
+        "<denied truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_NETWORK_DOMAINS * 2
+    )));
     // The `- ...` elision marker occupies the last of the capped lines.
     assert_eq!(
         rendered.matches("- agent-").count(),

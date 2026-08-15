@@ -257,6 +257,48 @@
       "id": "CONTEXT-1",
       "evidence": [
         {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/session/mod.rs",
+          "token": "join_thread_hint_content(&result.content)",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/token_budget_context.rs",
+          "token": "pub(crate) const MAX_THREAD_HINT_BYTES: usize = 2 * 1024;",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/token_budget_context_tests.rs",
+          "token": "fn many_thread_hint_items_are_capped()",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/environment_context.rs",
+          "token": "let workspace_roots = bound_entries(",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/environment_context.rs",
+          "token": "allowed_domains: bound_entries(",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/context/environment_context.rs",
+          "token": "denied_domains: bound_entries(",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "narrative",
+          "description": "Exact release-shard integration proof for bounded context is deferred until first-party helper binaries and fixtures are restored.",
+          "issue": 668,
+          "ciTier": "release"
+        },
+        {
           "kind": "file",
           "path": "codex-rs/core/src/context/token_budget_context_tests.rs",
           "ciTier": "nightly"
