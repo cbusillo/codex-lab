@@ -15,6 +15,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::is_project_validation_correction_consumed;
 use crate::context_manager::ImageSanitizationSource;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
@@ -1537,17 +1538,48 @@ async fn run_sampling_request(
     let mut retries = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
+    let sampling_start_context_item_for_request = sampling_start_context_item.clone();
+    let excludes_correction_consumed_marker_on_retry = sampling_start_context_item_for_request
+        .as_ref()
+        .is_some_and(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "user"
+                        && content.iter().any(|content| matches!(
+                            content,
+                            ContentItem::InputText { text }
+                                if is_project_validation_correction_consumed(text)
+                        ))
+            )
+        });
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let mut prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
             sess.prepare_model_visible_history(turn_context.as_ref())
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
+        if retries.has_retried()
+            && excludes_correction_consumed_marker_on_retry
+            && let Some(index) = prompt_input.iter().rposition(|item| {
+                matches!(
+                    item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "user"
+                            && content.iter().any(|content| matches!(
+                                content,
+                                ContentItem::InputText { text }
+                                    if is_project_validation_correction_consumed(text)
+                            ))
+                )
+            })
+        {
+            prompt_input.remove(index);
+        }
         let original_prompt_input = prompt_input.clone();
-        let mut prompt_input = prompt_input;
         if let Some(request_only_input_item) = &request_only_input_item {
             prompt_input.push(request_only_input_item.clone());
         }

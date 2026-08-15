@@ -3506,6 +3506,64 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_correction_retry_keeps_the_active_failure_prompt() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "if [ -f \"$1\" ]; then printf validation-pass; exit 0; fi; touch \"$1\"; printf validation-fail >&2; exit 7",
+        &["project-validation", "validation-ran"],
+        /*timeout_ms*/ 5_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        response_completed_chunks("resp-1"),
+        vec![streaming_chunk(serde_json::json!({
+            "type": "response.output_item.done",
+        }))],
+        response_completed_chunks("resp-2"),
+    ])
+    .await;
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder.build_with_streaming_server(&server).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 2);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[0].output, "validation-fail");
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "validation-pass");
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let request: Value = serde_json::from_slice(request)?;
+        let user_texts = request_message_input_texts(&request, "user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_validation_model_error_during_correction_persists_resolution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
