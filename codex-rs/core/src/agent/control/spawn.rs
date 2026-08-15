@@ -20,7 +20,7 @@ struct SpawnAgentThreadInheritance {
 /// unrepresentable.
 pub(super) enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
-    InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
+    InterAgentCommunication(Box<(InterAgentCommunication, AgentCommunicationContext)>),
 }
 
 fn default_agent_nickname_list() -> Vec<&'static str> {
@@ -241,7 +241,7 @@ impl AgentControl {
     ) -> CodexResult<LiveAgent> {
         Box::pin(self.spawn_agent_internal(
             config,
-            SpawnInitialInput::InterAgentCommunication(communication, context),
+            SpawnInitialInput::InterAgentCommunication(Box::new((communication, context))),
             session_source,
             options,
         ))
@@ -557,7 +557,8 @@ impl AgentControl {
                 )
                 .await?;
             }
-            SpawnInitialInput::InterAgentCommunication(communication, context) => {
+            SpawnInitialInput::InterAgentCommunication(communication) => {
+                let (communication, context) = *communication;
                 self.send_inter_agent_communication_after_capacity_check(
                     new_thread.thread_id,
                     &state,
