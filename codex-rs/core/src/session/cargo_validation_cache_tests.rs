@@ -694,6 +694,57 @@ async fn maintenance_bounds_cleanup_lock_wait() {
 }
 
 #[tokio::test]
+async fn maintenance_does_not_silently_lose_a_timed_out_handoff() {
+    let home = tempdir().expect("create cache home");
+    let repository = tempdir().expect("create repository");
+    let limits = CargoValidationCacheLimits {
+        max_entries: 4,
+        max_entry_bytes: 4,
+        max_total_bytes: 64,
+        max_files_per_entry: 4,
+    };
+    let lease = acquire(
+        &home,
+        &repository,
+        cache_key(&repository, "1.95.0", "host", &["cargo", "check"]),
+        &CancellationToken::new(),
+        limits,
+    )
+    .await;
+    let artifact = lease.target_dir().join("oversized");
+    fs::write(&artifact, "12345").expect("write oversized artifact");
+    let root = lease
+        .target_dir()
+        .as_path()
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .expect("target should be below the cache root")
+        .to_path_buf();
+    let cleanup_lock = open_lock(&root.join("cleanup.lock")).expect("open cleanup lock");
+    cleanup_lock.lock_exclusive().expect("hold cleanup lock");
+    let handoff_lock =
+        open_lock(&root.join("cleanup.handoff.lock")).expect("open cleanup handoff lock");
+    handoff_lock
+        .lock_exclusive()
+        .expect("hold cleanup handoff lock");
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    spawn_maintenance(lease, move |result| {
+        let _ = result_tx.send(result);
+    });
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    FileExt::unlock(&cleanup_lock).expect("release cleanup ownership");
+    let result = timeout(Duration::from_secs(2), result_rx)
+        .await
+        .expect("maintenance should remain bounded")
+        .expect("maintenance result should be reported");
+    assert!(result.is_err());
+    assert!(!artifact.exists());
+    FileExt::unlock(&handoff_lock).expect("release cleanup handoff lock");
+}
+
+#[tokio::test]
 async fn maintenance_retries_cleanup_after_temporary_contention() {
     let home = tempdir().expect("create cache home");
     let repository = tempdir().expect("create repository");

@@ -58,9 +58,14 @@ fn hand_off_or_run_cache_cleanup(
 ) -> io::Result<()> {
     let handoff_lock = open_lock(&root.join(CACHE_CLEANUP_HANDOFF_LOCK_FILE))?;
     if !try_lock_until(&handoff_lock, Instant::now() + CACHE_LOCK_TIMEOUT)? {
+        if try_lock_until(&cleanup_lock, Instant::now() + CACHE_LOCK_TIMEOUT)? {
+            return run_cache_cleanup_locked(root, key, entry_lock, cleanup_lock, limits);
+        }
         drop(entry_lock);
-        mark_cleanup_pending(root)?;
-        return Ok(());
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out reacquiring cargo validation cache cleanup ownership",
+        ));
     }
     if let Err(error) = mark_cleanup_pending(root) {
         drop(entry_lock);

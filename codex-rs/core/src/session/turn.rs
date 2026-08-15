@@ -174,6 +174,12 @@ enum RunTurnMode {
     Continuation,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SamplingHistoryExclusion {
+    None,
+    ProjectValidationCorrectionConsumed,
+}
+
 pub(crate) struct RunTurnState {
     turn_diff_tracker: tokio::sync::OnceCell<SharedTurnDiffTracker>,
     mode: RunTurnMode,
@@ -223,6 +229,22 @@ pub(crate) async fn run_turn(
 ) -> CodexResult<TurnRunResult> {
     let run_mode = run_state.begin_run();
     let mut sampling_start_context_item = run_state.next_sampling_start_context_item.take();
+    let sampling_history_exclusion = if sampling_start_context_item.as_ref().is_some_and(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && content.iter().any(|content| matches!(
+                        content,
+                        ContentItem::InputText { text }
+                            if is_project_validation_correction_consumed(text)
+                    ))
+        )
+    }) {
+        SamplingHistoryExclusion::ProjectValidationCorrectionConsumed
+    } else {
+        SamplingHistoryExclusion::None
+    };
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
         .await;
@@ -428,6 +450,7 @@ pub(crate) async fn run_turn(
                 sampling_request_input,
                 auto_review_awareness_input_item,
                 &mut sampling_start_context_item,
+                sampling_history_exclusion,
                 cancellation_token.child_token(),
             )
             .await
@@ -1517,6 +1540,7 @@ async fn run_sampling_request(
     input: Vec<ResponseItem>,
     request_only_input_item: Option<ResponseItem>,
     sampling_start_context_item: &mut Option<ResponseItem>,
+    sampling_history_exclusion: SamplingHistoryExclusion,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1538,21 +1562,6 @@ async fn run_sampling_request(
     let mut retries = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
-    let sampling_start_context_item_for_request = sampling_start_context_item.clone();
-    let excludes_correction_consumed_marker_on_retry = sampling_start_context_item_for_request
-        .as_ref()
-        .is_some_and(|item| {
-            matches!(
-                item,
-                ResponseItem::Message { role, content, .. }
-                    if role == "user"
-                        && content.iter().any(|content| matches!(
-                            content,
-                            ContentItem::InputText { text }
-                                if is_project_validation_correction_consumed(text)
-                        ))
-            )
-        });
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
         let mut prompt_input = if let Some(input) = initial_input.take() {
@@ -1562,8 +1571,8 @@ async fn run_sampling_request(
                 .await
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
-        if retries.has_retried()
-            && excludes_correction_consumed_marker_on_retry
+        if sampling_history_exclusion
+            == SamplingHistoryExclusion::ProjectValidationCorrectionConsumed
             && let Some(index) = prompt_input.iter().rposition(|item| {
                 matches!(
                     item,

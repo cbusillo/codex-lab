@@ -29,14 +29,12 @@ use super::SessionTaskResult;
 #[derive(Default)]
 pub(crate) struct RegularTask;
 
-/// Tracks where a turn sits in the bounded validate -> correct -> revalidate
-/// cycle. Each root turn runs the project command at most twice.
+/// Tracks whether the next validation follows ordinary model work or the
+/// single corrective model run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProjectValidationPhase {
+enum NextProjectValidationAttempt {
     Initial,
-    FollowUp,
-    Correcting,
-    Complete,
+    CorrectionRerun,
 }
 
 impl RegularTask {
@@ -91,7 +89,8 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
-        let mut project_validation_phase = ProjectValidationPhase::Initial;
+        let mut next_project_validation_attempt = NextProjectValidationAttempt::Initial;
+        let mut correction_available = true;
         // Capture worktree state before any model work so validation can tell
         // turn-authored changes from pre-existing ones.
         let project_validation_worktree_at_turn_start = tokio::select! {
@@ -127,36 +126,17 @@ impl SessionTask for RegularTask {
             if !validation_eligible {
                 return Ok(last_agent_message);
             }
-            let (attempt, may_start_correction, phase_after_validation) =
-                match project_validation_phase {
-                    ProjectValidationPhase::Initial => (
-                        ProjectValidationAttempt::Initial {
-                            worktree_at_turn_start: project_validation_worktree_at_turn_start
-                                .clone(),
-                            model_used_tools: project_validation_model_used_tools,
-                        },
-                        true,
-                        ProjectValidationPhase::FollowUp,
-                    ),
-                    ProjectValidationPhase::FollowUp => (
-                        ProjectValidationAttempt::Initial {
-                            worktree_at_turn_start: project_validation_worktree_at_turn_start
-                                .clone(),
-                            model_used_tools: project_validation_model_used_tools,
-                        },
-                        false,
-                        ProjectValidationPhase::Complete,
-                    ),
-                    ProjectValidationPhase::Correcting => (
-                        ProjectValidationAttempt::CorrectionRerun {
-                            worktree_at_turn_start: project_validation_worktree_at_turn_start
-                                .clone(),
-                        },
-                        false,
-                        ProjectValidationPhase::Complete,
-                    ),
-                    ProjectValidationPhase::Complete => return Ok(last_agent_message),
-                };
+            let attempt = match next_project_validation_attempt {
+                NextProjectValidationAttempt::Initial => ProjectValidationAttempt::Initial {
+                    worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
+                    model_used_tools: project_validation_model_used_tools,
+                },
+                NextProjectValidationAttempt::CorrectionRerun => {
+                    ProjectValidationAttempt::CorrectionRerun {
+                        worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
+                    }
+                }
+            };
             let validation_event = match run_project_validation(
                 &sess,
                 &ctx,
@@ -168,7 +148,7 @@ impl SessionTask for RegularTask {
                 ProjectValidationRun::NotApplicable => return Ok(last_agent_message),
                 ProjectValidationRun::Skipped(event) => event,
                 ProjectValidationRun::Completed(event) => {
-                    if may_start_correction
+                    if correction_available
                         && let Some(correction) = ProjectValidationFailure::from_event(&event)
                     {
                         sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
@@ -185,7 +165,9 @@ impl SessionTask for RegularTask {
                         run_turn_state.set_next_sampling_start_context_item(
                             ContextualUserFragment::into(ProjectValidationCorrectionConsumed),
                         );
-                        project_validation_phase = ProjectValidationPhase::Correcting;
+                        correction_available = false;
+                        next_project_validation_attempt =
+                            NextProjectValidationAttempt::CorrectionRerun;
                         next_input = Vec::new();
                         continue;
                     }
@@ -197,7 +179,7 @@ impl SessionTask for RegularTask {
                     return Ok(None);
                 }
             };
-            project_validation_phase = phase_after_validation;
+            next_project_validation_attempt = NextProjectValidationAttempt::Initial;
             sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(validation_event))
                 .await;
             if sess.input_queue.has_pending_input(&sess.active_turn).await {

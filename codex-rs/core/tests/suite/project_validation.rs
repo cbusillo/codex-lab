@@ -1477,8 +1477,7 @@ async fn project_validation_retries_pass_after_pending_input() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_follow_up_failure_does_not_start_second_correction_cycle() -> Result<()>
-{
+async fn project_validation_follow_up_failure_uses_single_correction_cycle() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let command = shell_command_with_args(
@@ -1508,6 +1507,7 @@ async fn project_validation_follow_up_failure_does_not_start_second_correction_c
             streaming_chunk(ev_completed("resp-fail-3")),
         ],
         response_completed_chunks("resp-fail-4"),
+        response_completed_chunks("resp-fail-5"),
     ])
     .await;
     let test = build_streaming_validation_codex(&server, command).await?;
@@ -1526,7 +1526,7 @@ async fn project_validation_follow_up_failure_does_not_start_second_correction_c
     assert!(test.workspace_path("first.rs").exists());
     assert!(test.workspace_path("second.rs").exists());
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 2);
+    assert_eq!(validation_events.len(), 3);
     assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[0].output, "validation-pass");
     assert_eq!(
@@ -1534,18 +1534,35 @@ async fn project_validation_follow_up_failure_does_not_start_second_correction_c
         ProjectValidationStatus::ActionableFailure
     );
     assert_eq!(validation_events[1].output, "validation-fail");
-    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    assert_eq!(
+        validation_events[2].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[2].output, "validation-fail");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
 
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 4);
-    for request in requests {
-        let request: Value = serde_json::from_slice(&request)?;
+    assert_eq!(requests.len(), 5);
+    for request in &requests[..4] {
+        let request: Value = serde_json::from_slice(request)?;
         assert!(
             request_message_input_texts(&request, "user")
                 .iter()
                 .all(|text| !text.starts_with("<project_validation_failure>"))
         );
     }
+    let correction_request: Value = serde_json::from_slice(&requests[4])?;
+    let correction_user_texts = request_message_input_texts(&correction_request, "user");
+    assert!(
+        correction_user_texts
+            .iter()
+            .any(|text| text.starts_with("<project_validation_failure>"))
+    );
+    assert!(
+        correction_user_texts
+            .iter()
+            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+    );
 
     server.shutdown().await;
     Ok(())
@@ -1974,6 +1991,22 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
     assert_eq!(validation_events[0].output, "validation-fail");
     assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[1].output, "validation-pass");
+
+    let correction_requests = response_mock.requests();
+    assert_eq!(correction_requests.len(), 4);
+    for request in &correction_requests[2..] {
+        let user_texts = request.message_input_texts("user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
 
     submit_user_input(&test.codex, &test, "continue with the next task").await?;
     collect_events_until_terminal(&test.codex).await?;
@@ -3407,7 +3440,7 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
     assert!(test.workspace_path("first.rs").exists());
     assert!(test.workspace_path("second.rs").exists());
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 2);
+    assert_eq!(validation_events.len(), 3);
     assert_eq!(
         validation_events[0].status,
         ProjectValidationStatus::ActionableFailure
@@ -3415,6 +3448,11 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
     assert_eq!(validation_events[0].output, "validation-fail-1");
     assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[1].output, "validation-pass-2");
+    assert_eq!(
+        validation_events[2].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[2].output, "validation-fail-3");
     let first_item_id = validation_events[0]
         .item_id
         .as_deref()
@@ -3424,7 +3462,7 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
         .as_deref()
         .expect("second validation should have an item id");
     assert_ne!(first_item_id, second_item_id);
-    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
     assert_eq!(server.requests().await.len(), 5);
     server.shutdown().await;
     Ok(())
