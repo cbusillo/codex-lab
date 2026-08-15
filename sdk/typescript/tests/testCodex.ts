@@ -74,6 +74,7 @@ function mergeTestConfig(
           },
         };
   const featureOverrides = mergedConfig?.features;
+  const validationOverrides = mergedConfig?.validation;
 
   return {
     ...mergedConfig,
@@ -83,6 +84,10 @@ function mergeTestConfig(
       featureOverrides && typeof featureOverrides === "object" && !Array.isArray(featureOverrides)
         ? { ...featureOverrides, plugins: false }
         : { plugins: false },
+    // Keep SDK integration tests deterministic and prevent incidental Cargo
+    // validation unless a test explicitly opts into a validation configuration.
+    validation:
+      validationOverrides === undefined ? { groups: { functional: false } } : validationOverrides,
   };
 }
 
