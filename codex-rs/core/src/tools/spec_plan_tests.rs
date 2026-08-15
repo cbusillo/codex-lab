@@ -59,7 +59,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -235,6 +235,84 @@ async fn tools_disabled_omits_visible_and_registered_tools() {
 
     assert_eq!(Vec::<String>::new(), plan.visible_names);
     assert_eq!(Vec::<String>::new(), plan.registered_names);
+}
+
+#[tokio::test]
+async fn first_party_external_integration_tools_follow_product_gates() {
+    let browser_disabled_plan = probe(|turn| {
+        set_feature(turn, Feature::InAppBrowser, /*enabled*/ false);
+        set_feature(turn, Feature::BrowserUse, /*enabled*/ false);
+    })
+    .await;
+    browser_disabled_plan.assert_visible_contains(&["auto_review_disposition", "code_bridge"]);
+    browser_disabled_plan.assert_registered_contains(&["auto_review_disposition", "code_bridge"]);
+    browser_disabled_plan.assert_visible_lacks(&["browser"]);
+    browser_disabled_plan.assert_registered_lacks(&["browser"]);
+
+    let browser_plan = probe(|turn| {
+        set_features(turn, &[Feature::InAppBrowser, Feature::BrowserUse]);
+    })
+    .await;
+    browser_plan.assert_visible_contains(&["browser"]);
+    browser_plan.assert_registered_contains(&["browser"]);
+
+    let subagent_plan = probe(|turn| {
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(AgentPath::try_from("/root/worker").expect("valid agent path")),
+            agent_nickname: None,
+            agent_role: None,
+        });
+    })
+    .await;
+    subagent_plan.assert_visible_contains(&["code_bridge"]);
+    subagent_plan.assert_registered_contains(&["code_bridge"]);
+    subagent_plan.assert_visible_lacks(&["auto_review_disposition"]);
+    subagent_plan.assert_registered_lacks(&["auto_review_disposition"]);
+}
+
+#[tokio::test]
+async fn browser_requires_both_managed_feature_gates() {
+    for features in [
+        vec![Feature::InAppBrowser],
+        vec![Feature::BrowserUse],
+        vec![Feature::InAppBrowser, Feature::BrowserUse],
+    ] {
+        let enabled = features.len() == 2;
+        let plan = probe(|turn| {
+            set_feature(turn, Feature::InAppBrowser, /*enabled*/ false);
+            set_feature(turn, Feature::BrowserUse, /*enabled*/ false);
+            set_features(turn, &features);
+        })
+        .await;
+        if enabled {
+            plan.assert_registered_contains(&["browser"]);
+        } else {
+            plan.assert_registered_lacks(&["browser"]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn browser_full_cdp_feature_controls_model_visible_schema() {
+    for (full_cdp_access, expected_cdp_action) in [(false, false), (true, true)] {
+        let plan = probe(|turn| {
+            set_features(turn, &[Feature::InAppBrowser, Feature::BrowserUse]);
+            set_feature(turn, Feature::BrowserUseFullCdpAccess, full_cdp_access);
+        })
+        .await;
+        let ToolSpec::Function(browser) = plan.visible_spec("browser") else {
+            panic!("expected browser function tool");
+        };
+        let parameters =
+            serde_json::to_value(&browser.parameters).expect("browser schema should serialize");
+        let actions = parameters["properties"]["action"]["enum"]
+            .as_array()
+            .expect("browser actions should be an enum");
+
+        assert_eq!(actions.contains(&json!("cdp")), expected_cdp_action);
+    }
 }
 
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
@@ -2444,7 +2522,11 @@ async fn multi_agent_v2_can_disable_wait_agent() {
         ]
     );
     plan.assert_visible_lacks(&["clock"]);
-    plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
+    plan.assert_registered_lacks(&[
+        "agents.wait_agent",
+        "collaboration.wait_agent",
+        "clock.sleep",
+    ]);
 }
 
 #[tokio::test]
@@ -2510,25 +2592,25 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
     let namespaced = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
         update_config(turn, |config| {
-            config.multi_agent_v2.tool_namespace = Some("agents".to_string());
+            config.multi_agent_v2.tool_namespace = Some("delegation".to_string());
         });
     })
     .await;
 
-    namespaced.assert_visible_contains(&["agents"]);
-    namespaced.assert_visible_lacks(&["assign_task"]);
+    namespaced.assert_visible_contains(&["delegation"]);
+    namespaced.assert_visible_lacks(&["assign_task", "collaboration"]);
     assert!(
         !namespaced
             .registered_names
-            .contains(&ToolName::namespaced("agents", "assign_task").to_string()),
+            .contains(&ToolName::namespaced("delegation", "assign_task").to_string()),
         "expected no namespaced runtime for assign_task"
     );
     assert!(
         !namespaced
-            .namespace_function_names("agents")
+            .namespace_function_names("delegation")
             .iter()
             .any(|name| name == "assign_task"),
-        "expected assign_task to be absent from agents namespace"
+        "expected assign_task to be absent from delegation namespace"
     );
     for tool_name in [
         "spawn_agent",
@@ -2542,9 +2624,15 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         assert!(
             namespaced
                 .registered_names
-                .contains(&ToolName::namespaced("agents", tool_name).to_string()),
+                .contains(&ToolName::namespaced("delegation", tool_name).to_string()),
             "expected namespaced runtime for {tool_name}"
         );
+        let legacy_tool_name = ToolName::namespaced("collaboration", tool_name).to_string();
+        assert!(
+            namespaced.registered_names.contains(&legacy_tool_name),
+            "expected hidden legacy runtime for {tool_name}"
+        );
+        assert_eq!(namespaced.exposure(&legacy_tool_name), ToolExposure::Hidden);
         assert!(
             !namespaced
                 .registered_names
@@ -2553,10 +2641,10 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         );
         assert!(
             namespaced
-                .namespace_function_names("agents")
+                .namespace_function_names("delegation")
                 .iter()
                 .any(|name| name == tool_name),
-            "expected {tool_name} in agents namespace"
+            "expected {tool_name} in delegation namespace"
         );
     }
 }

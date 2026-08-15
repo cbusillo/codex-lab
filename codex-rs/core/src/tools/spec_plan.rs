@@ -8,6 +8,9 @@ use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
 use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
+use crate::tools::handlers::AutoReviewDispositionHandler;
+use crate::tools::handlers::BrowserHandler;
+use crate::tools::handlers::CodeBridgeHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CurrentTimeHandler;
@@ -101,6 +104,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -1041,6 +1045,18 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(PlanHandler);
     }
 
+    if !turn_context.session_source.is_non_root_agent() {
+        registry.add(AutoReviewDispositionHandler);
+    }
+
+    registry.add(CodeBridgeHandler);
+
+    if features.enabled(Feature::InAppBrowser) && features.enabled(Feature::BrowserUse) {
+        registry.add(BrowserHandler::new(
+            features.enabled(Feature::BrowserUseFullCdpAccess),
+        ));
+    }
+
     if features.enabled(Feature::DeferredExecutor) {
         registry.add(
             context
@@ -1146,47 +1162,53 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 agent_type_description(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                        hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
-                        multi_agent_version: turn_context.multi_agent_version,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                    }),
-                    tool_namespace,
-                ),
+            register_multi_agent_v2_handler(
+                registry,
+                SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                    available_models: turn_context.available_models.clone(),
+                    agent_type_description,
+                    expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                    hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
+                    expose_spawn_agent_model_overrides: turn_context
+                        .config
+                        .multi_agent_v2
+                        .expose_spawn_agent_model_overrides,
+                    multi_agent_version: turn_context.multi_agent_version,
+                    usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                }),
+                tool_namespace,
                 exposure,
             );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
+            register_multi_agent_v2_handler(
+                registry,
+                SendMessageHandlerV2,
+                tool_namespace,
                 exposure,
             );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
+            register_multi_agent_v2_handler(
+                registry,
+                FollowupTaskHandlerV2,
+                tool_namespace,
                 exposure,
             );
             if turn_context.config.multi_agent_v2.wait_agent_enabled {
-                registry.register_trusted_with_exposure(
-                    multi_agent_v2_handler(
-                        WaitAgentHandlerV2::new(context.wait_agent_timeouts),
-                        tool_namespace,
-                    ),
+                register_multi_agent_v2_handler(
+                    registry,
+                    WaitAgentHandlerV2::new(context.wait_agent_timeouts),
+                    tool_namespace,
                     exposure,
                 );
             }
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
+            register_multi_agent_v2_handler(
+                registry,
+                InterruptAgentHandler,
+                tool_namespace,
                 exposure,
             );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
+            register_multi_agent_v2_handler(
+                registry,
+                ListAgentsHandlerV2,
+                tool_namespace,
                 exposure,
             );
         } else {
@@ -1299,16 +1321,35 @@ fn append_extension_tool_executors(
     standalone_web_search_tool
 }
 
-fn multi_agent_v2_handler(
+fn register_multi_agent_v2_handler(
+    registry: &mut ToolRegistry,
     handler: impl CoreToolRuntime + 'static,
+    namespace: Option<&str>,
+    exposure: ToolExposure,
+) {
+    let handler: Arc<dyn CoreToolRuntime> = Arc::new(handler);
+    registry.register_trusted_with_exposure(
+        multi_agent_v2_handler(Arc::clone(&handler), namespace),
+        exposure,
+    );
+    if namespace != Some(LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE) {
+        registry.register_trusted_with_exposure(
+            multi_agent_v2_handler(handler, Some(LEGACY_MULTI_AGENT_V2_TOOL_NAMESPACE)),
+            ToolExposure::Hidden,
+        );
+    }
+}
+
+fn multi_agent_v2_handler(
+    handler: Arc<dyn CoreToolRuntime>,
     namespace: Option<&str>,
 ) -> Arc<dyn CoreToolRuntime> {
     match namespace {
         Some(namespace) => Arc::new(MultiAgentV2NamespaceOverride {
-            handler: Arc::new(handler),
+            handler,
             namespace: namespace.to_string(),
         }),
-        None => Arc::new(handler),
+        None => handler,
     }
 }
 
