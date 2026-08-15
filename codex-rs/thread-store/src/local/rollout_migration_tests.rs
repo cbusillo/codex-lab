@@ -876,8 +876,8 @@ async fn migration_preserves_current_consumed_project_validation_correction_acro
         vec![
             rollout_response_item(input_response_message("user", "keep question")),
             rollout_response_item(failure),
-            rollout_response_item(correction.clone()),
             rollout_response_item(consumed.clone()),
+            rollout_response_item(correction.clone()),
             rollout_response_item(input_response_message("user", "remove question")),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
@@ -902,8 +902,8 @@ async fn migration_preserves_current_consumed_project_validation_correction_acro
             .collect::<Vec<_>>(),
         vec![
             input_response_message("user", "keep question"),
-            correction,
             consumed,
+            correction,
         ]
     );
 }
