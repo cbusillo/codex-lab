@@ -21,9 +21,7 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_extension_api::ExtensionRegistryBuilder;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -46,6 +44,7 @@ use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::sse_completed;
@@ -3479,16 +3478,33 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         &["project-validation", "validation-count"],
         /*timeout_ms*/ 5_000,
     );
-    let (correction_gate_tx, correction_gate_rx) = oneshot::channel();
+    let resume_command = command.clone();
+    let (compaction_gate_tx, compaction_gate_rx) = oneshot::channel();
     let (server, _completions) = start_streaming_sse_server(vec![
-        response_completed_chunks("resp-1"),
         vec![
-            streaming_chunk(ev_response_created("resp-2")),
-            gated_streaming_chunk(correction_gate_rx, vec![ev_completed("resp-2")]),
+            streaming_chunk(ev_response_created("resp-1")),
+            streaming_chunk(ev_completed_with_tokens(
+                "resp-1", /*total_tokens*/ 100,
+            )),
+        ],
+        vec![
+            streaming_chunk(ev_response_created("compact-1")),
+            gated_streaming_chunk(
+                compaction_gate_rx,
+                vec![
+                    ev_assistant_message("compact-message-1", "compacted correction context"),
+                    ev_completed_with_tokens("compact-1", /*total_tokens*/ 1),
+                ],
+            ),
         ],
     ])
     .await;
-    let test = build_streaming_validation_codex(&server, command).await?;
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_auto_compact_token_limit = Some(10);
+        config.model_provider.name = "local-test-provider".to_string();
+    });
+    let test = builder.build_with_streaming_server(&server).await?;
     let count_path = test.workspace_path("validation-count");
 
     submit_user_input(&test.codex, &test, "finish the work").await?;
@@ -3504,23 +3520,20 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         first_validation,
         EventMsg::ProjectValidationCompleted(_)
     ));
-    wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::RawResponseItem(event)
-                if matches!(
-                    &event.item,
-                    ResponseItem::Message { role, content, .. }
-                        if role == "user"
-                            && content.iter().any(|content| matches!(
-                                content,
-                                ContentItem::InputText { text }
-                                    if text.starts_with("<project_validation_failure>")
-                            ))
-                )
-        )
-    })
-    .await;
+    server.wait_for_request_count(/*count*/ 2).await;
+    let requests = server.requests().await;
+    let compaction_request: Value = serde_json::from_slice(&requests[1])?;
+    let compaction_user_texts = request_message_input_texts(&compaction_request, "user");
+    assert!(
+        compaction_user_texts
+            .iter()
+            .any(|text| text.starts_with("<project_validation_failure>"))
+    );
+    assert!(
+        compaction_user_texts
+            .iter()
+            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+    );
 
     test.codex.submit(Op::Interrupt).await?;
     wait_for_event(&test.codex, |event| {
@@ -3533,17 +3546,30 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
     assert!(in_flight_rollout.contains("<project_validation_failure>"));
     assert!(in_flight_rollout.contains("<project_validation_correction_consumed>"));
-    let requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
-    let _ = correction_gate_tx.send(());
+    assert_eq!(server.requests().await.len(), 2);
+    let _ = compaction_gate_tx.send(());
+    let rollout_path = test.codex.rollout_path().context("rollout path")?;
+    let home = Arc::clone(&test.home);
+    let resumed_cwd = test.config.cwd.clone();
+    test.codex.shutdown_and_wait().await?;
+    server.shutdown().await;
 
-    submit_user_input(&test.codex, &test, "continue after interruption").await?;
-    collect_events_until_terminal(&test.codex).await?;
+    let resume_server = start_mock_server().await;
+    let response_mock =
+        responses::mount_sse_once(&resume_server, sse_completed("resume-response")).await;
+    let mut resume_builder = test_codex().with_config(move |config| {
+        config.cwd = resumed_cwd.clone();
+        config.validation.project_command = Some(resume_command);
+        config.model_auto_compact_token_limit = Some(1_000_000);
+    });
+    let resumed = resume_builder
+        .resume(&resume_server, home, rollout_path)
+        .await?;
+    submit_user_input(&resumed.codex, &resumed, "continue after interruption").await?;
+    collect_events_until_terminal(&resumed.codex).await?;
 
-    let requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
-    let resumed_request: Value = serde_json::from_slice(&requests[1])?;
-    let resumed_user_texts = request_message_input_texts(&resumed_request, "user");
+    let resumed_request = response_mock.single_request();
+    let resumed_user_texts = resumed_request.message_input_texts("user");
     let failure_index = resumed_user_texts
         .iter()
         .position(|text| text.starts_with("<project_validation_failure>"))
@@ -3559,12 +3585,130 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
     assert!(failure_index < consumed_index);
     assert!(consumed_index < next_input_index);
     assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    Ok(())
+}
 
-    test.codex.flush_rollout().await?;
-    let rollout = std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
-    assert!(rollout.contains("<project_validation_failure>"));
-    assert!(rollout.contains("correction request has been consumed"));
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_correction_survives_pre_turn_compaction() -> Result<()> {
+    skip_if_no_network!(Ok(()));
 
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then printf validation-fail >&2; exit 7; fi; printf validation-pass",
+        &["project-validation", "validation-count"],
+        /*timeout_ms*/ 5_000,
+    );
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("initial-response"),
+                ev_completed_with_tokens("initial-response", /*total_tokens*/ 100),
+            ]),
+            responses::sse(vec![
+                ev_assistant_message("compact-message", "compacted correction context"),
+                ev_completed_with_tokens("compact-response", /*total_tokens*/ 1),
+            ]),
+            responses::sse(vec![
+                ev_response_created("correction-response"),
+                ev_completed_with_tokens("correction-response", /*total_tokens*/ 1),
+            ]),
+            sse_completed("next-response"),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_auto_compact_token_limit = Some(10);
+        config.model_provider.name = "local-test-provider".to_string();
+    });
+    let test = builder.build(&server).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    collect_events_until_terminal(&test.codex).await?;
+    submit_user_input(&test.codex, &test, "continue with the next task").await?;
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 4);
+    for request in &requests[1..3] {
+        let user_texts = request.message_input_texts("user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
+    let next_turn_user_texts = requests[3].message_input_texts("user");
+    let failure_index = next_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("next turn should preserve historical validation failure context");
+    let consumed_index = next_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("next turn should preserve the consumed correction marker");
+    assert!(failure_index < consumed_index);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_queued_input_during_correction_keeps_active_prompt() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "if [ -f \"$1\" ]; then printf validation-pass; exit 0; fi; touch \"$1\"; printf validation-fail >&2; exit 7",
+        &["project-validation", "validation-ran"],
+        /*timeout_ms*/ 5_000,
+    );
+    let (correction_gate_tx, correction_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        response_completed_chunks("initial-response"),
+        vec![
+            streaming_chunk(ev_response_created("correction-response")),
+            gated_streaming_chunk(
+                correction_gate_rx,
+                vec![ev_completed("correction-response")],
+            ),
+        ],
+        response_completed_chunks("correction-follow-up"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    server.wait_for_request_count(/*count*/ 2).await;
+    steer_user_input(&test.codex, "also preserve the public API").await?;
+    let _ = correction_gate_tx.send(());
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let request: Value = serde_json::from_slice(request)?;
+        let user_texts = request_message_input_texts(&request, "user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
+    let follow_up_request: Value = serde_json::from_slice(&requests[2])?;
+    assert!(
+        request_message_input_texts(&follow_up_request, "user")
+            .iter()
+            .any(|text| text == "also preserve the public API")
+    );
     server.shutdown().await;
     Ok(())
 }
