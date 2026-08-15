@@ -21,6 +21,7 @@ use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -55,16 +56,26 @@ use core_test_support::streaming_sse::StreamingSseServer;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex as base_test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use serde_json::Value;
 use tempfile::tempdir;
+use test_case::test_case;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing_test::traced_test;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+
+fn test_codex() -> TestCodexBuilder {
+    base_test_codex()
+        .with_code_mode_host_program("unused-code-mode-host".into())
+        .with_config(|config| {
+            let _ = config.features.disable(Feature::CodeModeHost);
+        })
+}
 
 async fn run_validation_turn(command: ProjectValidationCommand) -> Result<Vec<EventMsg>> {
     run_validation_turn_with_source(command, /*session_source*/ None).await
@@ -542,6 +553,100 @@ fn request_message_input_texts(body: &Value, role: &str) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CorrectionCompactionBackend {
+    Local,
+    LegacyRemote,
+    RemoteV2,
+}
+
+impl CorrectionCompactionBackend {
+    fn configure(self, config: &mut Config) {
+        match self {
+            Self::Local => config.model_provider.name = "local-test-provider".to_string(),
+            Self::LegacyRemote => {
+                let _ = config.features.disable(Feature::RemoteCompactionV2);
+            }
+            Self::RemoteV2 => {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+            }
+        }
+    }
+
+    fn is_legacy_remote(self) -> bool {
+        matches!(self, Self::LegacyRemote)
+    }
+
+    fn compaction_response(self, response_id: &str, summary: &str) -> String {
+        match self {
+            Self::Local => responses::sse(vec![
+                ev_assistant_message("compact-message", summary),
+                ev_completed_with_tokens(response_id, /*total_tokens*/ 1),
+            ]),
+            Self::RemoteV2 => responses::sse(vec![
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": summary,
+                    }
+                }),
+                ev_completed_with_tokens(response_id, /*total_tokens*/ 1),
+            ]),
+            Self::LegacyRemote => panic!("legacy remote compaction uses /responses/compact"),
+        }
+    }
+}
+
+fn assert_active_project_validation_correction(user_texts: &[String]) {
+    assert!(
+        user_texts
+            .iter()
+            .any(|text| text.starts_with("<project_validation_failure>"))
+    );
+    assert!(
+        user_texts
+            .iter()
+            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+    );
+}
+
+fn assert_persisted_project_validation_correction(user_texts: &[String], next_input: Option<&str>) {
+    let failure_index = user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("historical validation failure context should be preserved");
+    let consumed_index = user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("consumed correction marker should be preserved");
+    assert!(failure_index < consumed_index);
+    if let Some(next_input) = next_input {
+        let next_input_index = user_texts
+            .iter()
+            .position(|text| text == next_input)
+            .expect("request should include the next user input");
+        assert!(consumed_index < next_input_index);
+    }
+}
+
+async fn wait_for_recorded_requests(
+    response_mock: &responses::ResponseMock,
+    count: usize,
+) -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if response_mock.requests().len() >= count {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("request was not recorded")?;
+    Ok(())
 }
 
 fn run_git(path: &Path, args: &[&str]) -> Result<()> {
@@ -3469,8 +3574,13 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
     Ok(())
 }
 
+#[test_case(CorrectionCompactionBackend::Local; "local")]
+#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
+#[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_interrupt_during_correction_prevents_rerun() -> Result<()> {
+async fn project_validation_interrupt_during_correction_prevents_rerun(
+    backend: CorrectionCompactionBackend,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let command = shell_command_with_args(
@@ -3479,32 +3589,40 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         /*timeout_ms*/ 5_000,
     );
     let resume_command = command.clone();
-    let (compaction_gate_tx, compaction_gate_rx) = oneshot::channel();
-    let (server, _completions) = start_streaming_sse_server(vec![
-        vec![
-            streaming_chunk(ev_response_created("resp-1")),
-            streaming_chunk(ev_completed_with_tokens(
-                "resp-1", /*total_tokens*/ 100,
-            )),
-        ],
-        vec![
-            streaming_chunk(ev_response_created("compact-1")),
-            gated_streaming_chunk(
-                compaction_gate_rx,
-                vec![
-                    ev_assistant_message("compact-message-1", "compacted correction context"),
-                    ev_completed_with_tokens("compact-1", /*total_tokens*/ 1),
-                ],
-            ),
-        ],
-    ])
-    .await;
+    let server = start_mock_server().await;
+    let mut response_templates = vec![responses::sse_response(responses::sse(vec![
+        ev_response_created("resp-1"),
+        ev_completed_with_tokens("resp-1", /*total_tokens*/ 100),
+    ]))];
+    if !backend.is_legacy_remote() {
+        response_templates.push(
+            responses::sse_response(
+                backend.compaction_response("compact-1", "compacted correction context"),
+            )
+            .set_delay(Duration::from_secs(30)),
+        );
+    }
+    let response_mock = responses::mount_response_sequence(&server, response_templates).await;
+    let compact_mock = if backend.is_legacy_remote() {
+        Some(
+            responses::mount_compact_response_once(
+                &server,
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({ "output": [] }))
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let mut builder = test_codex().with_config(move |config| {
         config.validation.project_command = Some(command);
         config.model_auto_compact_token_limit = Some(10);
-        config.model_provider.name = "local-test-provider".to_string();
+        backend.configure(config);
     });
-    let test = builder.build_with_streaming_server(&server).await?;
+    let test = builder.build(&server).await?;
     let count_path = test.workspace_path("validation-count");
 
     submit_user_input(&test.codex, &test, "finish the work").await?;
@@ -3520,20 +3638,18 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         first_validation,
         EventMsg::ProjectValidationCompleted(_)
     ));
-    server.wait_for_request_count(/*count*/ 2).await;
-    let requests = server.requests().await;
-    let compaction_request: Value = serde_json::from_slice(&requests[1])?;
-    let compaction_user_texts = request_message_input_texts(&compaction_request, "user");
-    assert!(
-        compaction_user_texts
-            .iter()
-            .any(|text| text.starts_with("<project_validation_failure>"))
-    );
-    assert!(
-        compaction_user_texts
-            .iter()
-            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
-    );
+    let compaction_request = if let Some(compact_mock) = compact_mock.as_ref() {
+        wait_for_recorded_requests(compact_mock, /*count*/ 1).await?;
+        compact_mock.single_request()
+    } else {
+        wait_for_recorded_requests(&response_mock, /*count*/ 2).await?;
+        response_mock
+            .requests()
+            .into_iter()
+            .nth(1)
+            .expect("compaction request")
+    };
+    assert_active_project_validation_correction(&compaction_request.message_input_texts("user"));
 
     test.codex.submit(Op::Interrupt).await?;
     wait_for_event(&test.codex, |event| {
@@ -3546,13 +3662,14 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
     assert!(in_flight_rollout.contains("<project_validation_failure>"));
     assert!(in_flight_rollout.contains("<project_validation_correction_consumed>"));
-    assert_eq!(server.requests().await.len(), 2);
-    let _ = compaction_gate_tx.send(());
+    assert_eq!(
+        response_mock.requests().len(),
+        usize::from(!backend.is_legacy_remote()) + 1
+    );
     let rollout_path = test.codex.rollout_path().context("rollout path")?;
     let home = Arc::clone(&test.home);
     let resumed_cwd = test.config.cwd.clone();
     test.codex.shutdown_and_wait().await?;
-    server.shutdown().await;
 
     let resume_server = start_mock_server().await;
     let response_mock =
@@ -3561,6 +3678,7 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         config.cwd = resumed_cwd.clone();
         config.validation.project_command = Some(resume_command);
         config.model_auto_compact_token_limit = Some(1_000_000);
+        backend.configure(config);
     });
     let resumed = resume_builder
         .resume(&resume_server, home, rollout_path)
@@ -3570,26 +3688,21 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
 
     let resumed_request = response_mock.single_request();
     let resumed_user_texts = resumed_request.message_input_texts("user");
-    let failure_index = resumed_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_failure>"))
-        .expect("interrupted correction should preserve historical failure context");
-    let consumed_index = resumed_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
-        .expect("interrupted correction should persist its consumed marker");
-    let next_input_index = resumed_user_texts
-        .iter()
-        .position(|text| text == "continue after interruption")
-        .expect("resumed request should include the next user input");
-    assert!(failure_index < consumed_index);
-    assert!(consumed_index < next_input_index);
+    assert_persisted_project_validation_correction(
+        &resumed_user_texts,
+        Some("continue after interruption"),
+    );
     assert_eq!(std::fs::read_to_string(&count_path)?, "2");
     Ok(())
 }
 
+#[test_case(CorrectionCompactionBackend::Local; "local")]
+#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
+#[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_correction_survives_pre_turn_compaction() -> Result<()> {
+async fn project_validation_correction_survives_pre_turn_compaction(
+    backend: CorrectionCompactionBackend,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let command = shell_command_with_args(
@@ -3597,63 +3710,84 @@ async fn project_validation_correction_survives_pre_turn_compaction() -> Result<
         &["project-validation", "validation-count"],
         /*timeout_ms*/ 5_000,
     );
+    let resume_command = command.clone();
     let server = start_mock_server().await;
-    let response_mock = responses::mount_sse_sequence(
-        &server,
-        vec![
-            responses::sse(vec![
-                ev_response_created("initial-response"),
-                ev_completed_with_tokens("initial-response", /*total_tokens*/ 100),
-            ]),
-            responses::sse(vec![
-                ev_assistant_message("compact-message", "compacted correction context"),
-                ev_completed_with_tokens("compact-response", /*total_tokens*/ 1),
-            ]),
-            responses::sse(vec![
-                ev_response_created("correction-response"),
-                ev_completed_with_tokens("correction-response", /*total_tokens*/ 1),
-            ]),
-            sse_completed("next-response"),
-        ],
-    )
-    .await;
+    let mut responses = vec![responses::sse(vec![
+        ev_response_created("initial-response"),
+        ev_completed_with_tokens("initial-response", /*total_tokens*/ 100),
+    ])];
+    if !backend.is_legacy_remote() {
+        responses
+            .push(backend.compaction_response("compact-response", "compacted correction context"));
+    }
+    responses.push(responses::sse(vec![
+        ev_response_created("correction-response"),
+        ev_completed_with_tokens("correction-response", /*total_tokens*/ 1),
+    ]));
+    let response_mock = responses::mount_sse_sequence(&server, responses).await;
+    let compact_mock = if backend.is_legacy_remote() {
+        Some(
+            responses::mount_compact_user_history_with_summary_once(
+                &server,
+                "compacted correction context",
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let mut builder = test_codex().with_config(move |config| {
         config.validation.project_command = Some(command);
         config.model_auto_compact_token_limit = Some(10);
-        config.model_provider.name = "local-test-provider".to_string();
+        backend.configure(config);
     });
     let test = builder.build(&server).await?;
 
     submit_user_input(&test.codex, &test, "finish the work").await?;
     collect_events_until_terminal(&test.codex).await?;
-    submit_user_input(&test.codex, &test, "continue with the next task").await?;
-    collect_events_until_terminal(&test.codex).await?;
 
     let requests = response_mock.requests();
-    assert_eq!(requests.len(), 4);
-    for request in &requests[1..3] {
-        let user_texts = request.message_input_texts("user");
-        assert!(
-            user_texts
-                .iter()
-                .any(|text| text.starts_with("<project_validation_failure>"))
+    let correction_request_index = if let Some(compact_mock) = compact_mock {
+        assert_active_project_validation_correction(
+            &compact_mock.single_request().message_input_texts("user"),
         );
-        assert!(
-            user_texts
-                .iter()
-                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
-        );
-    }
-    let next_turn_user_texts = requests[3].message_input_texts("user");
-    let failure_index = next_turn_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_failure>"))
-        .expect("next turn should preserve historical validation failure context");
-    let consumed_index = next_turn_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
-        .expect("next turn should preserve the consumed correction marker");
-    assert!(failure_index < consumed_index);
+        1
+    } else {
+        assert_active_project_validation_correction(&requests[1].message_input_texts("user"));
+        2
+    };
+    assert_active_project_validation_correction(
+        &requests[correction_request_index].message_input_texts("user"),
+    );
+    assert_eq!(requests.len(), correction_request_index + 1);
+
+    let rollout_path = test.codex.rollout_path().context("rollout path")?;
+    let home = Arc::clone(&test.home);
+    let resumed_cwd = test.config.cwd.clone();
+    test.codex.shutdown_and_wait().await?;
+
+    let resume_server = start_mock_server().await;
+    let resume_response_mock =
+        responses::mount_sse_once(&resume_server, sse_completed("next-response")).await;
+    let mut resume_builder = test_codex().with_config(move |config| {
+        config.cwd = resumed_cwd.clone();
+        config.validation.project_command = Some(resume_command);
+        config.model_auto_compact_token_limit = Some(1_000_000);
+        backend.configure(config);
+    });
+    let resumed = resume_builder
+        .resume(&resume_server, home, rollout_path)
+        .await?;
+    submit_user_input(&resumed.codex, &resumed, "continue with the next task").await?;
+    collect_events_until_terminal(&resumed.codex).await?;
+
+    let next_turn_user_texts = resume_response_mock
+        .single_request()
+        .message_input_texts("user");
+    assert_persisted_project_validation_correction(
+        &next_turn_user_texts,
+        Some("continue with the next task"),
+    );
     Ok(())
 }
 
