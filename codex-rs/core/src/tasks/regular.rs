@@ -120,12 +120,12 @@ impl SessionTask for RegularTask {
             let validation_eligible = turn_result.project_validation_eligibility
                 == ProjectValidationEligibility::Eligible;
             project_validation_model_used_tools |= turn_result.model_used_tools;
-            if !validation_eligible {
-                return Ok(last_agent_message);
-            }
             if sess.input_queue.has_pending_input(&sess.active_turn).await {
                 next_input = Vec::new();
                 continue;
+            }
+            if !validation_eligible {
+                return Ok(last_agent_message);
             }
             let (attempt, may_start_correction, phase_after_validation) =
                 match project_validation_phase {
