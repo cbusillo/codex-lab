@@ -3624,7 +3624,7 @@ impl Session {
         if turn_context.config.features.enabled(Feature::TokenBudget)
             && turn_context.model_context_window().is_some()
         {
-            let mcp_result = self
+            let thread_hint = self
                 .services
                 .mcp_runtime
                 .latest_call_tool(
@@ -3637,25 +3637,14 @@ impl Session {
                 )
                 .await
                 .ok()
-                .and_then(|result| {
-                    let text = result
-                        .content
-                        .iter()
-                        .filter_map(|content| {
-                            content.get("text").and_then(serde_json::Value::as_str)
-                        })
-                        .filter(|text| !text.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    (!text.is_empty()).then_some(text)
-                });
+                .and_then(|result| crate::context::join_thread_hint_content(&result.content));
             separate_developer_sections.push(
                 crate::context::TokenBudgetContext::new(
                     self.thread_id,
                     auto_compact_window_ids.first_window_id,
                     auto_compact_window_ids.previous_window_id,
                     auto_compact_window_ids.window_id,
-                    mcp_result,
+                    thread_hint,
                 )
                 .render(),
             );
