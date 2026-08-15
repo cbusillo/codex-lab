@@ -425,6 +425,10 @@ async fn start_review_conversation(
         .clone()
         .unwrap_or_else(|| ctx.model_info.slug.clone());
     sub_agent_config.model = Some(model);
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
+    if let Some(budget_gate) = budget_gate.clone() {
+        thread_extension_init.insert(budget_gate);
+    }
     run_codex_thread_one_shot(
         sub_agent_config,
         Arc::clone(&session.services.auth_manager),
@@ -436,6 +440,7 @@ async fn start_review_conversation(
         SubAgentSource::Review,
         /*final_output_json_schema*/ None,
         /*initial_history*/ None,
+        thread_extension_init,
     )
     .await
     .map(|(session, io)| ReviewConversation {

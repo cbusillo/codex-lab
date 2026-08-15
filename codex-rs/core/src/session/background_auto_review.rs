@@ -973,6 +973,9 @@ impl Session {
         persistence: crate::review_persistence::ReviewPersistenceContext,
         coordination: &ReviewCoordination,
     ) -> anyhow::Result<Option<crate::state::BackgroundAutoReviewStart>> {
+        let coordination = coordination.clone();
+        let snapshot_epoch =
+            tokio::task::spawn_blocking(move || coordination.bump_snapshot_epoch()).await??;
         let trigger_turn_mailbox = self.input_queue.lock_trigger_turn_mailbox_items().await;
         if trigger_turn_mailbox.has_trigger_turn_items() {
             return Ok(None);
@@ -987,7 +990,6 @@ impl Session {
         if !state.background_auto_review.is_current_schedule(generation) {
             return Ok(None);
         }
-        let snapshot_epoch = coordination.bump_snapshot_epoch()?;
         let persistence = persistence.with_snapshot_epoch(snapshot_epoch);
         Ok(state
             .background_auto_review

@@ -186,6 +186,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             cancel_token,
             SubAgentSource::Review,
             /*initial_history*/ None,
+            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         ),
@@ -217,6 +218,7 @@ async fn run_codex_thread_interactive_rejects_approval_policy_that_can_prompt() 
         CancellationToken::new(),
         SubAgentSource::Review,
         /*initial_history*/ None,
+        codex_extension_api::ExtensionDataInit::default(),
         crate::session::GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
     )
