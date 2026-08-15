@@ -28,6 +28,7 @@ use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
@@ -131,7 +132,7 @@ async fn project_validation_completion_reaches_a_client_without_experimental_api
         .await?;
     let thread_id = thread.id;
 
-    let _: TurnStartResponse = mcp
+    let TurnStartResponse { turn } = mcp
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
             params: TurnStartParams {
@@ -146,11 +147,22 @@ async fn project_validation_completion_reaches_a_client_without_experimental_api
         })
         .await?;
 
-    let notification = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("validation/completed"),
-    )
-    .await??;
+    let notification = loop {
+        let message = timeout(DEFAULT_READ_TIMEOUT, mcp.read_next_message()).await??;
+        match message {
+            JSONRPCMessage::Notification(notification)
+                if notification.method == "validation/completed" =>
+            {
+                break notification;
+            }
+            JSONRPCMessage::Notification(notification)
+                if notification.method == "turn/completed" =>
+            {
+                anyhow::bail!("turn/completed arrived before validation/completed");
+            }
+            _ => {}
+        }
+    };
     let completed: ProjectValidationCompletedNotification = serde_json::from_value(
         notification
             .params
@@ -161,8 +173,8 @@ async fn project_validation_completion_reaches_a_client_without_experimental_api
         completed,
         ProjectValidationCompletedNotification {
             thread_id: thread_id.clone(),
-            // The turn id and duration are assigned at run time.
-            turn_id: completed.turn_id.clone(),
+            turn_id: turn.id.clone(),
+            // The duration and item id are assigned at run time.
             duration_ms: completed.duration_ms,
             item_id: completed.item_id.clone(),
             command: vec![
@@ -184,6 +196,23 @@ async fn project_validation_completion_reaches_a_client_without_experimental_api
         !completed.turn_id.is_empty(),
         "validation must be attributed to the turn that triggered it"
     );
+
+    let turn_completed: TurnCompletedNotification = loop {
+        let message = timeout(DEFAULT_READ_TIMEOUT, mcp.read_next_message()).await??;
+        let JSONRPCMessage::Notification(notification) = message else {
+            continue;
+        };
+        if notification.method != "turn/completed" {
+            continue;
+        }
+        break serde_json::from_value(
+            notification
+                .params
+                .context("turn/completed must carry params")?,
+        )?;
+    };
+    assert_eq!(turn_completed.thread_id, thread_id);
+    assert_eq!(turn_completed.turn.id, turn.id);
 
     Ok(())
 }

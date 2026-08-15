@@ -18,7 +18,10 @@ use codex_config::ShellcheckValidationProviderConfig;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -32,6 +35,8 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
+use codex_skills_extension::SkillsExtensionConfig;
+use codex_skills_extension::install;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::approx_token_count;
@@ -40,6 +45,7 @@ use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::sse_completed;
@@ -50,16 +56,26 @@ use core_test_support::streaming_sse::StreamingSseServer;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
-use core_test_support::test_codex::test_codex;
+use core_test_support::test_codex::test_codex as base_test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use serde_json::Value;
 use tempfile::tempdir;
+use test_case::test_case;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing_test::traced_test;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+
+fn test_codex() -> TestCodexBuilder {
+    base_test_codex()
+        .with_code_mode_host_program("unused-code-mode-host".into())
+        .with_config(|config| {
+            let _ = config.features.disable(Feature::CodeModeHost);
+        })
+}
 
 async fn run_validation_turn(command: ProjectValidationCommand) -> Result<Vec<EventMsg>> {
     run_validation_turn_with_source(command, /*session_source*/ None).await
@@ -81,10 +97,48 @@ async fn run_validation_turn_with_source(
 async fn run_validation_correction_turn(
     command: ProjectValidationCommand,
 ) -> Result<(Vec<EventMsg>, Vec<ResponsesRequest>)> {
-    run_validation_turn_with_source_and_response_count(
-        command, /*session_source*/ None, /*response_count*/ 2,
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![sse_completed("resp-1"), sse_completed("resp-2")],
     )
-    .await
+    .await;
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    install(&mut extensions, |config: &Config| SkillsExtensionConfig {
+        include_instructions: config.include_skill_instructions,
+        bundled_skills_enabled: false,
+        orchestrator_skills_enabled: false,
+        shadow_selection_enabled: false,
+    });
+    let mut builder = test_codex()
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(move |config| {
+            config.validation.project_command = Some(command);
+        })
+        .with_workspace_setup(|cwd, fs| async move {
+            let skill_dir = cwd.join(".agents/skills/validation-test");
+            let skill_dir_uri = PathUri::from_host_native_path(&skill_dir)?;
+            fs.create_directory(
+                &skill_dir_uri,
+                CreateDirectoryOptions { recursive: true },
+                /*sandbox*/ None,
+            )
+            .await?;
+            let skill_path = PathUri::from_host_native_path(skill_dir.join("SKILL.md"))?;
+            fs.write_file(
+                &skill_path,
+                b"---\nname: validation-test\ndescription: Validate correction context\n---\n"
+                    .to_vec(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok::<(), anyhow::Error>(())
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+    Ok((events, response_mock.requests()))
 }
 
 async fn run_validation_turn_with_source_and_response_count(
@@ -364,30 +418,29 @@ async fn submit_user_input_with_environment_override(
         }
     };
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: text.to_string(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                environments,
-                approval_policy: Some(AskForApproval::Never),
-                sandbox_policy: Some(sandbox_policy),
-                permission_profile,
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
-                        model: session_model,
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            },
-        })
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    environments,
+                    approval_policy: Some(AskForApproval::Never),
+                    sandbox_policy: Some(sandbox_policy),
+                    permission_profile,
+                    collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                        mode: codex_protocol::config_types::ModeKind::Default,
+                        settings: codex_protocol::config_types::Settings {
+                            model: session_model,
+                            reasoning_effort: None,
+                            developer_instructions: None,
+                        },
+                    }),
+                    ..Default::default()
+                },
+            ),
+        )
         .await?;
     Ok(())
 }
@@ -500,6 +553,100 @@ fn request_message_input_texts(body: &Value, role: &str) -> Vec<String> {
                 .map(str::to_string)
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CorrectionCompactionBackend {
+    Local,
+    LegacyRemote,
+    RemoteV2,
+}
+
+impl CorrectionCompactionBackend {
+    fn configure(self, config: &mut Config) {
+        match self {
+            Self::Local => config.model_provider.name = "local-test-provider".to_string(),
+            Self::LegacyRemote => {
+                let _ = config.features.disable(Feature::RemoteCompactionV2);
+            }
+            Self::RemoteV2 => {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+            }
+        }
+    }
+
+    fn is_legacy_remote(self) -> bool {
+        matches!(self, Self::LegacyRemote)
+    }
+
+    fn compaction_response(self, response_id: &str, summary: &str) -> String {
+        match self {
+            Self::Local => responses::sse(vec![
+                ev_assistant_message("compact-message", summary),
+                ev_completed_with_tokens(response_id, /*total_tokens*/ 1),
+            ]),
+            Self::RemoteV2 => responses::sse(vec![
+                serde_json::json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": summary,
+                    }
+                }),
+                ev_completed_with_tokens(response_id, /*total_tokens*/ 1),
+            ]),
+            Self::LegacyRemote => panic!("legacy remote compaction uses /responses/compact"),
+        }
+    }
+}
+
+fn assert_active_project_validation_correction(user_texts: &[String]) {
+    assert!(
+        user_texts
+            .iter()
+            .any(|text| text.starts_with("<project_validation_failure>"))
+    );
+    assert!(
+        user_texts
+            .iter()
+            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+    );
+}
+
+fn assert_persisted_project_validation_correction(user_texts: &[String], next_input: Option<&str>) {
+    let failure_index = user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("historical validation failure context should be preserved");
+    let consumed_index = user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("consumed correction marker should be preserved");
+    assert!(failure_index < consumed_index);
+    if let Some(next_input) = next_input {
+        let next_input_index = user_texts
+            .iter()
+            .position(|text| text == next_input)
+            .expect("request should include the next user input");
+        assert!(consumed_index < next_input_index);
+    }
+}
+
+async fn wait_for_recorded_requests(
+    response_mock: &responses::ResponseMock,
+    count: usize,
+) -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if response_mock.requests().len() >= count {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("request was not recorded")?;
+    Ok(())
 }
 
 fn run_git(path: &Path, args: &[&str]) -> Result<()> {
@@ -1229,6 +1376,66 @@ async fn project_validation_skips_when_preexisting_dirty_worktree_is_unchanged()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_interrupt_during_initial_fingerprint_records_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = build_validation_codex(
+        &server,
+        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
+    )
+    .await?;
+    init_git_repo(test.cwd_path())?;
+
+    let head_path = test.workspace_path(".git/HEAD");
+    let saved_head_path = test.workspace_path(".git/HEAD.project-validation-test");
+    let head_contents = std::fs::read(&head_path)?;
+    std::fs::rename(&head_path, &saved_head_path)?;
+    let mkfifo_status = Command::new("mkfifo").arg(&head_path).status()?;
+    anyhow::ensure!(mkfifo_status.success(), "mkfifo failed");
+
+    let (capture_started_tx, capture_started_rx) = oneshot::channel();
+    let (capture_release_tx, capture_release_rx) = oneshot::channel();
+    let capture_task = tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut fifo = std::fs::OpenOptions::new().write(true).open(&head_path)?;
+        std::fs::remove_file(&head_path)?;
+        std::fs::rename(&saved_head_path, &head_path)?;
+        let _ = capture_started_tx.send(());
+        capture_release_rx
+            .blocking_recv()
+            .context("capture release sender dropped")?;
+        fifo.write_all(&head_contents)?;
+        Ok(())
+    });
+
+    submit_user_input(&test.codex, &test, "preserve this input").await?;
+    timeout(Duration::from_secs(5), capture_started_rx)
+        .await
+        .context("timed out waiting for initial validation fingerprint capture")??;
+    test.codex.submit(Op::Interrupt).await?;
+    let _ = capture_release_tx.send(());
+    capture_task
+        .await
+        .context("validation fingerprint capture task panicked")??;
+
+    let events = collect_events_until_terminal(&test.codex).await?;
+    let user_messages = events
+        .iter()
+        .filter_map(|event| match event {
+            EventMsg::UserMessage(event) => Some(event.message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, vec!["preserve this input"]);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_validation_retries_unchanged_skip_after_pending_input() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -1371,6 +1578,98 @@ async fn project_validation_retries_pass_after_pending_input() -> Result<()> {
     assert_eq!(validation_events[1].output, "validation-pass-2");
     assert_eq!(std::fs::read_to_string(&count_path)?, "2");
     assert_eq!(server.requests().await.len(), 4);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_follow_up_failure_uses_single_correction_cycle() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then touch \"$2\"; while [ ! -f \"$3\" ]; do sleep 0.01; done; printf validation-pass; exit 0; fi; printf validation-fail >&2; exit 7",
+        &[
+            "project-validation",
+            "validation-count",
+            "validation-started",
+            "validation-release",
+        ],
+        /*timeout_ms*/ 5_000,
+    );
+    let first_patch =
+        "*** Begin Patch\n*** Add File: first.rs\n+pub fn first() {}\n*** End Patch\n";
+    let second_patch =
+        "*** Begin Patch\n*** Add File: second.rs\n+pub fn second() {}\n*** End Patch\n";
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-fail-1")),
+            streaming_chunk(ev_apply_patch_custom_tool_call("fail-first", first_patch)),
+            streaming_chunk(ev_completed("resp-fail-1")),
+        ],
+        response_completed_chunks("resp-fail-2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-fail-3")),
+            streaming_chunk(ev_apply_patch_custom_tool_call("fail-second", second_patch)),
+            streaming_chunk(ev_completed("resp-fail-3")),
+        ],
+        response_completed_chunks("resp-fail-4"),
+        response_completed_chunks("resp-fail-5"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command).await?;
+    init_git_repo(test.cwd_path())?;
+    let count_path = test.workspace_path("validation-count");
+    let started_path = test.workspace_path("validation-started");
+    let release_path = test.workspace_path("validation-release");
+
+    submit_user_input(&test.codex, &test, "make the first change").await?;
+    wait_for_path(&started_path).await?;
+    steer_user_input(&test.codex, "also make the second change").await?;
+    std::fs::write(&release_path, "release")?;
+
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    assert!(test.workspace_path("first.rs").exists());
+    assert!(test.workspace_path("second.rs").exists());
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 3);
+    assert_eq!(validation_events[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[0].output, "validation-pass");
+    assert_eq!(
+        validation_events[1].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[1].output, "validation-fail");
+    assert_eq!(
+        validation_events[2].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[2].output, "validation-fail");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 5);
+    for request in &requests[..4] {
+        let request: Value = serde_json::from_slice(request)?;
+        assert!(
+            request_message_input_texts(&request, "user")
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_failure>"))
+        );
+    }
+    let correction_request: Value = serde_json::from_slice(&requests[4])?;
+    let correction_user_texts = request_message_input_texts(&correction_request, "user");
+    assert!(
+        correction_user_texts
+            .iter()
+            .any(|text| text.starts_with("<project_validation_failure>"))
+    );
+    assert!(
+        correction_user_texts
+            .iter()
+            .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+    );
+
     server.shutdown().await;
     Ok(())
 }
@@ -1709,14 +2008,14 @@ async fn project_validation_reports_bounded_actionable_failure() -> Result<()> {
         .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with(SKILLS_INSTRUCTIONS_OPEN_TAG))
-        .count();
+        .collect::<Vec<_>>();
     let correction_skills_fragments = requests[1]
         .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with(SKILLS_INSTRUCTIONS_OPEN_TAG))
-        .count();
-    assert_eq!(initial_skills_fragments, 1);
-    assert_eq!(correction_skills_fragments, 1);
+        .collect::<Vec<_>>();
+    assert_eq!(initial_skills_fragments.len(), 1);
+    assert_eq!(correction_skills_fragments, initial_skills_fragments);
 
     let validation_indices = events
         .iter()
@@ -1769,6 +2068,8 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
                 ev_assistant_message("msg-2", "correction complete"),
                 ev_completed("resp-4"),
             ]),
+            sse_completed("resp-5"),
+            sse_completed("resp-6"),
         ],
     )
     .await;
@@ -1796,7 +2097,71 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
     assert_eq!(validation_events[0].output, "validation-fail");
     assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[1].output, "validation-pass");
-    assert_eq!(response_mock.requests().len(), 4);
+
+    let correction_requests = response_mock.requests();
+    assert_eq!(correction_requests.len(), 4);
+    for request in &correction_requests[2..] {
+        let user_texts = request.message_input_texts("user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
+
+    submit_user_input(&test.codex, &test, "continue with the next task").await?;
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 5);
+    let next_turn_user_texts = requests[4].message_input_texts("user");
+    let failure_index = next_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("next turn should preserve historical validation failure context");
+    let resolution_index = next_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("next turn should supersede the consumed correction request");
+    let next_user_input_index = next_turn_user_texts
+        .iter()
+        .position(|text| text == "continue with the next task")
+        .expect("next turn should include the current user input");
+    assert!(failure_index < resolution_index);
+    assert!(resolution_index < next_user_input_index);
+
+    test.codex
+        .submit(Op::ThreadRollback { num_turns: 1 })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ThreadRolledBack(_))
+    })
+    .await;
+    submit_user_input(&test.codex, &test, "continue after rollback").await?;
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 6);
+    let rollback_turn_user_texts = requests[5].message_input_texts("user");
+    let failure_index = rollback_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("rollback should preserve historical validation failure context");
+    let resolution_index = rollback_turn_user_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("rollback should preserve the consumed correction marker");
+    let current_user_input_index = rollback_turn_user_texts
+        .iter()
+        .position(|text| text == "continue after rollback")
+        .expect("rollback turn should include the current user input");
+    assert!(failure_index < resolution_index);
+    assert!(resolution_index < current_user_input_index);
     Ok(())
 }
 
@@ -2741,6 +3106,83 @@ async fn automatic_cargo_provider_separates_linked_worktree_cache_and_success() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_cargo_provider_does_not_share_success_across_sessions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let repo = tempdir()?;
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+    )?;
+    std::fs::write(
+        repo.path().join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"1.95.0\"\n",
+    )?;
+    init_git_repo(repo.path())?;
+    let provider = tempdir()?;
+    let fake_cargo = provider.path().join("cargo");
+    let count = provider.path().join("count");
+    write_executable(
+        &fake_cargo,
+        &format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = '-Vv' ]; then printf 'cargo 1.95.0 (fixture)\\n'; exit 0; fi\ncount=0\nif [ -f '{count}' ]; then count=$(cat '{count}'); fi\ncount=$((count + 1))\nprintf '%s' \"$count\" > '{count}'\n",
+            count = count.display(),
+        ),
+    )?;
+    let patch = "*** Begin Patch\n*** Add File: src/lib.rs\n+pub fn value() {}\n*** End Patch\n";
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            streaming_chunk(ev_response_created("resp-session-cache-1")),
+            streaming_chunk(ev_apply_patch_custom_tool_call(
+                "session-cache-patch-1",
+                patch,
+            )),
+            streaming_chunk(ev_completed("resp-session-cache-1")),
+        ],
+        response_completed_chunks("resp-session-cache-2"),
+        vec![
+            streaming_chunk(ev_response_created("resp-session-cache-3")),
+            streaming_chunk(ev_apply_patch_custom_tool_call(
+                "session-cache-patch-2",
+                patch,
+            )),
+            streaming_chunk(ev_completed("resp-session-cache-3")),
+        ],
+        response_completed_chunks("resp-session-cache-4"),
+    ])
+    .await;
+    let mut builder = cargo_provider_codex_builder(
+        repo.path(),
+        fake_cargo
+            .to_str()
+            .context("fake cargo path should be UTF-8")?
+            .to_string(),
+        /*timeout_ms*/ 5_000,
+        HashMap::new(),
+    )?;
+    let test = builder.build_with_streaming_server(&server).await?;
+
+    submit_user_input(&test.codex, &test, "add the Rust fixture").await?;
+    let first_events = collect_events_until_terminal(&test.codex).await?;
+    assert_eq!(
+        validation_events(&first_events)[0].status,
+        ProjectValidationStatus::Passed
+    );
+    std::fs::remove_file(repo.path().join("src/lib.rs"))?;
+
+    let second = start_root_thread_with_cwd(&test, repo.path()).await?;
+    submit_user_input(&second, &test, "add the Rust fixture again").await?;
+    let second_events = collect_events_until_terminal(&second).await?;
+    let second_validation = validation_events(&second_events);
+    assert_eq!(second_validation.len(), 1);
+    assert_eq!(second_validation[0].status, ProjectValidationStatus::Passed);
+    assert_eq!(std::fs::read_to_string(count)?, "2");
+    assert_eq!(server.requests().await.len(), 4);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automatic_validation_reports_disabled_disposition() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3104,7 +3546,7 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
     assert!(test.workspace_path("first.rs").exists());
     assert!(test.workspace_path("second.rs").exists());
     let validation_events = validation_events(&events);
-    assert_eq!(validation_events.len(), 2);
+    assert_eq!(validation_events.len(), 3);
     assert_eq!(
         validation_events[0].status,
         ProjectValidationStatus::ActionableFailure
@@ -3112,6 +3554,11 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
     assert_eq!(validation_events[0].output, "validation-fail-1");
     assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
     assert_eq!(validation_events[1].output, "validation-pass-2");
+    assert_eq!(
+        validation_events[2].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[2].output, "validation-fail-3");
     let first_item_id = validation_events[0]
         .item_id
         .as_deref()
@@ -3121,31 +3568,61 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
         .as_deref()
         .expect("second validation should have an item id");
     assert_ne!(first_item_id, second_item_id);
-    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    assert_eq!(std::fs::read_to_string(&count_path)?, "3");
     assert_eq!(server.requests().await.len(), 5);
     server.shutdown().await;
     Ok(())
 }
 
+#[test_case(CorrectionCompactionBackend::Local; "local")]
+#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
+#[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_validation_interrupt_during_correction_prevents_rerun() -> Result<()> {
+async fn project_validation_interrupt_during_correction_prevents_rerun(
+    backend: CorrectionCompactionBackend,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let command = shell_command_with_args(
-        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; printf validation-fail >&2; exit 7",
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then printf validation-fail >&2; exit 7; fi; printf validation-pass",
         &["project-validation", "validation-count"],
         /*timeout_ms*/ 5_000,
     );
-    let (correction_gate_tx, correction_gate_rx) = oneshot::channel();
-    let (server, _completions) = start_streaming_sse_server(vec![
-        response_completed_chunks("resp-1"),
-        vec![
-            streaming_chunk(ev_response_created("resp-2")),
-            gated_streaming_chunk(correction_gate_rx, vec![ev_completed("resp-2")]),
-        ],
-    ])
-    .await;
-    let test = build_streaming_validation_codex(&server, command).await?;
+    let resume_command = command.clone();
+    let server = start_mock_server().await;
+    let mut response_templates = vec![responses::sse_response(responses::sse(vec![
+        ev_response_created("resp-1"),
+        ev_completed_with_tokens("resp-1", /*total_tokens*/ 100),
+    ]))];
+    if !backend.is_legacy_remote() {
+        response_templates.push(
+            responses::sse_response(
+                backend.compaction_response("compact-1", "compacted correction context"),
+            )
+            .set_delay(Duration::from_secs(30)),
+        );
+    }
+    let response_mock = responses::mount_response_sequence(&server, response_templates).await;
+    let compact_mock = if backend.is_legacy_remote() {
+        Some(
+            responses::mount_compact_response_once(
+                &server,
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(serde_json::json!({ "output": [] }))
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_auto_compact_token_limit = Some(10);
+        backend.configure(config);
+    });
+    let test = builder.build(&server).await?;
     let count_path = test.workspace_path("validation-count");
 
     submit_user_input(&test.codex, &test, "finish the work").await?;
@@ -3161,19 +3638,321 @@ async fn project_validation_interrupt_during_correction_prevents_rerun() -> Resu
         first_validation,
         EventMsg::ProjectValidationCompleted(_)
     ));
-    server.wait_for_request_count(/*count*/ 2).await;
+    let compaction_request = if let Some(compact_mock) = compact_mock.as_ref() {
+        wait_for_recorded_requests(compact_mock, /*count*/ 1).await?;
+        compact_mock.single_request()
+    } else {
+        wait_for_recorded_requests(&response_mock, /*count*/ 2).await?;
+        response_mock
+            .requests()
+            .into_iter()
+            .nth(1)
+            .expect("compaction request")
+    };
+    assert_active_project_validation_correction(&compaction_request.message_input_texts("user"));
 
     test.codex.submit(Op::Interrupt).await?;
-    let _ = correction_gate_tx.send(());
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnAborted(_))
     })
     .await;
-    sleep(Duration::from_millis(100)).await;
-    assert_eq!(server.requests().await.len(), 2);
-    assert_eq!(std::fs::read_to_string(&count_path)?, "1");
+
+    test.codex.flush_rollout().await?;
+    let in_flight_rollout =
+        std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
+    assert!(in_flight_rollout.contains("<project_validation_failure>"));
+    assert!(in_flight_rollout.contains("<project_validation_correction_consumed>"));
+    assert_eq!(
+        response_mock.requests().len(),
+        usize::from(!backend.is_legacy_remote()) + 1
+    );
+    let rollout_path = test.codex.rollout_path().context("rollout path")?;
+    let home = Arc::clone(&test.home);
+    let resumed_cwd = test.config.cwd.clone();
+    test.codex.shutdown_and_wait().await?;
+
+    let resume_server = start_mock_server().await;
+    let response_mock =
+        responses::mount_sse_once(&resume_server, sse_completed("resume-response")).await;
+    let mut resume_builder = test_codex().with_config(move |config| {
+        config.cwd = resumed_cwd.clone();
+        config.validation.project_command = Some(resume_command);
+        config.model_auto_compact_token_limit = Some(1_000_000);
+        backend.configure(config);
+    });
+    let resumed = resume_builder
+        .resume(&resume_server, home, rollout_path)
+        .await?;
+    submit_user_input(&resumed.codex, &resumed, "continue after interruption").await?;
+    collect_events_until_terminal(&resumed.codex).await?;
+
+    let resumed_request = response_mock.single_request();
+    let resumed_user_texts = resumed_request.message_input_texts("user");
+    assert_persisted_project_validation_correction(
+        &resumed_user_texts,
+        Some("continue after interruption"),
+    );
+    assert_eq!(std::fs::read_to_string(&count_path)?, "2");
+    Ok(())
+}
+
+#[test_case(CorrectionCompactionBackend::Local; "local")]
+#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
+#[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_correction_survives_pre_turn_compaction(
+    backend: CorrectionCompactionBackend,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then printf validation-fail >&2; exit 7; fi; printf validation-pass",
+        &["project-validation", "validation-count"],
+        /*timeout_ms*/ 5_000,
+    );
+    let resume_command = command.clone();
+    let server = start_mock_server().await;
+    let mut responses = vec![responses::sse(vec![
+        ev_response_created("initial-response"),
+        ev_completed_with_tokens("initial-response", /*total_tokens*/ 100),
+    ])];
+    if !backend.is_legacy_remote() {
+        responses
+            .push(backend.compaction_response("compact-response", "compacted correction context"));
+    }
+    responses.push(responses::sse(vec![
+        ev_response_created("correction-response"),
+        ev_completed_with_tokens("correction-response", /*total_tokens*/ 1),
+    ]));
+    let response_mock = responses::mount_sse_sequence(&server, responses).await;
+    let compact_mock = if backend.is_legacy_remote() {
+        Some(
+            responses::mount_compact_user_history_with_summary_once(
+                &server,
+                "compacted correction context",
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_auto_compact_token_limit = Some(10);
+        backend.configure(config);
+    });
+    let test = builder.build(&server).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = response_mock.requests();
+    let correction_request_index = if let Some(compact_mock) = compact_mock {
+        assert_active_project_validation_correction(
+            &compact_mock.single_request().message_input_texts("user"),
+        );
+        1
+    } else {
+        assert_active_project_validation_correction(&requests[1].message_input_texts("user"));
+        2
+    };
+    assert_active_project_validation_correction(
+        &requests[correction_request_index].message_input_texts("user"),
+    );
+    assert_eq!(requests.len(), correction_request_index + 1);
+
+    let rollout_path = test.codex.rollout_path().context("rollout path")?;
+    let home = Arc::clone(&test.home);
+    let resumed_cwd = test.config.cwd.clone();
+    test.codex.shutdown_and_wait().await?;
+
+    let resume_server = start_mock_server().await;
+    let resume_response_mock =
+        responses::mount_sse_once(&resume_server, sse_completed("next-response")).await;
+    let mut resume_builder = test_codex().with_config(move |config| {
+        config.cwd = resumed_cwd.clone();
+        config.validation.project_command = Some(resume_command);
+        config.model_auto_compact_token_limit = Some(1_000_000);
+        backend.configure(config);
+    });
+    let resumed = resume_builder
+        .resume(&resume_server, home, rollout_path)
+        .await?;
+    submit_user_input(&resumed.codex, &resumed, "continue with the next task").await?;
+    collect_events_until_terminal(&resumed.codex).await?;
+
+    let next_turn_user_texts = resume_response_mock
+        .single_request()
+        .message_input_texts("user");
+    assert_persisted_project_validation_correction(
+        &next_turn_user_texts,
+        Some("continue with the next task"),
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_queued_input_during_correction_keeps_active_prompt() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "if [ -f \"$1\" ]; then printf validation-pass; exit 0; fi; touch \"$1\"; printf validation-fail >&2; exit 7",
+        &["project-validation", "validation-ran"],
+        /*timeout_ms*/ 5_000,
+    );
+    let (correction_gate_tx, correction_gate_rx) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        response_completed_chunks("initial-response"),
+        vec![
+            streaming_chunk(ev_response_created("correction-response")),
+            gated_streaming_chunk(
+                correction_gate_rx,
+                vec![ev_completed("correction-response")],
+            ),
+        ],
+        response_completed_chunks("correction-follow-up"),
+    ])
+    .await;
+    let test = build_streaming_validation_codex(&server, command).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    server.wait_for_request_count(/*count*/ 2).await;
+    steer_user_input(&test.codex, "also preserve the public API").await?;
+    let _ = correction_gate_tx.send(());
+    collect_events_until_terminal(&test.codex).await?;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let request: Value = serde_json::from_slice(request)?;
+        let user_texts = request_message_input_texts(&request, "user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
+    let follow_up_request: Value = serde_json::from_slice(&requests[2])?;
+    assert!(
+        request_message_input_texts(&follow_up_request, "user")
+            .iter()
+            .any(|text| text == "also preserve the public API")
+    );
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_correction_retry_keeps_the_active_failure_prompt() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "if [ -f \"$1\" ]; then printf validation-pass; exit 0; fi; touch \"$1\"; printf validation-fail >&2; exit 7",
+        &["project-validation", "validation-ran"],
+        /*timeout_ms*/ 5_000,
+    );
+    let (server, _completions) = start_streaming_sse_server(vec![
+        response_completed_chunks("resp-1"),
+        vec![streaming_chunk(serde_json::json!({
+            "type": "response.output_item.done",
+        }))],
+        response_completed_chunks("resp-2"),
+    ])
+    .await;
+    let mut builder = test_codex().with_config(move |config| {
+        config.validation.project_command = Some(command);
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder.build_with_streaming_server(&server).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let events = collect_events_until_terminal(&test.codex).await?;
+
+    let validation_events = validation_events(&events);
+    assert_eq!(validation_events.len(), 2);
+    assert_eq!(
+        validation_events[0].status,
+        ProjectValidationStatus::ActionableFailure
+    );
+    assert_eq!(validation_events[0].output, "validation-fail");
+    assert_eq!(validation_events[1].status, ProjectValidationStatus::Passed);
+    assert_eq!(validation_events[1].output, "validation-pass");
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    for request in &requests[1..] {
+        let request: Value = serde_json::from_slice(request)?;
+        let user_texts = request_message_input_texts(&request, "user");
+        assert!(
+            user_texts
+                .iter()
+                .any(|text| text.starts_with("<project_validation_failure>"))
+        );
+        assert!(
+            user_texts
+                .iter()
+                .all(|text| !text.starts_with("<project_validation_correction_consumed>"))
+        );
+    }
 
     server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_validation_model_error_during_correction_persists_resolution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let command = shell_command_with_args(
+        "count=0; if [ -f \"$1\" ]; then count=$(cat \"$1\"); fi; count=$((count + 1)); printf '%s' \"$count\" > \"$1\"; if [ \"$count\" -eq 1 ]; then printf validation-fail >&2; exit 7; fi; printf validation-pass",
+        &["project-validation", "validation-count"],
+        /*timeout_ms*/ 5_000,
+    );
+    let server = start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse_completed("resp-1"),
+            responses::sse_failed(
+                "resp-2",
+                "context_length_exceeded",
+                "correction request failed",
+            ),
+        ],
+    )
+    .await;
+    let test = build_validation_codex(&server, command).await?;
+
+    submit_user_input(&test.codex, &test, "finish the work").await?;
+    let first_turn_events = collect_events_until_terminal(&test.codex).await?;
+    assert!(
+        first_turn_events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_)))
+    );
+    assert_eq!(validation_events(&first_turn_events).len(), 1);
+
+    test.codex.flush_rollout().await?;
+    let rollout = std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
+    assert!(rollout.contains("<project_validation_failure>"));
+    assert!(rollout.contains("correction request has been consumed"));
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1]
+            .message_input_texts("user")
+            .into_iter()
+            .filter(|text| text.starts_with("<project_validation_failure>"))
+            .count(),
+        1
+    );
     Ok(())
 }
 

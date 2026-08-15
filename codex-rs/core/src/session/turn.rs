@@ -16,6 +16,7 @@ use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_
 use crate::connectors;
 use crate::context::ContextualUserFragment;
 use crate::context_manager::ImageSanitizationSource;
+use crate::context_manager::ModelRequestHistoryMode;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -211,6 +212,7 @@ pub(crate) async fn run_turn(
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
     run_state: &mut RunTurnState,
+    model_request_history_mode: ModelRequestHistoryMode,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
@@ -228,6 +230,7 @@ pub(crate) async fn run_turn(
         &sess,
         &turn_context,
         &mut client_session,
+        model_request_history_mode,
         &cancellation_token,
     )
     .await
@@ -396,9 +399,11 @@ pub(crate) async fn run_turn(
 
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
-                sess.prepare_model_visible_history(turn_context.as_ref())
-                    .await
-                    .for_prompt(&turn_context.model_info.input_modalities)
+                let mut history = sess
+                    .prepare_model_visible_history(turn_context.as_ref())
+                    .await;
+                history.apply_model_request_history_mode(model_request_history_mode);
+                history.for_prompt(&turn_context.model_info.input_modalities)
             }
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
@@ -419,6 +424,7 @@ pub(crate) async fn run_turn(
                 &responses_metadata,
                 sampling_request_input,
                 auto_review_awareness_input_item,
+                model_request_history_mode,
                 cancellation_token.child_token(),
             )
             .await
@@ -510,6 +516,7 @@ pub(crate) async fn run_turn(
                             world_state: Arc::clone(&world_state),
                             step_context: Arc::clone(&step_context),
                         },
+                        model_request_history_mode,
                         CompactionReason::ContextLimit,
                         CompactionPhase::MidTurn,
                     )
@@ -1176,10 +1183,17 @@ async fn run_pre_sampling_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
-        .await?;
+    maybe_run_previous_model_inline_compact(
+        sess,
+        turn_context,
+        client_session,
+        model_request_history_mode,
+        cancellation_token,
+    )
+    .await?;
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
@@ -1195,6 +1209,7 @@ async fn run_pre_sampling_compact(
             /*fallback_step_context*/ None,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::ContextLimit,
             CompactionPhase::PreTurn,
         )
@@ -1244,6 +1259,7 @@ async fn maybe_run_previous_model_inline_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
     let Some(previous_turn_settings) = sess.previous_turn_settings().await else {
@@ -1277,6 +1293,7 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::CompHashChanged,
             CompactionPhase::PreTurn,
         )
@@ -1325,6 +1342,7 @@ async fn maybe_run_previous_model_inline_compact(
             fallback_step_context,
             client_session,
             InitialContextInjection::DoNotInject,
+            model_request_history_mode,
             CompactionReason::ModelDownshift,
             CompactionPhase::PreTurn,
         )
@@ -1344,6 +1362,7 @@ async fn run_auto_compact(
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
@@ -1356,6 +1375,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             step_context,
             initial_context_injection,
+            model_request_history_mode,
         )
         .await?;
         return Ok(());
@@ -1378,6 +1398,7 @@ async fn run_auto_compact(
                 fallback_step_context,
                 client_session,
                 initial_context_injection,
+                model_request_history_mode,
                 reason,
                 phase,
             )
@@ -1395,6 +1416,7 @@ async fn run_auto_compact(
             fallback_step_context,
             client_session.turn_state(),
             initial_context_injection,
+            model_request_history_mode,
             reason,
             phase,
         )
@@ -1409,6 +1431,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            model_request_history_mode,
             reason,
             phase,
         )
@@ -1507,6 +1530,7 @@ async fn run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     request_only_input_item: Option<ResponseItem>,
+    model_request_history_mode: ModelRequestHistoryMode,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
@@ -1530,15 +1554,16 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        let prompt_input = if let Some(input) = initial_input.take() {
+        let mut prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
-            sess.prepare_model_visible_history(turn_context.as_ref())
-                .await
-                .for_prompt(&turn_context.model_info.input_modalities)
+            let mut history = sess
+                .prepare_model_visible_history(turn_context.as_ref())
+                .await;
+            history.apply_model_request_history_mode(model_request_history_mode);
+            history.for_prompt(&turn_context.model_info.input_modalities)
         };
         let original_prompt_input = prompt_input.clone();
-        let mut prompt_input = prompt_input;
         if let Some(request_only_input_item) = &request_only_input_item {
             prompt_input.push(request_only_input_item.clone());
         }

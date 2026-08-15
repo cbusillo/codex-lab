@@ -1,5 +1,7 @@
 use super::*;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+use crate::context::ContextualUserFragment;
+use crate::context::ProjectValidationCorrectionConsumed;
 use crate::context::UserInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
@@ -2732,5 +2734,32 @@ fn replace_all_images_reports_user_source_when_a_user_image_precedes_tool_images
     assert_eq!(
         history.replace_all_images("Image omitted"),
         Some(ImageSanitizationSource::User)
+    );
+}
+
+#[test]
+fn correction_history_mode_hides_only_the_active_consumed_marker() {
+    let old_failure =
+        user_input_text_msg("<project_validation_failure>old</project_validation_failure>");
+    let old_consumed = ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
+    let active_failure =
+        user_input_text_msg("<project_validation_failure>active</project_validation_failure>");
+    let active_consumed = ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
+    let mut history = create_history_with_items(vec![
+        old_failure.clone(),
+        old_consumed.clone(),
+        active_failure.clone(),
+        active_consumed.clone(),
+    ]);
+
+    let pair = history
+        .apply_model_request_history_mode(ModelRequestHistoryMode::ProjectValidationCorrection)
+        .expect("active correction pair");
+
+    assert_eq!(pair.failure.item, active_failure);
+    assert_eq!(pair.consumed.item, active_consumed);
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![old_failure, old_consumed, active_failure]
     );
 }

@@ -15,6 +15,8 @@ use crate::execution_account::ExecutionAccountLease;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
+use crate::session::project_validation_coordinator::ProjectValidationCoordinator;
+use crate::session::project_validation_coordinator::ProjectValidationSuccessCache;
 use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -100,4 +102,6 @@ pub(crate) struct SessionServices {
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
+    pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
+    pub(crate) project_validation_success_cache: ProjectValidationSuccessCache,
 }

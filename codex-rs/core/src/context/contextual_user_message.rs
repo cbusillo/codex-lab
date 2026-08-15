@@ -8,6 +8,8 @@ use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
+use super::ProjectValidationCorrectionConsumed;
+use super::ProjectValidationFailure;
 use super::RecommendedPluginsInstructions;
 use super::SubagentNotification;
 use super::TurnAborted;
@@ -23,6 +25,8 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
     SubagentNotification::matches_text,
+    ProjectValidationCorrectionConsumed::matches_text,
+    ProjectValidationFailure::matches_text,
     InternalModelContextFragment::matches_text,
     RecommendedPluginsInstructions::matches_text,
     LegacyUnifiedExecProcessLimitWarning::matches_text,

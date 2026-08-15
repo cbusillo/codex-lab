@@ -3235,7 +3235,11 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     );
 
     session
-        .start_new_context_window(&step_context, world_state)
+        .start_new_context_window(
+            &step_context,
+            world_state,
+            /*preserved_history*/ Vec::new(),
+        )
         .await;
 
     let live_history = session.clone_history().await;
@@ -5691,6 +5695,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         ClientMcpExtensions::default(),
         AgentControl::default(),
         environment_manager,
+        Arc::new(super::project_validation_coordinator::ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -5949,6 +5954,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        project_validation_coordinator: Arc::new(
+            super::project_validation_coordinator::ProjectValidationCoordinator::default(),
+        ),
+        project_validation_success_cache:
+            super::project_validation_coordinator::ProjectValidationSuccessCache::default(),
     };
 
     let plugins_input = per_turn_config.plugins_config_input();
@@ -6132,6 +6142,7 @@ async fn make_session_with_config_and_rx(
         ClientMcpExtensions::default(),
         AgentControl::default(),
         environment_manager,
+        Arc::new(super::project_validation_coordinator::ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -6247,6 +6258,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         ClientMcpExtensions::default(),
         agent_control,
         environment_manager,
+        Arc::new(super::project_validation_coordinator::ProjectValidationCoordinator::default()),
         /*inherited_environments*/ None,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
@@ -8159,6 +8171,11 @@ where
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
+        project_validation_coordinator: Arc::new(
+            super::project_validation_coordinator::ProjectValidationCoordinator::default(),
+        ),
+        project_validation_success_cache:
+            super::project_validation_coordinator::ProjectValidationSuccessCache::default(),
     };
 
     let plugins_input = per_turn_config.plugins_config_input();

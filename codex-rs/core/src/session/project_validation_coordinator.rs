@@ -17,6 +17,9 @@ const MAX_SUCCESSFUL_VALIDATION_KEYS: usize = 64;
 pub(crate) struct ProjectValidationCoordinator {
     leases: Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>,
     cargo_permits: Arc<Semaphore>,
+}
+
+pub(crate) struct ProjectValidationSuccessCache {
     successful_validations: Mutex<VecDeque<ProjectValidationSuccessKey>>,
 }
 
@@ -60,6 +63,13 @@ impl Default for ProjectValidationCoordinator {
         Self {
             leases: Mutex::new(HashMap::new()),
             cargo_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_CARGO_VALIDATIONS)),
+        }
+    }
+}
+
+impl Default for ProjectValidationSuccessCache {
+    fn default() -> Self {
+        Self {
             successful_validations: Mutex::new(VecDeque::new()),
         }
     }
@@ -119,7 +129,9 @@ impl ProjectValidationCoordinator {
             permit = permits.acquire_owned() => permit.ok().map(|permit| ProjectValidationCargoPermit { _permit: permit }),
         }
     }
+}
 
+impl ProjectValidationSuccessCache {
     pub(crate) async fn has_successful_validation(
         &self,
         key: &ProjectValidationSuccessKey,
@@ -294,9 +306,9 @@ mod tests {
 
     #[tokio::test]
     async fn successful_validation_cache_is_bounded_and_refreshes_duplicates() {
-        let coordinator = ProjectValidationCoordinator::default();
+        let cache = ProjectValidationSuccessCache::default();
         for index in 0..=MAX_SUCCESSFUL_VALIDATION_KEYS {
-            coordinator
+            cache
                 .record_successful_validation(ProjectValidationSuccessKey::new(
                     PathBuf::from("repo"),
                     PathBuf::from("workspace"),
@@ -307,7 +319,7 @@ mod tests {
                 .await;
         }
         assert_eq!(
-            coordinator.successful_validations.lock().await.len(),
+            cache.successful_validations.lock().await.len(),
             MAX_SUCCESSFUL_VALIDATION_KEYS
         );
 
@@ -318,12 +330,10 @@ mod tests {
             Some(format!("diff-{MAX_SUCCESSFUL_VALIDATION_KEYS}")),
             vec!["cargo".to_string(), "check".to_string()],
         );
-        assert!(coordinator.has_successful_validation(&newest).await);
-        coordinator
-            .record_successful_validation(newest.clone())
-            .await;
+        assert!(cache.has_successful_validation(&newest).await);
+        cache.record_successful_validation(newest.clone()).await;
         assert_eq!(
-            coordinator.successful_validations.lock().await.back(),
+            cache.successful_validations.lock().await.back(),
             Some(&newest)
         );
     }

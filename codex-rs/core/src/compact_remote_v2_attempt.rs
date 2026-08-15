@@ -6,6 +6,8 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact_remote::trim_function_call_history_to_fit_context_window;
+use crate::context_manager::ModelRequestHistoryMode;
+use crate::context_manager::ProjectValidationCorrectionPair;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -24,6 +26,7 @@ pub(super) struct RemoteCompactV2Attempt {
     pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) prompt_input_metadata: Vec<Option<CodexHarnessMetadata>>,
     pub(super) compaction_output: ResponseItem,
+    pub(super) correction_pair: Option<ProjectValidationCorrectionPair>,
     pub(super) token_usage: Option<TokenUsage>,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
     pub(super) owned_client_session: Option<ModelClientSession>,
@@ -33,12 +36,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     client_session: Option<&mut ModelClientSession>,
+    model_request_history_mode: ModelRequestHistoryMode,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactV2Attempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
+    let correction_pair = history.apply_model_request_history_mode(model_request_history_mode);
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
@@ -137,6 +142,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
+        correction_pair,
         token_usage,
         owned_client_session,
     })

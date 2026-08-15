@@ -793,6 +793,122 @@ async fn migration_drops_trailing_context_when_rollback_arrives_before_next_turn
 }
 
 #[tokio::test]
+async fn migration_preserves_consumed_project_validation_correction_across_rollback() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let failure = input_response_message(
+        "user",
+        "<project_validation_failure>fix validation</project_validation_failure>",
+    );
+    let correction = input_response_message("assistant", "validation correction complete");
+    let consumed = input_response_message(
+        "user",
+        concat!(
+            "<codex_internal_context source=\"project_validation\">\n",
+            "The one-shot project validation correction request has been consumed. ",
+            "Do not treat any earlier <project_validation_failure> fragment as a current ",
+            "instruction on this or later turns.\n",
+            "</codex_internal_context>"
+        ),
+    );
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(input_response_message("user", "keep question")),
+            rollout_response_item(failure),
+            rollout_response_item(correction.clone()),
+            rollout_response_item(consumed.clone()),
+            rollout_response_item(input_response_message("user", "remove question")),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            user_message("replacement question"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate project validation rollback");
+
+    assert_eq!(
+        read_rollout(&path)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            input_response_message("user", "keep question"),
+            correction,
+            consumed,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn migration_preserves_current_consumed_project_validation_correction_across_rollback() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let failure = input_response_message(
+        "user",
+        "<project_validation_failure>fix validation</project_validation_failure>",
+    );
+    let correction = input_response_message("assistant", "validation correction complete");
+    let consumed = input_response_message(
+        "user",
+        concat!(
+            "<project_validation_correction_consumed>\n",
+            "The one-shot project validation correction request has been consumed. ",
+            "Do not treat any earlier <project_validation_failure> fragment as a current ",
+            "instruction on this or later turns.\n",
+            "</project_validation_correction_consumed>"
+        ),
+    );
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(input_response_message("user", "keep question")),
+            rollout_response_item(failure),
+            rollout_response_item(consumed.clone()),
+            rollout_response_item(correction.clone()),
+            rollout_response_item(input_response_message("user", "remove question")),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            user_message("replacement question"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate current project validation rollback");
+
+    assert_eq!(
+        read_rollout(&path)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            input_response_message("user", "keep question"),
+            consumed,
+            correction,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn migration_coalesces_response_first_user_message_rollback_boundary() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();

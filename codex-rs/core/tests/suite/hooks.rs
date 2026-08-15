@@ -310,6 +310,44 @@ if payload.get("prompt") == {blocked_prompt_json}:
     Ok(())
 }
 
+fn write_gated_user_prompt_submit_hook(home: &Path, blocked_prompt: &str) -> Result<()> {
+    let script_path = home.join("gated_user_prompt_submit_hook.py");
+    let started_path = home.join("gated_user_prompt_submit_started");
+    let release_path = home.join("gated_user_prompt_submit_release");
+    let blocked_prompt_json =
+        serde_json::to_string(blocked_prompt).context("serialize blocked prompt for test")?;
+    let script = format!(
+        r#"import json
+from pathlib import Path
+import sys
+import time
+
+prompt = json.load(sys.stdin).get("prompt")
+if prompt == {blocked_prompt_json}:
+    Path(r"{started_path}").write_text(prompt, encoding="utf-8")
+    while not Path(r"{release_path}").exists():
+        time.sleep(0.01)
+    print(json.dumps({{"decision": "block", "reason": "blocked by hook"}}))
+"#,
+        started_path = started_path.display(),
+        release_path = release_path.display(),
+    );
+    let hooks = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": format!("python3 {}", script_path.display()),
+                }]
+            }]
+        }
+    });
+
+    fs::write(&script_path, script).context("write gated user prompt submit hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
+    Ok(())
+}
+
 fn write_async_user_prompt_submit_hook(home: &Path, gated: bool) -> Result<()> {
     let script_path = home.join("async_user_prompt_submit_hook.py");
     let started_path = home.join("async_user_prompt_submit_started");
@@ -1371,6 +1409,70 @@ async fn stop_hook_can_block_multiple_times_in_same_turn() -> Result<()> {
         "rollout should persist the second continuation prompt",
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_input_runs_after_user_prompt_hook_blocks_initial_input() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "queued input handled"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let blocked_prompt = "block this initial prompt";
+    let queued_prompt = "handle this queued prompt";
+    let test = test_codex()
+        .with_pre_build_hook(|home| {
+            write_gated_user_prompt_submit_hook(home, blocked_prompt)
+                .expect("write gated user prompt submit hook");
+        })
+        .with_config(trust_discovered_hooks)
+        .build(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: blocked_prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    fs_wait::wait_for_path_exists(
+        test.codex_home_path()
+            .join("gated_user_prompt_submit_started"),
+        Duration::from_secs(5),
+    )
+    .await
+    .context("timed out waiting for the user prompt submit hook to start")?;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: queued_prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    fs::write(
+        test.codex_home_path()
+            .join("gated_user_prompt_submit_release"),
+        "ready",
+    )
+    .context("release gated user prompt submit hook")?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = response.single_request();
+    let user_texts = request.message_input_texts("user");
+    assert!(user_texts.contains(&queued_prompt.to_string()));
+    assert!(!user_texts.contains(&blocked_prompt.to_string()));
     Ok(())
 }
 

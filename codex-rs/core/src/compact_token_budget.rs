@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use crate::compact::InitialContextInjection;
 use crate::context::world_state::WorldState;
+use crate::context_manager::ModelRequestHistoryMode;
+use crate::context_manager::ProjectValidationCorrectionPair;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -41,7 +43,14 @@ pub(crate) async fn run_manual_compact_task(
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await?;
     let world_state = Arc::new(sess.build_world_state_for_step(&step_context).await?);
-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Manual).await
+    run_compact_task_inner(
+        &sess,
+        &step_context,
+        world_state,
+        ModelRequestHistoryMode::Normal,
+        CompactionTrigger::Manual,
+    )
+    .await
 }
 
 /// Runs token-budget inline auto-compaction as a normal compaction lifecycle.
@@ -53,6 +62,7 @@ pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     initial_context_injection: InitialContextInjection,
+    model_request_history_mode: ModelRequestHistoryMode,
 ) -> CodexResult<()> {
     let world_state = match initial_context_injection {
         InitialContextInjection::BeforeLastUserMessage { world_state, .. } => world_state,
@@ -60,13 +70,21 @@ pub(crate) async fn run_inline_auto_compact_task(
             Arc::new(sess.build_world_state_for_step(&step_context).await?)
         }
     };
-    run_compact_task_inner(&sess, &step_context, world_state, CompactionTrigger::Auto).await
+    run_compact_task_inner(
+        &sess,
+        &step_context,
+        world_state,
+        model_request_history_mode,
+        CompactionTrigger::Auto,
+    )
+    .await
 }
 
 async fn run_compact_task_inner(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     world_state: Arc<WorldState>,
+    model_request_history_mode: ModelRequestHistoryMode,
     trigger: CompactionTrigger,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
@@ -79,7 +97,11 @@ async fn run_compact_task_inner(
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
-    sess.start_new_context_window(step_context, world_state)
+    let mut history = sess.clone_history().await;
+    let preserved_history = history
+        .apply_model_request_history_mode(model_request_history_mode)
+        .map_or_else(Vec::new, ProjectValidationCorrectionPair::into_items);
+    sess.start_new_context_window(step_context, world_state, preserved_history)
         .await;
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;

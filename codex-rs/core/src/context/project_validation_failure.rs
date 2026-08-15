@@ -30,7 +30,7 @@ impl ProjectValidationFailure {
             .saturating_sub(START_MARKER.len())
             .saturating_sub(END_MARKER.len())
             .saturating_sub(BODY_PADDING.len().saturating_mul(2));
-        let instruction = "Project validation failed. Fix the actionable failure below. Do not run this configured command yourself; the runtime will rerun it once after this correction cycle.";
+        let instruction = "Project validation failed. Fix the actionable failure below. This instruction applies only to the correction response that immediately follows. Do not run this configured command yourself; the runtime will rerun it once after this correction cycle.";
         let metadata = format!(
             "\nExit code: {exit_code}\nEvent output truncated: {output_truncated}\nOutput:\n"
         );

@@ -63,6 +63,28 @@ fn user_message(text: &str) -> ResponseItem {
     }
 }
 
+#[test]
+fn preserves_active_validation_correction_pair_before_summary() {
+    let failure = ResponseItemEnvelope::new(user_message(
+        "<project_validation_failure>active</project_validation_failure>",
+    ));
+    let consumed = ResponseItemEnvelope::new(user_message(
+        "<project_validation_correction_consumed>active</project_validation_correction_consumed>",
+    ));
+    let summary = ResponseItemEnvelope::new(user_message(&format!("{SUMMARY_PREFIX}\nsummary")));
+    let pair = ProjectValidationCorrectionPair {
+        failure: failure.clone(),
+        consumed: consumed.clone(),
+    };
+
+    let history = preserve_project_validation_correction_pair(
+        vec![failure.clone(), summary.clone()],
+        Some(&pair),
+    );
+
+    assert_eq!(history, vec![failure, consumed, summary]);
+}
+
 fn compacted_user_message(text: &str) -> CompactedUserMessage {
     CompactedUserMessage {
         message: text.to_string(),

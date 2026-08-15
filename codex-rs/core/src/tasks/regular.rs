@@ -2,8 +2,18 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::context::ContextualUserFragment;
+use crate::context::ProjectValidationCorrectionConsumed;
+use crate::context::ProjectValidationFailure;
+use crate::context_manager::ModelRequestHistoryMode;
 use crate::session::TurnInput;
+use crate::session::project_validation::ProjectValidationAttempt;
+use crate::session::project_validation::ProjectValidationRun;
+use crate::session::project_validation::project_validation_worktree_fingerprint;
+use crate::session::project_validation::run_project_validation;
 use crate::session::session::Session;
+use crate::session::turn::ProjectValidationEligibility;
+use crate::session::turn::RunTurnState;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
@@ -19,6 +29,14 @@ use super::SessionTaskResult;
 
 #[derive(Default)]
 pub(crate) struct RegularTask;
+
+/// Tracks whether the next validation follows ordinary model work or the
+/// single corrective model run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NextProjectValidationAttempt {
+    Initial,
+    CorrectionRerun,
+}
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
@@ -72,23 +90,111 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
-        let mut run_state = crate::session::turn::RunTurnState::new();
+        let mut next_project_validation_attempt = NextProjectValidationAttempt::Initial;
+        let mut correction_available = true;
+        // Capture worktree state before any model work so validation can tell
+        // turn-authored changes from pre-existing ones.
+        let project_validation_worktree_at_turn_start = tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                run_hooks_and_record_inputs(&sess, &ctx, &next_input).await;
+                return Ok(None);
+            },
+            fingerprint = project_validation_worktree_fingerprint(&ctx) => fingerprint,
+        };
+        let mut project_validation_model_used_tools = false;
+        let mut run_turn_state = RunTurnState::new();
         loop {
-            let result = run_turn(
+            let model_request_history_mode = match next_project_validation_attempt {
+                NextProjectValidationAttempt::Initial => ModelRequestHistoryMode::Normal,
+                NextProjectValidationAttempt::CorrectionRerun => {
+                    ModelRequestHistoryMode::ProjectValidationCorrection
+                }
+            };
+            let turn_result = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 Arc::clone(&ctx.extension_data),
                 next_input,
-                &mut run_state,
+                &mut run_turn_state,
+                model_request_history_mode,
                 prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
             .instrument(run_turn_span.clone())
-            .await?;
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return Ok(result.last_agent_message);
+            .await;
+            let turn_result = turn_result?;
+            let last_agent_message = turn_result.last_agent_message.clone();
+            let validation_eligible = turn_result.project_validation_eligibility
+                == ProjectValidationEligibility::Eligible;
+            project_validation_model_used_tools |= turn_result.model_used_tools;
+            if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                next_input = Vec::new();
+                continue;
             }
-            next_input = Vec::new();
+            if !validation_eligible {
+                return Ok(last_agent_message);
+            }
+            let attempt = match next_project_validation_attempt {
+                NextProjectValidationAttempt::Initial => ProjectValidationAttempt::Initial {
+                    worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
+                    model_used_tools: project_validation_model_used_tools,
+                },
+                NextProjectValidationAttempt::CorrectionRerun => {
+                    ProjectValidationAttempt::CorrectionRerun {
+                        worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
+                    }
+                }
+            };
+            let validation_event = match run_project_validation(
+                &sess,
+                &ctx,
+                attempt,
+                cancellation_token.child_token(),
+            )
+            .await
+            {
+                ProjectValidationRun::NotApplicable => return Ok(last_agent_message),
+                ProjectValidationRun::Skipped(event) => event,
+                ProjectValidationRun::Completed(event) => {
+                    if correction_available
+                        && let Some(correction) = ProjectValidationFailure::from_event(&event)
+                    {
+                        sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                            .await;
+                        if cancellation_token.is_cancelled() {
+                            return Ok(None);
+                        }
+                        let correction_item = ContextualUserFragment::into(correction);
+                        let correction_consumed_item =
+                            ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
+                        sess.record_conversation_items(
+                            &ctx,
+                            &[correction_item, correction_consumed_item],
+                        )
+                        .await;
+                        sess.flush_rollout().await?;
+                        correction_available = false;
+                        next_project_validation_attempt =
+                            NextProjectValidationAttempt::CorrectionRerun;
+                        next_input = Vec::new();
+                        continue;
+                    }
+                    event
+                }
+                ProjectValidationRun::Cancelled(event) => {
+                    sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
+                        .await;
+                    return Ok(None);
+                }
+            };
+            next_project_validation_attempt = NextProjectValidationAttempt::Initial;
+            sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(validation_event))
+                .await;
+            if sess.input_queue.has_pending_input(&sess.active_turn).await {
+                next_input = Vec::new();
+                continue;
+            }
+            return Ok(last_agent_message);
         }
     }
 }
