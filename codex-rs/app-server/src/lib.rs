@@ -26,6 +26,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
+use crate::config_manager::ConfigManagerArgs;
 use crate::connection_cleanup::ConnectionCleanupTasks;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
@@ -509,16 +510,16 @@ pub async fn run_main_with_transport_options(
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
     let ignore_user_config = loader_overrides.ignore_user_config;
-    let config_manager = ConfigManager::new(
-        codex_home.to_path_buf(),
-        codex_home.to_path_buf(),
-        cli_kv_overrides.clone(),
+    let config_manager = ConfigManager::new(ConfigManagerArgs {
+        codex_home: codex_home.to_path_buf(),
+        auth_home: codex_home.to_path_buf(),
+        cli_overrides: cli_kv_overrides.clone(),
         loader_overrides,
         strict_config,
-        Default::default(),
-        arg0_paths.clone(),
-        Arc::new(NoopThreadConfigLoader),
-    );
+        cloud_config_bundle: Default::default(),
+        arg0_paths: arg0_paths.clone(),
+        thread_config_loader: Arc::new(NoopThreadConfigLoader),
+    });
     match config_manager
         .load_latest_config(/*fallback_cwd*/ None)
         .await

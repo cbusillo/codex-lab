@@ -236,6 +236,7 @@ mod thread_processor_behavior_tests {
     }
 
     use super::super::*;
+    use crate::config_manager::ConfigManagerArgs;
     use crate::outgoing_message::OutgoingEnvelope;
     use crate::outgoing_message::OutgoingMessage;
     use anyhow::Result;
@@ -825,15 +826,15 @@ mod thread_processor_behavior_tests {
             supports_websockets: true,
             supports_standalone_web_search: false,
         };
-        let config_manager = ConfigManager::new(
-            temp_dir.path().to_path_buf(),
-            temp_dir.path().to_path_buf(),
-            Vec::new(),
-            LoaderOverrides::default(),
-            /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
-            Arg0DispatchPaths::default(),
-            Arc::new(StaticThreadConfigLoader::new(vec![
+        let config_manager = ConfigManager::new(ConfigManagerArgs {
+            codex_home: temp_dir.path().to_path_buf(),
+            auth_home: temp_dir.path().to_path_buf(),
+            cli_overrides: Vec::new(),
+            loader_overrides: LoaderOverrides::default(),
+            strict_config: false,
+            cloud_config_bundle: CloudConfigBundleLoader::default(),
+            arg0_paths: Arg0DispatchPaths::default(),
+            thread_config_loader: Arc::new(StaticThreadConfigLoader::new(vec![
                 ThreadConfigSource::Session(SessionThreadConfig {
                     model_provider: Some("session".to_string()),
                     model_providers: HashMap::from([(
@@ -843,7 +844,7 @@ mod thread_processor_behavior_tests {
                     features: BTreeMap::from([("plugins".to_string(), false)]),
                 }),
             ])),
-        );
+        });
         let config = config_manager
             .load_with_overrides(
                 Some(HashMap::from([

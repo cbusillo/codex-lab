@@ -52,6 +52,7 @@ use std::time::Duration;
 
 use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
+use crate::config_manager::ConfigManagerArgs;
 use crate::error_code::OVERLOADED_ERROR_CODE;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
@@ -451,16 +452,16 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         ));
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let config_manager = ConfigManager::new(
-            args.config.codex_home.to_path_buf(),
-            args.config.auth_home.to_path_buf(),
-            args.cli_overrides,
-            args.loader_overrides,
-            args.strict_config,
-            args.cloud_config_bundle,
-            args.arg0_paths.clone(),
-            args.thread_config_loader,
-        );
+        let config_manager = ConfigManager::new(ConfigManagerArgs {
+            codex_home: args.config.codex_home.to_path_buf(),
+            auth_home: args.config.auth_home.to_path_buf(),
+            cli_overrides: args.cli_overrides,
+            loader_overrides: args.loader_overrides,
+            strict_config: args.strict_config,
+            cloud_config_bundle: args.cloud_config_bundle,
+            arg0_paths: args.arg0_paths.clone(),
+            thread_config_loader: args.thread_config_loader,
+        });
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {

@@ -39,17 +39,29 @@ pub(crate) struct ConfigManager {
     thread_config_loader: Arc<RwLock<Arc<dyn ThreadConfigLoader>>>,
 }
 
+pub(crate) struct ConfigManagerArgs {
+    pub(crate) codex_home: PathBuf,
+    pub(crate) auth_home: PathBuf,
+    pub(crate) cli_overrides: Vec<(String, TomlValue)>,
+    pub(crate) loader_overrides: LoaderOverrides,
+    pub(crate) strict_config: bool,
+    pub(crate) cloud_config_bundle: CloudConfigBundleLoader,
+    pub(crate) arg0_paths: Arg0DispatchPaths,
+    pub(crate) thread_config_loader: Arc<dyn ThreadConfigLoader>,
+}
+
 impl ConfigManager {
-    pub(crate) fn new(
-        codex_home: PathBuf,
-        auth_home: PathBuf,
-        cli_overrides: Vec<(String, TomlValue)>,
-        loader_overrides: LoaderOverrides,
-        strict_config: bool,
-        cloud_config_bundle: CloudConfigBundleLoader,
-        arg0_paths: Arg0DispatchPaths,
-        thread_config_loader: Arc<dyn ThreadConfigLoader>,
-    ) -> Self {
+    pub(crate) fn new(args: ConfigManagerArgs) -> Self {
+        let ConfigManagerArgs {
+            codex_home,
+            auth_home,
+            cli_overrides,
+            loader_overrides,
+            strict_config,
+            cloud_config_bundle,
+            arg0_paths,
+            thread_config_loader,
+        } = args;
         Self {
             codex_home,
             auth_home,
@@ -111,14 +123,6 @@ impl ConfigManager {
             *guard = loader;
         } else {
             warn!("failed to update cloud config bundle loader");
-        }
-    }
-
-    pub(crate) fn clear_cloud_config_bundle_loader(&self) {
-        if let Ok(mut guard) = self.cloud_config_bundle.write() {
-            *guard = CloudConfigBundleLoader::default();
-        } else {
-            warn!("failed to clear cloud config bundle loader");
         }
     }
 
@@ -319,16 +323,16 @@ impl ConfigManager {
         loader_overrides: LoaderOverrides,
         cloud_config_bundle: CloudConfigBundleLoader,
     ) -> Self {
-        Self::new(
-            codex_home.clone(),
-            codex_home,
+        Self::new(ConfigManagerArgs {
+            codex_home: codex_home.clone(),
+            auth_home: codex_home,
             cli_overrides,
             loader_overrides,
-            /*strict_config*/ false,
+            strict_config: false,
             cloud_config_bundle,
-            Arg0DispatchPaths::default(),
-            Arc::new(codex_config::NoopThreadConfigLoader),
-        )
+            arg0_paths: Arg0DispatchPaths::default(),
+            thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+        })
     }
 
     #[cfg(test)]
