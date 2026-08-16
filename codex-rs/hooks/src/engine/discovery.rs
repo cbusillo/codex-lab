@@ -478,14 +478,6 @@ fn append_matcher_groups(
                     } else {
                         command
                     };
-                    if r#async && event_name != codex_protocol::protocol::HookEventName::SessionEnd
-                    {
-                        warnings.push(format!(
-                            "skipping async hook in {}: async hooks are not supported yet",
-                            source.path.display()
-                        ));
-                        continue;
-                    }
                     if command.trim().is_empty() {
                         warnings.push(format!(
                             "skipping empty hook command in {}",
@@ -499,7 +491,15 @@ fn append_matcher_groups(
                         source.path.as_path(),
                         warnings,
                     );
-                    if r#async {
+                    let execution_mode = if r#async
+                        && event_name != codex_protocol::protocol::HookEventName::SessionEnd
+                    {
+                        HookExecutionMode::Async
+                    } else {
+                        HookExecutionMode::Sync
+                    };
+                    if r#async && event_name == codex_protocol::protocol::HookEventName::SessionEnd
+                    {
                         warnings.push(format!(
                             "running async SessionEnd hook synchronously in {}",
                             source.path.display()
@@ -587,7 +587,7 @@ fn append_matcher_groups(
                         is_managed: source.is_managed,
                         current_hash,
                         trust_status,
-                        execution_mode: HookExecutionMode::Sync,
+                        execution_mode,
                     });
                     if enabled
                         && (source.bypass_hook_trust
@@ -610,7 +610,7 @@ fn append_matcher_groups(
                             kind: ConfiguredHandlerKind::Command {
                                 command,
                                 env: source.env.clone(),
-                                r#async: false,
+                                r#async: execution_mode == HookExecutionMode::Async,
                             },
                         });
                     }

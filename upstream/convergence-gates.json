@@ -331,6 +331,30 @@
       "id": "HOOKS-1",
       "evidence": [
         {
+          "kind": "symbol",
+          "path": "codex-rs/hooks/src/engine/discovery.rs",
+          "token": "HookExecutionMode::Async",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/session/turn.rs",
+          "token": "AsyncHookResultDrainPhase::BeforeUserPrompt",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/session/turn.rs",
+          "token": "AsyncHookResultDrainPhase::AfterSampling",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/hooks.rs",
+          "token": "async fn async_pre_tool_use_cannot_block_or_rewrite_and_still_records_additional_context()",
+          "ciTier": "release"
+        },
+        {
           "kind": "file",
           "path": "codex-rs/config/src/hooks_tests.rs",
           "ciTier": "nightly"
