@@ -210,16 +210,30 @@ impl RunTurnState {
     }
 }
 
+/// Owned inputs for one `run_turn` attempt.
+pub(crate) struct RunTurnParams {
+    pub(crate) sess: Arc<Session>,
+    pub(crate) turn_context: Arc<TurnContext>,
+    pub(crate) turn_extension_data: Arc<codex_extension_api::ExtensionData>,
+    pub(crate) input: Vec<TurnInput>,
+    pub(crate) model_request_history_mode: ModelRequestHistoryMode,
+    pub(crate) prewarmed_client_session: Option<ModelClientSession>,
+    pub(crate) cancellation_token: CancellationToken,
+}
+
 pub(crate) async fn run_turn(
-    sess: Arc<Session>,
-    mut turn_context: Arc<TurnContext>,
-    turn_extension_data: Arc<codex_extension_api::ExtensionData>,
-    input: Vec<TurnInput>,
+    params: RunTurnParams,
     run_state: &mut RunTurnState,
-    model_request_history_mode: ModelRequestHistoryMode,
-    prewarmed_client_session: Option<ModelClientSession>,
-    cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    let RunTurnParams {
+        sess,
+        mut turn_context,
+        turn_extension_data,
+        input,
+        model_request_history_mode,
+        prewarmed_client_session,
+        cancellation_token,
+    } = params;
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(
         &sess,

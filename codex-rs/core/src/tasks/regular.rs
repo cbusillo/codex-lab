@@ -13,6 +13,7 @@ use crate::session::project_validation::project_validation_worktree_fingerprint;
 use crate::session::project_validation::run_project_validation;
 use crate::session::session::Session;
 use crate::session::turn::ProjectValidationEligibility;
+use crate::session::turn::RunTurnParams;
 use crate::session::turn::RunTurnState;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
@@ -115,14 +116,16 @@ impl SessionTask for RegularTask {
                 }
             };
             let turn_result = run_turn(
-                Arc::clone(&sess),
-                Arc::clone(&ctx),
-                Arc::clone(&ctx.extension_data),
-                next_input,
+                RunTurnParams {
+                    sess: Arc::clone(&sess),
+                    turn_context: Arc::clone(&ctx),
+                    turn_extension_data: Arc::clone(&ctx.extension_data),
+                    input: next_input,
+                    model_request_history_mode,
+                    prewarmed_client_session: prewarmed_client_session.take(),
+                    cancellation_token: cancellation_token.child_token(),
+                },
                 &mut run_turn_state,
-                model_request_history_mode,
-                prewarmed_client_session.take(),
-                cancellation_token.child_token(),
             )
             .instrument(run_turn_span.clone())
             .await;
