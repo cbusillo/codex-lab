@@ -685,8 +685,25 @@ fn agent_type_description(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
 ) -> String {
+    let discovered_selectors = crate::agent::role::external_agent_backend_for_selector(
+        &turn_context.config,
+        "antigravity",
+    )
+    .map(|backend| {
+        crate::agent::external_capabilities::discovered_antigravity_selectors(
+            &backend,
+            turn_context.config.cwd.as_path(),
+        )
+        .into_iter()
+        .map(|capability| capability.selector)
+        .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
     let agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&turn_context.config.agent_roles);
+        crate::agent::role::spawn_tool_spec::build_for_config_with_external_selectors(
+            &turn_context.config,
+            &discovered_selectors,
+        );
     if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {

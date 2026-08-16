@@ -2,7 +2,11 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
+use codex_config::config_toml::AgentSelectorToml;
+use codex_core::config::AgentRoleBackendConfig;
 use codex_core::config::AgentRoleConfig;
+use codex_core::config::ExternalCommandAgentBackendConfig;
+use codex_core::config::ExternalCommandProtocol;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_models_manager::manager::RefreshStrategy;
@@ -27,8 +31,10 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex_with_agents as test_codex;
 use serde_json::Value;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::Instant;
+use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::sleep;
 
@@ -283,6 +289,99 @@ async fn configured_agent_roles_expose_spawn_agent_type() -> Result<()> {
         &response.single_request().body_json(),
         MULTI_AGENT_V2_NAMESPACE
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_agent_description_matches_configured_and_discovered_selectors() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let agy = stub_dir.path().join("agy");
+    std::fs::write(
+        &agy,
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "1.1.10"
+  exit 0
+fi
+if [ "$1" = "models" ]; then
+  echo "gemini-3.6-flash-high"
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  echo '--model Model'
+  echo '--effort low|medium|high'
+  exit 0
+fi
+exit 0
+"#,
+    )?;
+    let mut permissions = std::fs::metadata(&agy)?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&agy, permissions)?;
+
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should enable Collab");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should enable MultiAgentV2");
+            config.multi_agent_v2.hide_spawn_agent_metadata = false;
+            config.agent_roles.insert(
+                "antigravity".to_string(),
+                AgentRoleConfig {
+                    description: Some("Antigravity test backend".to_string()),
+                    backend: Some(AgentRoleBackendConfig::ExternalCommand(
+                        ExternalCommandAgentBackendConfig {
+                            command: agy.display().to_string(),
+                            protocol: ExternalCommandProtocol::RawCli,
+                            launch_family: Some("antigravity".to_string()),
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                },
+            );
+            config.agent_selector_overrides.insert(
+                "claude-sonnet-4.6".to_string(),
+                AgentSelectorToml {
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+            );
+            config.agent_selector_overrides.insert(
+                "cloud-gpt-5.1-codex-max".to_string(),
+                AgentSelectorToml {
+                    enabled: Some(true),
+                    ..Default::default()
+                },
+            );
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("hello").await?;
+
+    let body = response.single_request().body_json();
+    let spawn_agent = namespace_child_tool(&body, MULTI_AGENT_V2_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
+        .expect("spawn_agent tool should be present");
+    let description = spawn_agent
+        .pointer("/parameters/properties/agent_type/description")
+        .and_then(Value::as_str)
+        .expect("spawn_agent agent_type description should be present");
+    assert!(!description.contains("claude-sonnet-4.6"));
+    assert!(description.contains("cloud-gpt-5.1-codex-max"));
+    assert!(description.contains("antigravity-gemini-3.6-flash-high"));
+
     Ok(())
 }
 
