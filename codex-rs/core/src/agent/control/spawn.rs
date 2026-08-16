@@ -324,20 +324,24 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
-        if let Some(stored_model) = stored_model {
-            config.model = Some(stored_model);
-        }
-        config.model_provider = config
+        if let Some(stored_model_provider) = config
             .model_providers
             .get(&stored_model_provider_id)
             .cloned()
-            .ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "model provider `{stored_model_provider_id}` for thread {thread_id} is not configured"
-                ))
-            })?;
-        config.model_provider_id = stored_model_provider_id;
-        config.model_reasoning_effort = stored_reasoning_effort;
+        {
+            if let Some(stored_model) = stored_model {
+                config.model = Some(stored_model);
+            }
+            config.model_provider = stored_model_provider;
+            config.model_provider_id = stored_model_provider_id;
+            config.model_reasoning_effort = stored_reasoning_effort;
+        } else {
+            tracing::warn!(
+                %thread_id,
+                model_provider_id = %stored_model_provider_id,
+                "persisted child model provider is unavailable; using the current resume configuration"
+            );
+        }
         let residency_slot = self
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
             .await?;

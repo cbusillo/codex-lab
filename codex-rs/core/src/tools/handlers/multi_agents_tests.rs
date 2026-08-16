@@ -2306,7 +2306,7 @@ async fn send_input_reports_missing_agent() {
 }
 
 #[tokio::test]
-async fn send_input_interrupts_before_prompt() {
+async fn send_input_with_interrupt_submits_interrupt_and_records_prompt() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -4161,8 +4161,20 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.model_reasoning_effort = turn.reasoning_effort.clone();
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    apply_spawn_agent_runtime_overrides(&mut expected, &turn, /*environment*/ None)
-        .expect("runtime overrides");
+    expected
+        .permissions
+        .approval_policy
+        .set(turn.approval_policy())
+        .expect("approval policy set");
+    expected.approvals_reviewer = turn.config.approvals_reviewer;
+    #[allow(deprecated)]
+    {
+        expected.cwd = turn.cwd.clone();
+    }
+    expected
+        .permissions
+        .set_permission_profile(turn.permission_profile())
+        .expect("permission profile set");
     assert_eq!(config, expected);
 }
 
