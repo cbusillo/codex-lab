@@ -101,22 +101,21 @@ impl ChatWidget {
         }
         match result {
             Ok(response) => {
-                let current_matches = response.current.as_ref().is_some_and(|summary| {
+                if let Some(current) = response.current.as_ref().filter(|summary| {
                     summary.run_id == run_id
                         && background_auto_review_status_is_terminal(summary.status)
-                });
-                let latest_matches = response.latest.as_ref().is_some_and(|summary| {
+                }) {
+                    self.add_to_history(history_cell::new_current_auto_review_summary_cell(
+                        current,
+                        response.diagnostics.as_ref(),
+                    ));
+                } else if let Some(latest) = response.latest.as_ref().filter(|summary| {
                     summary.run_id == run_id
                         && background_auto_review_status_is_terminal(summary.status)
-                });
-                if current_matches {
-                    self.add_to_history(history_cell::new_auto_review_summary_cell(&response));
-                } else if latest_matches {
-                    self.add_to_history(history_cell::new_auto_review_run_summary_cell(
-                        response
-                            .latest
-                            .as_ref()
-                            .expect("latest match checked above"),
+                }) {
+                    self.add_to_history(history_cell::new_hidden_auto_review_run_summary_cell(
+                        latest,
+                        &response.status_counts,
                         response.diagnostics.as_ref(),
                     ));
                 } else if let Some(fallback) = fallback.as_ref() {
@@ -125,15 +124,15 @@ impl ChatWidget {
                     return;
                 }
             }
-            Err(_) if fallback.is_some() => {
-                self.add_to_history(history_cell::new_auto_review_status_cell(
-                    fallback.as_ref().expect("fallback checked above"),
-                ));
+            Err(err) => {
+                if let Some(fallback) = fallback.as_ref() {
+                    self.add_to_history(history_cell::new_auto_review_status_cell(fallback));
+                } else if self.current_background_review_matches_run(&run_id) {
+                    self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
+                } else {
+                    return;
+                }
             }
-            Err(err) if self.current_background_review_matches_run(&run_id) => {
-                self.add_to_history(history_cell::new_auto_review_summary_error_cell(err));
-            }
-            Err(_) => return,
         }
         self.review
             .rendered_terminal_background_reviews
