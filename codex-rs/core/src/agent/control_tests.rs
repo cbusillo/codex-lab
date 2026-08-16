@@ -1310,18 +1310,19 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .expect("stored child metadata should be readable")
         .expect("stored child metadata should exist");
     stored_metadata.model = None;
+    stored_metadata.reasoning_effort = None;
     state_db
         .upsert_thread(&stored_metadata)
         .await
         .expect("stored child model should be cleared");
+    let stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("stored child metadata should be readable")
+        .expect("stored child metadata should exist");
     assert_eq!(
-        state_db
-            .get_thread(spawned_agent.thread_id)
-            .await
-            .expect("stored child metadata should be readable")
-            .expect("stored child metadata should exist")
-            .model,
-        None,
+        (stored_metadata.model, stored_metadata.reasoning_effort),
+        (None, None)
     );
     assert!(
         harness
@@ -1345,13 +1346,13 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .await
         .expect("reloaded child thread should exist");
     let reloaded_snapshot = reloaded_child.config_snapshot().await;
-    assert_ne!(reloaded_snapshot.model, "gpt-5.5");
     assert_eq!(
         (
+            reloaded_snapshot.model,
             reloaded_snapshot.model_provider_id,
             reloaded_snapshot.reasoning_effort,
         ),
-        (stored_child.model_provider, Some(ReasoningEffort::Low)),
+        ("gpt-5.6-sol".to_string(), stored_child.model_provider, None,),
     );
 }
 
