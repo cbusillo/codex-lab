@@ -6,6 +6,7 @@
 
 use super::session::SessionConfiguration;
 use super::*;
+use crate::execution_account::ExecutionAccountSnapshot;
 use crate::mcp::McpRuntimeProjection;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::McpStartupPolicy;
@@ -15,6 +16,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
     pub(super) auth: Option<CodexAuth>,
+    pub(super) execution_snapshot: ExecutionAccountSnapshot,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) session_source: SessionSource,
@@ -61,6 +63,7 @@ impl Session {
             .and_then(|environment| environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let config = Self::build_per_turn_config(&session_configuration, cwd);
+        let execution_snapshot = self.services.execution_account.snapshot().await;
         let local_process_cwd = environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
@@ -69,6 +72,7 @@ impl Session {
         McpDesiredState {
             config: Arc::new(config),
             auth,
+            execution_snapshot,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -93,9 +97,11 @@ impl Session {
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
             .to_path_buf();
+        let execution_snapshot = self.services.execution_account.snapshot().await;
         let desired = McpDesiredState {
             config: Arc::new(config),
             auth,
+            execution_snapshot,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -170,9 +176,33 @@ impl Session {
             self.services.turn_environments.environment_manager(),
             desired.local_process_cwd.clone(),
         );
-        let codex_apps_auth_manager =
-            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                .then(|| Arc::clone(&self.services.auth_manager));
+        let host_owned_codex_apps_enabled =
+            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref());
+        let codex_apps_auth = if host_owned_codex_apps_enabled {
+            codex_mcp::CodexAppsAuth::ExecutionAccount(Box::new({
+                let execution_auth = desired
+                    .execution_snapshot
+                    .auth
+                    .clone()
+                    .filter(CodexAuth::uses_codex_backend);
+                codex_mcp::CodexAppsExecutionAuth {
+                    tools_cache_key: execution_auth
+                        .as_ref()
+                        .map(|auth| connector_runtime_context_key(Some(auth))),
+                    auth_provider: execution_auth
+                        .as_ref()
+                        .map(|_| Arc::clone(&desired.execution_snapshot.auth_provider)),
+                    auth: execution_auth,
+                    connection_discriminator: desired
+                        .execution_snapshot
+                        .cache_identity
+                        .connection_discriminator(),
+                    revision: desired.execution_snapshot.revision,
+                }
+            }))
+        } else {
+            codex_mcp::CodexAppsAuth::ControlPlane
+        };
 
         McpRuntimeInput {
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
@@ -190,10 +220,9 @@ impl Session {
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
             tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
             auth,
-            codex_apps_auth_manager,
+            codex_apps_auth,
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
         }

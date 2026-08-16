@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_channel::Sender;
+use codex_api::SharedAuthProvider;
 use codex_config::types::McpServerDisabledReason;
 use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeManager;
@@ -59,6 +60,27 @@ pub enum McpStartupPolicy {
     LazyWhenCached,
 }
 
+/// Selects the authentication owner for the reserved Codex Apps MCP server.
+#[derive(Clone)]
+pub enum CodexAppsAuth {
+    /// Use the immutable ambient control-plane auth snapshot.
+    ControlPlane,
+    /// Follow a shared control-plane auth manager across token refreshes.
+    ControlPlaneManager(Arc<AuthManager>),
+    /// Use one execution-account snapshot without falling back to control-plane auth.
+    ExecutionAccount(Box<CodexAppsExecutionAuth>),
+}
+
+/// One coherent execution-account identity used by Codex Apps MCP.
+#[derive(Clone)]
+pub struct CodexAppsExecutionAuth {
+    pub auth: Option<CodexAuth>,
+    pub auth_provider: Option<SharedAuthProvider>,
+    pub tools_cache_key: Option<ConnectorRuntimeContextKey>,
+    pub connection_discriminator: String,
+    pub revision: u64,
+}
+
 /// Everything needed to materialize one exact MCP configuration.
 pub struct McpRuntimeInput {
     pub startup_policy: McpStartupPolicy,
@@ -72,10 +94,9 @@ pub struct McpRuntimeInput {
     pub runtime_context: McpRuntimeContext,
     pub codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     pub tool_catalog_cache: McpToolCatalogCache,
-    pub codex_apps_tools_cache_key: ConnectorRuntimeContextKey,
     pub client_mcp_extensions: ClientMcpExtensions,
     pub auth: Option<CodexAuth>,
-    pub codex_apps_auth_manager: Option<Arc<AuthManager>>,
+    pub codex_apps_auth: CodexAppsAuth,
     pub elicitation_reviewer: Option<ElicitationReviewerHandle>,
     pub elicitation_lifecycle: Option<ElicitationLifecycle>,
 }
@@ -95,6 +116,7 @@ struct PublishedMcpRuntime {
     config: Option<Arc<McpConfig>>,
     auth: Option<CodexAuth>,
     auth_token: Option<String>,
+    codex_apps_execution_revision: Option<u64>,
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     cached_binding: Mutex<Option<CachedMcpBinding>>,
@@ -165,6 +187,7 @@ impl McpRuntime {
                 config: None,
                 auth: None,
                 auth_token: None,
+                codex_apps_execution_revision: None,
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
                 cached_binding: Mutex::new(None),
@@ -206,6 +229,10 @@ impl McpRuntime {
         let config = Arc::clone(&input.config);
         let auth = input.auth.clone();
         let auth_token = auth.as_ref().and_then(|auth| auth.get_token().ok());
+        let codex_apps_execution_revision = match &input.codex_apps_auth {
+            CodexAppsAuth::ExecutionAccount(execution) => Some(execution.revision),
+            CodexAppsAuth::ControlPlane | CodexAppsAuth::ControlPlaneManager(_) => None,
+        };
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
         let connections = Arc::new(
@@ -222,6 +249,7 @@ impl McpRuntime {
             config: Some(config),
             auth,
             auth_token,
+            codex_apps_execution_revision,
             plugins_available,
             ready_selected_capability_roots,
             cached_binding: Mutex::new(None),
@@ -305,6 +333,14 @@ impl McpRuntime {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         }
+    }
+
+    /// Returns whether the published Codex Apps binding still belongs to this execution revision.
+    pub fn current_codex_apps_execution_revision_matches(&self, revision: u64) -> bool {
+        self.current
+            .load()
+            .codex_apps_execution_revision
+            .is_none_or(|published| published == revision)
     }
 
     /// Detects newly saved credentials for servers whose startup failed authentication.
@@ -637,6 +673,7 @@ mod tests {
             ))),
             auth: None,
             auth_token: None,
+            codex_apps_execution_revision: None,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             cached_binding: Mutex::new(None),

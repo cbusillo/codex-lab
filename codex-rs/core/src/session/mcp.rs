@@ -168,6 +168,12 @@ impl Session {
                     .services
                     .mcp_runtime
                     .current_auth_matches(auth.as_ref())
+                || !self
+                    .services
+                    .mcp_runtime
+                    .current_codex_apps_execution_revision_matches(
+                        self.services.execution_account.auth_revision(),
+                    )
             {
                 self.mark_mcp_runtime_dirty();
             }

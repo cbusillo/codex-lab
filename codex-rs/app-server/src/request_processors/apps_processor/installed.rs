@@ -88,9 +88,14 @@ impl AppsRequestProcessor {
                         config.cwd.to_path_buf(),
                     );
                     let cancellation_token = CancellationToken::new();
-                    let codex_apps_auth_manager =
-                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-                            .then(|| Arc::clone(&self.auth_manager));
+                    let codex_apps_auth =
+                        if host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()) {
+                            codex_mcp::CodexAppsAuth::ControlPlaneManager(Arc::clone(
+                                &self.auth_manager,
+                            ))
+                        } else {
+                            codex_mcp::CodexAppsAuth::ControlPlane
+                        };
                     let runtime = McpRuntime::new(McpRuntimeInput {
                         startup_policy: McpStartupPolicy::Eager,
                         config: Arc::clone(&mcp_config),
@@ -103,10 +108,9 @@ impl AppsRequestProcessor {
                         runtime_context,
                         codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
                         tool_catalog_cache: mcp_manager.tool_catalog_cache(),
-                        codex_apps_tools_cache_key: cache_key.clone(),
                         client_mcp_extensions: ClientMcpExtensions::default(),
                         auth: auth.clone(),
-                        codex_apps_auth_manager,
+                        codex_apps_auth,
                         elicitation_reviewer: None,
                         elicitation_lifecycle: None,
                     })
