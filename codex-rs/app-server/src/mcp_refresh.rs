@@ -64,6 +64,7 @@ async fn load_refresh_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_manager::ConfigManagerArgs;
     use crate::extensions::ThreadExtensionDependencies;
     use crate::extensions::guardian_agent_spawner;
     use crate::extensions::thread_extensions;
@@ -366,16 +367,16 @@ enabled = false
             good_loads: AtomicUsize::new(0),
             bad_loads: AtomicUsize::new(0),
         });
-        let config_manager = ConfigManager::new(
-            temp_dir.path().to_path_buf(),
-            temp_dir.path().to_path_buf(),
-            Vec::new(),
-            LoaderOverrides::without_managed_config_for_tests(),
-            /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
-            Arg0DispatchPaths::default(),
-            loader.clone(),
-        );
+        let config_manager = ConfigManager::new(ConfigManagerArgs {
+            codex_home: temp_dir.path().to_path_buf(),
+            auth_home: temp_dir.path().to_path_buf(),
+            cli_overrides: Vec::new(),
+            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
+            strict_config: false,
+            cloud_config_bundle: CloudConfigBundleLoader::default(),
+            arg0_paths: Arg0DispatchPaths::default(),
+            thread_config_loader: loader.clone(),
+        });
 
         Ok((temp_dir, thread_manager, config_manager, loader))
     }
