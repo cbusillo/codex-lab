@@ -2096,11 +2096,11 @@ impl TestAppServerBuilder {
         };
         let mut owned_install_dir = None;
         if !custom_program
-            && codex_utils_cargo_bin::runfiles_available()
             && let Ok(code_mode_host_program) =
                 codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")
+            && program.parent() != code_mode_host_program.parent()
         {
-            // Bazel keeps binary targets in separate package directories.
+            // Test runners can keep binary targets in separate directories.
             // Recreate the installed sibling layout without a path override.
             // Prefer Bazel's TEST_TMPDIR so staging can share a filesystem with
             // the binaries and avoid expensive cross-filesystem copies.

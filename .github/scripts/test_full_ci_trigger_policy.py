@@ -314,6 +314,48 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertNotIn("remote_test_filter:", workflow)
         self.assertIn('run_nextest "${nextest_args[@]}"', platform_workflow)
 
+    def test_nextest_shards_stage_runtime_helpers_and_publish_junit(self) -> None:
+        platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+
+        for helper in (
+            "codex-code-mode-host",
+            "codex_code_mode_host",
+            "codex-execve-wrapper",
+            "codex_execve_wrapper",
+        ):
+            self.assertIn(f"CARGO_BIN_EXE_{helper}", platform_workflow)
+        for step_name in (
+            "Build runtime test helpers",
+            "Upload runtime test helpers",
+            "Download runtime test helpers",
+        ):
+            step = platform_workflow.split(f"      - name: {step_name}\n", 1)[1].split(
+                "\n      - name:", 1
+            )[0]
+            self.assertNotIn("\n        if:", step)
+        build_helpers = platform_workflow.split(
+            "      - name: Build runtime test helpers\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertEqual(build_helpers.count("\n          else\n"), 1)
+        self.assertEqual(
+            build_helpers.count(
+                '\n          elif [[ "${RUNNER_OS}" == "Windows" ]]; then\n'
+            ),
+            1,
+        )
+        self.assertIn(
+            'junit_source="${workspace_root}/target/nextest/default/junit.xml"',
+            platform_workflow,
+        )
+        junit_upload = platform_workflow.split(
+            "      - name: Upload nextest JUnit report\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("if-no-files-found: error", junit_upload)
+        self.assertNotIn(
+            'junit_source="${CARGO_TARGET_DIR}/nextest/default/junit.xml"',
+            platform_workflow,
+        )
+
     def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:
         workflow = RUST_ARGUMENT_COMMENT_LINT_WORKFLOW.read_text()
 
