@@ -12,6 +12,11 @@ use super::X_OPENAI_SUBAGENT_HEADER;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -24,6 +29,7 @@ use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
+use codex_login::AuthRouteConfig;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
@@ -108,6 +114,174 @@ fn test_model_client_with_thread_id(
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )
+}
+
+#[test]
+fn model_client_session_is_recached_without_invalidation() {
+    let model_client = test_model_client(SessionSource::Exec);
+    let mut session = model_client.new_session();
+    session.websocket_session.last_response_from_untraced_warmup = true;
+
+    drop(session);
+
+    let cached = model_client
+        .state
+        .cached_websocket_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(cached.session.last_response_from_untraced_warmup);
+}
+
+#[test]
+fn invalidated_model_client_session_is_not_recached() {
+    let model_client = test_model_client(SessionSource::Exec);
+    let mut session = model_client.new_session();
+    session.websocket_session.last_response_from_untraced_warmup = true;
+
+    model_client.invalidate_cached_websocket_session();
+    drop(session);
+
+    let cached = model_client
+        .state
+        .cached_websocket_session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(cached.generation, 1);
+    assert!(!cached.session.last_response_from_untraced_warmup);
+}
+
+#[tokio::test]
+async fn execution_account_identity_scopes_caches_without_rebinding_control_auth() {
+    let control_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
+    let execution_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-execution"));
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let thread_id = ThreadId::new();
+    let lease = ExecutionAccountLease::resolve(
+        thread_id,
+        Arc::clone(&control_auth_manager),
+        ExecutionAccountOptions {
+            codex_home: codex_home.path().to_path_buf(),
+            auth_home: codex_home.path().to_path_buf(),
+            auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
+            keyring_backend_kind: AuthKeyringBackendKind::default(),
+            forced_chatgpt_workspace_id: None,
+            auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
+                OutboundProxyPolicy::ReqwestDefault,
+            )),
+            chatgpt_base_url: CHATGPT_CODEX_BASE_URL.to_string(),
+            allow_api_key_fallback: false,
+            pooling: ExecutionAccountPooling::Disabled,
+            persistence: ExecutionAccountLeasePersistence::Durable,
+            start: ExecutionAccountStart::New,
+        },
+    )
+    .await;
+    let model_client = ModelClient::new(
+        Some(Arc::clone(&control_auth_manager)),
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        ModelProviderInfo::create_openai_provider(Some(CHATGPT_CODEX_BASE_URL.to_string())),
+        SessionSource::Exec,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    model_client.set_execution_account_lease(lease.clone());
+    let responses_metadata = test_responses_metadata_for_client(
+        &model_client,
+        /*turn_id*/ None,
+        "test-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let initial_websocket_key = super::websocket_auth_cache_key(
+        model_client.state.execution_account.load_full().as_ref(),
+        &model_client.state.provider,
+        model_client
+            .state
+            .agent_identity_session_fallback
+            .is_engaged(),
+    );
+
+    assert_eq!(
+        model_client.prompt_cache_key(&responses_metadata),
+        thread_id.to_string()
+    );
+    assert_eq!(
+        initial_websocket_key,
+        super::websocket_auth_cache_key(
+            model_client.state.execution_account.load_full().as_ref(),
+            &model_client.state.provider,
+            model_client
+                .state
+                .agent_identity_session_fallback
+                .is_engaged(),
+        )
+    );
+    assert!(Arc::ptr_eq(
+        &model_client.auth_manager().expect("control auth manager"),
+        &control_auth_manager,
+    ));
+
+    lease.replace_with_detached_auth_manager_for_testing(
+        "execution".to_string(),
+        execution_auth_manager,
+    );
+    let switched_websocket_key = super::websocket_auth_cache_key(
+        model_client.state.execution_account.load_full().as_ref(),
+        &model_client.state.provider,
+        model_client
+            .state
+            .agent_identity_session_fallback
+            .is_engaged(),
+    );
+
+    assert_eq!(
+        model_client.prompt_cache_key(&responses_metadata),
+        format!("{thread_id}:execution")
+    );
+    assert_eq!(
+        model_client
+            .clone()
+            .with_prompt_cache_key_override(Some("review".to_string()))
+            .prompt_cache_key(&responses_metadata),
+        "review:execution"
+    );
+    assert_ne!(initial_websocket_key, switched_websocket_key);
+    assert_eq!(
+        switched_websocket_key,
+        super::websocket_auth_cache_key(
+            model_client.state.execution_account.load_full().as_ref(),
+            &model_client.state.provider,
+            model_client
+                .state
+                .agent_identity_session_fallback
+                .is_engaged(),
+        )
+    );
+    assert!(Arc::ptr_eq(
+        &model_client.auth_manager().expect("control auth manager"),
+        &control_auth_manager,
+    ));
+    let setup = model_client
+        .current_client_setup()
+        .await
+        .expect("current client setup");
+    let mut headers = http::HeaderMap::new();
+    setup.api_auth.add_auth_headers(&mut headers);
+    assert_eq!(
+        headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer sk-control")
+    );
 }
 
 #[tokio::test]

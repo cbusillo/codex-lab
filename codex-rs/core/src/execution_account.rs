@@ -451,10 +451,6 @@ impl ExecutionAccountLease {
         self.inner.current.load().identity()
     }
 
-    pub(crate) fn thread_id(&self) -> ThreadId {
-        self.inner.thread_id
-    }
-
     pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
         Arc::clone(&self.inner.current.load().auth_manager)
     }
