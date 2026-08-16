@@ -333,6 +333,12 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
                 "\n      - name:", 1
             )[0]
             self.assertNotIn("\n        if:", step)
+        build_helpers = platform_workflow.split(
+            "      - name: Build runtime test helpers\n", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn(
+            'elif [[ "${RUNNER_OS}" == "Windows" ]]; then', build_helpers
+        )
         self.assertIn(
             'junit_source="${workspace_root}/target/nextest/default/junit.xml"',
             platform_workflow,
