@@ -1,15 +1,15 @@
 ---
 source: tui/src/bottom_pane/login_accounts_view_tests.rs
-expression: "render_snapshot(&buf, area)"
+expression: render_snapshot(&buf, area)
 ---
 ┌────────────────── Manage Accounts ───────────────────┐
 │ Connected Accounts                                   │
 │                                                      │
 │ > ChatGPT (current)                                  │
-│ API key                                              │
+│ API key  switching unavailable                       │
 │                                                      │
 │ Add account...                                       │
 │                                                      │
-│ up/down Navigate  Enter Select  d Disconnect  Esc    │
-│ Close                                                │
+│ up/down Navigate  Enter Add/repair when available    │
+│ Esc Close                                            │
 └──────────────────────────────────────────────────────┘

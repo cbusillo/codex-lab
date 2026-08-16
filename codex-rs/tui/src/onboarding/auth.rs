@@ -1013,7 +1013,7 @@ impl WidgetRef for AuthModeWidget {
     }
 }
 
-pub(super) fn maybe_open_auth_url_in_browser(request_handle: &AppServerRequestHandle, url: &str) {
+pub(crate) fn maybe_open_auth_url_in_browser(request_handle: &AppServerRequestHandle, url: &str) {
     if !matches!(request_handle, AppServerRequestHandle::InProcess(_)) {
         return;
     }

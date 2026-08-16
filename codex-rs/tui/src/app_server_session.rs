@@ -45,6 +45,7 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -521,6 +522,17 @@ impl AppServerSession {
             })
             .await
             .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+    }
+
+    pub(crate) async fn list_accounts(&mut self) -> Result<ListAccountsResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ListAccounts {
+                request_id,
+                params: None,
+            })
+            .await
+            .wrap_err("account/list failed in TUI")
     }
 
     pub(crate) async fn external_agent_config_detect(

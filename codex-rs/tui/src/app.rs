@@ -624,7 +624,6 @@ pub(crate) struct App {
     direct_login_add_account_attempt_id: u64,
     pending_login_add_account_id: Option<String>,
     completed_login_add_account_id: Option<String>,
-    pending_auth_profile_login: Option<PendingAuthProfileLogin>,
     agent_settings: agents_settings::AgentSettingsState,
 }
 
@@ -662,13 +661,6 @@ impl PendingDirectLoginAddAccountCancellation {
             PendingDirectLoginAddAccountCancellation::DeviceCode(token) => token.cancel(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingAuthProfileLogin {
-    pub(crate) login_id: String,
-    pub(crate) profile_name: String,
-    pub(crate) profile_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1177,7 +1169,6 @@ See the Codex keymap documentation for supported actions and examples."
             direct_login_add_account_attempt_id: 0,
             pending_login_add_account_id: None,
             completed_login_add_account_id: None,
-            pending_auth_profile_login: None,
             agent_settings: Default::default(),
         };
         if let Some(entry) = startup_hooks_browser {
@@ -1348,6 +1339,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
+        if let Err(err) = app.cancel_login_add_account_chatgpt(&mut app_server).await {
+            tracing::warn!("{err}");
+        }
         if let Err(err) = app_server.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }
@@ -1511,7 +1505,7 @@ See the Codex keymap documentation for supported actions and examples."
 
 impl Drop for App {
     fn drop(&mut self) {
-        self.cancel_login_add_account_chatgpt();
+        self.cancel_direct_login_add_account();
         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
         }

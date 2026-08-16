@@ -106,18 +106,6 @@ pub(crate) enum HistoryLookupResponse {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuthAccountSelection {
-    pub(crate) account_id: String,
-    pub(crate) label: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RemoveAuthAccountSelection {
-    pub(crate) account_id: String,
-    pub(crate) label: String,
-}
-
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SecretApiKey(String);
 
@@ -428,16 +416,6 @@ pub(crate) enum AppEvent {
     LoginAddAccountChatGptCompleted {
         attempt_id: u64,
         result: Result<(), String>,
-    },
-
-    /// Start a fresh session using credentials from the selected stored account.
-    SwitchAuthAccount {
-        selection: AuthAccountSelection,
-    },
-
-    /// Remove the selected stored account from the default account store.
-    RemoveAuthAccount {
-        selection: RemoveAuthAccountSelection,
     },
 
     /// Request to exit the application due to a fatal error.

@@ -10,7 +10,10 @@ use crate::app_event::ConnectorsSnapshot;
 use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
+use crate::bottom_pane::LoginAddAccountState;
 use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::AccountLoginCompletedNotification;
+use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::RateLimitReachedType;
 use codex_app_server_protocol::ServerNotification;
@@ -110,6 +113,10 @@ impl App {
                     .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 return;
             }
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.handle_login_add_account_completed(notification);
+                return;
+            }
             ServerNotification::AccountUpdated(notification) => {
                 // Deferred terminal writes must never carry the previous account's billing into
                 // the newly authenticated identity, even when both accounts share one thread.
@@ -135,6 +142,7 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                self.maybe_complete_login_add_account(notification);
                 return;
             }
             ServerNotification::ExternalAgentCapabilitiesUpdated(notification) => {
@@ -273,4 +281,65 @@ impl App {
             tracing::warn!("failed to enqueue app-server request: {err}");
         }
     }
+
+    fn handle_login_add_account_completed(
+        &mut self,
+        notification: &AccountLoginCompletedNotification,
+    ) {
+        let Some(login_id) = notification.login_id.as_deref() else {
+            return;
+        };
+        if self.pending_login_add_account_id.as_deref() != Some(login_id)
+            || self.chat_widget.active_login_add_account_id() != Some(login_id)
+        {
+            return;
+        }
+        if notification.success {
+            self.completed_login_add_account_id = Some(login_id.to_string());
+            return;
+        }
+
+        self.pending_login_add_account_id = None;
+        self.completed_login_add_account_id = None;
+        let message = notification
+            .error
+            .clone()
+            .unwrap_or_else(|| "ChatGPT login did not complete.".to_string());
+        let state = if self.chat_widget.login_add_account_uses_device_code() {
+            LoginAddAccountState::DeviceCodeFailed(message.clone())
+        } else {
+            LoginAddAccountState::Failed(message.clone())
+        };
+        if !self.chat_widget.update_login_add_account_view(state) {
+            self.chat_widget.add_error_message(message);
+        }
+    }
+
+    fn maybe_complete_login_add_account(&mut self, notification: &AccountUpdatedNotification) {
+        let Some(login_id) = self.pending_login_add_account_id.as_deref() else {
+            return;
+        };
+        if self.completed_login_add_account_id.as_deref() != Some(login_id)
+            || self.chat_widget.active_login_add_account_id() != Some(login_id)
+            || !notification
+                .auth_mode
+                .is_some_and(AuthMode::has_chatgpt_account)
+        {
+            return;
+        }
+
+        self.pending_login_add_account_id = None;
+        self.completed_login_add_account_id = None;
+        if !self
+            .chat_widget
+            .update_login_add_account_view(LoginAddAccountState::Complete)
+        {
+            self.chat_widget
+                .add_info_message("ChatGPT account added.".to_string(), /*hint*/ None);
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "app_server_events_tests.rs"]
+mod tests;

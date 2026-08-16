@@ -75,7 +75,6 @@ pub(super) fn current_auth_account_row(
         mode: auth_mode_to_api(mode),
         health: ApiAccountHealth::Ok,
         is_active: true,
-        is_pooled: false,
     }
 }
 

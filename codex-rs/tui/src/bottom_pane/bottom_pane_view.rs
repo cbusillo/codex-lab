@@ -67,6 +67,10 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    fn login_add_account_uses_device_code(&self) -> bool {
+        false
+    }
+
     /// Handle Ctrl-C while this view is active.
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         CancellationEvent::NotHandled

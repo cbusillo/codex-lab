@@ -1125,6 +1125,8 @@ impl ChatWidget {
             .bottom_pane
             .dismiss_active_view_if_id(LOGIN_ADD_ACCOUNT_VIEW_ID)
         {
+            self.bottom_pane
+                .dismiss_view_by_id(LOGIN_ADD_ACCOUNT_VIEW_ID);
             return false;
         }
         let view = LoginAddAccountView::with_state_for_store_mode(
@@ -1138,6 +1140,10 @@ impl ChatWidget {
 
     pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
         self.bottom_pane.active_login_add_account_id()
+    }
+
+    pub(crate) fn login_add_account_uses_device_code(&self) -> bool {
+        self.bottom_pane.login_add_account_uses_device_code()
     }
 
     pub(crate) fn open_memories_enable_prompt(&mut self) {

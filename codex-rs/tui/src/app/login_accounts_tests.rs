@@ -3,6 +3,47 @@ use crate::app::test_support::make_test_app;
 use codex_config::types::AuthCredentialsStoreMode;
 use pretty_assertions::assert_eq;
 
+#[test]
+fn current_account_entry_fills_missing_catalog_identity() {
+    assert_eq!(
+        current_account_list_entry(Account::ApiKey {}, /*account_id*/ None),
+        AccountListEntry {
+            account_id: "current".to_string(),
+            auth_mode: AuthMode::ApiKey,
+            health: AccountHealth::Ok,
+            label: Some("API key".to_string()),
+            created_at: None,
+            last_used_at: None,
+            is_active: true,
+        }
+    );
+}
+
+#[tokio::test]
+async fn login_storage_routing_keeps_remote_mutations_on_the_server() {
+    let mut app = make_test_app().await;
+    let auth_home = tempfile::tempdir().expect("create temporary auth home");
+    app.config.auth_home = auth_home
+        .path()
+        .to_path_buf()
+        .try_into()
+        .expect("temporary auth home should be absolute");
+    app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::Keyring;
+
+    assert!(app.use_default_store_login());
+    assert!(!app.preserve_existing_app_server_account());
+
+    app.app_server_target = crate::AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:4500".to_string(),
+            auth_token: None,
+        },
+    };
+
+    assert!(!app.use_default_store_login());
+    assert!(app.preserve_existing_app_server_account());
+}
+
 #[tokio::test]
 async fn api_key_login_saves_trimmed_key_to_default_store() {
     let mut app = make_test_app().await;
@@ -14,7 +55,7 @@ async fn api_key_login_saves_trimmed_key_to_default_store() {
         .expect("temporary Codex home should be absolute");
     app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
 
-    app.save_login_add_account_api_key("  sk-test-direct-login  ");
+    app.save_default_store_login_add_account_api_key("sk-test-direct-login");
 
     let stored = codex_login::load_auth_dot_json(
         codex_home.path(),
@@ -38,7 +79,7 @@ async fn cancelling_direct_device_code_login_clears_and_signals_pending_attempt(
         cancellation: PendingDirectLoginAddAccountCancellation::DeviceCode(cancellation.clone()),
     });
 
-    app.cancel_login_add_account_chatgpt();
+    app.cancel_direct_login_add_account();
 
     assert!(app.pending_direct_login_add_account.is_none());
     assert!(cancellation.is_cancelled());
