@@ -544,6 +544,43 @@ impl App {
                         .add_error_message(format!("Logout failed: {err}"));
                 }
             },
+            AppEvent::ShowLoginAccounts => {
+                self.chat_widget
+                    .show_login_accounts_view_with_feedback(None);
+            }
+            AppEvent::ShowLoginAddAccount => {
+                self.chat_widget.open_login_add_account_view();
+            }
+            AppEvent::LoginStartChatGpt
+            | AppEvent::LoginStartDeviceCode
+            | AppEvent::LoginCancelChatGpt => {
+                tracing::warn!("login account action is not wired yet");
+            }
+            AppEvent::LoginAddAccountApiKey { api_key } => {
+                tracing::warn!(?api_key, "API key login is not wired yet");
+            }
+            AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
+                tracing::warn!(
+                    account_id = self.chat_widget.active_login_add_account_id(),
+                    attempt_id,
+                    ?result,
+                    "login account completion is not wired yet"
+                );
+            }
+            AppEvent::SwitchAuthAccount { selection } => {
+                tracing::warn!(
+                    account_id = selection.account_id,
+                    account_label = selection.label,
+                    "account switching is not wired yet"
+                );
+            }
+            AppEvent::RemoveAuthAccount { selection } => {
+                tracing::warn!(
+                    account_id = selection.account_id,
+                    account_label = selection.label,
+                    "account removal is not wired yet"
+                );
+            }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
