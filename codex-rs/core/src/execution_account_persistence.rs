@@ -91,22 +91,3 @@ pub(super) fn persist_lease_record(
     file.persist(&path).map_err(|error| error.error)?;
     Ok(())
 }
-
-#[cfg(test)]
-pub(super) fn read_persisted_lease(codex_home: &Path, thread_id: ThreadId) -> Option<String> {
-    read_persisted_lease_record(codex_home, thread_id)?.account_id
-}
-
-#[cfg(test)]
-pub(super) fn persist_lease(
-    codex_home: &Path,
-    thread_id: ThreadId,
-    account_id: &str,
-) -> io::Result<()> {
-    persist_lease_record(
-        codex_home,
-        thread_id,
-        Some(account_id),
-        &format!("stored:{account_id}"),
-    )
-}
