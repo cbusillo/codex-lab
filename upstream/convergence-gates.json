@@ -179,6 +179,18 @@
           "ciTier": "nightly"
         },
         {
+          "kind": "symbol",
+          "path": "codex-rs/core/src/tools/spec_plan.rs",
+          "token": "spawn_tool_spec::build_for_config_with_external_selectors(",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/spawn_agent_description.rs",
+          "token": "async fn spawn_agent_description_matches_configured_and_discovered_selectors()",
+          "ciTier": "blocking"
+        },
+        {
           "kind": "file",
           "path": "tools/codex-exec-harness/scenarios/third-party-agent-current-binary-lifecycle.json",
           "ciTier": "nightly"
