@@ -91,7 +91,6 @@ pub(crate) use codex_app_server_client::legacy_core;
 
 mod account_label;
 mod additional_dirs;
-mod agent_install_helpers;
 mod agent_session_env;
 mod app;
 mod app_backtrack;
@@ -1844,8 +1843,6 @@ async fn run_ratatui_app(
         cli_kv_overrides.clone(),
         overrides.clone(),
         loader_overrides.clone(),
-        arg0_paths,
-        strict_config,
         cloud_config_bundle,
         prompt,
         images,
