@@ -4854,7 +4854,6 @@ async fn make_test_app() -> App {
         direct_login_add_account_attempt_id: 0,
         pending_login_add_account_id: None,
         completed_login_add_account_id: None,
-        pending_auth_profile_login: None,
         agent_settings: Default::default(),
     }
 }
@@ -4935,7 +4934,6 @@ async fn make_test_app_with_channels() -> (
             direct_login_add_account_attempt_id: 0,
             pending_login_add_account_id: None,
             completed_login_add_account_id: None,
-            pending_auth_profile_login: None,
             agent_settings: Default::default(),
         },
         rx,

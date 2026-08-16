@@ -31,8 +31,6 @@ use textwrap::wrap;
 
 use crate::account_label::account_display_label;
 use crate::app_event::AppEvent;
-use crate::app_event::AuthAccountSelection;
-use crate::app_event::RemoveAuthAccountSelection;
 use crate::app_event::SecretApiKey;
 use crate::app_event_sender::AppEventSender;
 use crate::render::renderable::Renderable;
@@ -66,7 +64,6 @@ pub(crate) struct LoginAccountsView {
     selected: usize,
     error: Option<String>,
     feedback: Option<LoginAccountsFeedback>,
-    mode: LoginAccountsMode,
     is_complete: bool,
     completion: Option<ViewCompletion>,
 }
@@ -79,19 +76,12 @@ struct AccountRow {
     mode: ApiAuthMode,
     health: ApiAccountHealth,
     is_active: bool,
-    is_pooled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LoginAccountsFeedback {
     Info(String),
     Error(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum LoginAccountsMode {
-    List,
-    ConfirmRemove { account_id: String, label: String },
 }
 
 impl LoginAccountsView {
@@ -123,7 +113,6 @@ impl LoginAccountsView {
             selected: loaded.selected,
             error: loaded.error.take(),
             feedback,
-            mode: LoginAccountsMode::List,
             is_complete: false,
             completion: None,
         }
@@ -156,7 +145,6 @@ impl LoginAccountsView {
             selected,
             error: None,
             feedback,
-            mode: LoginAccountsMode::List,
             is_complete: false,
             completion: None,
         }
@@ -198,14 +186,6 @@ impl LoginAccountsView {
     }
 
     fn handle_enter(&mut self) {
-        if let LoginAccountsMode::ConfirmRemove { account_id, label } = self.mode.clone() {
-            self.app_event_tx.send(AppEvent::RemoveAuthAccount {
-                selection: RemoveAuthAccountSelection { account_id, label },
-            });
-            self.finish(ViewCompletion::Accepted);
-            return;
-        }
-
         if self.selected == self.add_row_index() {
             self.finish(ViewCompletion::Accepted);
             self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
@@ -218,35 +198,7 @@ impl LoginAccountsView {
         if account.health == ApiAccountHealth::ReauthRequired {
             self.app_event_tx.send(AppEvent::ShowLoginAddAccount);
             self.finish(ViewCompletion::Accepted);
-            return;
         }
-        if account.is_active || !account.activation_supported() {
-            return;
-        }
-
-        self.app_event_tx.send(AppEvent::SwitchAuthAccount {
-            selection: AuthAccountSelection {
-                account_id: account.id.clone(),
-                label: account.label.clone(),
-            },
-        });
-        self.finish(ViewCompletion::Accepted);
-    }
-
-    fn handle_disconnect(&mut self) {
-        let Some(account) = self.selected_account() else {
-            return;
-        };
-        if !account.is_pooled {
-            self.feedback = Some(LoginAccountsFeedback::Info(
-                "This login is not pooled. Use /logout to disconnect it.".to_string(),
-            ));
-            return;
-        }
-        self.mode = LoginAccountsMode::ConfirmRemove {
-            account_id: account.id.clone(),
-            label: account.label.clone(),
-        };
     }
 
     fn reload_accounts(&mut self) {
@@ -271,10 +223,6 @@ impl LoginAccountsView {
         self.selected = loaded.selected;
         self.error = loaded.error;
         self.feedback = None;
-    }
-
-    fn cancel_confirm_remove(&mut self) {
-        self.mode = LoginAccountsMode::List;
     }
 
     fn wrapped_line_count(message: &str, width: u16) -> usize {
@@ -302,37 +250,18 @@ impl LoginAccountsView {
         }
         lines += self.accounts.len().max(1);
         lines += 3;
-        let hint = "up/down Navigate  Enter Select  d Disconnect  Esc Close";
+        let hint = "up/down Navigate  Enter Add/repair when available  Esc Close";
         lines += Self::wrapped_line_count(hint, content_width);
-        if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
-            let confirmation = format!("Disconnect {label}?");
-            lines += 1;
-            lines += Self::wrapped_line_count(&confirmation, content_width);
-            lines += Self::wrapped_line_count(
-                "Press Enter to disconnect or Esc to cancel.",
-                content_width,
-            );
-        }
         lines
     }
 }
 
 impl BottomPaneView for LoginAccountsView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
-        if matches!(self.mode, LoginAccountsMode::ConfirmRemove { .. }) {
-            match key_event.code {
-                KeyCode::Esc | KeyCode::Char('n') => self.cancel_confirm_remove(),
-                KeyCode::Enter | KeyCode::Char('y') => self.handle_enter(),
-                _ => {}
-            }
-            return;
-        }
-
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => self.finish(ViewCompletion::Cancelled),
             KeyCode::Up => self.select_previous(),
             KeyCode::Down => self.select_next(),
-            KeyCode::Char('d') => self.handle_disconnect(),
             KeyCode::Char('r') => self.reload_accounts(),
             KeyCode::Enter => self.handle_enter(),
             _ => {}
@@ -653,6 +582,15 @@ impl BottomPaneView for LoginAddAccountView {
 
     fn active_login_add_account_id(&self) -> Option<&str> {
         self.waiting_login_id()
+    }
+
+    fn login_add_account_uses_device_code(&self) -> bool {
+        matches!(
+            self.state,
+            LoginAddAccountState::DeviceCodeStarting
+                | LoginAddAccountState::DeviceCodeWaiting { .. }
+                | LoginAddAccountState::DeviceCodeFailed(_)
+        )
     }
 
     fn prefer_esc_to_handle_key_event(&self) -> bool {
@@ -996,33 +934,17 @@ impl Renderable for LoginAccountsView {
             Span::styled("up/down", Style::default().fg(Color::Cyan)),
             Span::styled(" Navigate  ", Style::default().fg(Color::DarkGray)),
             Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::styled(" Select  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " Add/repair when available  ",
+                Style::default().fg(Color::DarkGray),
+            ),
         ];
-        hint_spans.push(Span::styled(
-            "d",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-        hint_spans.push(Span::styled(
-            " Disconnect  ",
-            Style::default().fg(Color::DarkGray),
-        ));
         hint_spans.push(Span::styled(
             "Esc",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
         hint_spans.push(Span::styled(" Close", Style::default().fg(Color::DarkGray)));
         lines.push(Line::from(hint_spans));
-
-        if let LoginAccountsMode::ConfirmRemove { label, .. } = &self.mode {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![Span::styled(
-                format!("Disconnect {label}?"),
-                Style::default().add_modifier(Modifier::BOLD),
-            )]));
-            lines.push(Line::from("Press Enter to disconnect or Esc to cancel."));
-        }
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: true })
@@ -1057,7 +979,6 @@ impl AccountRow {
                 codex_login::AccountHealth::ReauthRequired => ApiAccountHealth::ReauthRequired,
             },
             is_active,
-            is_pooled: true,
         }
     }
 
@@ -1072,17 +993,7 @@ impl AccountRow {
             mode: entry.auth_mode,
             health: entry.health,
             is_active: entry.is_active,
-            is_pooled: true,
         }
-    }
-
-    fn activation_supported(&self) -> bool {
-        self.health == ApiAccountHealth::Ok
-            && self.is_pooled
-            && matches!(
-                self.mode,
-                ApiAuthMode::ApiKey | ApiAuthMode::Chatgpt | ApiAuthMode::ChatgptAuthTokens
-            )
     }
 
     fn render_line(&self, selected: bool) -> Line<'static> {
@@ -1107,10 +1018,10 @@ impl AccountRow {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        if self.health == ApiAccountHealth::Ok && !self.is_active && !self.activation_supported() {
+        if self.health == ApiAccountHealth::Ok && !self.is_active {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
-                "activation unavailable",
+                "switching unavailable",
                 Style::default().fg(Color::DarkGray),
             ));
         }

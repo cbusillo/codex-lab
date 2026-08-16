@@ -12,5 +12,5 @@ expression: "render_snapshot(&buf, area)"
 │                                                                          │
 │ Replace current login...                                                 │
 │                                                                          │
-│ up/down Navigate  Enter Select  d Disconnect  Esc Close                  │
+│ up/down Navigate  Enter Add/repair when available  Esc Close             │
 └──────────────────────────────────────────────────────────────────────────┘

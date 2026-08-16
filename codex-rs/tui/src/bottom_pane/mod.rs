@@ -1282,8 +1282,17 @@ impl BottomPane {
 
     pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
         self.view_stack
-            .last()
-            .and_then(|view| view.active_login_add_account_id())
+            .iter()
+            .rev()
+            .find_map(|view| view.active_login_add_account_id())
+    }
+
+    pub(crate) fn login_add_account_uses_device_code(&self) -> bool {
+        self.view_stack
+            .iter()
+            .rev()
+            .find(|view| view.view_id() == Some(LOGIN_ADD_ACCOUNT_VIEW_ID))
+            .is_some_and(|view| view.login_add_account_uses_device_code())
     }
 
     pub(crate) fn dismiss_active_view_if_id(&mut self, view_id: &'static str) -> bool {

@@ -16,6 +16,7 @@ use crate::bottom_pane::slash_commands::SlashCommandItem;
 use crate::bottom_pane::slash_commands::find_slash_command;
 use crate::goal_display::GOAL_USAGE;
 use crate::goal_files::GoalDraft;
+use codex_app_server_protocol::AccountListEntry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -35,6 +36,20 @@ impl ChatWidget {
             default_auth_home_is_current,
             self.config.cli_auth_credentials_store_mode,
             self.config.auth_keyring_backend_kind(),
+            feedback,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn show_login_accounts_view_with_loaded_accounts(
+        &mut self,
+        accounts: Vec<AccountListEntry>,
+        feedback: Option<LoginAccountsFeedback>,
+    ) {
+        let view = LoginAccountsView::new_with_loaded_accounts(
+            self.app_event_tx.clone(),
+            accounts,
             feedback,
         );
         self.bottom_pane.show_view(Box::new(view));

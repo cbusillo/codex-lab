@@ -7,7 +7,6 @@ use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_server_session::ForkGoalContinuation;
-use crate::bottom_pane::LoginAccountsFeedback;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
 use crate::pager_overlay::TranscriptHistoryState;
@@ -546,17 +545,19 @@ impl App {
                 }
             },
             AppEvent::ShowLoginAccounts => {
-                self.show_login_accounts_view();
+                self.show_login_accounts_view(app_server).await;
             }
             AppEvent::ShowLoginAddAccount => {
-                self.cancel_login_add_account_chatgpt();
-                self.chat_widget.open_login_add_account_view();
+                match self.cancel_login_add_account_chatgpt(app_server).await {
+                    Ok(()) => self.chat_widget.open_login_add_account_view(),
+                    Err(err) => self.chat_widget.add_error_message(err),
+                }
             }
             AppEvent::LoginStartChatGpt => {
-                self.start_login_add_account_chatgpt().await;
+                self.start_login_add_account_chatgpt(app_server).await;
             }
             AppEvent::LoginStartDeviceCode => {
-                self.start_login_add_account_device_code();
+                self.start_login_add_account_device_code(app_server).await;
             }
             AppEvent::LoginAddAccountDeviceCodeReady {
                 attempt_id,
@@ -570,33 +571,16 @@ impl App {
                 );
             }
             AppEvent::LoginCancelChatGpt => {
-                self.cancel_login_add_account_chatgpt();
+                if let Err(err) = self.cancel_login_add_account_chatgpt(app_server).await {
+                    self.chat_widget.add_error_message(err);
+                }
             }
             AppEvent::LoginAddAccountApiKey { api_key } => {
-                self.save_login_add_account_api_key(api_key.expose_secret());
+                self.save_login_add_account_api_key(app_server, api_key.expose_secret())
+                    .await;
             }
             AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
                 self.complete_login_add_account_chatgpt(attempt_id, result);
-            }
-            AppEvent::SwitchAuthAccount { selection } => {
-                tracing::warn!(
-                    account_id = selection.account_id,
-                    account_label = selection.label,
-                    "account switching is not wired yet"
-                );
-                self.show_login_accounts_feedback(LoginAccountsFeedback::Error(
-                    "Account switching is not available yet; no changes were made.".to_string(),
-                ));
-            }
-            AppEvent::RemoveAuthAccount { selection } => {
-                tracing::warn!(
-                    account_id = selection.account_id,
-                    account_label = selection.label,
-                    "account removal is not wired yet"
-                );
-                self.show_login_accounts_feedback(LoginAccountsFeedback::Error(
-                    "Account removal is not available yet; no changes were made.".to_string(),
-                ));
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
