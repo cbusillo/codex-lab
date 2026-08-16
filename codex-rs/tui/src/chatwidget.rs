@@ -285,7 +285,9 @@ use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::GoalStatusIndicator;
 use crate::bottom_pane::HistoryEntry;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::LOGIN_ADD_ACCOUNT_VIEW_ID;
 use crate::bottom_pane::LocalImageAttachment;
+use crate::bottom_pane::LoginAddAccountState;
 use crate::bottom_pane::LoginAddAccountView;
 use crate::bottom_pane::McpElicitationApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -1116,6 +1118,22 @@ impl ChatWidget {
             self.config.cli_auth_credentials_store_mode,
         );
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn update_login_add_account_view(&mut self, state: LoginAddAccountState) -> bool {
+        if !self
+            .bottom_pane
+            .dismiss_active_view_if_id(LOGIN_ADD_ACCOUNT_VIEW_ID)
+        {
+            return false;
+        }
+        let view = LoginAddAccountView::with_state_for_store_mode(
+            self.app_event_tx.clone(),
+            state,
+            self.config.cli_auth_credentials_store_mode,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        true
     }
 
     pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {

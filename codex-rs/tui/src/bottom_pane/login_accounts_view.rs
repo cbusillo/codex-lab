@@ -356,7 +356,7 @@ impl BottomPaneView for LoginAccountsView {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum LoginAddAccountState {
     Choose,
     ApiKey {
@@ -379,6 +379,47 @@ pub(crate) enum LoginAddAccountState {
     ApiKeyFailed(String),
     Failed(String),
     Complete,
+}
+
+impl std::fmt::Debug for LoginAddAccountState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Choose => formatter.write_str("Choose"),
+            Self::ApiKey { error, .. } => formatter
+                .debug_struct("ApiKey")
+                .field("value", &"[REDACTED]")
+                .field("error", error)
+                .finish(),
+            Self::SavingApiKey => formatter.write_str("SavingApiKey"),
+            Self::Starting => formatter.write_str("Starting"),
+            Self::Waiting { login_id, .. } => formatter
+                .debug_struct("Waiting")
+                .field("login_id", login_id)
+                .field("auth_url", &"[REDACTED]")
+                .finish(),
+            Self::DeviceCodeStarting => formatter.write_str("DeviceCodeStarting"),
+            Self::DeviceCodeWaiting {
+                login_id,
+                verification_url,
+                ..
+            } => formatter
+                .debug_struct("DeviceCodeWaiting")
+                .field("login_id", login_id)
+                .field("verification_url", verification_url)
+                .field("user_code", &"[REDACTED]")
+                .finish(),
+            Self::DeviceCodeFailed(message) => formatter
+                .debug_tuple("DeviceCodeFailed")
+                .field(message)
+                .finish(),
+            Self::ApiKeyFailed(message) => formatter
+                .debug_tuple("ApiKeyFailed")
+                .field(message)
+                .finish(),
+            Self::Failed(message) => formatter.debug_tuple("Failed").field(message).finish(),
+            Self::Complete => formatter.write_str("Complete"),
+        }
+    }
 }
 
 pub(crate) struct LoginAddAccountView {
