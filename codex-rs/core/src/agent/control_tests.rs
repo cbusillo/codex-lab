@@ -36,6 +36,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -1165,6 +1166,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
     let mut child_config = harness.config.clone();
     child_config.model = Some("gpt-5.6-luna".to_string());
+    child_config.model_reasoning_effort = Some(ReasoningEffort::Low);
     let spawned_agent = harness
         .control
         .spawn_agent_with_metadata(
@@ -1230,6 +1232,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get("ollama")
         .cloned()
         .expect("ollama provider should be configured");
+    sender_config.model_reasoning_effort = Some(ReasoningEffort::High);
 
     harness
         .control
@@ -1241,14 +1244,12 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("reloaded child thread should exist");
-    assert_eq!(
-        reloaded_child.config_snapshot().await.model,
-        "gpt-5.6-luna",
-        "residency reload must preserve the worker model instead of inheriting its parent model",
-    );
+    let reloaded_snapshot = reloaded_child.config_snapshot().await;
     assert_eq!(
         (
-            reloaded_child.config_snapshot().await.model_provider_id,
+            reloaded_snapshot.model,
+            reloaded_snapshot.model_provider_id,
+            reloaded_snapshot.reasoning_effort,
             reloaded_child
                 .session
                 .new_default_turn()
@@ -1258,10 +1259,12 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
                 .clone(),
         ),
         (
-            stored_child.model_provider,
+            "gpt-5.6-luna".to_string(),
+            stored_child.model_provider.clone(),
+            Some(ReasoningEffort::Low),
             harness.config.model_provider.clone()
         ),
-        "residency reload must preserve the worker provider instead of inheriting its sender's provider",
+        "residency reload must preserve the worker model configuration instead of inheriting its sender's configuration",
     );
 
     let communication = InterAgentCommunication::new(
@@ -1292,6 +1295,171 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .into_iter()
         .find(|entry| captured_op_matches(entry, &expected));
     assert!(captured.is_some());
+
+    reloaded_child
+        .shutdown_and_wait()
+        .await
+        .expect("reloaded child should shut down");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state should be initialized");
+    let mut stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("stored child metadata should be readable")
+        .expect("stored child metadata should exist");
+    stored_metadata.model = None;
+    stored_metadata.reasoning_effort = None;
+    state_db
+        .upsert_thread(&stored_metadata)
+        .await
+        .expect("stored child model should be cleared");
+    let stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("stored child metadata should be readable")
+        .expect("stored child metadata should exist");
+    assert_eq!(
+        (stored_metadata.model, stored_metadata.reasoning_effort),
+        (None, None)
+    );
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_agent.thread_id)
+            .await
+            .is_some()
+    );
+
+    let mut sender_config = harness.config.clone();
+    sender_config.model = Some("gpt-5.5".to_string());
+    sender_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    harness
+        .control
+        .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
+        .await
+        .expect("known v2 agent without a stored model should reload");
+    let reloaded_child = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("reloaded child thread should exist");
+    let reloaded_snapshot = reloaded_child.config_snapshot().await;
+    assert_eq!(
+        (
+            reloaded_snapshot.model,
+            reloaded_snapshot.model_provider_id,
+            reloaded_snapshot.reasoning_effort,
+        ),
+        ("gpt-5.6-sol".to_string(), stored_child.model_provider, None,),
+    );
+}
+
+#[tokio::test]
+async fn ensure_v2_agent_loaded_uses_current_config_when_stored_provider_is_unavailable() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
+    let mut child_config = harness.config.clone();
+    child_config.model = Some("gpt-5.6-luna".to_string());
+    child_config.model_reasoning_effort = Some(ReasoningEffort::Low);
+    let spawned_agent = harness
+        .control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path")),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn_agent should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("child thread should exist");
+    child_thread
+        .inject_response_items(vec![assistant_message(
+            "child persisted",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("child rollout should persist with v2 metadata");
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("child thread should shut down");
+    let stored_child = child_thread
+        .read_thread(
+            /*include_archived*/ true, /*include_history*/ false,
+        )
+        .await
+        .expect("child metadata should be readable");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_agent.thread_id)
+            .await
+            .is_some()
+    );
+
+    let mut sender_config = harness.config.clone();
+    sender_config.model = Some("gpt-5.6-sol".to_string());
+    sender_config.model_provider_id = "ollama".to_string();
+    sender_config.model_provider = sender_config
+        .model_providers
+        .get("ollama")
+        .cloned()
+        .expect("ollama provider should be configured");
+    sender_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    sender_config
+        .model_providers
+        .remove(&stored_child.model_provider);
+    let expected_provider = sender_config.model_provider.clone();
+
+    harness
+        .control
+        .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
+        .await
+        .expect("known v2 agent should reload with current configuration");
+    let reloaded_child = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("reloaded child thread should exist");
+    let snapshot = reloaded_child.config_snapshot().await;
+    assert_eq!(
+        (
+            snapshot.model,
+            snapshot.model_provider_id,
+            snapshot.reasoning_effort,
+            reloaded_child
+                .session
+                .new_default_turn()
+                .await
+                .provider
+                .info()
+                .clone(),
+        ),
+        (
+            "gpt-5.6-sol".to_string(),
+            "ollama".to_string(),
+            Some(ReasoningEffort::High),
+            expected_provider,
+        ),
+    );
 }
 
 #[tokio::test]
