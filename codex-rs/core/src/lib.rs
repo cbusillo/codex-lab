@@ -82,7 +82,6 @@ mod network_policy_decision;
 pub use mcp::McpManager;
 mod original_image_detail;
 mod review_persistence;
-mod rollout_compat;
 pub use codex_mcp::CodexAppsToolsCache;
 pub use codex_mcp::SandboxState;
 mod mcp_openai_file;
