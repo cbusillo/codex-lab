@@ -26,6 +26,8 @@ use codex_exec_server::NoiseChannelPublicKey;
 use codex_exec_server::NoiseRendezvousConnectArgs;
 use codex_exec_server::NoiseRendezvousConnectBundle;
 use codex_exec_server::ProcessId;
+use codex_exec_server::ReadParams;
+use codex_exec_server::RemoteExecServerConnectArgs;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use futures::SinkExt;
@@ -90,20 +92,76 @@ fn local_exec_server_ignores_invalid_config_without_strict_config() -> Result<()
     Ok(())
 }
 
-/// The standalone exec-server accepts an explicit per-connection concurrency limit.
-#[test]
-fn local_exec_server_accepts_concurrent_requests_flag() -> Result<()> {
+/// The standalone exec-server forwards its CLI concurrency limit to request dispatch.
+#[tokio::test]
+async fn local_exec_server_forwards_concurrent_requests_flag() -> Result<()> {
+    const TEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
     let codex_home = TempDir::new()?;
-    let mut cmd = codex_command(codex_home.path())?;
-    cmd.args([
-        "exec-server",
-        "--listen",
-        "stdio",
-        "--concurrent-requests",
-        "2",
-    ])
-    .assert()
-    .success();
+    let mut command = tokio::process::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
+    command
+        .env("CODEX_LAB_HOME", codex_home.path())
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
+        .args([
+            "exec-server",
+            "--listen",
+            "ws://127.0.0.1:0",
+            "--concurrent-requests",
+            "2",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("local exec-server stdout was not piped"))?;
+    let mut stdout = BufReader::new(stdout);
+    let mut listen_url = String::new();
+    tokio::time::timeout(TEST_TIMEOUT, stdout.read_line(&mut listen_url))
+        .await
+        .context("local exec-server did not report its listen URL")??;
+
+    let client = ExecServerClient::connect_websocket(RemoteExecServerConnectArgs {
+        websocket_url: listen_url.trim().to_string(),
+        client_name: "cli-local-concurrency-test".to_string(),
+        connect_timeout: TEST_TIMEOUT,
+        initialize_timeout: TEST_TIMEOUT,
+        resume_session_id: None,
+        http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    })
+    .await?;
+    let process_id = ProcessId::from("local-concurrency-process");
+    #[cfg(windows)]
+    let argv = vec!["ping.exe", "-n", "61", "127.0.0.1"];
+    #[cfg(not(windows))]
+    let argv = vec!["/bin/sleep", "60"];
+    let cwd = url::Url::from_directory_path(std::env::current_dir()?)
+        .map_err(|()| anyhow::anyhow!("could not convert cwd to file URL"))?;
+    client
+        .exec(ExecParams {
+            process_id: process_id.clone(),
+            argv: argv.into_iter().map(str::to_string).collect(),
+            cwd: cwd.as_str().parse()?,
+            env_policy: None,
+            env: HashMap::new(),
+            tty: false,
+            pipe_stdin: false,
+            arg0: None,
+            sandbox: None,
+            enforce_managed_network: false,
+            managed_network: None,
+            network_proxy: None,
+        })
+        .await?;
+
+    assert_concurrent_request_dispatch(&client, &process_id).await?;
+    client.terminate(&process_id).await?;
+    drop(client);
+    child.start_kill()?;
+    child.wait().await?;
 
     Ok(())
 }
@@ -246,9 +304,10 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
     ];
     let cwd = url::Url::from_directory_path(std::env::current_dir()?)
         .map_err(|()| anyhow::anyhow!("could not convert cwd to file URL"))?;
+    let process_id = ProcessId::from("parent-lifetime-process");
     client
         .exec(ExecParams {
-            process_id: ProcessId::from("parent-lifetime-process"),
+            process_id: process_id.clone(),
             argv: argv.into_iter().map(str::to_string).collect(),
             cwd: cwd.as_str().parse()?,
             env_policy: Some(codex_exec_server::ExecEnvPolicy {
@@ -268,6 +327,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
             network_proxy: None,
         })
         .await?;
+    assert_concurrent_request_dispatch(&client, &process_id).await?;
     anyhow::ensure!(
         child.try_wait()?.is_none(),
         "remote exec-server exited while its parent stdin remained open"
@@ -311,6 +371,39 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{collector_url}/v1/metrics", pr
         Some(1),
     );
 
+    Ok(())
+}
+
+async fn assert_concurrent_request_dispatch(
+    client: &ExecServerClient,
+    process_id: &ProcessId,
+) -> Result<()> {
+    const READ_WAIT_MS: u64 = 60_000;
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 5);
+
+    let read_client = client.clone();
+    let process_id = process_id.clone();
+    let read_task = tokio::spawn(async move {
+        read_client
+            .read(ReadParams {
+                process_id,
+                after_seq: None,
+                max_bytes: None,
+                wait_ms: Some(READ_WAIT_MS),
+            })
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(/*millis*/ 100)).await;
+    anyhow::ensure!(
+        !read_task.is_finished(),
+        "long process/read completed before concurrency could be tested"
+    );
+    tokio::time::timeout(REQUEST_TIMEOUT, client.environment_info())
+        .await
+        .context("a second request remained blocked behind process/read")??;
+
+    read_task.abort();
+    let _ = read_task.await;
     Ok(())
 }
 
