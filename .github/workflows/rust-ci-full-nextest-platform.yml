@@ -214,7 +214,7 @@ jobs:
             --bin codex-code-mode-host
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-code-mode-host.exe" "${helper_dir}/"
-          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+          else
             cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \
@@ -245,7 +245,7 @@ jobs:
                 --bin codex
               cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex" "${helper_dir}/"
             fi
-          else
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
             cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \

@@ -336,8 +336,12 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         build_helpers = platform_workflow.split(
             "      - name: Build runtime test helpers\n", 1
         )[1].split("\n      - name:", 1)[0]
-        self.assertIn(
-            'elif [[ "${RUNNER_OS}" == "Windows" ]]; then', build_helpers
+        self.assertEqual(build_helpers.count("\n          else\n"), 1)
+        self.assertEqual(
+            build_helpers.count(
+                '\n          elif [[ "${RUNNER_OS}" == "Windows" ]]; then\n'
+            ),
+            1,
         )
         self.assertIn(
             'junit_source="${workspace_root}/target/nextest/default/junit.xml"',
