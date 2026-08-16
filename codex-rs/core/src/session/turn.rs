@@ -20,6 +20,8 @@ use crate::context_manager::ImageSanitizationSource;
 use crate::context_manager::ModelRequestHistoryMode;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
+use crate::hook_runtime::AsyncHookResultDrainPhase;
+use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
@@ -218,6 +220,14 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<TurnRunResult> {
+    // Record results from hooks that finished after the previous turn before this turn's user prompt.
+    drain_async_hook_results(
+        &sess,
+        &turn_context,
+        AsyncHookResultDrainPhase::BeforeUserPrompt,
+    )
+    .await;
+
     let run_mode = run_state.begin_run();
     turn_context = sess
         .ensure_mcp_manager_for_execution_account(&turn_context)
@@ -449,6 +459,13 @@ pub(crate) async fn run_turn(
                         .await;
                 }
                 can_drain_pending_input = true;
+                // Process async hooks only after sampling and its tools have finished.
+                drain_async_hook_results(
+                    &sess,
+                    &turn_context,
+                    AsyncHookResultDrainPhase::AfterSampling,
+                )
+                .await;
                 let (has_pending_input, token_status) = async {
                     let has_pending_input =
                         sess.input_queue.has_pending_input(&sess.active_turn).await;

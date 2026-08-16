@@ -601,6 +601,12 @@ pub(crate) async fn record_pending_input(
     record_additional_contexts(sess, turn_context, additional_contexts).await;
 }
 
+/// Identifies the safe turn boundary consuming finished async hook results.
+pub(crate) enum AsyncHookResultDrainPhase {
+    BeforeUserPrompt,
+    AfterSampling,
+}
+
 /// Processes finished async hook results at a safe turn boundary.
 ///
 /// Before the user prompt, records additional context directly into conversation
@@ -611,7 +617,7 @@ pub(crate) async fn record_pending_input(
 pub(crate) async fn drain_async_hook_results(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
-    before_user_prompt: bool,
+    phase: AsyncHookResultDrainPhase,
 ) {
     while let Ok(result) = sess.async_hook_results.try_recv() {
         let additional_contexts = result
@@ -622,12 +628,16 @@ pub(crate) async fn drain_async_hook_results(
             .map(|entry| entry.text.clone())
             .collect::<Vec<_>>();
 
-        if before_user_prompt {
-            record_additional_contexts(sess, turn_context, additional_contexts).await;
-        } else if !additional_contexts.is_empty() {
-            let _ = sess
-                .inject_if_running(additional_context_messages(additional_contexts))
-                .await;
+        match phase {
+            AsyncHookResultDrainPhase::BeforeUserPrompt => {
+                record_additional_contexts(sess, turn_context, additional_contexts).await;
+            }
+            AsyncHookResultDrainPhase::AfterSampling if !additional_contexts.is_empty() => {
+                let _ = sess
+                    .inject_if_running(additional_context_messages(additional_contexts))
+                    .await;
+            }
+            AsyncHookResultDrainPhase::AfterSampling => {}
         }
 
         for entry in &result.run.entries {
