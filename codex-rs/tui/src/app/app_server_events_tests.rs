@@ -40,13 +40,17 @@ async fn app_waiting_for_login(login_id: &str) -> App {
 async fn unrelated_and_stale_login_completions_are_ignored() {
     let mut app = app_waiting_for_login("login-a").await;
 
-    app.handle_login_add_account_completed(&login_completed("login-b", true, None));
+    app.handle_login_add_account_completed(&login_completed(
+        "login-b", /*success*/ true, /*error*/ None,
+    ));
     assert_eq!(app.pending_login_add_account_id.as_deref(), Some("login-a"));
     assert_eq!(app.completed_login_add_account_id, None);
 
     let mut stale_app = make_test_app().await;
     stale_app.pending_login_add_account_id = Some("login-a".to_string());
-    stale_app.handle_login_add_account_completed(&login_completed("login-a", true, None));
+    stale_app.handle_login_add_account_completed(&login_completed(
+        "login-a", /*success*/ true, /*error*/ None,
+    ));
     assert_eq!(stale_app.completed_login_add_account_id, None);
 }
 
@@ -54,7 +58,9 @@ async fn unrelated_and_stale_login_completions_are_ignored() {
 async fn login_success_waits_for_chatgpt_account_update() {
     let mut app = app_waiting_for_login("login-a").await;
 
-    app.handle_login_add_account_completed(&login_completed("login-a", true, None));
+    app.handle_login_add_account_completed(&login_completed(
+        "login-a", /*success*/ true, /*error*/ None,
+    ));
     assert_eq!(
         app.completed_login_add_account_id.as_deref(),
         Some("login-a")
@@ -74,7 +80,7 @@ async fn failed_login_completion_clears_pending_attempt() {
 
     app.handle_login_add_account_completed(&login_completed(
         "login-a",
-        false,
+        /*success*/ false,
         Some("login failed"),
     ));
 

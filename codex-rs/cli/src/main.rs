@@ -596,6 +596,14 @@ struct ExecServerCommand {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
+    /// Maximum number of requests to process concurrently on each connection.
+    #[arg(
+        long = "concurrent-requests",
+        value_name = "COUNT",
+        default_value = "1"
+    )]
+    request_dispatch_mode: codex_exec_server::RequestDispatchMode,
+
     /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`.
     #[arg(long = "listen", value_name = "URL", conflicts_with = "remote")]
     listen: Option<String>,
@@ -1784,6 +1792,7 @@ async fn run_exec_server_command(
         codex_self_exe,
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
+    let request_dispatch_mode = cmd.request_dispatch_mode;
     if let Some(base_url) = cmd.remote {
         let environment_id = cmd
             .environment_id
@@ -1802,6 +1811,7 @@ async fn run_exec_server_command(
         if let Some(name) = cmd.name {
             remote_config.name = name;
         }
+        remote_config.request_dispatch_mode = request_dispatch_mode;
         let remote_config = remote_config.with_telemetry(telemetry);
         let parent_lifetime = if cmd.exit_on_stdin_close {
             exec_server_telemetry::ParentLifetime::StdinPipe
@@ -1851,7 +1861,7 @@ async fn run_exec_server_command(
                     runtime_paths,
                     telemetry,
                     http_client_factory,
-                    codex_exec_server::RequestDispatchMode::Inline,
+                    request_dispatch_mode,
                 )
                 .await
             },

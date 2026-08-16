@@ -110,7 +110,7 @@ async fn stale_direct_login_completion_does_not_clear_current_attempt() {
         cancellation: PendingDirectLoginAddAccountCancellation::DeviceCode(cancellation.clone()),
     });
 
-    app.complete_login_add_account_chatgpt(1, Ok(()));
+    app.complete_login_add_account_chatgpt(/*attempt_id*/ 1, Ok(()));
 
     assert_eq!(
         app.pending_direct_login_add_account
