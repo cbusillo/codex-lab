@@ -1,0 +1,18 @@
+---
+source: tui/src/history_cell/auto_review_status_tests.rs
+expression: rendered
+---
+○ Background Review has no current findings · latest current · run-current
+  completed · current · review-model
+  Latest review output is hidden because it does not apply to this review target.
+  2 background current completed off-target
+---
+○ Background Review has no current findings · latest stale · run-stale
+  completed · stale · review-model
+  Latest review output is stale and hidden because it no longer matches this worktree.
+  2 background stale completed off-target
+---
+○ Background Review has no current findings · latest detached · run-detached
+  completed · detached · review-model
+  Latest review output is detached and hidden because it no longer matches this worktree.
+  2 background detached completed off-target

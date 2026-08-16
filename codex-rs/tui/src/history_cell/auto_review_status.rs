@@ -4,9 +4,9 @@ use super::*;
 use codex_app_server_protocol::AutoReviewDiagnosticsSummary;
 use codex_app_server_protocol::AutoReviewFindingDisposition;
 use codex_app_server_protocol::AutoReviewFreshness;
+use codex_app_server_protocol::AutoReviewRunSource;
 use codex_app_server_protocol::AutoReviewRunSummary;
 use codex_app_server_protocol::AutoReviewStatusCount;
-use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::AutoReviewTerminalReason;
 use codex_app_server_protocol::BackgroundAutoReviewStatus;
 use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
@@ -46,19 +46,7 @@ pub(crate) fn new_auto_review_status_cell(
     PlainHistoryCell::new(vec![Line::from(spans)])
 }
 
-pub(crate) fn new_auto_review_summary_cell(
-    response: &AutoReviewSummaryReadResponse,
-) -> PlainHistoryCell {
-    let mut lines = Vec::new();
-    match response.current.as_ref() {
-        Some(summary) => push_current_summary_lines(&mut lines, summary),
-        None => push_no_current_summary_lines(&mut lines, response),
-    }
-    push_diagnostics(&mut lines, response.diagnostics.as_ref());
-    PlainHistoryCell::new(lines)
-}
-
-pub(crate) fn new_auto_review_run_summary_cell(
+pub(crate) fn new_current_auto_review_summary_cell(
     summary: &AutoReviewRunSummary,
     diagnostics: Option<&AutoReviewDiagnosticsSummary>,
 ) -> PlainHistoryCell {
@@ -70,10 +58,12 @@ pub(crate) fn new_auto_review_run_summary_cell(
 
 pub(crate) fn new_hidden_auto_review_run_summary_cell(
     summary: &AutoReviewRunSummary,
+    status_counts: &[AutoReviewStatusCount],
     diagnostics: Option<&AutoReviewDiagnosticsSummary>,
 ) -> PlainHistoryCell {
     let mut lines = Vec::new();
     push_hidden_summary_lines(&mut lines, summary);
+    push_status_counts(&mut lines, status_counts);
     push_diagnostics(&mut lines, diagnostics);
     PlainHistoryCell::new(lines)
 }
@@ -112,21 +102,6 @@ fn push_current_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoRevi
     ]));
     push_summary_metadata(lines, summary);
     push_summary_content(lines, summary);
-}
-
-fn push_no_current_summary_lines(
-    lines: &mut Vec<Line<'static>>,
-    response: &AutoReviewSummaryReadResponse,
-) {
-    if let Some(latest) = response.latest.as_ref() {
-        push_hidden_summary_lines(lines, latest);
-    } else {
-        lines.push(Line::from(vec![
-            "✔ ".green(),
-            "Background Review has no stored result for this thread".bold(),
-        ]));
-    }
-    push_status_counts(lines, &response.status_counts);
 }
 
 fn push_hidden_summary_lines(lines: &mut Vec<Line<'static>>, summary: &AutoReviewRunSummary) {
@@ -311,8 +286,9 @@ fn push_status_counts(lines: &mut Vec<Line<'static>>, counts: &[AutoReviewStatus
         .iter()
         .map(|count| {
             format!(
-                "{} {} {}{}",
+                "{} {} {} {}{}",
                 count.count,
+                source_label(count.source),
                 freshness_label(count.freshness),
                 status_label(count.status),
                 if count.target_matches {
@@ -426,6 +402,13 @@ fn freshness_label(freshness: AutoReviewFreshness) -> &'static str {
     }
 }
 
+fn source_label(source: AutoReviewRunSource) -> &'static str {
+    match source {
+        AutoReviewRunSource::Manual => "manual",
+        AutoReviewRunSource::Background => "background",
+    }
+}
+
 fn status_label(status: BackgroundAutoReviewStatus) -> &'static str {
     match status {
         BackgroundAutoReviewStatus::Pending => "queued",
@@ -451,3 +434,7 @@ fn review_target_label(target: &ReviewTarget) -> String {
         ReviewTarget::Custom { .. } => "custom review".to_string(),
     }
 }
+
+#[cfg(test)]
+#[path = "auto_review_status_tests.rs"]
+mod tests;
