@@ -647,46 +647,9 @@ pub(crate) fn resume_source_kinds(include_non_interactive: bool) -> Vec<ThreadSo
     source_kinds
 }
 
-async fn lookup_session_target_by_name_with_app_server(
-    app_server: &mut AppServerSession,
-    name: &str,
-) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
-    let mut cursor = None;
-    loop {
-        let response = app_server
-            .thread_list(ThreadListParams {
-                cursor: cursor.clone(),
-                limit: Some(100),
-                sort_key: Some(AppServerThreadSortKey::UpdatedAt),
-                sort_direction: None,
-                model_providers: None,
-                source_kinds: Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode]),
-                archived: Some(false),
-                descendant_of_thread_id: None,
-                section_id: None,
-                parent_thread_id: None,
-                ancestor_thread_id: None,
-                cwd: None,
-                use_state_db_only: false,
-                search_term: Some(name.to_string()),
-            })
-            .await?;
-        if let Some(thread) = response
-            .data
-            .into_iter()
-            .find(|thread| thread.name.as_deref() == Some(name))
-        {
-            return Ok(session_target_from_app_server_thread(thread));
-        }
-        if response.next_cursor.is_none() {
-            return Ok(None);
-        }
-        cursor = response.next_cursor;
-    }
-}
-
 async fn lookup_session_target_with_app_server(
     app_server: &mut AppServerSession,
+    config: &Config,
     id_or_name: &str,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     if Uuid::parse_str(id_or_name).is_ok() {
@@ -717,7 +680,7 @@ async fn lookup_session_target_with_app_server(
         };
     }
 
-    lookup_session_target_by_name_with_app_server(app_server, id_or_name).await
+    named_session_lookup::lookup(app_server, config, id_or_name).await
 }
 
 async fn lookup_latest_session_target_with_app_server(
@@ -1589,7 +1552,8 @@ async fn run_ratatui_app(
             let Some(startup_app_server) = app_server.as_mut() else {
                 unreachable!("app server should be initialized for --fork <id>");
             };
-            match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+            match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await?
+            {
                 Some(target_session) => resume_picker::SessionSelection::Fork(target_session),
                 None => {
                     shutdown_app_server_if_present(app_server.take()).await;
@@ -1646,7 +1610,7 @@ async fn run_ratatui_app(
         let Some(startup_app_server) = app_server.as_mut() else {
             unreachable!("app server should be initialized for --resume <id>");
         };
-        match lookup_session_target_with_app_server(startup_app_server, id_str).await? {
+        match lookup_session_target_with_app_server(startup_app_server, &config, id_str).await? {
             Some(target_session) => resume_picker::SessionSelection::Resume(target_session),
             None => {
                 shutdown_app_server_if_present(app_server.take()).await;
@@ -3188,7 +3152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_session_target_by_name_uses_backend_title_search() -> color_eyre::Result<()> {
+    async fn lookup_session_target_routes_names_ids_and_misses() -> color_eyre::Result<()> {
         Box::pin(async {
             let temp_dir = TempDir::new()?;
             let config = build_config(&temp_dir).await?;
@@ -3199,7 +3163,33 @@ mod tests {
                 .join(format!("rollout-2025-02-01T10-00-00-{thread_id}.jsonl"));
             let rollout_dir = rollout_path.parent().expect("rollout parent");
             std::fs::create_dir_all(rollout_dir)?;
-            std::fs::write(&rollout_path, "")?;
+            let session_cwd = temp_dir.path().join("project");
+            std::fs::create_dir_all(&session_cwd)?;
+            let session_meta = codex_protocol::protocol::SessionMetaLine {
+                meta: codex_protocol::protocol::SessionMeta {
+                    session_id: thread_id.into(),
+                    id: thread_id,
+                    timestamp: "2025-02-01T10:00:00Z".to_string(),
+                    cwd: session_cwd.clone(),
+                    originator: "codex".to_string(),
+                    cli_version: "0.0.0".to_string(),
+                    source: codex_protocol::protocol::SessionSource::Cli,
+                    model_provider: Some(config.model_provider_id.clone()),
+                    history_mode: codex_protocol::protocol::ThreadHistoryMode::Legacy,
+                    ..Default::default()
+                },
+                git: None,
+            };
+            std::fs::write(
+                &rollout_path,
+                serde_json::json!({
+                    "timestamp": "2025-02-01T10:00:00Z",
+                    "type": "session_meta",
+                    "payload": session_meta,
+                })
+                .to_string()
+                    + "\n",
+            )?;
 
             let state_runtime = codex_state::StateRuntime::init(
                 codex_state::SqliteConfig::new_for_testing(config.codex_home.as_path().abs()),
@@ -3212,8 +3202,6 @@ mod tests {
                 .await
                 .map_err(std::io::Error::other)?;
 
-            let session_cwd = temp_dir.path().join("project");
-            std::fs::create_dir_all(&session_cwd)?;
             let created_at = chrono::DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")
                 .expect("timestamp should parse")
                 .with_timezone(&chrono::Utc);
@@ -3235,16 +3223,32 @@ mod tests {
 
             let mut app_server = AppServerSession::new(
                 codex_app_server_client::AppServerClient::InProcess(
-                    start_test_embedded_app_server(config).await?,
+                    start_test_embedded_app_server(config.clone()).await?,
                 ),
                 ThreadParamsMode::Embedded,
             );
             let target =
-                lookup_session_target_by_name_with_app_server(&mut app_server, "saved-session")
+                lookup_session_target_with_app_server(&mut app_server, &config, "saved-session")
                     .await?;
             let target = target.expect("name lookup should find the saved thread");
+            assert_eq!(target.path, Some(rollout_path.clone()));
+            assert_eq!(target.thread_id, thread_id);
+
+            let target = lookup_session_target_with_app_server(
+                &mut app_server,
+                &config,
+                &thread_id.to_string(),
+            )
+            .await?
+            .expect("ID lookup should find the saved thread");
             assert_eq!(target.path, Some(rollout_path));
             assert_eq!(target.thread_id, thread_id);
+
+            assert!(
+                lookup_session_target_with_app_server(&mut app_server, &config, "missing-session",)
+                    .await?
+                    .is_none()
+            );
 
             app_server.shutdown().await?;
             Ok(())
