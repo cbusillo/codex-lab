@@ -286,6 +286,7 @@ use crate::bottom_pane::GoalStatusIndicator;
 use crate::bottom_pane::HistoryEntry;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
+use crate::bottom_pane::LoginAddAccountView;
 use crate::bottom_pane::McpElicitationApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::bottom_pane::MemoriesSettingsView;
@@ -1107,6 +1108,18 @@ impl ChatWidget {
             self.bottom_pane.list_keymap(),
         );
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_login_add_account_view(&mut self) {
+        let view = LoginAddAccountView::new_for_store_mode(
+            self.app_event_tx.clone(),
+            self.config.cli_auth_credentials_store_mode,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
+        self.bottom_pane.active_login_add_account_id()
     }
 
     pub(crate) fn open_memories_enable_prompt(&mut self) {

@@ -7,6 +7,8 @@
 
 use super::*;
 use crate::app_event::ThreadGoalSetMode;
+use crate::bottom_pane::LoginAccountsFeedback;
+use crate::bottom_pane::LoginAccountsView;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands::BuiltinCommandFlags;
 use crate::bottom_pane::slash_commands::ServiceTierCommand;
@@ -19,6 +21,25 @@ use crate::goal_files::GoalDraft;
 enum SlashCommandDispatchSource {
     Live,
     Queued,
+}
+
+impl ChatWidget {
+    pub(crate) fn show_login_accounts_view_with_feedback(
+        &mut self,
+        feedback: Option<LoginAccountsFeedback>,
+    ) {
+        let default_auth_home_is_current = self.config.auth_home == self.config.codex_home;
+        let view = LoginAccountsView::new_with_feedback(
+            &self.config.codex_home,
+            self.app_event_tx.clone(),
+            default_auth_home_is_current,
+            self.config.cli_auth_credentials_store_mode,
+            self.config.auth_keyring_backend_kind(),
+            feedback,
+        );
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
 }
 
 struct PreparedSlashCommandArgs {

@@ -108,6 +108,7 @@ mod experimental_features_view;
 mod file_search_popup;
 mod footer;
 mod list_selection_view;
+mod login_accounts_view;
 mod memories_settings_view;
 mod mentions_v2;
 pub(crate) mod prompt_args;
@@ -128,6 +129,9 @@ pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
 pub(crate) use list_selection_view::side_by_side_layout_widths;
+pub(crate) use login_accounts_view::LoginAccountsFeedback;
+pub(crate) use login_accounts_view::LoginAccountsView;
+pub(crate) use login_accounts_view::LoginAddAccountView;
 pub(crate) use memories_settings_view::MemoriesSettingsView;
 use slash_commands::ServiceTierCommand;
 mod feedback_view;
@@ -1272,6 +1276,12 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.active_tab_id())
+    }
+
+    pub(crate) fn active_login_add_account_id(&self) -> Option<&str> {
+        self.view_stack
+            .last()
+            .and_then(|view| view.active_login_add_account_id())
     }
 
     pub(crate) fn dismiss_active_view_if_id(&mut self, view_id: &'static str) -> bool {
