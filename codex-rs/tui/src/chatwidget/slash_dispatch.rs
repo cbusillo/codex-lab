@@ -418,6 +418,9 @@ impl ChatWidget {
             SlashCommand::Logout => {
                 self.app_event_tx.send(AppEvent::Logout);
             }
+            SlashCommand::Login => {
+                self.app_event_tx.send(AppEvent::ShowLoginAccounts);
+            }
             SlashCommand::Copy => {
                 self.copy_last_agent_markdown();
             }
@@ -1151,6 +1154,7 @@ impl ChatWidget {
             | SlashCommand::Memories
             | SlashCommand::Quit
             | SlashCommand::Exit
+            | SlashCommand::Login
             | SlashCommand::Logout
             | SlashCommand::Mention
             | SlashCommand::Skills

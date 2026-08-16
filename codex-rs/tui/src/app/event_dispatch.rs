@@ -7,6 +7,7 @@ use super::resize_reflow::trailing_run_start;
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
 use crate::app_server_session::ForkGoalContinuation;
+use crate::bottom_pane::LoginAccountsFeedback;
 use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
 use crate::pager_overlay::TranscriptHistoryState;
@@ -545,27 +546,37 @@ impl App {
                 }
             },
             AppEvent::ShowLoginAccounts => {
-                self.chat_widget
-                    .show_login_accounts_view_with_feedback(None);
+                self.show_login_accounts_view();
             }
             AppEvent::ShowLoginAddAccount => {
+                self.cancel_login_add_account_chatgpt();
                 self.chat_widget.open_login_add_account_view();
             }
-            AppEvent::LoginStartChatGpt
-            | AppEvent::LoginStartDeviceCode
-            | AppEvent::LoginCancelChatGpt => {
-                tracing::warn!("login account action is not wired yet");
+            AppEvent::LoginStartChatGpt => {
+                self.start_login_add_account_chatgpt().await;
+            }
+            AppEvent::LoginStartDeviceCode => {
+                self.start_login_add_account_device_code();
+            }
+            AppEvent::LoginAddAccountDeviceCodeReady {
+                attempt_id,
+                verification_url,
+                user_code,
+            } => {
+                self.show_login_add_account_device_code(
+                    attempt_id,
+                    verification_url,
+                    user_code.expose_secret().to_string(),
+                );
+            }
+            AppEvent::LoginCancelChatGpt => {
+                self.cancel_login_add_account_chatgpt();
             }
             AppEvent::LoginAddAccountApiKey { api_key } => {
-                tracing::warn!(?api_key, "API key login is not wired yet");
+                self.save_login_add_account_api_key(api_key.expose_secret());
             }
             AppEvent::LoginAddAccountChatGptCompleted { attempt_id, result } => {
-                tracing::warn!(
-                    account_id = self.chat_widget.active_login_add_account_id(),
-                    attempt_id,
-                    ?result,
-                    "login account completion is not wired yet"
-                );
+                self.complete_login_add_account_chatgpt(attempt_id, result);
             }
             AppEvent::SwitchAuthAccount { selection } => {
                 tracing::warn!(
@@ -573,6 +584,9 @@ impl App {
                     account_label = selection.label,
                     "account switching is not wired yet"
                 );
+                self.show_login_accounts_feedback(LoginAccountsFeedback::Error(
+                    "Account switching is not available yet; no changes were made.".to_string(),
+                ));
             }
             AppEvent::RemoveAuthAccount { selection } => {
                 tracing::warn!(
@@ -580,6 +594,9 @@ impl App {
                     account_label = selection.label,
                     "account removal is not wired yet"
                 );
+                self.show_login_accounts_feedback(LoginAccountsFeedback::Error(
+                    "Account removal is not available yet; no changes were made.".to_string(),
+                ));
             }
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));

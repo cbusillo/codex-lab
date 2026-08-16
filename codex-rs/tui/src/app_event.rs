@@ -125,9 +125,32 @@ impl SecretApiKey {
     pub(crate) fn new(api_key: String) -> Self {
         Self(api_key)
     }
+
+    pub(crate) fn expose_secret(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Debug for SecretApiKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SecretDeviceCode(String);
+
+impl SecretDeviceCode {
+    pub(crate) fn new(device_code: String) -> Self {
+        Self(device_code)
+    }
+
+    pub(crate) fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretDeviceCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[REDACTED]")
     }
@@ -390,6 +413,13 @@ pub(crate) enum AppEvent {
 
     /// Start a ChatGPT device-code login from the add-account flow.
     LoginStartDeviceCode,
+
+    /// The direct-store device-code request is ready to show to the user.
+    LoginAddAccountDeviceCodeReady {
+        attempt_id: u64,
+        verification_url: String,
+        user_code: SecretDeviceCode,
+    },
 
     /// Cancel the active ChatGPT add-account login attempt.
     LoginCancelChatGpt,

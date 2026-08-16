@@ -229,6 +229,7 @@ mod history_pagination;
 mod history_ui;
 mod input;
 mod loaded_threads;
+mod login_accounts;
 mod pending_interactive_replay;
 mod pets;
 mod platform_actions;
@@ -1510,6 +1511,7 @@ See the Codex keymap documentation for supported actions and examples."
 
 impl Drop for App {
     fn drop(&mut self) {
+        self.cancel_login_add_account_chatgpt();
         if let Err(err) = self.chat_widget.clear_managed_terminal_title() {
             tracing::debug!(error = %err, "failed to clear terminal title on app drop");
         }
