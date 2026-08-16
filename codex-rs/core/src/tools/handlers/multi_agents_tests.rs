@@ -31,6 +31,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::error::CodexErr;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -47,6 +48,7 @@ use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -104,6 +106,27 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
     )
+}
+
+async fn wait_for_recorded_user_items(thread: &crate::CodexThread, expected: Vec<UserInput>) {
+    timeout(Duration::from_secs(/*secs*/ 5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::UserMessage(item),
+                ..
+            }) = event.msg
+                && item.content == expected
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for user message recording");
 }
 
 async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
@@ -2313,9 +2336,16 @@ async fn send_input_interrupts_before_prompt() {
         .iter()
         .filter_map(|(id, op)| (*id == agent_id).then_some(op))
         .collect();
-    assert_eq!(ops_for_agent.len(), 2);
+    assert_eq!(ops_for_agent.len(), 1);
     assert!(matches!(ops_for_agent[0], Op::Interrupt));
-    assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+    wait_for_recorded_user_items(
+        thread.thread.as_ref(),
+        vec![UserInput::Text {
+            text: "hi".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2352,8 +2382,9 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    let _expected = Op::UserInput {
-        items: vec![
+    wait_for_recorded_user_items(
+        thread.thread.as_ref(),
+        vec![
             UserInput::Mention {
                 name: "drive".to_string(),
                 path: "app://google_drive".to_string(),
@@ -2363,30 +2394,8 @@ async fn send_input_accepts_structured_items() {
                 text_elements: Vec::new(),
             },
         ],
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: Default::default(),
-    };
-    let captured = manager.captured_ops().into_iter().find(|(id, op)| {
-        *id == agent_id
-            && matches!(
-                op,
-                Op::UserInput { items, .. }
-                    if items
-                        == &vec![
-                            UserInput::Mention {
-                                name: "drive".to_string(),
-                                path: "app://google_drive".to_string(),
-                            },
-                            UserInput::Text {
-                                text: "read the folder".to_string(),
-                                text_elements: Vec::new(),
-                            },
-                        ]
-            )
-    });
-    assert!(captured.is_some(), "expected user input was not captured");
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -4134,7 +4143,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     let mut config = (*turn.config).clone();
     config
         .permissions
-        .set_permission_profile(permission_profile.clone())
+        .set_permission_profile(permission_profile)
         .expect("permission profile set");
     config
         .permissions
@@ -4152,19 +4161,8 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.model_reasoning_effort = turn.reasoning_effort.clone();
     expected.model_reasoning_summary = Some(turn.reasoning_summary);
     expected.developer_instructions = turn.developer_instructions.clone();
-    #[allow(deprecated)]
-    {
-        expected.cwd = turn.cwd;
-    }
-    expected
-        .permissions
-        .approval_policy
-        .set(AskForApproval::OnRequest)
-        .expect("approval policy set");
-    expected
-        .permissions
-        .set_permission_profile(permission_profile)
-        .expect("permission profile set");
+    apply_spawn_agent_runtime_overrides(&mut expected, &turn, /*environment*/ None)
+        .expect("runtime overrides");
     assert_eq!(config, expected);
 }
 

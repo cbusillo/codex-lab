@@ -271,6 +271,9 @@ impl AgentControl {
             .await?;
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
+        let stored_model = stored_thread.model.clone();
+        let stored_model_provider_id = stored_thread.model_provider.clone();
+        let stored_reasoning_effort = stored_thread.reasoning_effort;
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
@@ -321,6 +324,20 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
+        if let Some(stored_model) = stored_model {
+            config.model = Some(stored_model);
+        }
+        config.model_provider = config
+            .model_providers
+            .get(&stored_model_provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest(format!(
+                    "model provider `{stored_model_provider_id}` for thread {thread_id} is not configured"
+                ))
+            })?;
+        config.model_provider_id = stored_model_provider_id;
+        config.model_reasoning_effort = stored_reasoning_effort;
         let residency_slot = self
             .reserve_v2_residency_slot(&state, &config, Some(thread_id))
             .await?;
