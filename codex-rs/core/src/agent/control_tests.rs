@@ -1260,7 +1260,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         ),
         (
             "gpt-5.6-luna".to_string(),
-            stored_child.model_provider,
+            stored_child.model_provider.clone(),
             Some(ReasoningEffort::Low),
             harness.config.model_provider.clone()
         ),
@@ -1295,6 +1295,64 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .into_iter()
         .find(|entry| captured_op_matches(entry, &expected));
     assert!(captured.is_some());
+
+    reloaded_child
+        .shutdown_and_wait()
+        .await
+        .expect("reloaded child should shut down");
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state should be initialized");
+    let mut stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("stored child metadata should be readable")
+        .expect("stored child metadata should exist");
+    stored_metadata.model = None;
+    state_db
+        .upsert_thread(&stored_metadata)
+        .await
+        .expect("stored child model should be cleared");
+    assert_eq!(
+        state_db
+            .get_thread(spawned_agent.thread_id)
+            .await
+            .expect("stored child metadata should be readable")
+            .expect("stored child metadata should exist")
+            .model,
+        None,
+    );
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_agent.thread_id)
+            .await
+            .is_some()
+    );
+
+    let mut sender_config = harness.config.clone();
+    sender_config.model = Some("gpt-5.5".to_string());
+    sender_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    harness
+        .control
+        .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
+        .await
+        .expect("known v2 agent without a stored model should reload");
+    let reloaded_child = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("reloaded child thread should exist");
+    let reloaded_snapshot = reloaded_child.config_snapshot().await;
+    assert_ne!(reloaded_snapshot.model, "gpt-5.5");
+    assert_eq!(
+        (
+            reloaded_snapshot.model_provider_id,
+            reloaded_snapshot.reasoning_effort,
+        ),
+        (stored_child.model_provider, Some(ReasoningEffort::Low)),
+    );
 }
 
 #[tokio::test]

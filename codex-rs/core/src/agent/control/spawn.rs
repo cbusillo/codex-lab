@@ -329,9 +329,7 @@ impl AgentControl {
             .get(&stored_model_provider_id)
             .cloned()
         {
-            if let Some(stored_model) = stored_model {
-                config.model = Some(stored_model);
-            }
+            config.model = stored_model;
             config.model_provider = stored_model_provider;
             config.model_provider_id = stored_model_provider_id;
             config.model_reasoning_effort = stored_reasoning_effort;
