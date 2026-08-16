@@ -158,7 +158,7 @@ pub(crate) struct ExecutionAccountSnapshot {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) auth: Option<CodexAuth>,
     pub(crate) auth_provider: SharedAuthProvider,
-    revision: u64,
+    pub(crate) revision: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -459,17 +459,6 @@ impl ExecutionAccountLease {
         ExecutionAccountCacheIdentity(self.inner.current.load().cache_identity.clone())
     }
 
-    #[cfg(test)]
-    pub(crate) fn codex_apps_auth_provider(
-        &self,
-        expected_cache_identity: ExecutionAccountCacheIdentity,
-    ) -> SharedAuthProvider {
-        Arc::new(ExecutionAccountCodexAppsAuthProvider {
-            lease: self.clone(),
-            expected_cache_identity,
-        })
-    }
-
     pub(crate) async fn snapshot(&self) -> ExecutionAccountSnapshot {
         let account = self.inner.current.load_full();
         let auth = account.auth_manager.auth().await;
@@ -765,14 +754,6 @@ impl ExecutionAccountLease {
             }
             return true;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn replace_auth_manager_for_testing(&self, auth_manager: Arc<AuthManager>) {
-        let stored_account_id = auth_manager
-            .auth_cached()
-            .and_then(|auth| auth.get_account_id());
-        self.replace_auth_manager_for_testing_inner(stored_account_id, auth_manager);
     }
 
     #[cfg(test)]

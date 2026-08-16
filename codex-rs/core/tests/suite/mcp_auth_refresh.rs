@@ -46,19 +46,24 @@ impl ExternalAuth for StaticExternalAuth {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token() -> Result<()> {
+async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_execution_account_token() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
     let apps_server = AppsTestServer::mount_hosted_plugin_runtime_searchable(&server).await?;
     let home = Arc::new(TempDir::new()?);
-    let expected_auth = CodexAuth::from_external_chatgpt_tokens(
-        "header.e30.first",
-        "test-account",
+    let control_auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.control",
+        "control-account",
         /*chatgpt_plan_type*/ None,
     )?;
-    let auth_manager = AuthManager::from_auth_for_testing_with_home(
-        expected_auth.clone(),
+    let execution_auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.first",
+        "execution-account",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let execution_auth_manager = AuthManager::from_auth_for_testing_with_home(
+        execution_auth.clone(),
         home.path().to_path_buf(),
     );
     // Build the hosted-plugin config directly so the local test origin can
@@ -105,10 +110,20 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
         ),
         codex_apps_tools_cache: CodexAppsToolsCache::default(),
         tool_catalog_cache: McpToolCatalogCache::default(),
-        codex_apps_tools_cache_key: codex_mcp::codex_apps_tools_cache_key(Some(&expected_auth)),
         client_mcp_extensions: ClientMcpExtensions::default(),
-        auth: Some(expected_auth.clone()),
-        codex_apps_auth_manager: Some(Arc::clone(&auth_manager)),
+        auth: Some(control_auth),
+        codex_apps_auth: codex_mcp::CodexAppsAuth::ExecutionAccount(Box::new(
+            codex_mcp::CodexAppsExecutionAuth {
+                auth: Some(execution_auth.clone()),
+                auth_provider: Some(codex_model_provider::auth_provider_from_auth_manager(
+                    Arc::clone(&execution_auth_manager),
+                    &execution_auth,
+                )),
+                tools_cache_key: Some(codex_mcp::codex_apps_tools_cache_key(Some(&execution_auth))),
+                connection_discriminator: "execution-account".to_string(),
+                revision: 1,
+            },
+        )),
         elicitation_reviewer: None,
         elicitation_lifecycle: None,
     })
@@ -116,19 +131,19 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
     // The model-provider test covers AuthManager reload behavior. Keep this
     // regression focused on core MCP wiring by updating the same shared
     // manager after the MCP client has been created.
-    auth_manager
+    execution_auth_manager
         .set_external_auth(Arc::new(StaticExternalAuth(
             CodexAuth::from_external_chatgpt_tokens(
                 "header.e30.reloaded",
-                "test-account",
+                "execution-account",
                 /*chatgpt_plan_type*/ None,
             )?,
         )))
         .await?;
 
-    // The manager and its static fallback were created before the auth update,
-    // so this tool call only sees the new token if the Codex Apps provider
-    // reads the shared AuthManager at request time.
+    // The execution-account provider was created before the auth update, so this
+    // tool call only sees the new token if Codex Apps keeps execution ownership
+    // and reads the shared execution AuthManager at request time.
     let tool_result = runtime
         .latest_call_tool(
             CODEX_APPS_MCP_SERVER_NAME,

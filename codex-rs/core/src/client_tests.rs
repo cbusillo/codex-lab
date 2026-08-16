@@ -152,10 +152,22 @@ fn invalidated_model_client_session_is_not_recached() {
 
 #[tokio::test]
 async fn execution_account_identity_scopes_caches_without_rebinding_control_auth() {
-    let control_auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-control"));
-    let execution_auth_manager =
-        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("sk-execution"));
+    let control_auth_manager = AuthManager::from_auth_for_testing(
+        CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.control",
+            "control-account",
+            /*chatgpt_plan_type*/ None,
+        )
+        .expect("control auth"),
+    );
+    let execution_auth_manager = AuthManager::from_auth_for_testing(
+        CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.execution",
+            "execution-account",
+            /*chatgpt_plan_type*/ None,
+        )
+        .expect("execution auth"),
+    );
     let codex_home = tempfile::tempdir().expect("tempdir");
     let thread_id = ThreadId::new();
     let lease = ExecutionAccountLease::resolve(
@@ -229,6 +241,17 @@ async fn execution_account_identity_scopes_caches_without_rebinding_control_auth
         &model_client.auth_manager().expect("control auth manager"),
         &control_auth_manager,
     ));
+    let initial_execution_snapshot = lease.snapshot().await;
+    let mut initial_execution_headers = http::HeaderMap::new();
+    initial_execution_snapshot
+        .auth_provider
+        .add_auth_headers(&mut initial_execution_headers);
+    assert_eq!(
+        initial_execution_headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer header.e30.control")
+    );
 
     lease.replace_with_detached_auth_manager_for_testing(
         "execution".to_string(),
@@ -270,6 +293,15 @@ async fn execution_account_identity_scopes_caches_without_rebinding_control_auth
         &model_client.auth_manager().expect("control auth manager"),
         &control_auth_manager,
     ));
+    let mut stale_execution_headers = http::HeaderMap::new();
+    initial_execution_snapshot
+        .auth_provider
+        .add_auth_headers(&mut stale_execution_headers);
+    assert!(
+        stale_execution_headers
+            .get(http::header::AUTHORIZATION)
+            .is_none()
+    );
     let setup = model_client
         .current_client_setup()
         .await
@@ -280,7 +312,7 @@ async fn execution_account_identity_scopes_caches_without_rebinding_control_auth
         headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok()),
-        Some("Bearer sk-control")
+        Some("Bearer header.e30.control")
     );
 }
 
