@@ -22,12 +22,9 @@ doctest = false
 workspace = true
 
 [package.metadata.cargo-shear]
-# Retained account-flow reference implementations from the pre-convergence TUI;
-# the current downstream bottom-pane module does not compile these files.
-ignored-paths = [
-    "src/bottom_pane/account_switch_settings_view.rs",
-    "src/bottom_pane/login_accounts_view.rs",
-]
+# Retained account-flow reference implementation from the pre-convergence TUI;
+# the current downstream bottom-pane module does not compile this file.
+ignored-paths = ["src/bottom_pane/account_switch_settings_view.rs"]
 
 [dependencies]
 anyhow = { workspace = true }
