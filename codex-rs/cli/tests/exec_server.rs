@@ -21,6 +21,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_exec_server::ExecParams;
 use codex_exec_server::ExecServerClient;
+use codex_exec_server::FsReadFileParams;
 use codex_exec_server::NoiseChannelIdentity;
 use codex_exec_server::NoiseChannelPublicKey;
 use codex_exec_server::NoiseRendezvousConnectArgs;
@@ -398,9 +399,25 @@ async fn assert_concurrent_request_dispatch(
         !read_task.is_finished(),
         "long process/read completed before concurrency could be tested"
     );
-    tokio::time::timeout(REQUEST_TIMEOUT, client.environment_info())
-        .await
-        .context("a second request remained blocked behind process/read")??;
+
+    let temp_dir = TempDir::new()?;
+    let probe_path = temp_dir.path().join("concurrency-probe.txt");
+    std::fs::write(&probe_path, "ready")?;
+    let probe_url = url::Url::from_file_path(&probe_path)
+        .map_err(|()| anyhow::anyhow!("could not convert concurrency probe path to file URL"))?;
+    let response = tokio::time::timeout(
+        REQUEST_TIMEOUT,
+        client.fs_read_file(FsReadFileParams {
+            path: probe_url.as_str().parse()?,
+            sandbox: None,
+        }),
+    )
+    .await
+    .context("an ordinary request remained blocked behind process/read")??;
+    anyhow::ensure!(
+        response.data_base64 == "cmVhZHk=",
+        "concurrency probe returned unexpected file contents"
+    );
 
     read_task.abort();
     let _ = read_task.await;
