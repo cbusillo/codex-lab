@@ -644,32 +644,30 @@ impl AgentControl {
 
         let parent_thread_id = *parent_thread_id;
         let parent_thread = state.get_thread(parent_thread_id).await?;
-        let (subagent_developer_instructions, parent_developer_instructions) = match (
-            multi_agent_version,
-            config
-                .multi_agent_v2
-                .subagent_developer_instructions
-                .as_ref(),
-        ) {
-            (MultiAgentVersion::V2, Some(_)) => {
-                let parent_developer_instructions = match parent_thread
-                    .session
-                    .new_default_turn()
-                    .await
-                    .developer_instructions
-                    .clone()
-                {
-                    Some(instructions) if !instructions.is_empty() => Some(instructions),
-                    Some(_) | None => None,
-                };
-                (
-                    Some(config.developer_instructions.clone().unwrap_or_default()),
-                    parent_developer_instructions,
-                )
-            }
-            (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-            | (MultiAgentVersion::V2, None) => (None, None),
-        };
+        let (subagent_developer_instructions, parent_developer_instructions) =
+            match multi_agent_version {
+                MultiAgentVersion::V2 => {
+                    let parent_developer_instructions = match parent_thread
+                        .session
+                        .new_default_turn()
+                        .await
+                        .developer_instructions
+                        .clone()
+                    {
+                        Some(instructions) if !instructions.is_empty() => Some(instructions),
+                        Some(_) | None => None,
+                    };
+                    let child_developer_instructions = config
+                        .developer_instructions
+                        .clone()
+                        .filter(|instructions| !instructions.is_empty());
+                    (
+                        Some(child_developer_instructions.unwrap_or_default()),
+                        parent_developer_instructions,
+                    )
+                }
+                MultiAgentVersion::Disabled | MultiAgentVersion::V1 => (None, None),
+            };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
         // Flush before snapshotting store history for a fork.
@@ -738,46 +736,75 @@ impl AgentControl {
         // Scrub inherited hints and replace only the parent's developer-instruction fragment.
         // Compaction stores response items separately, so sanitize both top-level messages and
         // compacted replacement histories with the same policy.
-        let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
-            if matches!(response_item, ResponseItem::AgentMessage { .. }) {
-                return false;
-            }
-            if is_multi_agent_v2_usage_hint_message(
-                response_item,
-                &multi_agent_v2_usage_hint_texts_to_filter,
-            ) {
-                return false;
-            }
+        let retain_forked_item =
+            |response_item: &mut ResponseItem,
+             replaced: &mut bool,
+             allow_legacy_mixed_fragment: bool| {
+                if matches!(response_item, ResponseItem::AgentMessage { .. }) {
+                    return false;
+                }
+                if is_multi_agent_v2_usage_hint_message(
+                    response_item,
+                    &multi_agent_v2_usage_hint_texts_to_filter,
+                ) {
+                    return false;
+                }
 
-            if let Some(parent_developer_instructions) = parent_developer_instructions.as_ref()
-                && let Some(subagent_developer_instructions) =
-                    subagent_developer_instructions.as_ref()
-                && let ResponseItem::Message { role, content, .. } = response_item
-                && role == "developer"
-            {
-                content.retain_mut(|content_item| {
-                    let ContentItem::InputText { text } = content_item else {
-                        return true;
-                    };
-                    // TODO(anp) track better message fragment provenance in rollouts.
-                    if !text.contains(parent_developer_instructions) {
-                        return true;
-                    }
+                if let Some(parent_developer_instructions) = parent_developer_instructions.as_ref()
+                    && let Some(subagent_developer_instructions) =
+                        subagent_developer_instructions.as_ref()
+                    && let ResponseItem::Message { role, content, .. } = response_item
+                    && role == "developer"
+                {
+                    content.retain_mut(|content_item| {
+                        let ContentItem::InputText { text } = content_item else {
+                            return true;
+                        };
+                        if text == parent_developer_instructions {
+                            let replacement = if preserve_reference_context_item && !*replaced {
+                                subagent_developer_instructions.as_str()
+                            } else {
+                                ""
+                            };
+                            *replaced = true;
+                            *text = replacement.to_string();
+                            return !text.is_empty();
+                        }
+                        if !allow_legacy_mixed_fragment {
+                            return true;
+                        }
 
-                    *replaced = true;
-                    let replacement = if preserve_reference_context_item {
-                        subagent_developer_instructions.as_str()
-                    } else {
-                        ""
-                    };
-                    *text = text.replace(parent_developer_instructions, replacement);
-                    !text.is_empty()
-                });
-                return !content.is_empty();
-            }
+                        // TODO(anp) track better message fragment provenance in rollouts.
+                        let matches = text
+                            .match_indices(parent_developer_instructions)
+                            .filter_map(|(start, _)| {
+                                let end = start + parent_developer_instructions.len();
+                                ((start == 0 || text[..start].ends_with('\n'))
+                                    && (end == text.len() || text[end..].starts_with('\n')))
+                                .then_some((start, end))
+                            })
+                            .collect::<Vec<_>>();
+                        if matches.is_empty() {
+                            return true;
+                        }
 
-            true
-        };
+                        let replace_first_match = preserve_reference_context_item && !*replaced;
+                        *replaced = true;
+                        for (index, (start, end)) in matches.into_iter().enumerate().rev() {
+                            let replacement = if replace_first_match && index == 0 {
+                                subagent_developer_instructions.as_str()
+                            } else {
+                                ""
+                            };
+                            text.replace_range(start..end, replacement);
+                        }
+                        !text.is_empty()
+                    });
+                    return !content.is_empty();
+                }
+
+                true
+            };
         forked_rollout_items.retain_mut(|item| {
             if !keep_forked_rollout_item(item, preserve_reference_context_item)
                 || destination_history_mode == Some(ThreadHistoryMode::Paginated)
@@ -795,9 +822,11 @@ impl AgentControl {
             }
 
             match item {
-                RolloutItem::ResponseItem(response_item) => {
-                    retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
-                }
+                RolloutItem::ResponseItem(response_item) => retain_forked_item(
+                    response_item,
+                    &mut replaced_parent_developer_instructions,
+                    false,
+                ),
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = compacted.replacement_history.as_mut() {
                         // Matches before this checkpoint cannot survive its replacement history.
@@ -806,6 +835,7 @@ impl AgentControl {
                             retain_forked_item(
                                 response_item,
                                 &mut replaced_parent_developer_instructions,
+                                true,
                             )
                         });
                     }

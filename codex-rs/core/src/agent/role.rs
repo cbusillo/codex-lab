@@ -460,9 +460,8 @@ mod reload {
             preserve_current_provider,
             preserve_current_service_tier,
         );
-        if let (RoleDeveloperInstructions::PreserveCallerInstructions, Some(_), None) = (
+        if let (RoleDeveloperInstructions::PreserveCallerInstructions, None) = (
             developer_instructions,
-            &config.multi_agent_v2.subagent_developer_instructions,
             role_layer_toml.get("developer_instructions"),
         ) {
             overrides

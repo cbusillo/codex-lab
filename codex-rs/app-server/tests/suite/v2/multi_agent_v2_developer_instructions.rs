@@ -32,11 +32,14 @@ const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
 #[test_case("full history"; "full history")]
 #[test_case("bounded history"; "bounded history")]
 #[test_case("configured role without instructions"; "configured role without instructions")]
+#[test_case("no history configured role without instructions"; "no history configured role without instructions")]
+#[test_case("bounded history configured role without instructions"; "bounded history configured role without instructions")]
 #[test_case("unset override"; "unset override")]
 #[test_case("blank override"; "blank override")]
 #[test_case("parent has no instructions"; "parent has no instructions")]
 #[test_case("explicit configured role"; "explicit configured role")]
 #[test_case("full history configured role"; "full history configured role")]
+#[test_case("full history explicit default role"; "full history explicit default role")]
 #[test_case("implicit configured default"; "implicit configured default")]
 #[test_case("full fork skips default role"; "full fork skips default role")]
 #[tokio::test]
@@ -44,19 +47,28 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     case: &str,
 ) -> Result<()> {
     let fork_turns = match case {
-        "bounded history" => Some("1"),
-        "no history" | "explicit configured role" | "implicit configured default" => Some("none"),
+        "bounded history" | "bounded history configured role without instructions" => Some("1"),
+        "no history"
+        | "no history configured role without instructions"
+        | "explicit configured role"
+        | "implicit configured default" => Some("none"),
         _ => None,
     };
     let agent_type = match case {
         "configured role without instructions"
+        | "no history configured role without instructions"
+        | "bounded history configured role without instructions"
         | "explicit configured role"
         | "full history configured role" => Some("custom"),
+        "full history explicit default role" => Some("default"),
         _ => None,
     };
     let configured_override = match case {
         "unset override"
         | "full history configured role"
+        | "full history explicit default role"
+        | "no history configured role without instructions"
+        | "bounded history configured role without instructions"
         | "configured role without instructions" => None,
         "blank override" => Some("   "),
         "full history" => Some("  child-only developer instructions  "),
@@ -70,8 +82,11 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let configured_roles = matches!(
         case,
         "configured role without instructions"
+            | "no history configured role without instructions"
+            | "bounded history configured role without instructions"
             | "explicit configured role"
             | "full history configured role"
+            | "full history explicit default role"
             | "implicit configured default"
             | "full fork skips default role"
     );
@@ -79,14 +94,19 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         case,
         "explicit configured role"
             | "full history configured role"
+            | "full history explicit default role"
             | "implicit configured default"
             | "full fork skips default role"
     );
     let expected = match case {
-        "unset override" | "configured role without instructions" => Some(PARENT_INSTRUCTIONS),
+        "unset override"
+        | "configured role without instructions"
+        | "no history configured role without instructions"
+        | "bounded history configured role without instructions" => Some(PARENT_INSTRUCTIONS),
         "blank override" => None,
         "explicit configured role"
         | "full history configured role"
+        | "full history explicit default role"
         | "implicit configured default" => Some(ROLE_INSTRUCTIONS),
         _ => Some(CHILD_INSTRUCTIONS),
     };

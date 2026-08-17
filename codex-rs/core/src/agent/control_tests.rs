@@ -2012,11 +2012,19 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     role: "developer".to_string(),
                     content: vec![
                         ContentItem::InputText {
-                            text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
-                                .to_string(),
+                            text: "Preserved quote: Parent developer instructions.".to_string(),
                         },
                         ContentItem::InputText {
-                            text: "Preserved developer context.".to_string(),
+                            text: "Developer context before.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "Parent developer instructions.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "Developer context after.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "Parent developer instructions.".to_string(),
                         },
                     ],
                     phase: None,
@@ -2095,11 +2103,16 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         role: "developer".to_string(),
         content: vec![
             ContentItem::InputText {
-                text: "Developer context before.\nChild developer instructions.\nDeveloper context after."
-                    .to_string(),
+                text: "Preserved quote: Parent developer instructions.".to_string(),
             },
             ContentItem::InputText {
-                text: "Preserved developer context.".to_string(),
+                text: "Developer context before.".to_string(),
+            },
+            ContentItem::InputText {
+                text: "Child developer instructions.".to_string(),
+            },
+            ContentItem::InputText {
+                text: "Developer context after.".to_string(),
             },
         ],
         phase: None,
@@ -2177,22 +2190,36 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         !history_contains_text(no_hint_history.raw_items(), "Child subagent guidance."),
         "full-history forked child should not add empty subagent guidance"
     );
+    let parent_instruction_item_count = no_hint_history
+        .raw_items()
+        .filter_map(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return None;
+            };
+            Some(content)
+        })
+        .flatten()
+        .filter(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text == "Parent developer instructions."
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+        .count();
+    assert_eq!(parent_instruction_item_count, 0);
     assert!(
-        !history_contains_text(
-            no_hint_history.raw_items(),
-            "Parent developer instructions."
-        ),
-        "empty child developer instructions should remove parent developer instructions"
+        history_contains_text(no_hint_history.raw_items(), "Developer context before."),
+        "empty child developer instructions should preserve preceding developer context"
+    );
+    assert!(
+        history_contains_text(no_hint_history.raw_items(), "Developer context after."),
+        "empty child developer instructions should preserve subsequent developer context"
     );
     assert!(
         history_contains_text(
             no_hint_history.raw_items(),
-            "Developer context before.\n\nDeveloper context after."
+            "Preserved quote: Parent developer instructions."
         ),
-        "empty child developer instructions should preserve surrounding developer context"
-    );
-    assert!(
-        history_contains_text(no_hint_history.raw_items(), "Preserved developer context."),
         "empty child developer instructions should preserve unrelated developer fragments"
     );
 
@@ -2400,6 +2427,10 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
     child_config.developer_instructions = Some("Child developer instructions.".to_string());
     child_config.multi_agent_v2.subagent_developer_instructions =
         Some("Child developer instructions.".to_string());
+    let mut matching_child_config = parent_config.clone();
+    matching_child_config
+        .multi_agent_v2
+        .subagent_developer_instructions = Some("Parent developer instructions.".to_string());
 
     let new_thread = harness
         .manager
@@ -2489,7 +2520,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -2519,11 +2550,61 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
         "full-history fork should append child instructions absent from effective compacted history"
     );
 
+    let matching_child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            matching_child_config,
+            text_input("matching child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching forked spawn should restore compacted instructions")
+        .thread_id;
+    let matching_child_thread = harness
+        .manager
+        .get_thread(matching_child_thread_id)
+        .await
+        .expect("matching child thread should be registered");
+    let matching_history = matching_child_thread.session.clone_history().await;
+    let matching_instruction_count = matching_history
+        .raw_items()
+        .filter_map(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return None;
+            };
+            Some(content)
+        })
+        .flatten()
+        .filter(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text.contains("Parent developer instructions.")
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+        .count();
+    assert_eq!(matching_instruction_count, 1);
+
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(matching_child_thread_id)
+        .await
+        .expect("matching child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
@@ -3077,7 +3158,7 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
-            child_config,
+            child_config.clone(),
             text_input("child task"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -3087,7 +3168,7 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::LastNTurns(2)),
                 ..Default::default()
             },
@@ -3123,11 +3204,57 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
         "bounded fork should preserve unrelated developer fragments"
     );
 
+    let mut matching_child_config = child_config;
+    matching_child_config.developer_instructions =
+        Some("Parent developer instructions.".to_string());
+    matching_child_config
+        .multi_agent_v2
+        .subagent_developer_instructions = Some("Parent developer instructions.".to_string());
+    let matching_child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            matching_child_config,
+            text_input("matching child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::LastNTurns(2)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded fork with matching instructions should sanitize parent context")
+        .thread_id;
+    let matching_child_thread = harness
+        .manager
+        .get_thread(matching_child_thread_id)
+        .await
+        .expect("matching child thread should be registered");
+    let matching_history = matching_child_thread.session.clone_history().await;
+    assert!(
+        !history_contains_text(
+            matching_history.raw_items(),
+            "Parent developer instructions."
+        ),
+        "bounded fork should remove matching parent instructions before the child rebuilds startup context"
+    );
+
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(matching_child_thread_id)
+        .await
+        .expect("matching child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
