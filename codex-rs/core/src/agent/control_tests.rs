@@ -2018,6 +2018,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                             text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
                                 .to_string(),
                         },
+                        ContentItem::InputText {
+                            text: "Parent developer instructions.".to_string(),
+                        },
                     ],
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,

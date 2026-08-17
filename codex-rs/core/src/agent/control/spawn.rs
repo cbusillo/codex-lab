@@ -757,29 +757,30 @@ impl AgentControl {
                     let ContentItem::InputText { text } = content_item else {
                         return true;
                     };
-                    if *replaced {
+                    // TODO(anp) track better message fragment provenance in rollouts.
+                    let matches = text
+                        .match_indices(parent_developer_instructions)
+                        .filter_map(|(start, _)| {
+                            let end = start + parent_developer_instructions.len();
+                            ((start == 0 || text[..start].ends_with('\n'))
+                                && (end == text.len() || text[end..].starts_with('\n')))
+                            .then_some((start, end))
+                        })
+                        .collect::<Vec<_>>();
+                    if matches.is_empty() {
                         return true;
                     }
-                    // TODO(anp) track better message fragment provenance in rollouts.
-                    let Some((start, _)) =
-                        text.match_indices(parent_developer_instructions)
-                            .find(|(start, _)| {
-                                let end = start + parent_developer_instructions.len();
-                                (*start == 0 || text[..*start].ends_with('\n'))
-                                    && (end == text.len() || text[end..].starts_with('\n'))
-                            })
-                    else {
-                        return true;
-                    };
 
+                    let replace_first_match = preserve_reference_context_item && !*replaced;
                     *replaced = true;
-                    let replacement = if preserve_reference_context_item {
-                        subagent_developer_instructions.as_str()
-                    } else {
-                        ""
-                    };
-                    let end = start + parent_developer_instructions.len();
-                    text.replace_range(start..end, replacement);
+                    for (index, (start, end)) in matches.into_iter().enumerate().rev() {
+                        let replacement = if replace_first_match && index == 0 {
+                            subagent_developer_instructions.as_str()
+                        } else {
+                            ""
+                        };
+                        text.replace_range(start..end, replacement);
+                    }
                     !text.is_empty()
                 });
                 return !content.is_empty();
