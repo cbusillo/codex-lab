@@ -6,6 +6,8 @@ use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::ExternalCommandAgentBackendConfig;
 use crate::config::ExternalCommandProtocol;
+use crate::config::PermissionProfileSnapshot;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::step_context::StepContext;
@@ -429,8 +431,10 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
-    let (session, mut turn) = make_session_and_context().await;
+async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
     let mut config = (*turn.config).clone();
     config
         .features
@@ -445,22 +449,22 @@ async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "incompatible_model",
-                "model": "gpt-5.4",
+                "task_name": "unknown_model",
+                "model": "unknown-model",
                 "fork_turns": "none"
             })),
         ))
         .await
         .err()
-        .expect("model from a different multi-agent backend should be rejected");
+        .expect("unknown model should be rejected before spawning");
 
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "Unknown model `gpt-5.4` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra"
-                .to_string()
+            "Unknown model `unknown-model` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2".to_string()
         )
     );
+    assert!(manager.list_thread_ids().await.is_empty());
 }
 
 #[tokio::test]
@@ -2041,6 +2045,12 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
         .set_permission_profile(expected_permission_profile.clone())
         .expect("permission profile should be set");
     set_turn_config(&mut turn, config);
+    let TurnEnvironmentState::Ready(primary_environment) = &mut turn.environments.environments[0]
+    else {
+        panic!("expected ready primary environment");
+    };
+    primary_environment.config.permission_profile =
+        PermissionProfileSnapshot::legacy(expected_permission_profile.clone());
 
     let invocation = invocation(
         Arc::new(session),
