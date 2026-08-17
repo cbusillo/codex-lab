@@ -11074,6 +11074,28 @@ async fn disabled_multi_agent_v2_feature_is_normalized_to_enabled() -> std::io::
 }
 
 #[tokio::test]
+async fn legacy_multi_agent_feature_can_disable_agents() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nmulti_agent = false\n",
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(!config.agents_enabled);
+    assert_eq!(
+        config.multi_agent_version_from_features(),
+        MultiAgentVersion::Disabled
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn multi_agent_v2_migrates_legacy_collaboration_namespace() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(

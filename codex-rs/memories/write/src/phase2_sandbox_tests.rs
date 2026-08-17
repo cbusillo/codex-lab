@@ -60,6 +60,7 @@ async fn consolidation_uses_canonical_parent_enforcement() -> anyhow::Result<()>
             agent_config.permissions.permission_profile(),
             &expected_permission_profile
         );
+        assert!(!agent_config.agents_enabled);
     }
 
     test.codex.shutdown_and_wait().await?;

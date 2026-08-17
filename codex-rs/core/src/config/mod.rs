@@ -3996,7 +3996,7 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.enabled)
-            .unwrap_or(true);
+            .unwrap_or_else(|| features.enabled(Feature::Collab));
         let agent_max_threads = cfg
             .agents
             .as_ref()
