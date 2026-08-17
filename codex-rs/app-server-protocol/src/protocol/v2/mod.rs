@@ -1,4 +1,5 @@
 mod shared;
+mod structured_request;
 
 mod account;
 mod apps;
@@ -61,6 +62,7 @@ pub use realtime::*;
 pub use remote_control::*;
 pub use review::*;
 pub use shared::*;
+pub use structured_request::*;
 pub use thread::*;
 pub use thread_data::*;
 pub use thread_usage::*;

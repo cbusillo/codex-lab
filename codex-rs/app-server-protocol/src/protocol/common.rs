@@ -499,6 +499,19 @@ client_request_definitions! {
         response: v2::ServerDiagnosticsResponse,
     },
 
+    #[experimental("structuredRequest/start")]
+    StructuredRequestStart => "structuredRequest/start" {
+        params: v2::StructuredRequestStartParams,
+        serialization: None,
+        response: v2::StructuredRequestStartResponse,
+    },
+    #[experimental("structuredRequest/cancel")]
+    StructuredRequestCancel => "structuredRequest/cancel" {
+        params: v2::StructuredRequestCancelParams,
+        serialization: None,
+        response: v2::StructuredRequestCancelResponse,
+    },
+
     /// NEW APIs
     // Thread lifecycle
     // Uses `inspect_params` because only some fields are experimental.

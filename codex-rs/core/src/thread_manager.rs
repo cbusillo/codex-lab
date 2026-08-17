@@ -836,6 +836,25 @@ impl ThreadManager {
         self.state.models_manager.clone()
     }
 
+    pub async fn run_stateless_model_request(
+        &self,
+        config: &Config,
+        request: crate::StatelessModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> codex_protocol::error::Result<crate::StatelessModelResponse> {
+        crate::stateless_model_request::run_stateless_model_request(
+            config,
+            self.state.auth_manager.clone(),
+            self.state.models_manager.clone(),
+            self.state.session_source.clone(),
+            self.state.installation_id.clone(),
+            self.state.attestation_provider.clone(),
+            request,
+            cancellation,
+        )
+        .await
+    }
+
     pub async fn list_models(
         &self,
         refresh_strategy: RefreshStrategy,
