@@ -26,8 +26,10 @@ const NAMESPACE: &str = "agents";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
+const PARENT_HISTORY_PROMPT: &str = "remember this parent-only conversation turn";
+const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 
-/// V2 fork modes, roles, and unset/blank overrides expose their agreed instruction precedence.
+/// V2 fork modes, history isolation, roles, and overrides expose their agreed precedence.
 #[test_case("no history"; "no history")]
 #[test_case("full history"; "full history")]
 #[test_case("bounded history"; "bounded history")]
@@ -115,6 +117,20 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     const SPAWN_CALL_ID: &str = "spawn-instruction-override-worker";
 
     let server = responses::start_mock_server().await;
+    let is_no_history = fork_turns == Some("none");
+    responses::mount_sse_once_match_recording_matches(
+        &server,
+        |request: &wiremock::Request| {
+            let body = String::from_utf8_lossy(&request.body);
+            body.contains(PARENT_HISTORY_PROMPT) && !body.contains(PARENT_PROMPT)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("parent-history"),
+            responses::ev_assistant_message("parent-history-message", PARENT_HISTORY_RESPONSE),
+            responses::ev_completed("parent-history"),
+        ]),
+    )
+    .await;
     let mut spawn_args = json!({"message": CHILD_PROMPT, "task_name": "worker"});
     if let Some(fork_turns) = fork_turns {
         spawn_args["fork_turns"] = json!(fork_turns);
@@ -139,11 +155,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         ]),
     )
     .await;
-    let child_request = responses::mount_sse_once_match(
+    let child_request = responses::mount_sse_once_match_recording_matches(
         &server,
         |request: &wiremock::Request| {
             let body = String::from_utf8_lossy(&request.body);
-            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL_ID)
+            body.contains(CHILD_PROMPT)
+                && request
+                    .headers
+                    .get("x-openai-subagent")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("collab_spawn")
         },
         responses::sse(vec![
             responses::ev_response_created("child-work"),
@@ -202,6 +223,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             ..Default::default()
         })
         .await?;
+    app_server
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: PARENT_HISTORY_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
     let _: TurnStartResponse = app_server
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
@@ -215,36 +246,95 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             },
         })
         .await?;
-    let child_request = timeout(READ_TIMEOUT, async {
+    timeout(READ_TIMEOUT, async {
         loop {
-            if let Some(request) = child_request
-                .requests()
-                .into_iter()
-                .find(|request| !request.inputs_of_type("agent_message").is_empty())
-            {
-                break request;
+            if !child_request.requests().is_empty() {
+                break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await?;
+    let child_request = child_request.single_request();
 
-    let parent_texts = parent_request
-        .single_request()
-        .message_input_texts("developer");
+    let parent_spawn_request = parent_request.single_request();
+    let parent_texts = parent_spawn_request.message_input_texts("developer");
     if let Some(parent) = parent {
         assert!(
             parent_texts.iter().any(|text| text == parent),
             "{case}: parent developer instructions unexpectedly changed: {parent_texts:?}"
         );
     }
-    let child_texts = child_request.message_input_texts("developer");
-    if case == "full history configured role" {
-        assert_eq!(child_request.body_json()["model"], json!("gpt-5.5"));
+    for parent_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
+        assert!(
+            parent_spawn_request.body_contains_text(parent_text),
+            "{case}: parent history did not contain seeded item {parent_text:?}"
+        );
+    }
+    if is_no_history {
+        for parent_text in [
+            PARENT_HISTORY_PROMPT,
+            PARENT_HISTORY_RESPONSE,
+            PARENT_PROMPT,
+            SPAWN_CALL_ID,
+        ] {
+            assert!(
+                !child_request.body_contains_text(parent_text),
+                "{case}: the no-history child inherited parent item {parent_text:?}"
+            );
+        }
+        let assistant_messages = child_request
+            .inputs_of_type("message")
+            .into_iter()
+            .filter(|item| {
+                item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            assistant_messages,
+            Vec::<serde_json::Value>::new(),
+            "{case}: the no-history child should not inherit parent assistant messages"
+        );
+        for forbidden_type in [
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "reasoning",
+            "tool_search_call",
+            "tool_search_output",
+        ] {
+            assert_eq!(
+                child_request.inputs_of_type(forbidden_type),
+                Vec::<serde_json::Value>::new(),
+                "{case}: the no-history child should not inherit parent {forbidden_type} items"
+            );
+        }
+    } else if fork_turns == Some("1") {
         assert!(
             child_request.body_contains_text(PARENT_PROMPT),
-            "the child should inherit the parent's conversation history"
+            "{case}: the bounded-history child lost the spawn turn"
         );
+        assert!(
+            !child_request.body_contains_text(PARENT_HISTORY_PROMPT),
+            "{case}: the bounded-history child inherited the older parent user turn"
+        );
+    } else {
+        for inherited_text in [PARENT_HISTORY_PROMPT, PARENT_PROMPT] {
+            assert!(
+                child_request.body_contains_text(inherited_text),
+                "{case}: the full-history child lost parent item {inherited_text:?}"
+            );
+        }
+    }
+    let child_texts = child_request.message_input_texts("developer");
+    assert_eq!(
+        child_request.inputs_of_type("agent_message").len(),
+        1,
+        "{case}: the child should receive its task exactly once"
+    );
+    if case == "full history configured role" {
+        assert_eq!(child_request.body_json()["model"], json!("gpt-5.5"));
         assert!(
             child_texts
                 .iter()
