@@ -10625,6 +10625,67 @@ shell_tool = false
 }
 
 #[tokio::test]
+async fn feature_requirements_cannot_disable_mandatory_multi_agent_v2() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+multi_agent_v2 = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert!(
+        config.startup_warnings.iter().any(|warning| {
+            warning.contains("Ignoring `features` requirement `multi_agent_v2 = false`")
+                && warning.contains("multi-agent V2 is mandatory")
+        }),
+        "{:?}",
+        config.startup_warnings
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn feature_requirements_can_disable_agents() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[agents]\nenabled = true\n",
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+multi_agent = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert_eq!(
+        (
+            config.agents_enabled,
+            config.multi_agent_version_from_features()
+        ),
+        (false, MultiAgentVersion::Disabled)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn feature_requirements_auto_review_disables_guardian_approval() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
 
@@ -11018,6 +11079,51 @@ max_concurrent_threads_per_session = 9
     assert!(!config.multi_agent_v2.wait_agent_enabled);
     assert!(config.multi_agent_v2.non_code_mode_only);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_multi_agent_v2_feature_is_normalized_to_enabled() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nmulti_agent_v2 = false\n",
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert_eq!(
+        config.multi_agent_version_from_features(),
+        MultiAgentVersion::V2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_multi_agent_feature_disables_agents_even_when_agents_are_enabled()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nmulti_agent = false\n[agents]\nenabled = true\n",
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(!config.agents_enabled);
+    assert_eq!(
+        config.multi_agent_version_from_features(),
+        MultiAgentVersion::Disabled
+    );
     Ok(())
 }
 

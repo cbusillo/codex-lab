@@ -48,7 +48,6 @@ const PROJECT_INSTRUCTIONS: &str = "project instructions";
 const PROJECT_SEPARATOR: &str = "--- project-doc ---";
 const SPAWN_CALL_ID: &str = "spawn-global-instructions-child";
 const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
-const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
 const SPAWN_PARENT_PROMPT: &str = "spawn a child with the parent context";
 const SPAWN_SEED_PROMPT: &str = "seed parent history";
 
@@ -1028,23 +1027,12 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forked_subagent_replays_one_creation_time_global_instruction_fragment() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    run_subagent_global_instruction_case(/*fork_context*/ true).await
+    run_subagent_global_instruction_case().await
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fresh_subagent_uses_creation_time_instructions_without_parent_history() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-    run_subagent_global_instruction_case(/*fork_context*/ false).await
-}
-
-async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> {
+async fn run_subagent_global_instruction_case() -> Result<()> {
     // Set up matched responses for the parent seed, spawn call, child turn, and parent follow-up.
     let server = responses::start_mock_server().await;
-    let parent_prompt = if fork_context {
-        SPAWN_PARENT_PROMPT
-    } else {
-        SPAWN_FRESH_PARENT_PROMPT
-    };
     let seed_mock = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| request_body_contains(request, SPAWN_SEED_PROMPT),
@@ -1057,16 +1045,17 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     .await;
     let spawn_args = serde_json::to_string(&json!({
         "message": SPAWN_CHILD_PROMPT,
-        "fork_context": fork_context,
+        "task_name": "child",
+        "fork_turns": "all",
     }))?;
     let spawn_mock = responses::mount_sse_once_match(
         &server,
-        move |request: &wiremock::Request| request_body_contains(request, parent_prompt),
+        |request: &wiremock::Request| request_body_contains(request, SPAWN_PARENT_PROMPT),
         responses::sse(vec![
             responses::ev_response_created("spawn-response"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "multi_agent_v1",
+                "agents",
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -1079,6 +1068,11 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
         |request: &wiremock::Request| {
             request_body_contains(request, SPAWN_CHILD_PROMPT)
                 && !request_body_contains(request, SPAWN_CALL_ID)
+                && request
+                    .headers
+                    .get("x-openai-subagent")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("collab_spawn")
         },
         responses::sse(vec![
             responses::ev_response_created("child-response"),
@@ -1130,7 +1124,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     )?;
     assert_ne!(source, new_source);
     let mut created_threads = test.thread_manager.subscribe_thread_created();
-    test.submit_turn(parent_prompt).await?;
+    test.submit_turn(SPAWN_PARENT_PROMPT).await?;
     let child_thread_id = tokio::time::timeout(Duration::from_secs(10), created_threads.recv())
         .await
         .map_err(|_| anyhow!("timed out waiting for the subagent thread"))??;
@@ -1138,12 +1132,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     let spawn_request = spawn_mock.single_request();
     let child_request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(request) = child_mock.requests().into_iter().find(|request| {
-                request
-                    .message_input_texts("user")
-                    .iter()
-                    .any(|text| text == SPAWN_CHILD_PROMPT)
-            }) {
+            if let Some(request) = child_mock.requests().into_iter().next() {
                 break request;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1167,33 +1156,13 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
         vec![PathUri::from_abs_path(&source)],
         "subagent reports the parent's creation-time source"
     );
-    if fork_context {
-        let seed_input = seed_request.input();
-        let child_input = child_request.input();
-        assert_eq!(
-            child_input.get(..seed_input.len()),
-            Some(seed_input.as_slice()),
-            "forked subagent should replay the parent's original structured input prefix"
-        );
-    } else {
-        let child_user_texts = child_request.message_input_texts("user");
-        assert_eq!(
-            child_user_texts
-                .iter()
-                .filter(|text| text.as_str() == SPAWN_SEED_PROMPT)
-                .count(),
-            0,
-            "fresh-context subagent should omit parent user history; observed: {child_user_texts:?}"
-        );
-        assert_eq!(
-            child_user_texts
-                .iter()
-                .filter(|text| text.as_str() == SPAWN_CHILD_PROMPT)
-                .count(),
-            1,
-            "fresh-context subagent should contain its own prompt exactly once; observed: {child_user_texts:?}"
-        );
-    }
+    let seed_input = seed_request.input();
+    let child_input = child_request.input();
+    assert_eq!(
+        child_input.get(..seed_input.len()),
+        Some(seed_input.as_slice()),
+        "forked subagent should replay the parent's original structured input prefix"
+    );
 
     Ok(())
 }

@@ -430,7 +430,9 @@ impl Features {
     }
 
     pub fn disable(&mut self, f: Feature) -> &mut Self {
-        self.enabled.remove(&f);
+        if f != Feature::MultiAgentV2 {
+            self.enabled.remove(&f);
+        }
         self
     }
 
@@ -1076,7 +1078,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
         stage: Stage::Stable,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::MultiAgentMode,

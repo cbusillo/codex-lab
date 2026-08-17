@@ -57,12 +57,26 @@ const SUBAGENT_DEVELOPER_INSTRUCTIONS: &str = "Use the default durable worker in
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Result<()> {
+    assert_recorded_history_resumes_with_v2_tools("v1", "legacy V1").await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_history_resumes_with_v2_tools_and_preserved_context() -> Result<()> {
+    assert_recorded_history_resumes_with_v2_tools("disabled", "disabled").await
+}
+
+async fn assert_recorded_history_resumes_with_v2_tools(
+    recorded_version: &str,
+    history_label: &str,
+) -> Result<()> {
     let server = start_mock_server().await;
+    let historical_context = format!("{history_label} context");
+    let historical_response = format!("{history_label} response");
     mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-legacy"),
-            ev_assistant_message("msg-legacy", "legacy response"),
+            ev_assistant_message("msg-legacy", &historical_response),
             ev_completed("resp-legacy"),
         ]),
     )
@@ -75,7 +89,9 @@ async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Resu
         .rollout_path()
         .expect("legacy rollout path")
         .to_path_buf();
-    initial.submit_turn("legacy V1 context").await?;
+    initial.submit_turn(&historical_context).await?;
+    initial.codex.shutdown_and_wait().await?;
+    drop(initial);
     let rollout = std::fs::read_to_string(&rollout_path)?;
     let legacy_rollout = rollout
         .lines()
@@ -84,7 +100,7 @@ async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Resu
             if item.get("type").and_then(Value::as_str) == Some("session_meta") {
                 item.pointer_mut("/payload/multi_agent_version")
                     .expect("session metadata should record the multi-agent version")
-                    .clone_from(&json!("v1"));
+                    .clone_from(&json!(recorded_version));
             }
             Ok(serde_json::to_string(&item)?)
         })
@@ -109,8 +125,8 @@ async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Resu
     let body = request.body_json();
     assert!(namespace_child_tool(&body, "agents", "spawn_agent").is_some());
     assert!(namespace_child_tool(&body, "multi_agent_v1", "spawn_agent").is_none());
-    assert!(request.body_contains_text("legacy V1 context"));
-    assert!(request.body_contains_text("legacy response"));
+    assert!(request.body_contains_text(&historical_context));
+    assert!(request.body_contains_text(&historical_response));
     Ok(())
 }
 

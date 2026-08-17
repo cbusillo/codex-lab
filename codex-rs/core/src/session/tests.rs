@@ -2470,7 +2470,7 @@ async fn prepares_resumed_history_before_installing_it() {
 }
 
 #[test]
-fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
+fn resolve_multi_agent_version_always_upgrades_supported_sessions_to_v2() {
     let thread_id = ThreadId::default();
 
     assert_eq!(
@@ -2478,7 +2478,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
             &InitialHistory::New,
             /*inherited_multi_agent_version*/ None
         ),
-        None
+        Some(MultiAgentVersion::V2)
     );
     assert_eq!(
         resolve_multi_agent_version(
@@ -2489,7 +2489,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
             }),
             /*inherited_multi_agent_version*/ None,
         ),
-        Some(MultiAgentVersion::V1)
+        Some(MultiAgentVersion::V2)
     );
     assert_eq!(
         resolve_multi_agent_version(
@@ -2514,7 +2514,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
             }),
             Some(MultiAgentVersion::V2),
         ),
-        Some(MultiAgentVersion::Disabled)
+        Some(MultiAgentVersion::V2)
     );
     assert_eq!(
         resolve_multi_agent_version(
@@ -2531,7 +2531,7 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
             &InitialHistory::Forked(Vec::new()),
             /*inherited_multi_agent_version*/ None
         ),
-        Some(MultiAgentVersion::V1)
+        Some(MultiAgentVersion::V2)
     );
 }
 
@@ -9457,7 +9457,7 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
 }
 
 #[tokio::test]
-async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_disabled() {
+async fn build_initial_context_keeps_multi_agent_v2_usage_hints_when_feature_disabled() {
     let (session, turn_context) =
         make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ false).await;
 
@@ -9465,13 +9465,10 @@ async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_dis
 
     let developer_messages = developer_message_texts(&initial_context);
     assert!(
-        !developer_messages.iter().any(|message| {
-            matches!(
-                message.as_slice(),
-                ["Root guidance."] | ["Subagent guidance."]
-            )
-        }),
-        "did not expect multi-agent v2 usage hint developer messages, got {developer_messages:?}"
+        developer_messages
+            .iter()
+            .any(|message| message.contains(&"Root guidance.")),
+        "expected mandatory multi-agent v2 root guidance, got {developer_messages:?}"
     );
 }
 
