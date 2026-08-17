@@ -761,9 +761,16 @@ impl AgentControl {
                         return true;
                     }
                     // TODO(anp) track better message fragment provenance in rollouts.
-                    if !text.contains(parent_developer_instructions) {
+                    let Some((start, _)) =
+                        text.match_indices(parent_developer_instructions)
+                            .find(|(start, _)| {
+                                let end = start + parent_developer_instructions.len();
+                                (*start == 0 || text[..*start].ends_with('\n'))
+                                    && (end == text.len() || text[end..].starts_with('\n'))
+                            })
+                    else {
                         return true;
-                    }
+                    };
 
                     *replaced = true;
                     let replacement = if preserve_reference_context_item {
@@ -771,7 +778,8 @@ impl AgentControl {
                     } else {
                         ""
                     };
-                    *text = text.replacen(parent_developer_instructions, replacement, 1);
+                    let end = start + parent_developer_instructions.len();
+                    text.replace_range(start..end, replacement);
                     !text.is_empty()
                 });
                 return !content.is_empty();

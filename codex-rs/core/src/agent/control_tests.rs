@@ -2012,11 +2012,11 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     role: "developer".to_string(),
                     content: vec![
                         ContentItem::InputText {
-                            text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
-                                .to_string(),
+                            text: "Preserved quote: Parent developer instructions.".to_string(),
                         },
                         ContentItem::InputText {
-                            text: "Preserved quote: Parent developer instructions.".to_string(),
+                            text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
+                                .to_string(),
                         },
                     ],
                     phase: None,
@@ -2095,11 +2095,11 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         role: "developer".to_string(),
         content: vec![
             ContentItem::InputText {
-                text: "Developer context before.\nChild developer instructions.\nDeveloper context after."
-                    .to_string(),
+                text: "Preserved quote: Parent developer instructions.".to_string(),
             },
             ContentItem::InputText {
-                text: "Preserved quote: Parent developer instructions.".to_string(),
+                text: "Developer context before.\nChild developer instructions.\nDeveloper context after."
+                    .to_string(),
             },
         ],
         phase: None,
