@@ -442,21 +442,13 @@ pub(crate) struct SessionSpawnArgs {
 }
 
 pub(crate) fn resolve_multi_agent_version(
-    conversation_history: &InitialHistory,
+    _conversation_history: &InitialHistory,
     inherited_multi_agent_version: Option<MultiAgentVersion>,
 ) -> Option<MultiAgentVersion> {
     if inherited_multi_agent_version == Some(MultiAgentVersion::Disabled) {
         return Some(MultiAgentVersion::Disabled);
     }
-
-    conversation_history
-        .get_multi_agent_version()
-        .or(inherited_multi_agent_version)
-        .or(match conversation_history {
-            InitialHistory::New | InitialHistory::Cleared => None,
-            // Threads created before runtime metadata existed keep the legacy V1 tool surface.
-            InitialHistory::Resumed(_) | InitialHistory::Forked(_) => Some(MultiAgentVersion::V1),
-        })
+    Some(MultiAgentVersion::V2)
 }
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";

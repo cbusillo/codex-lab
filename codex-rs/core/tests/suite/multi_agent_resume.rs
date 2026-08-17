@@ -76,6 +76,8 @@ async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Resu
         .expect("legacy rollout path")
         .to_path_buf();
     initial.submit_turn("legacy V1 context").await?;
+    initial.codex.shutdown_and_wait().await?;
+    drop(initial);
     let rollout = std::fs::read_to_string(&rollout_path)?;
     let legacy_rollout = rollout
         .lines()

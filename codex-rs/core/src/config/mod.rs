@@ -1627,32 +1627,23 @@ impl Config {
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
-        if self.features.enabled(Feature::MultiAgentV2) {
-            Some(MultiAgentVersion::V2)
-        } else if !self.agents_enabled {
+        if !self.agents_enabled {
             Some(MultiAgentVersion::Disabled)
         } else {
-            None
+            Some(MultiAgentVersion::V2)
         }
     }
 
     pub(crate) fn multi_agent_version_from_features(&self) -> MultiAgentVersion {
-        self.multi_agent_version_override().unwrap_or_else(|| {
-            if self.features.enabled(Feature::Collab) {
-                MultiAgentVersion::V1
-            } else {
-                MultiAgentVersion::Disabled
-            }
-        })
+        self.multi_agent_version_override()
+            .unwrap_or(MultiAgentVersion::V2)
     }
 
     pub(crate) fn multi_agent_version_for_model(
         &self,
-        model_multi_agent_version: Option<MultiAgentVersion>,
+        _model_multi_agent_version: Option<MultiAgentVersion>,
     ) -> MultiAgentVersion {
-        self.multi_agent_version_override()
-            .or(model_multi_agent_version)
-            .unwrap_or_else(|| self.multi_agent_version_from_features())
+        self.multi_agent_version_from_features()
     }
 
     pub(crate) fn effective_agent_max_threads(
