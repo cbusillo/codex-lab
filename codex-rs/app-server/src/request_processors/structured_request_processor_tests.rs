@@ -71,9 +71,8 @@ fn identical_request_ids_are_isolated_by_connection() {
     let first_registration =
         register_active_request(&active_requests, first_key.clone(), first.clone())
             .expect("first registration");
-    let second_registration =
-        register_active_request(&active_requests, second_key.clone(), second.clone())
-            .expect("second registration");
+    let second_registration = register_active_request(&active_requests, second_key, second.clone())
+        .expect("second registration");
 
     assert!(cancel_active_request(&active_requests, &first_key));
     assert!(first.is_cancelled());
