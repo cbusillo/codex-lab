@@ -2015,8 +2015,13 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                             text: "Preserved quote: Parent developer instructions.".to_string(),
                         },
                         ContentItem::InputText {
-                            text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
-                                .to_string(),
+                            text: "Developer context before.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "Parent developer instructions.".to_string(),
+                        },
+                        ContentItem::InputText {
+                            text: "Developer context after.".to_string(),
                         },
                         ContentItem::InputText {
                             text: "Parent developer instructions.".to_string(),
@@ -2101,8 +2106,13 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 text: "Preserved quote: Parent developer instructions.".to_string(),
             },
             ContentItem::InputText {
-                text: "Developer context before.\nChild developer instructions.\nDeveloper context after."
-                    .to_string(),
+                text: "Developer context before.".to_string(),
+            },
+            ContentItem::InputText {
+                text: "Child developer instructions.".to_string(),
+            },
+            ContentItem::InputText {
+                text: "Developer context after.".to_string(),
             },
         ],
         phase: None,
@@ -2180,19 +2190,30 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         !history_contains_text(no_hint_history.raw_items(), "Child subagent guidance."),
         "full-history forked child should not add empty subagent guidance"
     );
+    let parent_instruction_item_count = no_hint_history
+        .raw_items()
+        .filter_map(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return None;
+            };
+            Some(content)
+        })
+        .flatten()
+        .filter(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text == "Parent developer instructions."
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+        .count();
+    assert_eq!(parent_instruction_item_count, 0);
     assert!(
-        !history_contains_text(
-            no_hint_history.raw_items(),
-            "Developer context before.\nParent developer instructions.\nDeveloper context after."
-        ),
-        "empty child developer instructions should remove parent developer instructions"
+        history_contains_text(no_hint_history.raw_items(), "Developer context before."),
+        "empty child developer instructions should preserve preceding developer context"
     );
     assert!(
-        history_contains_text(
-            no_hint_history.raw_items(),
-            "Developer context before.\n\nDeveloper context after."
-        ),
-        "empty child developer instructions should preserve surrounding developer context"
+        history_contains_text(no_hint_history.raw_items(), "Developer context after."),
+        "empty child developer instructions should preserve subsequent developer context"
     );
     assert!(
         history_contains_text(
