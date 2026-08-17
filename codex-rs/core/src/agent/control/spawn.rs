@@ -644,7 +644,7 @@ impl AgentControl {
 
         let parent_thread_id = *parent_thread_id;
         let parent_thread = state.get_thread(parent_thread_id).await?;
-        let (subagent_developer_instructions, parent_developer_instructions) =
+        let (mut subagent_developer_instructions, mut parent_developer_instructions) =
             match multi_agent_version {
                 MultiAgentVersion::V2 => {
                     let parent_developer_instructions = match parent_thread
@@ -661,14 +661,10 @@ impl AgentControl {
                         .developer_instructions
                         .clone()
                         .filter(|instructions| !instructions.is_empty());
-                    if child_developer_instructions == parent_developer_instructions {
-                        (None, None)
-                    } else {
-                        (
-                            Some(child_developer_instructions.unwrap_or_default()),
-                            parent_developer_instructions,
-                        )
-                    }
+                    (
+                        Some(child_developer_instructions.unwrap_or_default()),
+                        parent_developer_instructions,
+                    )
                 }
                 MultiAgentVersion::Disabled | MultiAgentVersion::V1 => (None, None),
             };
@@ -735,6 +731,15 @@ impl AgentControl {
                 }
                 break;
             }
+        }
+        if preserve_reference_context_item
+            && subagent_developer_instructions
+                .as_deref()
+                .filter(|instructions| !instructions.is_empty())
+                == parent_developer_instructions.as_deref()
+        {
+            subagent_developer_instructions = None;
+            parent_developer_instructions = None;
         }
         let mut replaced_parent_developer_instructions = false;
         // Scrub inherited hints and replace only the parent's developer-instruction fragment.
