@@ -126,10 +126,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         },
         responses::sse(vec![
             responses::ev_response_created("parent-history"),
-            responses::ev_assistant_message(
-                "parent-history-message",
-                PARENT_HISTORY_RESPONSE,
-            ),
+            responses::ev_assistant_message("parent-history-message", PARENT_HISTORY_RESPONSE),
             responses::ev_completed("parent-history"),
         ]),
     )
@@ -291,14 +288,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         let unexpected_items = child_request
             .input()
             .into_iter()
-            .filter(|item| match item.get("type").and_then(serde_json::Value::as_str) {
-                Some("agent_message") => false,
-                Some("message") => !matches!(
-                    item.get("role").and_then(serde_json::Value::as_str),
-                    Some("developer" | "user")
-                ),
-                Some(_) | None => true,
-            })
+            .filter(
+                |item| match item.get("type").and_then(serde_json::Value::as_str) {
+                    Some("agent_message") => false,
+                    Some("message") => !matches!(
+                        item.get("role").and_then(serde_json::Value::as_str),
+                        Some("developer" | "user")
+                    ),
+                    Some(_) | None => true,
+                },
+            )
             .collect::<Vec<_>>();
         assert_eq!(
             unexpected_items,
@@ -317,16 +316,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             );
         }
     } else {
-        for inherited_text in [
-            PARENT_HISTORY_PROMPT,
-            PARENT_HISTORY_RESPONSE,
-            PARENT_PROMPT,
-        ] {
+        for inherited_text in [PARENT_HISTORY_PROMPT, PARENT_PROMPT] {
             assert!(
                 child_request.body_contains_text(inherited_text),
                 "{case}: the full-history child lost parent item {inherited_text:?}"
             );
         }
+        assert!(
+            !child_request.body_contains_text(PARENT_HISTORY_RESPONSE),
+            "{case}: the full-history child inherited a filtered parent assistant response"
+        );
     }
     let child_texts = child_request.message_input_texts("developer");
     assert_eq!(

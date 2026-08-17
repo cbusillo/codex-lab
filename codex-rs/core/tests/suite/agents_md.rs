@@ -51,6 +51,7 @@ const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
 const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
 const SPAWN_PARENT_PROMPT: &str = "spawn a child with the parent context";
 const SPAWN_SEED_PROMPT: &str = "seed parent history";
+const SPAWN_SEED_RESPONSE: &str = "seeded";
 
 #[derive(Clone, Copy)]
 enum SubagentHistory {
@@ -1055,7 +1056,7 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         |request: &wiremock::Request| request_body_contains(request, SPAWN_SEED_PROMPT),
         responses::sse(vec![
             responses::ev_response_created("seed-response"),
-            responses::ev_assistant_message("seed-message", "seeded"),
+            responses::ev_assistant_message("seed-message", SPAWN_SEED_RESPONSE),
             responses::ev_completed("seed-response"),
         ]),
     )
@@ -1083,11 +1084,10 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         ]),
     )
     .await;
-    let child_mock = responses::mount_sse_once_match(
+    let child_mock = responses::mount_sse_once_match_recording_matches(
         &server,
         |request: &wiremock::Request| {
             request_body_contains(request, SPAWN_CHILD_PROMPT)
-                && !request_body_contains(request, SPAWN_CALL_ID)
                 && request
                     .headers
                     .get("x-openai-subagent")
@@ -1150,20 +1150,17 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         .map_err(|_| anyhow!("timed out waiting for the subagent thread"))??;
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
     let spawn_request = spawn_mock.single_request();
-    let child_request = tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(request) = child_mock
-                .requests()
-                .into_iter()
-                .find(|request| !request.inputs_of_type("agent_message").is_empty())
-            {
-                break request;
+            if !child_mock.requests().is_empty() {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .map_err(|_| anyhow!("timed out waiting for the subagent request"))?;
+    let child_request = child_mock.single_request();
 
     // Assert parent and child report and render the parent's creation-time snapshot exactly once.
     let expected_fragment = expected_provider_only_instruction_fragment(OLD_GLOBAL_INSTRUCTIONS);
@@ -1194,7 +1191,7 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
             let child_input = child_request.input();
             for parent_text in [
                 SPAWN_SEED_PROMPT,
-                "seeded",
+                SPAWN_SEED_RESPONSE,
                 SPAWN_FRESH_PARENT_PROMPT,
                 SPAWN_CALL_ID,
             ] {
@@ -1203,6 +1200,25 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
                     "fresh-context subagent should omit parent history item {parent_text:?}; observed: {child_input:#?}"
                 );
             }
+            let unexpected_items = child_input
+                .iter()
+                .filter(
+                    |item| match item.get("type").and_then(serde_json::Value::as_str) {
+                        Some("agent_message") => false,
+                        Some("message") => !matches!(
+                            item.get("role").and_then(serde_json::Value::as_str),
+                            Some("developer" | "user")
+                        ),
+                        Some(_) | None => true,
+                    },
+                )
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                unexpected_items,
+                Vec::<serde_json::Value>::new(),
+                "fresh-context subagent should contain only startup messages and its task"
+            );
             assert!(
                 child_request.body_contains_text(SPAWN_CHILD_PROMPT),
                 "fresh-context subagent should contain its own task"
