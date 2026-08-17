@@ -1167,6 +1167,12 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
     assert_single_instruction_fragment(&seed_request, &expected_fragment);
     assert_single_instruction_fragment(&spawn_request, &expected_fragment);
     assert_single_instruction_fragment(&child_request, &expected_fragment);
+    for seeded_text in [SPAWN_SEED_PROMPT, SPAWN_SEED_RESPONSE] {
+        assert!(
+            spawn_request.body_contains_text(seeded_text),
+            "parent spawn request should contain seeded history item {seeded_text:?}"
+        );
+    }
     assert_eq!(
         test.codex.instruction_sources().await,
         vec![PathUri::from_abs_path(&source)],
@@ -1231,13 +1237,13 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
                 child_request.body_contains_text(SPAWN_CHILD_PROMPT),
                 "fresh-context subagent should contain its own task"
             );
-            assert_eq!(
-                child_request.inputs_of_type("agent_message").len(),
-                1,
-                "fresh-context subagent should contain its own task exactly once"
-            );
         }
     }
+    assert_eq!(
+        child_request.inputs_of_type("agent_message").len(),
+        1,
+        "subagent should contain its own task exactly once"
+    );
 
     Ok(())
 }
