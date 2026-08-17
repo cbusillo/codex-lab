@@ -1630,7 +1630,7 @@ impl Config {
         if !self.agents_enabled {
             Some(MultiAgentVersion::Disabled)
         } else {
-            Some(MultiAgentVersion::V2)
+            None
         }
     }
 
@@ -3996,7 +3996,8 @@ impl Config {
             .agents
             .as_ref()
             .and_then(|agents| agents.enabled)
-            .unwrap_or_else(|| features.enabled(Feature::Collab));
+            .unwrap_or(true)
+            && features.enabled(Feature::Collab);
         let agent_max_threads = cfg
             .agents
             .as_ref()
