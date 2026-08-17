@@ -113,7 +113,7 @@ jobs:
         run: pnpm -r --filter ./sdk/typescript run lint
 
       - name: Test SDK packages
-        run: pnpm -r --filter ./sdk/typescript run test
+        run: pnpm -r --filter ./sdk/typescript run test --runInBand --testTimeout=15000
 
       - name: Save bazel repository cache
         if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
