@@ -37,6 +37,7 @@ use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
+use crate::request_processors::StructuredRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
 use crate::request_processors::ThreadRequestProcessor;
 use crate::request_processors::TurnRequestProcessor;
@@ -123,6 +124,7 @@ pub(crate) struct MessageProcessor {
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
+    structured_request_processor: StructuredRequestProcessor,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
@@ -432,6 +434,8 @@ impl MessageProcessor {
             config.cwd.to_path_buf(),
         );
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
+        let structured_request_processor =
+            StructuredRequestProcessor::new(Arc::clone(&thread_manager), config_manager.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
             outgoing.clone(),
@@ -530,6 +534,7 @@ impl MessageProcessor {
             plugin_processor,
             remote_control_processor,
             search_processor,
+            structured_request_processor,
             thread_goal_processor,
             thread_processor,
             turn_processor,
@@ -916,6 +921,16 @@ impl MessageProcessor {
                 panic!("Initialize should be handled before initialized request dispatch");
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
+            ClientRequest::StructuredRequestStart { params, .. } => self
+                .structured_request_processor
+                .start(connection_id, params)
+                .await
+                .map(|response| Some(response.into())),
+            ClientRequest::StructuredRequestCancel { params, .. } => Ok(Some(
+                self.structured_request_processor
+                    .cancel(connection_id, params)
+                    .into(),
+            )),
             ClientRequest::ConfigRead { params, .. } => self
                 .config_processor
                 .read(params)
