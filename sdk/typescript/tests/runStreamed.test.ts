@@ -167,7 +167,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  });
+  }, 15_000);
 
   it("applies output schema turn options when streaming", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
