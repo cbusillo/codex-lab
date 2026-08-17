@@ -432,7 +432,9 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 
 #[tokio::test]
 async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
-    let (session, mut turn) = make_session_and_context().await;
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
     let mut config = (*turn.config).clone();
     config
         .features
@@ -462,6 +464,7 @@ async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
             "Unknown model `unknown-model` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2".to_string()
         )
     );
+    assert!(manager.list_thread_ids().await.is_empty());
 }
 
 #[tokio::test]
