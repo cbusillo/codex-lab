@@ -2403,6 +2403,10 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
     child_config.developer_instructions = Some("Child developer instructions.".to_string());
     child_config.multi_agent_v2.subagent_developer_instructions =
         Some("Child developer instructions.".to_string());
+    let mut matching_child_config = parent_config.clone();
+    matching_child_config
+        .multi_agent_v2
+        .subagent_developer_instructions = Some("Parent developer instructions.".to_string());
 
     let new_thread = harness
         .manager
@@ -2492,7 +2496,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -2522,11 +2526,61 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
         "full-history fork should append child instructions absent from effective compacted history"
     );
 
+    let matching_child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            matching_child_config,
+            text_input("matching child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("matching forked spawn should restore compacted instructions")
+        .thread_id;
+    let matching_child_thread = harness
+        .manager
+        .get_thread(matching_child_thread_id)
+        .await
+        .expect("matching child thread should be registered");
+    let matching_history = matching_child_thread.session.clone_history().await;
+    let matching_instruction_count = matching_history
+        .raw_items()
+        .filter_map(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return None;
+            };
+            Some(content)
+        })
+        .flatten()
+        .filter(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text.contains("Parent developer instructions.")
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+        .count();
+    assert_eq!(matching_instruction_count, 1);
+
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
+    let _ = harness
+        .control
+        .shutdown_live_agent(matching_child_thread_id)
+        .await
+        .expect("matching child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
         .await
