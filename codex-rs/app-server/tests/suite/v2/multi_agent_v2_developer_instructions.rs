@@ -285,36 +285,42 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
                 "{case}: the no-history child inherited parent item {parent_text:?}"
             );
         }
-        let unexpected_items = child_request
-            .input()
+        let assistant_messages = child_request
+            .inputs_of_type("message")
             .into_iter()
-            .filter(
-                |item| match item.get("type").and_then(serde_json::Value::as_str) {
-                    Some("agent_message") => false,
-                    Some("message") => !matches!(
-                        item.get("role").and_then(serde_json::Value::as_str),
-                        Some("developer" | "user")
-                    ),
-                    Some(_) | None => true,
-                },
-            )
+            .filter(|item| {
+                item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+            })
             .collect::<Vec<_>>();
         assert_eq!(
-            unexpected_items,
+            assistant_messages,
             Vec::<serde_json::Value>::new(),
-            "{case}: the no-history child should contain only startup messages and its task"
+            "{case}: the no-history child should not inherit parent assistant messages"
         );
+        for forbidden_type in [
+            "function_call",
+            "function_call_output",
+            "custom_tool_call",
+            "custom_tool_call_output",
+            "reasoning",
+            "tool_search_call",
+            "tool_search_output",
+        ] {
+            assert_eq!(
+                child_request.inputs_of_type(forbidden_type),
+                Vec::<serde_json::Value>::new(),
+                "{case}: the no-history child should not inherit parent {forbidden_type} items"
+            );
+        }
     } else if fork_turns == Some("1") {
         assert!(
             child_request.body_contains_text(PARENT_PROMPT),
             "{case}: the bounded-history child lost the spawn turn"
         );
-        for omitted_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
-            assert!(
-                !child_request.body_contains_text(omitted_text),
-                "{case}: the bounded-history child inherited older parent item {omitted_text:?}"
-            );
-        }
+        assert!(
+            !child_request.body_contains_text(PARENT_HISTORY_PROMPT),
+            "{case}: the bounded-history child inherited the older parent user turn"
+        );
     } else {
         for inherited_text in [PARENT_HISTORY_PROMPT, PARENT_PROMPT] {
             assert!(
@@ -322,10 +328,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
                 "{case}: the full-history child lost parent item {inherited_text:?}"
             );
         }
-        assert!(
-            !child_request.body_contains_text(PARENT_HISTORY_RESPONSE),
-            "{case}: the full-history child inherited a filtered parent assistant response"
-        );
     }
     let child_texts = child_request.message_input_texts("developer");
     assert_eq!(

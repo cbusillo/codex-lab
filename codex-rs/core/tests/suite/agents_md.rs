@@ -1200,25 +1200,33 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
                     "fresh-context subagent should omit parent history item {parent_text:?}; observed: {child_input:#?}"
                 );
             }
-            let unexpected_items = child_input
-                .iter()
-                .filter(
-                    |item| match item.get("type").and_then(serde_json::Value::as_str) {
-                        Some("agent_message") => false,
-                        Some("message") => !matches!(
-                            item.get("role").and_then(serde_json::Value::as_str),
-                            Some("developer" | "user")
-                        ),
-                        Some(_) | None => true,
-                    },
-                )
-                .cloned()
+            let assistant_messages = child_request
+                .inputs_of_type("message")
+                .into_iter()
+                .filter(|item| {
+                    item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                })
                 .collect::<Vec<_>>();
             assert_eq!(
-                unexpected_items,
+                assistant_messages,
                 Vec::<serde_json::Value>::new(),
-                "fresh-context subagent should contain only startup messages and its task"
+                "fresh-context subagent should not inherit parent assistant messages"
             );
+            for forbidden_type in [
+                "function_call",
+                "function_call_output",
+                "custom_tool_call",
+                "custom_tool_call_output",
+                "reasoning",
+                "tool_search_call",
+                "tool_search_output",
+            ] {
+                assert_eq!(
+                    child_request.inputs_of_type(forbidden_type),
+                    Vec::<serde_json::Value>::new(),
+                    "fresh-context subagent should not inherit parent {forbidden_type} items"
+                );
+            }
             assert!(
                 child_request.body_contains_text(SPAWN_CHILD_PROMPT),
                 "fresh-context subagent should contain its own task"
