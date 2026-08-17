@@ -50,7 +50,7 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
         fallback_path.pop();
     }
     fallback_path.push(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    if fallback_path.exists() {
+    if fallback_path.is_file() {
         Ok(fallback_path)
     } else {
         Err(CargoBinError::NotFound {
