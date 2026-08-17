@@ -10625,6 +10625,36 @@ shell_tool = false
 }
 
 #[tokio::test]
+async fn feature_requirements_cannot_disable_mandatory_multi_agent_v2() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+multi_agent_v2 = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert!(
+        config.startup_warnings.iter().any(|warning| {
+            warning.contains("Ignoring `features` requirement `multi_agent_v2 = false`")
+                && warning.contains("multi-agent V2 is mandatory")
+        }),
+        "{:?}",
+        config.startup_warnings
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn feature_requirements_auto_review_disables_guardian_approval() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
 

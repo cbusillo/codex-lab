@@ -1135,6 +1135,7 @@ pub(crate) fn build_guardian_review_session_config(
             anyhow::anyhow!("guardian review session could not set permission profile: {err}")
         })?;
     guardian_config.include_apps_instructions = false;
+    guardian_config.agents_enabled = false;
     guardian_config
         .mcp_servers
         .set(HashMap::new())
@@ -1158,7 +1159,6 @@ pub(crate) fn build_guardian_review_session_config(
     }
     for feature in [
         Feature::Collab,
-        Feature::MultiAgentV2,
         Feature::CodexHooks,
         Feature::Apps,
         Feature::Plugins,
@@ -1566,7 +1566,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn guardian_review_session_config_disables_hooks() {
+    async fn guardian_review_session_config_disables_agents_and_hooks() {
         let mut parent_config = crate::config::test_config().await;
         parent_config
             .features
@@ -1582,6 +1582,7 @@ mod tests {
         )
         .expect("guardian config");
 
+        assert!(!guardian_config.agents_enabled);
         assert!(!guardian_config.features.enabled(Feature::CodexHooks));
     }
 

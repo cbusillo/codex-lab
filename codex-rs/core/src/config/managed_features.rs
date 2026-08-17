@@ -216,11 +216,29 @@ fn parse_feature_requirements(
         }
 
         if let Some(feature) = canonical_feature_for_key(&key) {
+            if feature == Feature::MultiAgentV2 && !enabled {
+                push_feature_requirement_warning(
+                    &mut startup_warnings,
+                    format!(
+                        "Ignoring `features` requirement `{key} = false` from {source}; multi-agent V2 is mandatory"
+                    ),
+                );
+                continue;
+            }
             pinned_features.insert(feature, enabled);
             continue;
         }
 
         if let Some(feature) = feature_for_key(&key) {
+            if feature == Feature::MultiAgentV2 && !enabled {
+                push_feature_requirement_warning(
+                    &mut startup_warnings,
+                    format!(
+                        "Ignoring `features` requirement `{key} = false` from {source}; multi-agent V2 is mandatory"
+                    ),
+                );
+                continue;
+            }
             push_feature_requirement_warning(
                 &mut startup_warnings,
                 format!(

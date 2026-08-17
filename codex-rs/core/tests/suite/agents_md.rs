@@ -1074,6 +1074,11 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
         |request: &wiremock::Request| {
             request_body_contains(request, SPAWN_CHILD_PROMPT)
                 && !request_body_contains(request, SPAWN_CALL_ID)
+                && request
+                    .headers
+                    .get("x-openai-subagent")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("collab_spawn")
         },
         responses::sse(vec![
             responses::ev_response_created("child-response"),
