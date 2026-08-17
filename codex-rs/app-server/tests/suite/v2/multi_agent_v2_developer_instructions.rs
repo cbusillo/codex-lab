@@ -265,13 +265,11 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             "{case}: parent developer instructions unexpectedly changed: {parent_texts:?}"
         );
     }
-    if is_no_history {
-        for parent_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
-            assert!(
-                parent_spawn_request.body_contains_text(parent_text),
-                "{case}: parent history did not contain seeded item {parent_text:?}"
-            );
-        }
+    for parent_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
+        assert!(
+            parent_spawn_request.body_contains_text(parent_text),
+            "{case}: parent history did not contain seeded item {parent_text:?}"
+        );
     }
     if is_no_history {
         for parent_text in [
