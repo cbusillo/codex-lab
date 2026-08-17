@@ -223,16 +223,18 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             ..Default::default()
         })
         .await?;
-    app_server
-        .start_turn_and_wait_for_completion(TurnStartParams {
+    timeout(
+        READ_TIMEOUT,
+        app_server.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: thread.id.clone(),
             input: vec![UserInput::Text {
                 text: PARENT_HISTORY_PROMPT.to_string(),
                 text_elements: Vec::new(),
             }],
             ..Default::default()
-        })
-        .await?;
+        }),
+    )
+    .await??;
     let _: TurnStartResponse = app_server
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
@@ -251,7 +253,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             if !child_request.requests().is_empty() {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
@@ -315,10 +317,12 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             child_request.body_contains_text(PARENT_PROMPT),
             "{case}: the bounded-history child lost the spawn turn"
         );
-        assert!(
-            !child_request.body_contains_text(PARENT_HISTORY_PROMPT),
-            "{case}: the bounded-history child inherited the older parent user turn"
-        );
+        for omitted_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
+            assert!(
+                !child_request.body_contains_text(omitted_text),
+                "{case}: the bounded-history child inherited older parent item {omitted_text:?}"
+            );
+        }
     } else {
         for inherited_text in [PARENT_HISTORY_PROMPT, PARENT_PROMPT] {
             assert!(
