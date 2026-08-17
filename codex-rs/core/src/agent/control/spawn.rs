@@ -761,6 +761,9 @@ impl AgentControl {
                     let ContentItem::InputText { text } = content_item else {
                         return true;
                     };
+                    if *replaced {
+                        return true;
+                    }
                     // TODO(anp) track better message fragment provenance in rollouts.
                     if !text.contains(parent_developer_instructions) {
                         return true;
@@ -772,7 +775,7 @@ impl AgentControl {
                     } else {
                         ""
                     };
-                    *text = text.replace(parent_developer_instructions, replacement);
+                    *text = text.replacen(parent_developer_instructions, replacement, 1);
                     !text.is_empty()
                 });
                 return !content.is_empty();

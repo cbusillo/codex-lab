@@ -2016,7 +2016,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                                 .to_string(),
                         },
                         ContentItem::InputText {
-                            text: "Preserved developer context.".to_string(),
+                            text: "Preserved quote: Parent developer instructions.".to_string(),
                         },
                     ],
                     phase: None,
@@ -2099,7 +2099,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     .to_string(),
             },
             ContentItem::InputText {
-                text: "Preserved developer context.".to_string(),
+                text: "Preserved quote: Parent developer instructions.".to_string(),
             },
         ],
         phase: None,
@@ -2180,7 +2180,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     assert!(
         !history_contains_text(
             no_hint_history.raw_items(),
-            "Parent developer instructions."
+            "Developer context before.\nParent developer instructions.\nDeveloper context after."
         ),
         "empty child developer instructions should remove parent developer instructions"
     );
@@ -2192,7 +2192,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "empty child developer instructions should preserve surrounding developer context"
     );
     assert!(
-        history_contains_text(no_hint_history.raw_items(), "Preserved developer context."),
+        history_contains_text(
+            no_hint_history.raw_items(),
+            "Preserved quote: Parent developer instructions."
+        ),
         "empty child developer instructions should preserve unrelated developer fragments"
     );
 

@@ -136,11 +136,6 @@ async fn handle_spawn_agent(
     }
     if !is_full_history_fork || explicit_role_name.is_some() {
         apply_spawn_agent_role(&session, &mut config, role_name).await?;
-        if is_full_history_fork && config.developer_instructions.is_none() {
-            config
-                .developer_instructions
-                .clone_from(&turn.developer_instructions);
-        }
     }
     if let Some((role_name, role)) = preflighted_external_role {
         config.agent_roles.insert(role_name, role);
