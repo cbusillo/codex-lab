@@ -8,17 +8,21 @@ Scenario: First post-resume turn where resumed config model differs from rollout
 00:message/developer[2]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:seed resume history
+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:seed resume history
 
 ## First Request After Resume
 00:message/developer[2]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:seed resume history
-03:message/assistant:recorded before resume
-04:message/developer:<model_switch>\nThe user was previously using a different model. Please continue the conversatio...
-05:message/developer:<PERMISSIONS_INSTRUCTIONS>
-06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
-07:message/user:resume and change personality
+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:seed resume history
+05:message/assistant:recorded before resume
+06:message/developer:<model_switch><bounded_world_state_section section="63fde66b7c231ccb5e54258ed2b846a7d29d1e80" ro...
+07:message/developer:<PERMISSIONS_INSTRUCTIONS>
+08:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
+09:message/user:resume and change personality

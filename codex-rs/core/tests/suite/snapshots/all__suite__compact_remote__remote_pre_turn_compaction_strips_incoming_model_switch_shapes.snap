@@ -6,20 +6,26 @@ Scenario: Remote pre-turn compaction during model switch currently excludes inco
 
 ## Initial Request (Previous Model)
 00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:BEFORE_SWITCH_USER
+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive mul...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:BEFORE_SWITCH_USER
 
 ## Remote Compaction Request
 00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:BEFORE_SWITCH_USER
-03:message/assistant:BEFORE_SWITCH_REPLY
+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive mul...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:BEFORE_SWITCH_USER
+05:message/assistant:BEFORE_SWITCH_REPLY
 
 ## Remote Post-Compaction History Layout
 00:message/user:BEFORE_SWITCH_USER
 01:compaction:encrypted=true
 02:message/developer[2]:
-    [01] <model_switch>\nThe user was previously using a different model....
+    [01] <model_switch><bounded_world_state_section section="63fde66b7c23...
     [02] <PERMISSIONS_INSTRUCTIONS>
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:AFTER_SWITCH_USER
+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
+04:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive mul...
+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+06:message/user:AFTER_SWITCH_USER

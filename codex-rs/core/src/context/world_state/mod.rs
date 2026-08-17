@@ -201,6 +201,7 @@ struct PendingWorldStateFragment {
     id: &'static str,
     state_hash: String,
     role: &'static str,
+    requires_separate_message: bool,
     markers: (&'static str, &'static str),
     body: String,
 }
@@ -212,6 +213,7 @@ impl PendingWorldStateFragment {
         fragment: Box<dyn ContextualUserFragment>,
     ) -> Self {
         let role = fragment.role();
+        let requires_separate_message = fragment.requires_separate_message();
         let markers = fragment.markers();
         let body = fragment.body();
         let rendered = format!("{}{body}{}", markers.0, markers.1);
@@ -220,6 +222,7 @@ impl PendingWorldStateFragment {
             state_hash: state_hash
                 .unwrap_or_else(|| bounded_world_state_hash("rendered", &rendered)),
             role,
+            requires_separate_message,
             markers,
             body,
         }
@@ -240,6 +243,7 @@ impl PendingWorldStateFragment {
 
 struct BoundedWorldStateFragment {
     role: &'static str,
+    requires_separate_message: bool,
     markers: (&'static str, &'static str),
     body: String,
     original_byte_count: usize,
@@ -252,6 +256,7 @@ impl BoundedWorldStateFragment {
         if original_byte_count <= max_bytes {
             return Self {
                 role: fragment.role,
+                requires_separate_message: fragment.requires_separate_message,
                 markers: fragment.markers,
                 body: fragment.body,
                 original_byte_count,
@@ -295,6 +300,7 @@ impl BoundedWorldStateFragment {
         debug_assert!(rendered_byte_count <= max_bytes);
         Self {
             role: fragment.role,
+            requires_separate_message: fragment.requires_separate_message,
             markers,
             body,
             original_byte_count,
@@ -310,6 +316,10 @@ impl BoundedWorldStateFragment {
 impl ContextualUserFragment for BoundedWorldStateFragment {
     fn role(&self) -> &'static str {
         self.role
+    }
+
+    fn requires_separate_message(&self) -> bool {
+        self.requires_separate_message
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
