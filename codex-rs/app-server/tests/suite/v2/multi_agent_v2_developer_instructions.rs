@@ -26,8 +26,10 @@ const NAMESPACE: &str = "agents";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
+const PARENT_HISTORY_PROMPT: &str = "remember this parent-only conversation turn";
+const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 
-/// V2 fork modes, roles, and unset/blank overrides expose their agreed instruction precedence.
+/// V2 fork modes, history isolation, roles, and overrides expose their agreed precedence.
 #[test_case("no history"; "no history")]
 #[test_case("full history"; "full history")]
 #[test_case("bounded history"; "bounded history")]
@@ -115,6 +117,28 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     const SPAWN_CALL_ID: &str = "spawn-instruction-override-worker";
 
     let server = responses::start_mock_server().await;
+    let is_no_history = fork_turns == Some("none");
+    let parent_history_request = if is_no_history {
+        Some(
+            responses::mount_sse_once_match(
+                &server,
+                |request: &wiremock::Request| {
+                    String::from_utf8_lossy(&request.body).contains(PARENT_HISTORY_PROMPT)
+                },
+                responses::sse(vec![
+                    responses::ev_response_created("parent-history"),
+                    responses::ev_assistant_message(
+                        "parent-history-message",
+                        PARENT_HISTORY_RESPONSE,
+                    ),
+                    responses::ev_completed("parent-history"),
+                ]),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let mut spawn_args = json!({"message": CHILD_PROMPT, "task_name": "worker"});
     if let Some(fork_turns) = fork_turns {
         spawn_args["fork_turns"] = json!(fork_turns);
@@ -202,6 +226,18 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             ..Default::default()
         })
         .await?;
+    if parent_history_request.is_some() {
+        app_server
+            .start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: PARENT_HISTORY_PROMPT.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .await?;
+    }
     let _: TurnStartResponse = app_server
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
@@ -238,13 +274,32 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             "{case}: parent developer instructions unexpectedly changed: {parent_texts:?}"
         );
     }
-    let child_texts = child_request.message_input_texts("developer");
-    if case == "full history configured role" {
-        assert_eq!(child_request.body_json()["model"], json!("gpt-5.5"));
+    if is_no_history {
+        for parent_text in [
+            PARENT_HISTORY_PROMPT,
+            PARENT_HISTORY_RESPONSE,
+            PARENT_PROMPT,
+            SPAWN_CALL_ID,
+        ] {
+            assert!(
+                !child_request.body_contains_text(parent_text),
+                "{case}: the no-history child inherited parent item {parent_text:?}"
+            );
+        }
+    } else {
         assert!(
             child_request.body_contains_text(PARENT_PROMPT),
-            "the child should inherit the parent's conversation history"
+            "{case}: the history-enabled child lost the parent prompt"
         );
+    }
+    let child_texts = child_request.message_input_texts("developer");
+    assert_eq!(
+        child_request.inputs_of_type("agent_message").len(),
+        1,
+        "{case}: the child should receive its task exactly once"
+    );
+    if case == "full history configured role" {
+        assert_eq!(child_request.body_json()["model"], json!("gpt-5.5"));
         assert!(
             child_texts
                 .iter()
