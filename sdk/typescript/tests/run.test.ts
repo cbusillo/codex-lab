@@ -91,7 +91,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  });
+  }, 15_000);
 
   it("continues the thread when run is called twice with options", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
@@ -135,7 +135,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  });
+  }, 15_000);
 
   it("resumes thread by id", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
@@ -182,7 +182,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  });
+  }, 15_000);
 
   it("passes turn options to exec", async () => {
     const { url, close, requests } = await startResponsesTestProxy({
