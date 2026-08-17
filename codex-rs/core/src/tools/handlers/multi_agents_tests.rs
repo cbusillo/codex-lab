@@ -385,7 +385,7 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
+async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_override(&mut turn).await;
     let manager = thread_manager();
@@ -406,9 +406,10 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
         ..turn
     };
 
-    let err = SpawnAgentHandlerV2::default()
+    let session = Arc::new(session);
+    let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
-            Arc::new(session),
+            session,
             Arc::new(turn),
             "spawn_agent",
             function_payload(json!({
@@ -419,13 +420,34 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
             })),
         ))
         .await
-        .err()
-        .expect("fork_turns=all should reject agent_type overrides");
+        .expect("fork_turns=all should apply agent_type overrides");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result["task_name"], "/root/fork_context_v2");
+    let agent_id = manager
+        .captured_ops()
+        .into_iter()
+        .map(|(thread_id, _)| thread_id)
+        .find(|thread_id| *thread_id != root.thread_id)
+        .expect("spawned agent should receive an op");
+    let snapshot = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
 
     assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
+        (
+            snapshot.model,
+            snapshot.model_provider_id,
+            snapshot.reasoning_effort
+        ),
+        (
+            "gpt-5-role-override".to_string(),
+            "ollama".to_string(),
+            Some(ReasoningEffort::Minimal)
         )
     );
 }

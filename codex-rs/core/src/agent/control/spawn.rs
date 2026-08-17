@@ -644,32 +644,34 @@ impl AgentControl {
 
         let parent_thread_id = *parent_thread_id;
         let parent_thread = state.get_thread(parent_thread_id).await?;
-        let (subagent_developer_instructions, parent_developer_instructions) = match (
-            multi_agent_version,
-            config
-                .multi_agent_v2
-                .subagent_developer_instructions
-                .as_ref(),
-        ) {
-            (MultiAgentVersion::V2, Some(_)) => {
-                let parent_developer_instructions = match parent_thread
-                    .session
-                    .new_default_turn()
-                    .await
-                    .developer_instructions
-                    .clone()
-                {
-                    Some(instructions) if !instructions.is_empty() => Some(instructions),
-                    Some(_) | None => None,
-                };
-                (
-                    Some(config.developer_instructions.clone().unwrap_or_default()),
-                    parent_developer_instructions,
-                )
-            }
-            (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-            | (MultiAgentVersion::V2, None) => (None, None),
-        };
+        let (subagent_developer_instructions, parent_developer_instructions) =
+            match multi_agent_version {
+                MultiAgentVersion::V2 => {
+                    let parent_developer_instructions = match parent_thread
+                        .session
+                        .new_default_turn()
+                        .await
+                        .developer_instructions
+                        .clone()
+                    {
+                        Some(instructions) if !instructions.is_empty() => Some(instructions),
+                        Some(_) | None => None,
+                    };
+                    let child_developer_instructions = config
+                        .developer_instructions
+                        .clone()
+                        .filter(|instructions| !instructions.is_empty());
+                    if child_developer_instructions == parent_developer_instructions {
+                        (None, None)
+                    } else {
+                        (
+                            Some(child_developer_instructions.unwrap_or_default()),
+                            parent_developer_instructions,
+                        )
+                    }
+                }
+                MultiAgentVersion::Disabled | MultiAgentVersion::V1 => (None, None),
+            };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
         // Flush before snapshotting store history for a fork.
