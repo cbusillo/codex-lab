@@ -323,11 +323,11 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
     let input1 = body1["input"].as_array().expect("input array");
     assert_eq!(
         input1.len(),
-        3,
-        "expected permissions + cached contextual user prefix + user msg"
+        5,
+        "expected permissions + multi-agent guidance + cached contextual user prefix + user msg"
     );
 
-    let ui_text = input1[1]["content"][0]["text"]
+    let ui_text = input1[3]["content"][0]["text"]
         .as_str()
         .expect("ui message text");
     assert!(
@@ -336,17 +336,17 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
     );
 
     let cwd_str = config.cwd.to_string_lossy();
-    let env_text = input1[1]["content"][1]["text"]
+    let env_text = input1[3]["content"][1]["text"]
         .as_str()
         .expect("environment context text");
     assert_default_env_context(env_text, &cwd_str);
     assert_eq!(
-        input1[1]["content"][1]["type"].as_str(),
+        input1[3]["content"][1]["type"].as_str(),
         Some("input_text"),
         "expected environment context bundled after UI message in cached contextual message"
     );
     assert_eq_without_metadata_or_item_ids(
-        input1[2].clone(),
+        input1[4].clone(),
         text_user_input("hello 1".to_string()),
     );
 
@@ -855,7 +855,9 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
     let body2 = request2.body_json();
 
     let expected_permissions_msg = body1["input"][0].clone();
-    let expected_ui_msg = body1["input"][1].clone();
+    let expected_root_usage_hint_msg = body1["input"][1].clone();
+    let expected_multi_agent_mode_msg = body1["input"][2].clone();
+    let expected_ui_msg = body1["input"][3].clone();
 
     let default_cwd_lossy = default_cwd.to_string_lossy();
     let expected_env_text_1 = expected_ui_msg["content"][1]["text"]
@@ -875,6 +877,8 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
 
     let expected_input_1 = serde_json::Value::Array(vec![
         expected_permissions_msg.clone(),
+        expected_root_usage_hint_msg.clone(),
+        expected_multi_agent_mode_msg.clone(),
         expected_contextual_user_msg_1.clone(),
         expected_user_message_1.clone(),
     ]);
@@ -883,6 +887,8 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
     let expected_user_message_2 = text_user_input("hello 2".to_string());
     let expected_input_2 = serde_json::Value::Array(vec![
         expected_permissions_msg,
+        expected_root_usage_hint_msg,
+        expected_multi_agent_mode_msg,
         expected_contextual_user_msg_1,
         expected_user_message_1,
         expected_user_message_2,
@@ -991,7 +997,9 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     let body2 = request2.body_json();
 
     let expected_permissions_msg = body1["input"][0].clone();
-    let expected_ui_msg = body1["input"][1].clone();
+    let expected_root_usage_hint_msg = body1["input"][1].clone();
+    let expected_multi_agent_mode_msg = body1["input"][2].clone();
+    let expected_ui_msg = body1["input"][3].clone();
 
     let expected_env_text_1 = expected_ui_msg["content"][1]["text"]
         .as_str()
@@ -1008,6 +1016,8 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     let expected_user_message_1 = text_user_input("hello 1".to_string());
     let expected_input_1 = serde_json::Value::Array(vec![
         expected_permissions_msg.clone(),
+        expected_root_usage_hint_msg.clone(),
+        expected_multi_agent_mode_msg.clone(),
         expected_contextual_user_msg_1.clone(),
         expected_user_message_1.clone(),
     ]);
@@ -1049,6 +1059,8 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     let expected_user_message_2 = text_user_input("hello 2".to_string());
     let expected_input_2 = serde_json::Value::Array(vec![
         expected_permissions_msg,
+        expected_root_usage_hint_msg,
+        expected_multi_agent_mode_msg,
         expected_contextual_user_msg_1,
         expected_user_message_1,
         expected_settings_update_msg,

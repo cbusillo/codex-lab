@@ -53,11 +53,71 @@ impl ContextualUserFragment for TestFragment {
     }
 }
 
+struct SeparateDeveloperFragment(String);
+
+impl ContextualUserFragment for SeparateDeveloperFragment {
+    fn role(&self) -> &'static str {
+        "developer"
+    }
+
+    fn requires_separate_message(&self) -> bool {
+        true
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+
+    fn body(&self) -> String {
+        self.0.clone()
+    }
+}
+
 #[test]
 fn world_state_hash_normalizes_crlf_line_endings() {
     assert_eq!(
         WorldStateHash::from_fragment(&TestFragment("line one\r\nline two".to_string())),
         WorldStateHash::from_fragment(&TestFragment("line one\nline two".to_string())),
+    );
+}
+
+#[test]
+fn bounded_world_state_preserves_separate_message_requirement() {
+    let untruncated = BoundedWorldStateFragment::new(
+        PendingWorldStateFragment::new(
+            "separate_developer",
+            None,
+            Box::new(SeparateDeveloperFragment("short".to_string())),
+        ),
+        MAX_WORLD_STATE_SECTION_BYTES,
+    );
+    let truncated = BoundedWorldStateFragment::new(
+        PendingWorldStateFragment::new(
+            "separate_developer",
+            None,
+            Box::new(SeparateDeveloperFragment(
+                "x".repeat(MAX_WORLD_STATE_SECTION_BYTES),
+            )),
+        ),
+        MIN_WORLD_STATE_SECTION_BYTES,
+    );
+
+    assert_eq!(
+        [
+            (
+                untruncated.requires_separate_message(),
+                untruncated.was_truncated(),
+            ),
+            (
+                truncated.requires_separate_message(),
+                truncated.was_truncated(),
+            ),
+        ],
+        [(true, false), (true, true)],
     );
 }
 

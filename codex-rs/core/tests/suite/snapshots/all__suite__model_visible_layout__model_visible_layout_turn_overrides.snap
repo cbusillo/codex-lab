@@ -8,17 +8,21 @@ Scenario: Second turn changes cwd, approval policy, and personality while keepin
 00:message/developer[2]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:first turn
+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:first turn
 
 ## Second Request (Turn Overrides)
 00:message/developer[2]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:first turn
-03:message/assistant:turn one complete
-04:message/developer:<personality_spec> The user has requested a new communication style. Future messages should adhe...
-05:message/developer:<PERMISSIONS_INSTRUCTIONS>
-06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
-07:message/user:second turn with context updates
+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer ap...
+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:first turn
+05:message/assistant:turn one complete
+06:message/developer:<personality_spec> The user has requested a new communication style. Future messages should adhe...
+07:message/developer:<PERMISSIONS_INSTRUCTIONS>
+08:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
+09:message/user:second turn with context updates

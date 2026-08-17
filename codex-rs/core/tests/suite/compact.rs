@@ -4839,7 +4839,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
     ]);
     let mut responses = vec![first_turn];
     responses.extend(
-        (0..5).map(|_| {
+        (0..7).map(|_| {
             sse_failed(
                 "compact-failed",
                 "context_length_exceeded",
