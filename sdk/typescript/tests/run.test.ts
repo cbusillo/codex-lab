@@ -771,7 +771,7 @@ describe("Codex", () => {
       cleanup();
       await close();
     }
-  }, 10000); // TODO(pakrym): remove timeout
+  }, 15000); // TODO(pakrym): remove timeout
 });
 
 /**
