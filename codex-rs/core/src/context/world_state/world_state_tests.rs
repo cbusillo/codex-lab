@@ -90,7 +90,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
     let untruncated = BoundedWorldStateFragment::new(
         PendingWorldStateFragment::new(
             "separate_developer",
-            None,
+            /*state_hash*/ None,
             Box::new(SeparateDeveloperFragment("short".to_string())),
         ),
         MAX_WORLD_STATE_SECTION_BYTES,
@@ -98,7 +98,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
     let truncated = BoundedWorldStateFragment::new(
         PendingWorldStateFragment::new(
             "separate_developer",
-            None,
+            /*state_hash*/ None,
             Box::new(SeparateDeveloperFragment(
                 "x".repeat(MAX_WORLD_STATE_SECTION_BYTES),
             )),
