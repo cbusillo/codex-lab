@@ -97,13 +97,16 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
         alg: "none",
         typ: "JWT",
     };
+    let mut auth_claims = serde_json::json!({
+        "chatgpt_user_id": "user-12345",
+        "user_id": "user-12345",
+    });
+    if let Some(account_id) = account_id {
+        auth_claims["chatgpt_account_id"] = serde_json::Value::String(account_id.to_string());
+    }
     let payload = serde_json::json!({
         "email": "user@example.com",
-        "https://api.openai.com/auth": {
-            "chatgpt_user_id": "user-12345",
-            "user_id": "user-12345",
-            "chatgpt_account_id": "account_id"
-        }
+        "https://api.openai.com/auth": auth_claims,
     });
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let header_b64 = b64(&serde_json::to_vec(&header).expect("header should serialize"));
@@ -1649,6 +1652,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                 "id": 11,
                 "result": {
                     "userAgent": "codex-test-agent",
+                    "serverBuild": null,
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",
