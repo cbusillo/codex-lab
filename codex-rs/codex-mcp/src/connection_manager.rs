@@ -203,6 +203,7 @@ impl McpConnectionSet {
     ) -> Self {
         let McpRuntimeInput {
             startup_policy,
+            startup_reconnect_policy,
             config,
             plugins_available: _,
             ready_selected_capability_roots: _,
@@ -524,6 +525,7 @@ impl McpConnectionSet {
                 client_mcp_extensions.clone(),
                 protocol_mode,
                 catalog_item_limit,
+                startup_reconnect_policy,
             );
             let defer_startup = allow_deferred_startup
                 && !tool_plugin_provenance.is_selected_plugin_mcp_server(&server_name)

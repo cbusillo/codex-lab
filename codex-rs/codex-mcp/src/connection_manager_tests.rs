@@ -14,6 +14,7 @@ use crate::rmcp_client::ManagedClientFuture;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::list_tools_for_client_uncached;
 use crate::runtime::McpRuntimeContext;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::server::CodexAppsCacheIdentity;
 use crate::server::EffectiveMcpServer;
 use crate::server::McpServerMetadata;
@@ -1692,6 +1693,7 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -3483,6 +3485,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             McpPublicationGate::already_published(),
             McpRuntimeInput {
                 startup_policy: McpStartupPolicy::Eager,
+                startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
                 config: Arc::new(runtime_config.clone()),
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
@@ -3594,6 +3597,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(crate::mcp::tests::test_mcp_config(
                 codex_home.path().to_path_buf(),
             )),
@@ -3937,6 +3941,7 @@ async fn reconcile_reusable_server(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(crate::mcp::tests::test_mcp_config(
                 codex_home.path().to_path_buf(),
             )),
@@ -4230,6 +4235,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -4285,6 +4291,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),

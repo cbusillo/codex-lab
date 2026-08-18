@@ -18,6 +18,7 @@ use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpStartupPolicy;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::McpToolCatalogCache;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::AskForApproval;
@@ -97,6 +98,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_execution_account_token() -
     let mcp_config = Arc::new(config.to_mcp_config(&plugins_manager).await);
     let runtime = McpRuntime::new(McpRuntimeInput {
         startup_policy: McpStartupPolicy::Eager,
+        startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
         config: mcp_config,
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),
