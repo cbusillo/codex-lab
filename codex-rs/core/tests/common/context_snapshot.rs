@@ -7,7 +7,6 @@ use std::sync::OnceLock;
 use crate::responses::ResponsesRequest;
 use crate::responses::strip_response_item_ids_from_json;
 use codex_protocol::protocol::APPS_INSTRUCTIONS_OPEN_TAG;
-use codex_protocol::protocol::CONTEXT_WINDOW_OPEN_TAG;
 use codex_protocol::protocol::PLUGINS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
@@ -436,11 +435,6 @@ fn canonicalize_snapshot_text(text: &str) -> String {
             "<ENVIRONMENT_CONTEXT>".to_string()
         };
     }
-    if let Some(rest) = text.strip_prefix(&format!("{CONTEXT_WINDOW_OPEN_TAG}\nThread id: "))
-        && let Some((_, suffix)) = rest.split_once('\n')
-    {
-        return format!("{CONTEXT_WINDOW_OPEN_TAG}\nThread id: <THREAD_ID>\n{suffix}");
-    }
     if text.starts_with("You are performing a CONTEXT CHECKPOINT COMPACTION.") {
         return "<SUMMARIZATION_PROMPT>".to_string();
     }
@@ -560,25 +554,6 @@ mod tests {
         );
 
         assert_eq!(rendered, "00:message/user:<AGENTS_MD>");
-    }
-
-    #[test]
-    fn redacted_text_mode_normalizes_context_window_thread_id() {
-        let items = vec![json!({
-            "type": "message",
-            "role": "developer",
-            "content": [{
-                "type": "input_text",
-                "text": "<context_window>\nThread id: 01a011be-0a5c-7ed2-8971-e6bb6ec5f9a5\nFirst context window id: first\nCurrent context window id: current\n</context_window>"
-            }]
-        })];
-
-        let rendered = format_response_items_snapshot(&items, &ContextSnapshotOptions::default());
-
-        assert_eq!(
-            rendered,
-            r"00:message/developer:<context_window>\nThread id: <THREAD_ID>\nFirst context window id: first\nCurrent context window id: current\n</context_window>"
-        );
     }
 
     #[test]
