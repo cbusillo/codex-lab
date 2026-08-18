@@ -60,6 +60,22 @@ pub enum McpStartupPolicy {
     LazyWhenCached,
 }
 
+/// Controls whether a failed Codex Apps startup may publish through a
+/// background reconnect after the caller has observed the startup result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpStartupReconnectPolicy {
+    /// Retry failed Codex Apps startup in the background.
+    ReconnectInBackground,
+    /// Treat failed Codex Apps startup as final for this runtime.
+    FailureIsFinal,
+}
+
+impl McpStartupReconnectPolicy {
+    pub(crate) fn reconnects_codex_apps_in_background(self) -> bool {
+        matches!(self, Self::ReconnectInBackground)
+    }
+}
+
 /// Selects the authentication owner for the reserved Codex Apps MCP server.
 #[derive(Clone)]
 pub enum CodexAppsAuth {
@@ -84,6 +100,7 @@ pub struct CodexAppsExecutionAuth {
 /// Everything needed to materialize one exact MCP configuration.
 pub struct McpRuntimeInput {
     pub startup_policy: McpStartupPolicy,
+    pub startup_reconnect_policy: McpStartupReconnectPolicy,
     pub config: Arc<McpConfig>,
     pub plugins_available: bool,
     pub ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,

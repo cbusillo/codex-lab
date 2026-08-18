@@ -10,6 +10,7 @@ use crate::execution_account::ExecutionAccountSnapshot;
 use crate::mcp::McpRuntimeProjection;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::McpStartupPolicy;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::PreparedMcpCall;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 
@@ -210,6 +211,7 @@ impl Session {
             } else {
                 McpStartupPolicy::Eager
             },
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: mcp_config,
             plugins_available,
             ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),

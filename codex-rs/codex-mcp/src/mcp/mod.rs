@@ -53,6 +53,7 @@ use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::McpRuntimeInput;
 use crate::runtime::McpStartupPolicy;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::server::EffectiveMcpServer;
 use crate::tools::ToolInfo;
 
@@ -360,6 +361,7 @@ pub async fn read_mcp_resource(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -437,6 +439,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),

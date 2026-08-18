@@ -9,6 +9,7 @@ use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpStartupPolicy;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::effective_mcp_servers;
 use codex_mcp::host_owned_codex_apps_enabled;
@@ -98,6 +99,7 @@ impl AppsRequestProcessor {
                         };
                     let runtime = McpRuntime::new(McpRuntimeInput {
                         startup_policy: McpStartupPolicy::Eager,
+                        startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
                         config: Arc::clone(&mcp_config),
                         plugins_available: false,
                         ready_selected_capability_roots: Vec::new(),
