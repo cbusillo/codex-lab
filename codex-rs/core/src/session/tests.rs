@@ -9436,12 +9436,11 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
 
     let developer_messages = developer_message_texts(&initial_context);
     assert!(
-        developer_messages.iter().flatten().any(|text| {
-            text.starts_with("<context_window>\nThread id: ")
-                && text.contains("\nFirst context window id: ")
-                && text.contains("\nCurrent context window id: ")
-        }),
-        "expected subagent context window to use the current thread identity schema, got {developer_messages:?}"
+        developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("<context_window>\nAgent name: /root/worker\n")),
+        "expected subagent context window to include its canonical name, got {developer_messages:?}"
     );
     assert!(
         developer_messages
