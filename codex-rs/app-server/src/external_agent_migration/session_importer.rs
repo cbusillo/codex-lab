@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_arg0::Arg0DispatchPaths;
+use codex_config::ConfigLoadError;
 use codex_core::ThreadManager;
 use codex_core::config::ConfigOverrides;
 use codex_external_agent_migration::ExternalAgentConfigImportItemResult;
@@ -283,8 +284,13 @@ impl ExternalAgentSessionImporter {
             )
             .await
             .map_err(|err| {
+                let sub_error_type = err
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<ConfigLoadError>())
+                    .map(|_| "failed_to_load_session_config_invalid_data")
+                    .unwrap_or("failed_to_load_session_config");
                 SessionImportStepFailure::new(
-                    "failed_to_load_session_config",
+                    sub_error_type,
                     format!("failed to load imported session config: {err}"),
                 )
             })?;
