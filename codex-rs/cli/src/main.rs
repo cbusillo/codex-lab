@@ -4164,7 +4164,7 @@ mod tests {
     #[test]
     fn app_server_rejects_invalid_code_mode_host_urls() {
         for endpoint in [
-            "http://127.0.0.1:8765",
+            "ftp://127.0.0.1:8765",
             "ws://",
             "wss://example.test/code-mode#fragment",
         ] {
