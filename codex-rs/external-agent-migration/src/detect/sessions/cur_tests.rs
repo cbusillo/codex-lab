@@ -201,6 +201,22 @@ fn resolves_cur_project_names_with_common_separators() {
 }
 
 #[test]
+fn resolves_multiple_hyphenated_path_components() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root
+        .path()
+        .join("first-project")
+        .join("second-project")
+        .join("workspace");
+    fs::create_dir_all(&project).expect("project root");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        Some(project)
+    );
+}
+
+#[test]
 fn rejects_ambiguous_cur_project_without_a_direct_match() {
     let root = TempDir::new().expect("tempdir");
     for project_name in ["my-project", "my project", "my+project"] {
