@@ -1404,8 +1404,11 @@ async fn project_validation_interrupt_during_initial_fingerprint_records_input()
         capture_release_rx
             .blocking_recv()
             .context("capture release sender dropped")?;
-        fifo.write_all(&head_contents)?;
-        Ok(())
+        match fifo.write_all(&head_contents) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     });
 
     submit_user_input(&test.codex, &test, "preserve this input").await?;
