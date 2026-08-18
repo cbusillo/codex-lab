@@ -1,4 +1,4 @@
-use codex_protocol::ThreadId;
+use codex_protocol::AgentPath;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use uuid::Uuid;
@@ -18,7 +18,7 @@ fn thread_hint_content(texts: &[String]) -> Vec<serde_json::Value> {
 
 fn context_with_hint(hint: Option<String>) -> TokenBudgetContext {
     TokenBudgetContext::new(
-        ThreadId::default(),
+        AgentPath::root(),
         Uuid::nil(),
         /*previous_window_id*/ None,
         Uuid::nil(),
