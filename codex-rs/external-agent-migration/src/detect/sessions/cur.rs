@@ -8,8 +8,16 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
-const MAX_CUR_PROJECT_PATH_PROBES: usize = 128;
-const MAX_CUR_PROJECT_DIRECTORY_ENTRIES: usize = 1_024;
+const CUR_PROJECT_PATH_LIMITS: CurProjectPathLimits = CurProjectPathLimits {
+    max_path_probes: 128,
+    max_scanned_entries: 4_096,
+};
+
+#[derive(Clone, Copy)]
+struct CurProjectPathLimits {
+    max_path_probes: usize,
+    max_scanned_entries: usize,
+}
 
 pub fn detect_recent_cur_sessions(
     external_agent_home: &Path,
@@ -41,8 +49,12 @@ pub(crate) fn detect_recent_cur_sessions_with_limits(
         if !project_storage.is_dir() {
             continue;
         }
+        let transcripts = cur_transcript_files(&project_storage.join("agent-transcripts"));
+        if transcripts.is_empty() {
+            continue;
+        }
         let fallback_cwd = cur_project_cwd(&project_storage, external_agent_home);
-        for path in cur_transcript_files(&project_storage.join("agent-transcripts")) {
+        for path in transcripts {
             candidates.push(SessionFileCandidate {
                 path,
                 fallback_cwd: fallback_cwd.clone(),
@@ -116,9 +128,15 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
     }
     let mut probes = 0;
     let mut scanned_entries = 0;
-    decode_cur_project_path_from(&path, encoded, &mut probes, &mut scanned_entries)
-        .ok()
-        .flatten()
+    decode_cur_project_path_from(
+        &path,
+        encoded,
+        &mut probes,
+        &mut scanned_entries,
+        CUR_PROJECT_PATH_LIMITS,
+    )
+    .ok()
+    .flatten()
 }
 
 fn decode_cur_project_path_from(
@@ -126,16 +144,19 @@ fn decode_cur_project_path_from(
     encoded: &str,
     probes: &mut usize,
     scanned_entries: &mut usize,
+    limits: CurProjectPathLimits,
 ) -> Result<Option<PathBuf>, ()> {
-    let Ok(entries) = fs::read_dir(parent) else {
-        return Ok(None);
-    };
-    let mut matched_path = None;
-    for entry in entries.flatten() {
-        if *scanned_entries >= MAX_CUR_PROJECT_DIRECTORY_ENTRIES {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(parent).map_err(|_| ())? {
+        if *scanned_entries >= limits.max_scanned_entries {
             return Err(());
         }
         *scanned_entries += 1;
+        entries.push(entry.map_err(|_| ())?);
+    }
+    entries.sort_by_key(fs::DirEntry::file_name);
+    let mut matched_path = None;
+    for entry in entries {
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -164,24 +185,18 @@ fn decode_cur_project_path_from(
         .into_iter()
         .flatten()
         {
-            let remaining = if encoded == component {
-                Some("")
-            } else {
-                encoded
-                    .strip_prefix(component)
-                    .and_then(|remaining| remaining.strip_prefix('-'))
-            };
+            let remaining = strip_cur_project_component(encoded, component);
             let Some(remaining) = remaining else {
                 continue;
             };
-            if *probes >= MAX_CUR_PROJECT_PATH_PROBES {
+            if *probes >= limits.max_path_probes {
                 return Err(());
             }
             *probes += 1;
             let candidate = if remaining.is_empty() {
                 Some(path.clone())
             } else {
-                decode_cur_project_path_from(&path, remaining, probes, scanned_entries)?
+                decode_cur_project_path_from(&path, remaining, probes, scanned_entries, limits)?
             };
             if let Some(candidate) = candidate {
                 if matched_path
@@ -195,6 +210,26 @@ fn decode_cur_project_path_from(
         }
     }
     Ok(matched_path)
+}
+
+fn strip_cur_project_component<'a>(encoded: &'a str, component: &str) -> Option<&'a str> {
+    #[cfg(windows)]
+    let remaining = {
+        let prefix = encoded.get(..component.len())?;
+        if !prefix.eq_ignore_ascii_case(component) {
+            return None;
+        }
+        encoded.get(component.len()..)?
+    };
+
+    #[cfg(not(windows))]
+    let remaining = encoded.strip_prefix(component)?;
+
+    if remaining.is_empty() {
+        Some(remaining)
+    } else {
+        remaining.strip_prefix('-')
+    }
 }
 
 #[cfg(any(windows, test))]
