@@ -563,7 +563,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
         warmup["stream_options"]["reasoning_summary_delivery"].as_str(),
         Some("sequential_cutoff")
     );
-    assert_eq!(warmup["tools"], serde_json::json!([]));
+    assert!(warmup.get("tools").is_none());
     let warmup_turn_metadata: serde_json::Value = serde_json::from_str(
         warmup["client_metadata"]["x-codex-turn-metadata"]
             .as_str()
@@ -947,7 +947,7 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
         .body_json();
     assert_eq!(warmup["type"].as_str(), Some("response.create"));
     assert_eq!(warmup["generate"].as_bool(), Some(false));
-    assert_eq!(warmup["tools"], serde_json::json!([]));
+    assert!(warmup.get("tools").is_none());
     assert_eq!(follow_up["type"].as_str(), Some("response.create"));
     assert_eq!(follow_up["previous_response_id"].as_str(), Some("warm-1"));
     assert_eq!(follow_up["input"], serde_json::json!([]));
