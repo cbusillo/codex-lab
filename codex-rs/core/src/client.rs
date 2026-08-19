@@ -204,6 +204,7 @@ struct ModelClientState {
     thread_id: ThreadId,
     execution_account: arc_swap::ArcSwapOption<ExecutionAccountLease>,
     provider: SharedModelProvider,
+    execution_provider: StdMutex<Option<(Arc<AuthManager>, SharedModelProvider)>>,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
     originator: String,
@@ -475,6 +476,7 @@ impl ModelClient {
                 thread_id,
                 execution_account: arc_swap::ArcSwapOption::empty(),
                 provider: model_provider,
+                execution_provider: StdMutex::new(None),
                 auth_env_telemetry,
                 session_source,
                 originator,
@@ -505,7 +507,46 @@ impl ModelClient {
 
     pub(crate) fn set_execution_account_lease(&self, lease: ExecutionAccountLease) {
         self.state.execution_account.store(Some(Arc::new(lease)));
+        *self
+            .state
+            .execution_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.invalidate_cached_websocket_session();
+    }
+
+    fn request_provider(&self) -> SharedModelProvider {
+        let Some(execution_account) = self.state.execution_account.load_full() else {
+            return Arc::clone(&self.state.provider);
+        };
+        let auth_manager = execution_account.auth_manager();
+        if self
+            .state
+            .provider
+            .auth_manager()
+            .as_ref()
+            .is_some_and(|control_auth_manager| Arc::ptr_eq(control_auth_manager, &auth_manager))
+        {
+            return Arc::clone(&self.state.provider);
+        }
+
+        let mut execution_provider = self
+            .state
+            .execution_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_auth_manager, provider)) = execution_provider.as_ref()
+            && Arc::ptr_eq(cached_auth_manager, &auth_manager)
+        {
+            return Arc::clone(provider);
+        }
+
+        let provider = create_model_provider(
+            self.state.provider.info().clone(),
+            Some(Arc::clone(&auth_manager)),
+        );
+        *execution_provider = Some((auth_manager, Arc::clone(&provider)));
+        provider
     }
 
     fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
@@ -1029,11 +1070,10 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
-            .provider
+        let provider = self.request_provider();
+        let auth = provider.auth().await;
+        let api_provider = provider.api_provider().await?;
+        let resolved_auth = provider
             .api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
@@ -1048,7 +1088,7 @@ impl ModelClient {
             agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
             websocket_auth_cache_key: websocket_auth_cache_key(
                 execution_account.as_ref(),
-                &self.state.provider,
+                &provider,
                 self.state.agent_identity_session_fallback.is_engaged(),
             ),
         })
@@ -1525,7 +1565,7 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.request_provider().auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
@@ -1662,7 +1702,7 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.request_provider().auth_manager();
 
         let mut auth_recovery = auth_manager
             .as_ref()

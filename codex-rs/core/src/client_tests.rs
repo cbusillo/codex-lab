@@ -312,7 +312,7 @@ async fn execution_account_identity_scopes_caches_without_rebinding_control_auth
         headers
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok()),
-        Some("Bearer header.e30.control")
+        Some("Bearer header.e30.execution")
     );
 }
 
