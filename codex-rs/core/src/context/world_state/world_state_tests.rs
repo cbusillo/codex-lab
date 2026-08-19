@@ -4,6 +4,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 
+const ELEVATED_TEST_SECTION_BYTES: usize = 12 * 1024;
+
 #[derive(Clone, Deserialize, Serialize)]
 struct TestSection {
     value: String,
@@ -77,6 +79,30 @@ impl ContextualUserFragment for SeparateDeveloperFragment {
     }
 }
 
+struct ElevatedBudgetSection;
+
+impl WorldStateSection for ElevatedBudgetSection {
+    const ID: &'static str = "elevated_budget";
+    type Snapshot = String;
+
+    fn snapshot(&self) -> Self::Snapshot {
+        Self::ID.to_string()
+    }
+
+    fn max_rendered_bytes(&self) -> usize {
+        ELEVATED_TEST_SECTION_BYTES
+    }
+
+    fn render_diff(
+        &self,
+        _previous: PreviousSectionState<'_, Self::Snapshot>,
+    ) -> Option<Box<dyn ContextualUserFragment>> {
+        Some(Box::new(TestFragment(
+            "x".repeat(ELEVATED_TEST_SECTION_BYTES + 1024),
+        )))
+    }
+}
+
 #[test]
 fn world_state_hash_normalizes_crlf_line_endings() {
     assert_eq!(
@@ -91,6 +117,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
         PendingWorldStateFragment::new(
             "separate_developer",
             /*state_hash*/ None,
+            MAX_WORLD_STATE_SECTION_BYTES,
             Box::new(SeparateDeveloperFragment("short".to_string())),
         ),
         MAX_WORLD_STATE_SECTION_BYTES,
@@ -99,6 +126,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
         PendingWorldStateFragment::new(
             "separate_developer",
             /*state_hash*/ None,
+            MAX_WORLD_STATE_SECTION_BYTES,
             Box::new(SeparateDeveloperFragment(
                 "x".repeat(MAX_WORLD_STATE_SECTION_BYTES),
             )),
@@ -118,6 +146,36 @@ fn bounded_world_state_preserves_separate_message_requirement() {
             ),
         ],
         [(true, false), (true, true)],
+    );
+}
+
+#[test]
+fn section_budget_override_remains_bounded_by_section_and_total_limits() {
+    let mut world_state = WorldState::default();
+    world_state.add_section(ElevatedBudgetSection);
+
+    let rendered = world_state.render_full();
+    assert_eq!(rendered.len(), 1);
+    assert_eq!(rendered[0].render().len(), ELEVATED_TEST_SECTION_BYTES);
+    assert!(rendered[0].render().len() > MAX_WORLD_STATE_SECTION_BYTES);
+
+    let fragments = vec![
+        PendingWorldStateFragment::new(
+            "large_a",
+            /*state_hash*/ None,
+            MAX_WORLD_STATE_TOTAL_BYTES,
+            Box::new(TestFragment("a".repeat(MAX_WORLD_STATE_TOTAL_BYTES))),
+        ),
+        PendingWorldStateFragment::new(
+            "large_b",
+            /*state_hash*/ None,
+            MAX_WORLD_STATE_TOTAL_BYTES,
+            Box::new(TestFragment("b".repeat(MAX_WORLD_STATE_TOTAL_BYTES))),
+        ),
+    ];
+    assert_eq!(
+        allocate_world_state_budgets(&fragments),
+        vec![MAX_WORLD_STATE_TOTAL_BYTES / 2; 2]
     );
 }
 

@@ -3,6 +3,8 @@ use super::WorldStateSection;
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
 
+const MAX_MODEL_INSTRUCTIONS_SECTION_BYTES: usize = 32 * 1024;
+
 /// Model identity and the instructions needed when that identity changes.
 #[derive(Clone, Debug)]
 pub(crate) struct ModelInstructionsState {
@@ -27,6 +29,10 @@ impl WorldStateSection for ModelInstructionsState {
 
     fn snapshot(&self) -> Self::Snapshot {
         self.model.clone()
+    }
+
+    fn max_rendered_bytes(&self) -> usize {
+        MAX_MODEL_INSTRUCTIONS_SECTION_BYTES
     }
 
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {

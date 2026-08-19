@@ -61,6 +61,8 @@ pub(crate) use tools::ToolsState;
 trait ErasedWorldStateSection: Send + Sync {
     fn snapshot(&self) -> Option<Value>;
 
+    fn max_rendered_bytes(&self) -> usize;
+
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool;
 
     fn has_retained_fragment_matcher(&self) -> bool;
@@ -98,6 +100,10 @@ impl<S: WorldStateSection> ErasedWorldStateSection for S {
             return None;
         }
         Some(snapshot)
+    }
+
+    fn max_rendered_bytes(&self) -> usize {
+        WorldStateSection::max_rendered_bytes(self)
     }
 
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool {
@@ -148,6 +154,10 @@ impl ErasedWorldStateSection for ExtensionWorldStateSection {
         let mut snapshot = self.0.snapshot().clone();
         remove_null_object_fields(&mut snapshot);
         (!snapshot.is_null()).then_some(snapshot)
+    }
+
+    fn max_rendered_bytes(&self) -> usize {
+        MAX_WORLD_STATE_SECTION_BYTES
     }
 
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool {
@@ -204,12 +214,14 @@ struct PendingWorldStateFragment {
     requires_separate_message: bool,
     markers: (&'static str, &'static str),
     body: String,
+    max_rendered_bytes: usize,
 }
 
 impl PendingWorldStateFragment {
     fn new(
         id: &'static str,
         state_hash: Option<String>,
+        max_rendered_bytes: usize,
         fragment: Box<dyn ContextualUserFragment>,
     ) -> Self {
         let role = fragment.role();
@@ -225,6 +237,7 @@ impl PendingWorldStateFragment {
             requires_separate_message,
             markers,
             body,
+            max_rendered_bytes,
         }
     }
 
@@ -335,10 +348,14 @@ impl ContextualUserFragment for BoundedWorldStateFragment {
     }
 }
 
-fn allocate_world_state_budgets(fragment_byte_counts: &[usize]) -> Vec<usize> {
-    let capped_byte_counts = fragment_byte_counts
+fn allocate_world_state_budgets(fragments: &[PendingWorldStateFragment]) -> Vec<usize> {
+    let capped_byte_counts = fragments
         .iter()
-        .map(|byte_count| (*byte_count).min(MAX_WORLD_STATE_SECTION_BYTES))
+        .map(|fragment| {
+            fragment
+                .rendered_byte_count()
+                .min(fragment.max_rendered_bytes)
+        })
         .collect::<Vec<_>>();
     if capped_byte_counts.iter().sum::<usize>() <= MAX_WORLD_STATE_TOTAL_BYTES {
         return capped_byte_counts;
@@ -479,6 +496,11 @@ pub(crate) trait WorldStateSection: Send + Sync + 'static {
     /// Whether the section contributes comparison state to persisted rollouts.
     fn should_persist(&self) -> bool {
         true
+    }
+
+    /// Maximum rendered size for this section before bounded truncation.
+    fn max_rendered_bytes(&self) -> usize {
+        MAX_WORLD_STATE_SECTION_BYTES
     }
 
     fn matches_legacy_fragment(_role: &str, _text: &str) -> bool {
@@ -695,6 +717,7 @@ impl WorldState {
                             .snapshot()
                             .as_ref()
                             .map(bounded_world_state_state_hash),
+                        section.max_rendered_bytes(),
                         fragment,
                     )
                 })
@@ -704,12 +727,7 @@ impl WorldState {
             fragments.len() <= MAX_WORLD_STATE_SECTION_COUNT,
             "rendered world-state section count exceeds {MAX_WORLD_STATE_SECTION_COUNT}"
         );
-        let budgets = allocate_world_state_budgets(
-            &fragments
-                .iter()
-                .map(PendingWorldStateFragment::rendered_byte_count)
-                .collect::<Vec<_>>(),
-        );
+        let budgets = allocate_world_state_budgets(&fragments);
 
         fragments
             .into_iter()
