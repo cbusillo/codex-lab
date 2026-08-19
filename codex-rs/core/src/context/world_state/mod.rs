@@ -756,9 +756,6 @@ fn has_retained_fragment(
     state: &Value,
     section: &dyn ErasedWorldStateSection,
 ) -> bool {
-    let bounded_role = section
-        .render_diff(PreviousSectionState::Absent)
-        .map(|fragment| fragment.role());
     items.iter().any(|item| {
         matches!(
             item,
@@ -767,15 +764,7 @@ fn has_retained_fragment(
                     matches!(
                         content,
                         ContentItem::InputText { text }
-                            if bounded_role.is_some_and(|bounded_role| {
-                                role == bounded_role
-                                    && matches_bounded_world_state_fragment(
-                                        section_id,
-                                        state,
-                                        bounded_role,
-                                        text,
-                                    )
-                            })
+                            if matches_bounded_world_state_fragment(section_id, state, role, text)
                                 || section.matches_retained_fragment(role, text)
                     )
                 })

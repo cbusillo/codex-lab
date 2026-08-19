@@ -3,6 +3,9 @@ use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 const ELEVATED_TEST_SECTION_BYTES: usize = 12 * 1024;
 
@@ -325,25 +328,30 @@ fn world_state_sections_are_hard_bounded_and_fairly_allocated() {
 #[test]
 fn bounded_retained_fragment_is_authenticated_and_not_reinjected() {
     let mut world_state = WorldState::default();
+    let rendered_count = Arc::new(AtomicUsize::new(0));
     let body = format!(
         "{}retained needle{}",
         "x".repeat(MAX_WORLD_STATE_SECTION_BYTES),
         "x".repeat(MAX_WORLD_STATE_SECTION_BYTES)
     );
     let snapshot_body = body.clone();
+    let rendered_count_for_section = Arc::clone(&rendered_count);
     world_state.add_extension_section(
         WorldStateSectionContribution::new(
             "bounded_retained_extension",
             json!({"body": snapshot_body}),
             move |previous| match previous {
-                PreviousWorldStateSection::Absent => Some(RenderedWorldStateFragment::new(
-                    "developer",
-                    (
-                        "<bounded_retained_extension>",
-                        "</bounded_retained_extension>",
-                    ),
-                    body.clone(),
-                )),
+                PreviousWorldStateSection::Absent => {
+                    rendered_count_for_section.fetch_add(/*val*/ 1, Ordering::Relaxed);
+                    Some(RenderedWorldStateFragment::new(
+                        "developer",
+                        (
+                            "<bounded_retained_extension>",
+                            "</bounded_retained_extension>",
+                        ),
+                        body.clone(),
+                    ))
+                }
                 PreviousWorldStateSection::Unknown | PreviousWorldStateSection::Known(_) => None,
             },
         )
@@ -358,6 +366,7 @@ fn bounded_retained_fragment_is_authenticated_and_not_reinjected() {
         .next()
         .expect("bounded fragment")
         .into_boxed_response_item();
+    assert_eq!(rendered_count.load(Ordering::Relaxed), 1);
 
     assert!(matches!(
         &retained,
@@ -371,6 +380,7 @@ fn bounded_retained_fragment_is_authenticated_and_not_reinjected() {
             .render_history_diff(Some(&previous), &[retained])
             .is_empty()
     );
+    assert_eq!(rendered_count.load(Ordering::Relaxed), 1);
     let section_state = previous
         .sections
         .get("bounded_retained_extension")
@@ -401,6 +411,7 @@ fn bounded_retained_fragment_is_authenticated_and_not_reinjected() {
             .render()
             .starts_with("<bounded_retained_extension>")
     );
+    assert_eq!(rendered_count.load(Ordering::Relaxed), 2);
 }
 
 #[test]
