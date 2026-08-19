@@ -1,11 +1,13 @@
 ---
 source: core/tests/suite/additional_context.rs
-expression: "context_snapshot::format_labeled_requests_snapshot(\"additional context is inserted before the user turn input.\",\n&[(\"Request\", &request)], &additional_context_snapshot_options(),)"
+expression: "context_snapshot::format_labeled_requests_snapshot(\"additional context is inserted before the user turn input.\",\n&[(\"Request\", &request)],\n&ContextSnapshotOptions::default().strip_capability_instructions().render_mode(ContextSnapshotRenderMode::KindWithTextPrefix\n{ max_chars: 160 }),)"
 ---
 Scenario: additional context is inserted before the user turn input.
 
 ## Request
 00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/developer:<automation_info>run one</automation_info>
-02:message/user:<external_browser_info>tab one</external_browser_info>
-03:message/user:inspect the active tab
+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.\n\nAt the start of your turn, you are the active agent.\nYou c...
+02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGE...
+03:message/developer:<automation_info>run one</automation_info>
+04:message/user:<external_browser_info>tab one</external_browser_info>
+05:message/user:inspect the active tab
