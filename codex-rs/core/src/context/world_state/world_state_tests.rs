@@ -91,6 +91,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
         PendingWorldStateFragment::new(
             "separate_developer",
             /*state_hash*/ None,
+            MAX_WORLD_STATE_SECTION_BYTES,
             Box::new(SeparateDeveloperFragment("short".to_string())),
         ),
         MAX_WORLD_STATE_SECTION_BYTES,
@@ -99,6 +100,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
         PendingWorldStateFragment::new(
             "separate_developer",
             /*state_hash*/ None,
+            MAX_WORLD_STATE_SECTION_BYTES,
             Box::new(SeparateDeveloperFragment(
                 "x".repeat(MAX_WORLD_STATE_SECTION_BYTES),
             )),

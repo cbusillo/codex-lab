@@ -9,7 +9,9 @@ use serde_json::Value;
 use crate::ExtensionData;
 use crate::ExtensionMetrics;
 
-/// Maximum rendered size of one World State section, including its section markers.
+/// Default maximum rendered size of one World State section, including its section markers.
+/// Extension-contributed sections always use this limit; core sections may define another
+/// bounded limit under the total World State budget.
 pub const MAX_WORLD_STATE_SECTION_BYTES: usize = 9 * 1024;
 
 /// Host state available while an extension contributes one sampling step's World State.
