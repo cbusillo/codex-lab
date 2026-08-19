@@ -71,6 +71,7 @@ async fn real_turn_records_live_environments_and_resume_restores_the_same_baseli
     // Resume on the same cwd so the reconstructed baseline is directly comparable:
     // a lost baseline shows up as a missing or divergent environments record.
     let resumed_cwd = test.config.cwd.clone();
+    test.codex.shutdown_and_wait().await?;
     let mut resume_builder = test_codex()
         .with_home(Arc::clone(&test.home))
         .with_config(move |config| config.cwd = resumed_cwd);
