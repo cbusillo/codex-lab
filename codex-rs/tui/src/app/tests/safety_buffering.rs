@@ -691,6 +691,14 @@ goals = true
         let rendered_retry = forked_history
             .lines()
             .skip_while(|line| !line.contains(RETRY_PROMPT))
+            // This snapshot covers safety-retry replay, not validation disposition cells.
+            .map(|line| {
+                line.split_once("Automatic Validation")
+                    .map_or(line, |(retry_line, _)| {
+                        retry_line.trim_end_matches(['✔', '✗', '○', ' '])
+                    })
+            })
+            .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
         insta::assert_snapshot!("safety_retry_committed_steer_history", rendered_retry);
