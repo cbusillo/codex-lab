@@ -102,6 +102,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
+        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ThreadSettingsApplied(_) => true,
 
         // Only persist these legacy events when the thread's history mode is Legacy.
@@ -122,7 +123,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         // Transient, non-durable events.
         EventMsg::Error(_)
         | EventMsg::BackgroundAutoReviewStatus(_)
-        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ThreadQueueChanged(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
@@ -185,3 +185,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::CollabResumeBegin(_) => false,
     }
 }
+
+#[cfg(test)]
+#[path = "policy_tests.rs"]
+mod tests;
