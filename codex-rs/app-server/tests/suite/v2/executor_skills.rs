@@ -574,12 +574,13 @@ stream_max_retries = 0
         json!(skill_dir.inferred_native_path_string())
     );
     match scenario {
-        ExecutorSkillScenario::VisibleWithBudgetWarning
-        | ExecutorSkillScenario::RestrictedPermittedReference
-        | ExecutorSkillScenario::RestrictedVisible => {
+        ExecutorSkillScenario::VisibleWithBudgetWarning => {
             assert!(reference_output["next_cursor"].is_string());
         }
-        ExecutorSkillScenario::ExplicitOnly | ExecutorSkillScenario::RestrictedDeniedReference => {
+        ExecutorSkillScenario::ExplicitOnly
+        | ExecutorSkillScenario::RestrictedPermittedReference
+        | ExecutorSkillScenario::RestrictedDeniedReference
+        | ExecutorSkillScenario::RestrictedVisible => {
             assert!(reference_output["next_cursor"].is_null());
         }
     }
