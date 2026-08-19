@@ -1112,7 +1112,17 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     });
 
     let task_id = match initial_operation {
-        InitialOperation::ForkOnly => String::new(),
+        InitialOperation::ForkOnly => {
+            request_shutdown(&client, &mut request_ids, &primary_thread_id_for_span)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            client
+                .shutdown()
+                .await
+                .map_err(|err| anyhow::anyhow!("in-process app-server shutdown failed: {err}"))?;
+            event_processor.print_final_output();
+            return Ok(());
+        }
         InitialOperation::UserTurn {
             items,
             output_schema,
