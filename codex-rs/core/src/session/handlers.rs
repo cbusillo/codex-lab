@@ -22,6 +22,7 @@ use crate::tasks::UserShellCommandMode;
 use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
 use codex_history::RolloutItem;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -44,6 +45,12 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::turn_input::NotSubmittedReason;
+use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
+use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_thread_store::PersistContext;
 
 use crate::context_manager::is_user_turn_boundary;
@@ -567,6 +574,96 @@ pub(super) async fn submission_loop(
                 } => {
                     let result = turn_input::handle(&sess, *request, mode, sub.id.clone()).await;
                     let _ = reply.send(result);
+                    false
+                }
+                Op::UserInput {
+                    items,
+                    final_output_json_schema,
+                    responsesapi_client_metadata,
+                    additional_context,
+                    thread_settings,
+                } => {
+                    let request = TurnInputRequest::new(SubmittedTurnInput::UserInput {
+                        content: items,
+                        client_id: sub.client_user_message_id,
+                    })
+                    .with_thread_settings(thread_settings)
+                    .on_start(TurnStartOptions {
+                        final_output_json_schema,
+                        parent_turn_id: sub.parent_turn_id,
+                        root_turn_id: sub.root_turn_id,
+                    })
+                    .with_additional_context(additional_context)
+                    .with_responses_metadata(responsesapi_client_metadata);
+                    let error_event = match turn_input::handle(
+                        &sess,
+                        request,
+                        TurnInputMode::StartOrSteer,
+                        sub.id.clone(),
+                    )
+                    .await
+                    {
+                        Ok(
+                            TurnInputSubmission::Started { .. }
+                            | TurnInputSubmission::Steered { .. },
+                        ) => None,
+                        Ok(TurnInputSubmission::NotSubmitted { reason }) => Some(match reason {
+                            NotSubmittedReason::NotIdle
+                            | NotSubmittedReason::NoActiveTurn
+                            | NotSubmittedReason::PendingTriggerTurn
+                            | NotSubmittedReason::PlanMode => ErrorEvent {
+                                message: "no active turn to steer".to_string(),
+                                codex_error_info: Some(CodexErrorInfo::BadRequest),
+                            },
+                            NotSubmittedReason::ExpectedTurnMismatch { expected, actual } => {
+                                ErrorEvent {
+                                    message: format!(
+                                        "expected active turn id `{expected}` but found `{actual}`"
+                                    ),
+                                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                                }
+                            }
+                            NotSubmittedReason::ActiveTurnNotSteerable { turn_kind } => {
+                                let turn_kind_label = match turn_kind {
+                                    codex_protocol::protocol::NonSteerableTurnKind::Review => {
+                                        "review"
+                                    }
+                                    codex_protocol::protocol::NonSteerableTurnKind::Compact => {
+                                        "compact"
+                                    }
+                                };
+                                ErrorEvent {
+                                    message: format!("cannot steer a {turn_kind_label} turn"),
+                                    codex_error_info: Some(
+                                        CodexErrorInfo::ActiveTurnNotSteerable { turn_kind },
+                                    ),
+                                }
+                            }
+                            NotSubmittedReason::ActiveTurnOutputSchemaMismatch => ErrorEvent {
+                                message: "active turn uses a different output schema".to_string(),
+                                codex_error_info: Some(CodexErrorInfo::BadRequest),
+                            },
+                            NotSubmittedReason::EmptyInput => ErrorEvent {
+                                message: "input must not be empty".to_string(),
+                                codex_error_info: Some(CodexErrorInfo::BadRequest),
+                            },
+                        }),
+                        Err(error) => {
+                            let mut error_event =
+                                error.to_error_event(/*message_prefix*/ None);
+                            if matches!(error.details(), CodexErrorDetails::InvalidRequest(_)) {
+                                error_event.codex_error_info = Some(CodexErrorInfo::BadRequest);
+                            }
+                            Some(error_event)
+                        }
+                    };
+                    if let Some(error_event) = error_event {
+                        sess.send_event_raw(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::Error(error_event),
+                        })
+                        .await;
+                    }
                     false
                 }
                 Op::RecoverTurn {
