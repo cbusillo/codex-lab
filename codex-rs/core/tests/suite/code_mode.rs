@@ -1168,10 +1168,20 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
              direct_only_namespace={direct_only_namespace}, namespace={namespace}, tools={:?}",
                 tool_names(&body)
             );
+            assert!(
+                tool_names(&body).iter().any(|name| name == "web_search"),
+                "MCP omissions must not disable hosted web search; \
+             omit_tools_from={omit_tools_from:?}, \
+             supports_search_tool={supports_search_tool}, \
+             direct_only_namespace={direct_only_namespace}, namespace={namespace}, tools={:?}",
+                tool_names(&body)
+            );
             assert_eq!(
                 tool_names(&body).iter().any(|name| name == "tool_search"),
-                supports_search_tool,
-                "MCP omissions must not disable tool search for other tools; \
+                supports_search_tool
+                    && !omit_tools_from.contains(&"deferred")
+                    && !direct_only_namespace,
+                "tool search requires searchable deferred tools; \
              omit_tools_from={omit_tools_from:?}, \
              supports_search_tool={supports_search_tool}, \
              direct_only_namespace={direct_only_namespace}, namespace={namespace}, tools={:?}",

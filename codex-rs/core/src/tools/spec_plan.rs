@@ -1167,10 +1167,12 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
     let turn_context = context.turn_context;
     if collab_tools_enabled(turn_context) {
         if multi_agent_v2_enabled(turn_context) {
-            let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
-                ToolExposure::DirectModelOnly
-            } else {
+            let exposure = if !turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::Direct
+            } else if effective_tool_mode(turn_context) == ToolMode::CodeModeOnly {
+                ToolExposure::Hidden
+            } else {
+                ToolExposure::DirectModelOnly
             };
             let tool_namespace = namespace_tools_enabled(turn_context)
                 .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
