@@ -1835,8 +1835,18 @@ async fn includes_user_instructions_message_in_request() {
         "expected permissions message to mention sandbox_mode, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
+    let user_context_texts = request
+        .message_input_text_groups("user")
+        .into_iter()
+        .find(|texts| {
+            texts
+                .iter()
+                .any(|text| text.starts_with("# AGENTS.md instructions"))
+                && texts
+                    .iter()
+                    .any(|text| text.starts_with("<environment_context>"))
+        })
+        .expect("contextual user message");
     assert!(
         user_context_texts
             .iter()
@@ -1845,7 +1855,6 @@ async fn includes_user_instructions_message_in_request() {
     );
     let ui_text = user_context_texts
         .iter()
-        .copied()
         .find(|text| text.contains("<INSTRUCTIONS>"))
         .expect("invalid message content");
     assert!(ui_text.contains("<INSTRUCTIONS>"));
@@ -2870,8 +2879,18 @@ async fn includes_developer_instructions_message_in_request() {
         "expected developer instructions in a developer message, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
+    let user_context_texts = request
+        .message_input_text_groups("user")
+        .into_iter()
+        .find(|texts| {
+            texts
+                .iter()
+                .any(|text| text.starts_with("# AGENTS.md instructions"))
+                && texts
+                    .iter()
+                    .any(|text| text.starts_with("<environment_context>"))
+        })
+        .expect("contextual user message");
     assert!(
         user_context_texts
             .iter()
@@ -2880,7 +2899,6 @@ async fn includes_developer_instructions_message_in_request() {
     );
     let ui_text = user_context_texts
         .iter()
-        .copied()
         .find(|text| text.contains("<INSTRUCTIONS>"))
         .expect("invalid message content");
     assert!(ui_text.contains("<INSTRUCTIONS>"));

@@ -1187,10 +1187,51 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         SubagentHistory::Full => {
             let seed_input = seed_request.input();
             let child_input = child_request.input();
+            let root_agent_usage_hint = test
+                .config
+                .multi_agent_v2
+                .root_agent_usage_hint_text
+                .as_deref()
+                .expect("root agent usage hint");
+            let replayable_seed_input = seed_input
+                .iter()
+                .filter(|item| {
+                    let is_standalone_root_usage_hint = item
+                        .get("type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("message")
+                        && item.get("role").and_then(serde_json::Value::as_str)
+                            == Some("developer")
+                        && item
+                            .get("content")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|content| {
+                                content.len() == 1
+                                    && content[0].get("type").and_then(serde_json::Value::as_str)
+                                        == Some("input_text")
+                                    && content[0].get("text").and_then(serde_json::Value::as_str)
+                                        == Some(root_agent_usage_hint)
+                            });
+                    !is_standalone_root_usage_hint
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             assert_eq!(
-                child_input.get(..seed_input.len()),
-                Some(seed_input.as_slice()),
-                "forked subagent should replay the parent's original structured input prefix"
+                replayable_seed_input.len() + 1,
+                seed_input.len(),
+                "parent seed should contain exactly one standalone root usage hint"
+            );
+            assert_eq!(
+                child_input.get(..replayable_seed_input.len()),
+                Some(replayable_seed_input.as_slice()),
+                "forked subagent should replay the parent's structured input prefix after scrubbing the parent-only root usage hint"
+            );
+            assert!(
+                !child_request
+                    .message_input_texts("developer")
+                    .iter()
+                    .any(|text| text == root_agent_usage_hint),
+                "forked subagent should omit the parent-only root usage hint"
             );
         }
         SubagentHistory::None => {
