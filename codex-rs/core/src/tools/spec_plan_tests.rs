@@ -2330,6 +2330,7 @@ async fn mandatory_multi_agent_v2_selects_the_v2_tool_family() {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
         update_config(turn, |config| {
             config.multi_agent_v2.max_concurrent_threads_per_session = 17;
+            config.multi_agent_v2.non_code_mode_only = true;
         });
     })
     .await;
@@ -2361,6 +2362,10 @@ async fn mandatory_multi_agent_v2_selects_the_v2_tool_family() {
             "expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace"
         );
     }
+    assert_eq!(
+        v2.exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
     let ToolSpec::Namespace(namespace) = v2.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
         panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
     };
@@ -2391,7 +2396,35 @@ async fn mandatory_multi_agent_v2_selects_the_v2_tool_family() {
         "Note that passing `fork_turns=\"none\"` will not pass any surrounding context to the spawned subagent"
     ));
 
-    let direct_model_only = probe(|turn| {
+    let code_mode = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = true;
+        });
+    })
+    .await;
+    code_mode.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
+
+    let code_mode_nested = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_nested.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
+    );
+
+    let code_mode_only = probe(|turn| {
         set_features(
             turn,
             &[
@@ -2405,12 +2438,37 @@ async fn mandatory_multi_agent_v2_selects_the_v2_tool_family() {
         });
     })
     .await;
-    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
+    code_mode_only.assert_visible_lacks(&[
+        MULTI_AGENT_V2_NAMESPACE,
+        "spawn_agent",
+        "send_message",
+        "wait_agent",
+    ]);
     assert_eq!(
-        direct_model_only
+        code_mode_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
-        ToolExposure::DirectModelOnly
+        ToolExposure::Hidden
+    );
+
+    let code_mode_only_nested = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::CodeMode,
+                Feature::CodeModeOnly,
+                Feature::MultiAgentV2,
+            ],
+        );
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_only_nested.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_only_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
     );
 }
 
@@ -2619,7 +2677,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
-async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
+async fn code_mode_only_hides_namespaced_multi_agent_v2_when_non_code_mode_only() {
     let plan = probe(|turn| {
         set_features(
             turn,
@@ -2642,18 +2700,11 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
             "exec",
             "wait",
             "request_user_input",
-            "agents",
             // Hosted Responses tool.
             "web_search",
         ]
     );
-    assert!(
-        !plan
-            .namespace_function_names("agents")
-            .iter()
-            .any(|name| name == "assign_task"),
-        "expected assign_task to be absent from agents namespace"
-    );
+    assert!(plan.namespace_function_names("agents").is_empty());
     for tool_name in [
         "spawn_agent",
         "send_message",
@@ -2662,11 +2713,12 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "interrupt_agent",
         "list_agents",
     ] {
-        assert!(
-            plan.namespace_function_names("agents")
-                .iter()
-                .any(|name| name == tool_name),
-            "expected {tool_name} in agents namespace"
+        let tool_name = ToolName::namespaced("agents", tool_name).to_string();
+        plan.assert_registered_contains(&[&tool_name]);
+        assert_eq!(
+            plan.exposure(&tool_name),
+            ToolExposure::Hidden,
+            "expected {tool_name} to be hidden in code-mode-only"
         );
     }
 }
@@ -2791,8 +2843,6 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             codex_code_mode::PUBLIC_TOOL_NAME,
             codex_code_mode::WAIT_TOOL_NAME,
             "request_user_input",
-            // Multi-agent v2 tools.
-            MULTI_AGENT_V2_NAMESPACE,
             // Hosted Responses tools.
             "web_search",
         ]
