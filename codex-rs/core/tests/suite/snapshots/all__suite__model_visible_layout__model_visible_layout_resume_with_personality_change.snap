@@ -22,7 +22,7 @@ Scenario: First post-resume turn where resumed config model differs from rollout
 03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
 04:message/user:seed resume history
 05:message/assistant:recorded before resume
-06:message/developer:<model_switch><bounded_world_state_section section="63fde66b7c231ccb5e54258ed2b846a7d29d1e80" ro...
+06:message/developer:<model_switch>\nThe user was previously using a different model. Please continue the conversatio...
 07:message/developer:<PERMISSIONS_INSTRUCTIONS>
 08:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
 09:message/user:resume and change personality
