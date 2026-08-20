@@ -235,6 +235,10 @@ async fn invalid_image_recovery_clears_all_candidate_images_in_one_pass() -> Res
 
     test.codex.submit(user_image_turn("second image")).await?;
     wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     test.submit_turn("continue after sanitization").await?;
 

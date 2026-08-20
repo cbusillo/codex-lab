@@ -191,5 +191,4 @@ ignored-paths = [
     "tests/suite/cyber_exec_policy.rs",
     "tests/suite/injected_models_cache.rs",
     "tests/remote_env_windows/*.rs",
-    "tests/suite/turn_input_submission.rs",
 ]
