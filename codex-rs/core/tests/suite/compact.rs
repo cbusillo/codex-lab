@@ -25,6 +25,7 @@ use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
+use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
@@ -1041,14 +1042,20 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     let server = start_mock_server().await;
 
     let non_openai_provider_name = non_openai_model_provider(&server).name;
-    let codex = test_codex()
+    let test_codex = test_codex()
         .with_config(move |config| {
             config.model_provider.name = non_openai_provider_name;
         })
         .build(&server)
         .await
-        .expect("build codex")
-        .codex;
+        .expect("build codex");
+    let root_agent_usage_hint_text = test_codex
+        .config
+        .multi_agent_v2
+        .root_agent_usage_hint_text
+        .clone()
+        .expect("root agent usage hint");
+    let codex = test_codex.codex;
 
     // user message
     let user_message = "create an app";
@@ -1184,7 +1191,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         Some(normalized)
     }
 
-    fn normalize_inputs(values: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let normalize_inputs = |values: &[serde_json::Value]| -> Vec<serde_json::Value> {
         values
             .iter()
             .filter_map(|value| {
@@ -1202,15 +1209,20 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     .and_then(|content| content.as_array())
                     .into_iter()
                     .flatten()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()));
+                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>();
 
-                // Ignore cached prefix messages (project docs + permissions) since they are not
-                // relevant to compaction behavior and can change as bundled prompts evolve.
+                // Ignore cached prefix and world-state messages since they are not relevant to
+                // compaction behavior and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
                 if role == Some("developer")
-                    && texts
-                        .into_iter()
-                        .any(|text| text.contains("`sandbox_mode`"))
+                    && (texts.iter().any(|text| text.contains("`sandbox_mode`"))
+                        || texts
+                            .iter()
+                            .any(|text| *text == root_agent_usage_hint_text.as_str())
+                        || texts
+                            .iter()
+                            .any(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG)))
                 {
                     return None;
                 }
@@ -1220,7 +1232,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                 Some(value)
             })
             .collect()
-    }
+    };
 
     let initial_input = normalize_inputs(input);
     let environment_message = initial_input[0]["content"][0]["text"].as_str().unwrap();
@@ -1235,12 +1247,40 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     for (i, expected_summary) in compaction_indices.into_iter().zip(expected_summaries) {
         let body = requests_payloads.clone()[i].body_json();
         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
+        let developer_texts = input
+            .iter()
+            .filter(|value| value.get("role").and_then(|role| role.as_str()) == Some("developer"))
+            .flat_map(|value| {
+                value
+                    .get("content")
+                    .and_then(|content| content.as_array())
+                    .into_iter()
+                    .flatten()
+            })
+            .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            developer_texts
+                .iter()
+                .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
+                .count(),
+            1,
+            "compaction request at index {i} should include one multi-agent mode message"
+        );
+        assert_eq!(
+            developer_texts
+                .iter()
+                .filter(|text| **text == root_agent_usage_hint_text)
+                .count(),
+            1,
+            "compaction request at index {i} should include one root agent usage hint"
+        );
         let input = normalize_inputs(input);
         assert_eq!(input.len(), 3);
-        let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+        let compaction_environment_message = input[0]["content"][0]["text"].as_str().unwrap();
         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(environment_message, environment_message);
+        assert_eq!(compaction_environment_message, environment_message);
         assert_eq!(user_message_received, user_message);
         assert_eq!(
             summary_message, expected_summary,
