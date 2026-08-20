@@ -1217,9 +1217,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                 let role = value.get("role").and_then(|role| role.as_str());
                 if role == Some("developer")
                     && (texts.iter().any(|text| text.contains("`sandbox_mode`"))
-                        || texts
-                            .iter()
-                            .any(|text| *text == root_agent_usage_hint_text.as_str())
+                        || texts.contains(&root_agent_usage_hint_text.as_str())
                         || texts
                             .iter()
                             .any(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG)))
