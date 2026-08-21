@@ -12,6 +12,7 @@ AUTHORIZATION_WORKFLOW = "uses: ./.github/workflows/authorize-self-hosted.yml"
 PERSISTENT_RUNNER_LABELS = (
     "self-hosted",
     "codex-lab-app",
+    "codex-lab-signing",
     "codex-lab-linux",
     "macos-codex-lab",
 )
@@ -157,6 +158,46 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
         self.assertNotRegex(
             contents,
             re.compile(r"^  pull_request_target:$", re.MULTILINE),
+        )
+
+    def test_release_signing_uses_its_dedicated_runner_and_environment(self) -> None:
+        release_workflow = (WORKFLOWS / "codex-lab-release.yml").read_text(
+            encoding="utf-8"
+        )
+        release_blocks = workflow_job_blocks(
+            release_workflow
+        )
+        release_job = "\n".join(release_blocks["build-macos-aarch64"])
+        app_workflow = (WORKFLOWS / "codex-lab-app.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "    if: ${{ github.ref_name == github.event.repository.default_branch }}",
+            release_job,
+        )
+        self.assertIn("      - name: Require the repository default branch", release_workflow)
+        self.assertIn('if [[ "$REF_NAME" != "$DEFAULT_BRANCH" ]]', release_workflow)
+        self.assertIn("    runs-on: codex-lab-signing", release_job)
+        self.assertIn("      name: macos-signing", release_job)
+        self.assertNotIn("security set-keychain-settings", release_job)
+        self.assertIn(
+            'security find-identity -v -p codesigning "$signing_keychain"',
+            release_job,
+        )
+        self.assertEqual(release_job.count('--keychain "$signing_keychain"'), 2)
+        self.assertNotIn("codex-lab-signing", app_workflow)
+
+    def test_signing_label_is_exclusive_to_the_release_artifact_job(self) -> None:
+        assignments = []
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            for job_name, block in workflow_job_blocks(
+                path.read_text(encoding="utf-8")
+            ).items():
+                if "runs-on: codex-lab-signing" in "\n".join(block):
+                    assignments.append((path.name, job_name))
+
+        self.assertEqual(
+            assignments,
+            [("codex-lab-release.yml", "build-macos-aarch64")],
         )
 
 

@@ -16,7 +16,7 @@ REPOSITORY_DERIVED_RUNNER = re.compile(
 )
 SELF_HOSTED_RUNNER = re.compile(r"\bself-hosted\b")
 PERSISTENT_RUNNER_LABEL = re.compile(
-    r"\b(?:codex-lab-app|codex-lab-linux|macos-codex-lab)\b"
+    r"\b(?:codex-lab-app|codex-lab-signing|codex-lab-linux|macos-codex-lab)\b"
 )
 MACOS_LARGE_RUNNER = re.compile(r"\bmacos-[0-9]+-(?:large|xlarge)\b")
 RUNNER_SELECTOR = re.compile(
