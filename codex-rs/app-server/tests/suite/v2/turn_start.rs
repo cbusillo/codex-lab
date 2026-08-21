@@ -720,8 +720,8 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
         .last()
         .expect("expected at least one model request");
     assert!(
-        !body_contains(request, "## Skills"),
-        "expected the empty skills section to be omitted after all descriptions were trimmed"
+        body_contains(request, "## Skills"),
+        "expected the empty core-compatible skills section to be preserved after all descriptions were trimmed"
     );
     assert!(
         !body_contains(request, "- alpha-skill:") && !body_contains(request, "- beta-skill:"),

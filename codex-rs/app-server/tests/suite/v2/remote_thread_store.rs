@@ -163,7 +163,11 @@ async fn thread_section_operations_without_sqlite_return_method_not_found() -> R
     }
 
     client.shutdown().await?;
-    assert_no_local_persistence_artifacts(codex_home.path())?;
+    let expected_execution_account_lease_files = BTreeSet::new();
+    assert_no_local_persistence_artifacts(
+        codex_home.path(),
+        &expected_execution_account_lease_files,
+    )?;
 
     Ok(())
 }
@@ -345,7 +349,13 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
         "turn completion should flush through the injected store"
     );
 
-    assert_no_local_persistence_artifacts(codex_home.path())?;
+    // Execution-account leases are durable routing metadata owned outside the
+    // thread store, so thread/delete does not remove the loaded thread's lease.
+    let expected_execution_account_lease_files = BTreeSet::from([format!("{}.json", thread.id)]);
+    assert_no_local_persistence_artifacts(
+        codex_home.path(),
+        &expected_execution_account_lease_files,
+    )?;
 
     Ok(())
 }
@@ -496,11 +506,15 @@ async fn delete_thread(
     Ok(())
 }
 
-fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
+fn assert_no_local_persistence_artifacts(
+    codex_home: &Path,
+    expected_execution_account_lease_files: &BTreeSet<String>,
+) -> Result<()> {
     // These are the observable tripwires for accidental local persistence. If a
     // future code path constructs a local rollout/session store or opens the
     // local thread sqlite database, it should leave one of these artifacts in
-    // the isolated test codex_home.
+    // the isolated test codex_home. Durable execution-account routing metadata
+    // is checked separately against the exact caller-provided lease filenames.
     assert!(
         !codex_home.join("sessions").exists(),
         "non-local thread persistence should not create local rollout sessions"
@@ -534,10 +548,23 @@ fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
         sqlite_artifacts.is_empty(),
         "non-local thread persistence should not create sqlite artifacts: {sqlite_artifacts:?}"
     );
+    let execution_account_lease_dir = codex_home.join("execution-account-leases");
+    let execution_account_lease_files = if execution_account_lease_dir.exists() {
+        codex_home_entries(&execution_account_lease_dir)?
+    } else {
+        BTreeSet::new()
+    };
+    assert_eq!(
+        &execution_account_lease_files, expected_execution_account_lease_files,
+        "non-local thread persistence should not create unexpected execution account leases"
+    );
     let mut entries = codex_home_entries(codex_home)?;
     // Host startup may leave sandbox migration markers, and Bazel test runs may
-    // initialize shell snapshot storage. Neither is thread persistence.
+    // initialize shell snapshot storage. Execution account initialization also
+    // creates its lease directory, whose exact contents were verified above.
+    // None of these are thread persistence.
     entries.remove(".sandbox_migration");
+    entries.remove("execution-account-leases");
     entries.remove("shell_snapshots");
     assert_eq!(
         entries,
