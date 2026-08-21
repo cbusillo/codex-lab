@@ -18,6 +18,7 @@ Options:
   --entitlements PATH
   --identifier IDENTIFIER
   --identity IDENTITY
+  --keychain PATH
   --options FLAGS
   --target PATH
   --timestamp true|false|none
@@ -26,6 +27,7 @@ EOF
 
 target=""
 identity=""
+keychain=""
 options=""
 entitlements_file=""
 identifier=""
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --identity)
       identity="${2:-}"
+      shift 2
+      ;;
+    --keychain)
+      keychain="${2:-}"
       shift 2
       ;;
     --options)
@@ -135,6 +141,10 @@ sign_with_codesign() {
     args+=(--identifier "$identifier")
   fi
 
+  if [[ -n "$keychain" ]]; then
+    args+=(--keychain "$keychain")
+  fi
+
   args+=(--sign "$identity" "$target")
   codesign "${args[@]}"
 }
@@ -184,6 +194,11 @@ rcodesign_options_require_notarization() {
 }
 
 sign_with_rcodesign() {
+  if [[ -n "$keychain" ]]; then
+    echo "--keychain is supported only by the native codesign backend." >&2
+    exit 2
+  fi
+
   : "${OAI_AKV_PKCS11_LIBRARY:?OAI_AKV_PKCS11_LIBRARY is required for AKV PKCS11 signing.}"
   : "${OAI_AKV_SIGNING_CERTIFICATE_PEM:?OAI_AKV_SIGNING_CERTIFICATE_PEM is required for AKV PKCS11 signing.}"
   : "${OAI_AKV_KEY_LABEL:?OAI_AKV_KEY_LABEL is required for AKV PKCS11 signing.}"

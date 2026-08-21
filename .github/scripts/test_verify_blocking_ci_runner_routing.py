@@ -43,6 +43,8 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
             "    runs-on: [self-hosted, Linux, X64, codex-lab-linux]\n"
             "  local_alias:\n"
             "    runs-on: macos-codex-lab\n"
+            "  signing:\n"
+            "    runs-on: codex-lab-signing\n"
             "  macos:\n"
             "    runs-on: macos-15-xlarge\n"
             "  windows:\n"

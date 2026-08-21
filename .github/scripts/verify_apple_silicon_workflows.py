@@ -19,7 +19,7 @@ SELECTOR = re.compile(
 )
 BLOCK_SCALAR = re.compile(r"^\s*[A-Za-z0-9_-]+:\s*[>|][0-9+-]*\s*$")
 EXPRESSION = re.compile(r"^\$\{\{.*\}\}$")
-APPLE_RUNNERS = frozenset({"macos-26", "macos-codex-lab"})
+APPLE_RUNNERS = frozenset({"macos-26", "macos-codex-lab", "codex-lab-signing"})
 APPLE_TARGET = "aarch64-apple-darwin"
 APPLE_PLATFORMS = frozenset({"macos_arm64", "macos-aarch64"})
 LINUX_CONTAINER_ACTIONS = (
