@@ -271,7 +271,7 @@ pub(super) async fn try_run_zsh_fork(
 
 pub(crate) async fn prepare_unified_exec_zsh_fork(
     req: &crate::tools::runtimes::unified_exec::UnifiedExecRequest,
-    _attempt: &SandboxAttempt<'_>,
+    attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx,
     exec_request: ExecRequest,
     shell_zsh_path: &std::path::Path,
@@ -326,6 +326,11 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         codex_linux_sandbox_exe: ctx.step_context.turn.config.codex_linux_sandbox_exe.clone(),
         use_legacy_landlock: ctx.step_context.turn.config.features.use_legacy_landlock(),
     };
+    let (attempt_file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
+    let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        req.sandbox_permissions,
+        &attempt_file_system_sandbox_policy,
+    );
     let escalation_policy = CoreShellActionProvider {
         policy: Arc::clone(&exec_policy),
         session: Arc::clone(&ctx.session),
@@ -336,9 +341,9 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         tool_name: ctx.tool_name.clone(),
         approval_policy: ctx.step_context.turn.approval_policy(),
         permission_profile: exec_request.permission_profile.clone(),
-        sandbox_permissions: req.sandbox_permissions,
+        sandbox_permissions,
         approval_sandbox_permissions: approval_sandbox_permissions(
-            req.sandbox_permissions,
+            sandbox_permissions,
             req.additional_permissions_preapproved,
         ),
         prompt_permissions: req.additional_permissions.clone(),
