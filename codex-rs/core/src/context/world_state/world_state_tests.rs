@@ -153,6 +153,27 @@ fn bounded_world_state_preserves_separate_message_requirement() {
 }
 
 #[test]
+fn persisted_fragment_identity_matches_bounded_usage_hint() {
+    let mut world_state = WorldState::default();
+    world_state.add_section(MultiAgentUsageHintState::new(
+        &"x".repeat(MAX_WORLD_STATE_SECTION_BYTES + 1),
+    ));
+    let identity = world_state
+        .snapshot()
+        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
+        .expect("usage hint identity");
+    let rendered = world_state
+        .render_full()
+        .into_iter()
+        .next()
+        .expect("rendered usage hint")
+        .render();
+
+    assert!(identity.matches("developer", &rendered));
+    assert!(!identity.matches("developer", "unrelated developer text"));
+}
+
+#[test]
 fn section_budget_override_remains_bounded_by_section_and_total_limits() {
     let mut world_state = WorldState::default();
     world_state.add_section(ElevatedBudgetSection);

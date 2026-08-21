@@ -3,6 +3,7 @@ use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
 use crate::context::ContextualUserFragment;
 use crate::context::ProjectValidationCorrectionConsumed;
 use crate::context::UserInstructions;
+use crate::context::world_state::MultiAgentUsageHintState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
 use base64::Engine;
@@ -564,7 +565,10 @@ fn drop_last_n_user_turns_treats_inter_agent_assistant_messages_as_instruction_t
         inter_agent_reply,
     ]);
 
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
 
     assert_eq!(raw_items(&history), vec![first_turn, first_reply]);
 }
@@ -1016,7 +1020,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert_eq!(
         history.for_prompt(&modalities),
         vec![
@@ -1033,7 +1040,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
         user_msg("u2"),
         assistant_msg("a2"),
     ]);
-    history.drop_last_n_user_turns(/*num_turns*/ 99);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 99,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert_eq!(
         history.for_prompt(&modalities),
         vec![assistant_msg("session prefix item")]
@@ -1062,7 +1072,10 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
 
     let expected_prefix_and_first_turn = vec![
         user_input_text_msg("<environment_context>ctx</environment_context>"),
@@ -1116,7 +1129,10 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
         user_input_text_msg("turn 2 user"),
         assistant_msg("turn 2 assistant"),
     ]);
-    history.drop_last_n_user_turns(/*num_turns*/ 2);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 2,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
 
     let mut history = create_history_with_items(vec![
@@ -1136,7 +1152,10 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
         user_input_text_msg("turn 2 user"),
         assistant_msg("turn 2 assistant"),
     ]);
-    history.drop_last_n_user_turns(/*num_turns*/ 3);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 3,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
 }
 
@@ -1156,6 +1175,7 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
             "{ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_ENVIRONMENT_INSTRUCTIONS"
         )),
         developer_msg("<collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>"),
+        developer_msg("Custom root usage hint."),
         developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
         user_input_text_msg(
             "<environment_context><cwd>PRETURN_CONTEXT_DIFF_CWD</cwd></environment_context>",
@@ -1168,7 +1188,13 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
     let mut history = create_history_with_items(items);
     let reference_context_item = reference_context_item();
     history.set_reference_context_item(Some(reference_context_item.clone()));
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    let mut world_state = WorldState::default();
+    world_state.add_section(MultiAgentUsageHintState::new("Custom root usage hint."));
+    let usage_hint_identity = world_state
+        .snapshot()
+        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
+        .expect("usage hint identity");
+    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
 
     assert_eq!(
         history.clone().for_prompt(&modalities),
@@ -1187,6 +1213,105 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
 }
 
 #[test]
+fn drop_last_n_user_turns_preserves_unpaired_developer_text_matching_usage_hint() {
+    let items = vec![
+        user_input_text_msg("turn 1 user"),
+        assistant_msg("turn 1 assistant"),
+        developer_msg("Custom root usage hint."),
+        user_input_text_msg("turn 2 user"),
+        assistant_msg("turn 2 assistant"),
+    ];
+
+    let mut world_state = WorldState::default();
+    world_state.add_section(MultiAgentUsageHintState::new("Custom root usage hint."));
+    let usage_hint_identity = world_state
+        .snapshot()
+        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
+        .expect("usage hint identity");
+    let mut history = create_history_with_items(items);
+    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
+
+    assert_eq!(
+        history.for_prompt(&default_input_modalities()),
+        vec![
+            user_input_text_msg("turn 1 user"),
+            assistant_msg("turn 1 assistant"),
+            developer_msg("Custom root usage hint."),
+        ]
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_preserves_client_authored_text_matching_usage_hint() {
+    let mut items = vec![
+        user_input_text_msg("turn 1 user"),
+        assistant_msg("turn 1 assistant"),
+        developer_msg("Custom root usage hint."),
+        developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
+        user_input_text_msg("turn 2 user"),
+        assistant_msg("turn 2 assistant"),
+    ]
+    .into_iter()
+    .map(ResponseItemEnvelope::new)
+    .collect::<Vec<_>>();
+    items[2].metadata = Some(CodexHarnessMetadata {
+        client_authored: true,
+        ..Default::default()
+    });
+    let mut world_state = WorldState::default();
+    world_state.add_section(MultiAgentUsageHintState::new("Custom root usage hint."));
+    let usage_hint_identity = world_state
+        .snapshot()
+        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
+        .expect("usage hint identity");
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
+    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
+
+    assert_eq!(
+        history.for_prompt(&default_input_modalities()),
+        vec![
+            user_input_text_msg("turn 1 user"),
+            assistant_msg("turn 1 assistant"),
+            developer_msg("Custom root usage hint."),
+        ]
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_trims_durably_tagged_usage_hint_without_world_state_identity() {
+    let mut items = vec![
+        user_input_text_msg("turn 1 user"),
+        assistant_msg("turn 1 assistant"),
+        developer_msg("Custom root usage hint."),
+        developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
+        user_input_text_msg("turn 2 user"),
+        assistant_msg("turn 2 assistant"),
+    ]
+    .into_iter()
+    .map(ResponseItemEnvelope::new)
+    .collect::<Vec<_>>();
+    items[2].metadata = Some(CodexHarnessMetadata {
+        context_fragment: Some(ContextFragmentKind::MultiAgentUsageHint),
+        ..Default::default()
+    });
+    let mut history = ContextManager::new();
+    history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
+
+    assert_eq!(
+        history.for_prompt(&default_input_modalities()),
+        vec![
+            user_input_text_msg("turn 1 user"),
+            assistant_msg("turn 1 assistant"),
+        ]
+    );
+}
+
+#[test]
 fn drop_last_n_user_turns_trims_saved_prefix_update_above_rolled_back_turn() {
     let items = vec![
         assistant_msg("session prefix item"),
@@ -1201,7 +1326,10 @@ fn drop_last_n_user_turns_trims_saved_prefix_update_above_rolled_back_turn() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
 
     assert_eq!(
         history.for_prompt(&modalities),
@@ -1232,7 +1360,10 @@ fn drop_last_n_user_turns_clears_reference_context_for_mixed_developer_context_b
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
     history.set_reference_context_item(Some(reference_context_item()));
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
 
     assert_eq!(
         history.clone().for_prompt(&modalities),

@@ -26,6 +26,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
@@ -77,6 +78,33 @@ fn normalize_line_endings_str(text: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn remove_multi_agent_usage_hint_world_state_section(rollout_path: &Path) -> Result<()> {
+    let rollout = std::fs::read_to_string(rollout_path)?;
+    let mut removed_section = false;
+    let retained = rollout
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|mut line| {
+            if let RolloutItem::WorldState(world_state) = &mut line.item
+                && let Some(state) = world_state.state.as_object_mut()
+                && state.remove("multi_agent_usage_hint").is_some()
+            {
+                removed_section = true;
+            }
+            serde_json::to_string(&line)
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .join("\n");
+    anyhow::ensure!(
+        removed_section,
+        "rollout did not contain a persisted multi-agent usage-hint section"
+    );
+    std::fs::write(rollout_path, format!("{retained}\n"))?;
+    Ok(())
 }
 
 fn response_message_contains_text(item: &ResponseItem, expected: &str) -> bool {
@@ -516,6 +544,7 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
     }
 
     const EDITED_AFTER_COMPACT: &str = "EDITED_AFTER_COMPACT";
+    const UPDATED_ROOT_AGENT_USAGE_HINT: &str = "UPDATED_ROOT_AGENT_USAGE_HINT";
     const SECOND_REPLY: &str = "SECOND_REPLY";
 
     let server = MockServer::start().await;
@@ -535,23 +564,37 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
 
     let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
-    let (_home, _config, _manager, base) = start_test_conversation(&server, /*model*/ None).await;
+    let (_home, config, manager, base) = start_test_conversation(&server, /*model*/ None).await;
+    let original_root_agent_usage_hint = config
+        .multi_agent_v2
+        .root_agent_usage_hint_text
+        .as_ref()
+        .expect("root agent usage hint");
 
     user_turn(&base, "hello world").await;
     compact_conversation(&base).await;
     user_turn(&base, EDITED_AFTER_COMPACT).await;
 
-    base.submit(Op::ThreadRollback { num_turns: 1 })
+    let base_path = fetch_conversation_path(&base);
+    shutdown_conversation(&base).await;
+    remove_multi_agent_usage_hint_world_state_section(&base_path)?;
+    let mut resumed_config = config.clone();
+    resumed_config.multi_agent_v2.root_agent_usage_hint_text =
+        Some(UPDATED_ROOT_AGENT_USAGE_HINT.to_string());
+    let resumed = resume_conversation(&manager, &resumed_config, base_path).await;
+
+    resumed
+        .submit(Op::ThreadRollback { num_turns: 1 })
         .await
         .expect("submit thread rollback");
     let rollback_event =
-        wait_for_event(&base, |ev| matches!(ev, EventMsg::ThreadRolledBack(_))).await;
+        wait_for_event(&resumed, |ev| matches!(ev, EventMsg::ThreadRolledBack(_))).await;
     let EventMsg::ThreadRolledBack(rollback_event) = rollback_event else {
         panic!("expected thread rolled back event");
     };
     assert_eq!(rollback_event.num_turns, 1);
 
-    user_turn(&base, AFTER_ROLLBACK).await;
+    user_turn(&resumed, AFTER_ROLLBACK).await;
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 4);
@@ -575,6 +618,34 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
     assert!(
         requests[3].body_contains_text(SUMMARY_TEXT),
         "compaction summary should remain for the preserved first turn",
+    );
+    let after_rollback_developer_texts = requests[3].message_input_texts("developer");
+    assert_eq!(
+        (
+            after_rollback_developer_texts
+                .iter()
+                .filter(|text| {
+                    text.to_ascii_lowercase()
+                        .starts_with("<permissions instructions>")
+                })
+                .count(),
+            after_rollback_developer_texts
+                .iter()
+                .filter(|text| **text == UPDATED_ROOT_AGENT_USAGE_HINT)
+                .count(),
+            after_rollback_developer_texts
+                .iter()
+                .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
+                .count(),
+        ),
+        (1, 1, 1),
+        "post-rollback startup context should contain one permissions, usage-hint, and mode bundle",
+    );
+    assert!(
+        after_rollback_developer_texts
+            .iter()
+            .all(|text| text != original_root_agent_usage_hint),
+        "post-rollback startup context should not retain the pre-resume usage hint",
     );
 
     insta::assert_snapshot!(

@@ -25,6 +25,7 @@ use crate::context::ModelSwitchInstructions;
 use crate::context::NetworkRuleSaved;
 use crate::context::RecommendedPluginsInstructions;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::WorldStateSnapshot;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::BANNED_PREFIX_SUGGESTIONS;
@@ -3082,15 +3083,42 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        self.record_conversation_items_with_rollout_suffix(
+            turn_context,
+            items,
+            Vec::new(),
+            /*usage_hint_world_state_snapshot*/ None,
+        )
+        .await;
+    }
+
+    async fn record_conversation_items_with_rollout_suffix(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+        rollout_suffix: Vec<RolloutItem>,
+        usage_hint_world_state_snapshot: Option<&WorldStateSnapshot>,
+    ) {
         let (items, image_preparations) =
             self.prepare_conversation_items_for_history(turn_context, items);
-        let items = items
+        let mut items = items
             .into_owned()
             .into_iter()
             .map(ResponseItemEnvelope::new)
-            .collect();
-        self.record_prepared_conversation_items(turn_context, items, image_preparations)
-            .await;
+            .collect::<Vec<_>>();
+        if let Some(world_state_snapshot) = usage_hint_world_state_snapshot {
+            crate::context_manager::updates::annotate_multi_agent_usage_hint(
+                &mut items,
+                world_state_snapshot,
+            );
+        }
+        self.record_prepared_conversation_items(
+            turn_context,
+            items,
+            image_preparations,
+            rollout_suffix,
+        )
+        .await;
     }
 
     async fn record_prepared_conversation_items(
@@ -3098,6 +3126,7 @@ impl Session {
         turn_context: &TurnContext,
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
+        rollout_suffix: Vec<RolloutItem>,
     ) {
         let response_items = items
             .iter()
@@ -3120,8 +3149,9 @@ impl Session {
                     metadata: image,
                 });
         }
-        let rollout_items: Vec<RolloutItem> =
+        let mut rollout_items: Vec<RolloutItem> =
             items.into_iter().map(RolloutItem::ResponseItem).collect();
+        rollout_items.extend(rollout_suffix);
         self.persist_rollout_items(&rollout_items).await;
         self.send_raw_response_items(turn_context, &response_items)
             .await;
@@ -3144,19 +3174,23 @@ impl Session {
         let items = crate::context_manager::updates::merge_contextual_fragments(
             world_state.render_diff(&previous_snapshot),
         );
-        if !items.is_empty() {
-            self.record_conversation_items(turn_context, &items).await;
-        }
-
         // ContextManager remembers this for later turns; run_turn owns the live value.
         self.state
             .lock()
             .await
             .history
-            .set_world_state_baseline(world_state_snapshot);
-        // Record the patch after the context it describes is present in model history.
-        if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
+            .set_world_state_baseline(world_state_snapshot.clone());
+        let world_state_rollout_item = world_state_item.map(RolloutItem::WorldState);
+        if !items.is_empty() {
+            self.record_conversation_items_with_rollout_suffix(
+                turn_context,
+                &items,
+                world_state_rollout_item.into_iter().collect(),
+                Some(&world_state_snapshot),
+            )
+            .await;
+        } else if let Some(world_state_rollout_item) = world_state_rollout_item {
+            self.persist_rollout_items(&[world_state_rollout_item])
                 .await;
         }
         Ok(world_state)
@@ -3400,17 +3434,14 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
-        // Persist the baseline after the replacement history that established it.
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
-                .await;
+            rollout_items.push(RolloutItem::WorldState(world_state_item));
         }
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
         }
+        self.persist_rollout_items(&rollout_items).await;
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
@@ -3761,6 +3792,10 @@ impl Session {
             .into_iter()
             .map(ResponseItemEnvelope::new)
             .collect::<Vec<_>>();
+        crate::context_manager::updates::annotate_multi_agent_usage_hint(
+            &mut context_items,
+            &world_state.snapshot(),
+        );
         context_items.extend(preserved_history);
         let turn_context_item = turn_context.to_turn_context_item();
         self.replace_compacted_history(
@@ -3810,20 +3845,22 @@ impl Session {
         let turn_context_changed = reference_context_item.as_ref() != Some(&turn_context_item);
         let should_inject_full_context = reference_context_item.is_none();
         let world_state = Arc::new(self.build_world_state_for_step(step_context).await?);
+        let world_state_snapshot = world_state.snapshot();
         // Full initial context resets the baseline; later turns persist only its changes.
         let (mut context_items, world_state_item) = if should_inject_full_context {
             let context_items = self
                 .build_initial_context_with_world_state(turn_context, world_state.as_ref())
                 .await;
-            let snapshot = world_state.snapshot();
             self.state
                 .lock()
                 .await
                 .history
-                .set_world_state_baseline(snapshot.clone());
+                .set_world_state_baseline(world_state_snapshot.clone());
             (
                 context_items,
-                Some(WorldStateItem::full(snapshot.into_value())),
+                Some(WorldStateItem::full(
+                    world_state_snapshot.clone().into_value(),
+                )),
             )
         } else {
             let (world_state_items, world_state_item) = {
@@ -3848,13 +3885,17 @@ impl Session {
         if only_world_state_changed && world_state_item.is_none() {
             return Ok(world_state);
         }
+        let world_state_rollout_item = world_state_item.map(RolloutItem::WorldState);
         if !context_items.is_empty() {
-            self.record_conversation_items(turn_context, &context_items)
-                .await;
-        }
-        // Persist state only after any model-visible context generated from it.
-        if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
+            self.record_conversation_items_with_rollout_suffix(
+                turn_context,
+                &context_items,
+                world_state_rollout_item.into_iter().collect(),
+                Some(&world_state_snapshot),
+            )
+            .await;
+        } else if let Some(world_state_rollout_item) = world_state_rollout_item {
+            self.persist_rollout_items(&[world_state_rollout_item])
                 .await;
         }
         // A snapshot-only change does not require a duplicate TurnContext record.

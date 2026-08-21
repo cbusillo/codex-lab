@@ -32,7 +32,6 @@ use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
-use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -102,17 +101,18 @@ pub(crate) async fn build_compaction_initial_context(
                     world_state.as_ref(),
                 )
                 .await;
-            (
-                items.into_iter().map(ResponseItemEnvelope::new).collect(),
-                Some(Arc::clone(world_state)),
-            )
+            let mut items = items
+                .into_iter()
+                .map(ResponseItemEnvelope::new)
+                .collect::<Vec<_>>();
+            crate::context_manager::updates::annotate_multi_agent_usage_hint(
+                &mut items,
+                &world_state.snapshot(),
+            );
+            (items, Some(Arc::clone(world_state)))
         }
         InitialContextInjection::DoNotInject => (Vec::new(), None),
     }
-}
-
-pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bool {
-    provider.supports_remote_compaction()
 }
 
 pub(crate) struct CompactionJobConfig {

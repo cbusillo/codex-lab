@@ -1,4 +1,6 @@
 use super::*;
+use crate::context::world_state::MultiAgentUsageHintState;
+use crate::context::world_state::WorldStateSection;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
@@ -318,6 +320,8 @@ impl Session {
         .unwrap_or(u64::MAX);
 
         let mut history = ContextManager::new();
+        let mut replay_world_state_baseline: Option<WorldStateSnapshot> = None;
+        let mut multi_agent_usage_hint_identities = Vec::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some(base_replacement_history) = base_replacement_history {
             history.replace_annotated(base_replacement_history.to_vec());
@@ -342,6 +346,8 @@ impl Session {
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
                 RolloutItem::Compacted(compacted) => {
+                    replay_world_state_baseline = None;
+                    multi_agent_usage_hint_identities.clear();
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)
                         // should stop before any compaction that has Some replacement_history
@@ -367,11 +373,40 @@ impl Session {
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
-                    history.drop_last_n_user_turns(rollback.num_turns);
+                    history.drop_last_n_user_turns(
+                        rollback.num_turns,
+                        &multi_agent_usage_hint_identities,
+                    );
+                }
+                RolloutItem::WorldState(world_state) => {
+                    let world_state_updated = if world_state.full {
+                        replay_world_state_baseline =
+                            serde_json::from_value(world_state.state.clone()).ok();
+                        replay_world_state_baseline.is_some()
+                    } else if let Some(baseline) = replay_world_state_baseline.as_mut() {
+                        match baseline.apply_merge_patch(&world_state.state) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                warn!("failed to apply persisted world state patch: {err}");
+                                false
+                            }
+                        }
+                    } else {
+                        warn!("ignored world-state patch without a full snapshot");
+                        false
+                    };
+                    if world_state_updated
+                        && let Some(identity) =
+                            replay_world_state_baseline.as_ref().and_then(|state| {
+                                state.fragment_identity(MultiAgentUsageHintState::ID, "developer")
+                            })
+                        && !multi_agent_usage_hint_identities.contains(&identity)
+                    {
+                        multi_agent_usage_hint_identities.push(identity);
+                    }
                 }
                 RolloutItem::EventMsg(_)
                 | RolloutItem::TurnContext(_)
-                | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::SessionMeta(_) => {}
             }

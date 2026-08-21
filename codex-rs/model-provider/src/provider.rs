@@ -49,6 +49,7 @@ pub struct ProviderCapabilities {
     pub image_generation: bool,
     pub web_search: bool,
     pub external_web_access: bool,
+    /// Protocol-specific network behavior must be explicitly enabled by provider implementations.
     pub remote_compaction: RemoteCompactionSupport,
 }
 
@@ -59,7 +60,7 @@ impl Default for ProviderCapabilities {
             image_generation: true,
             web_search: true,
             external_web_access: true,
-            remote_compaction: RemoteCompactionSupport::V2,
+            remote_compaction: RemoteCompactionSupport::Unsupported,
         }
     }
 }
@@ -583,13 +584,19 @@ mod tests {
     }
 
     #[test]
-    fn configured_provider_uses_default_capabilities() {
+    fn configured_openai_provider_enables_remote_compaction() {
         let provider = create_model_provider(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,
         );
 
-        assert_eq!(provider.capabilities(), ProviderCapabilities::default());
+        assert_eq!(
+            provider.capabilities(),
+            ProviderCapabilities {
+                remote_compaction: RemoteCompactionSupport::V2,
+                ..ProviderCapabilities::default()
+            }
+        );
     }
 
     #[test]

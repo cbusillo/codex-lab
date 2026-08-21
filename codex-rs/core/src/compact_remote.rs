@@ -278,12 +278,13 @@ async fn run_remote_compact_task_inner_impl(
         correction_pair,
     } = attempt;
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (new_history, world_state_baseline) =
-        process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
     let new_history = new_history
         .into_iter()
         .map(ResponseItemEnvelope::new)
         .collect();
+    let (new_history, world_state_baseline) =
+        process_annotated_compacted_history(sess.as_ref(), new_history, &initial_context_injection)
+            .await;
     let new_history =
         preserve_project_validation_correction_pair(new_history, correction_pair.as_ref());
 
@@ -307,7 +308,8 @@ async fn run_remote_compact_task_inner_impl(
         });
     }
     // Legacy `/responses/compact` returns provider-normalized items without a stable link to their
-    // original envelopes, so it does not preserve harness metadata. Compaction-trigger/v2 does.
+    // original envelopes. Those provider items remain unannotated, while fresh canonical context
+    // injected locally retains its harness metadata.
     sess.replace_compacted_history(
         new_history,
         reference_context_item,
@@ -326,6 +328,7 @@ async fn run_remote_compact_task_inner_impl(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn process_compacted_history(
     sess: &Session,
     compacted_history: Vec<ResponseItem>,

@@ -535,11 +535,33 @@ pub(crate) struct WorldStateHash(String);
 
 impl WorldStateHash {
     pub(crate) fn from_fragment(fragment: &(impl ContextualUserFragment + ?Sized)) -> Self {
+        Self::from_role_and_text(fragment.role(), &fragment.render())
+    }
+
+    fn from_role_and_text(role: &str, text: &str) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(b"codex-world-state-fragment-v1\0");
-        hash_component(&mut hasher, fragment.role());
-        hash_component(&mut hasher, &fragment.render());
+        hash_component(&mut hasher, role);
+        hash_component(&mut hasher, text);
         Self(format!("{:x}", hasher.finalize()))
+    }
+}
+
+/// Persisted identity for one model-visible world-state fragment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorldStateFragmentIdentity {
+    role: String,
+    fragment_hash: Option<WorldStateHash>,
+    bounded_open_tag: String,
+}
+
+impl WorldStateFragmentIdentity {
+    pub(crate) fn matches(&self, role: &str, text: &str) -> bool {
+        role == self.role
+            && (self.fragment_hash.as_ref()
+                == Some(&WorldStateHash::from_role_and_text(role, text))
+                || (text.contains(&self.bounded_open_tag)
+                    && text.contains(BOUNDED_WORLD_STATE_CLOSE_TAG)))
     }
 }
 
@@ -564,6 +586,23 @@ pub(crate) struct WorldStateSnapshot {
 }
 
 impl WorldStateSnapshot {
+    pub(crate) fn fragment_identity(
+        &self,
+        section_id: &str,
+        role: &str,
+    ) -> Option<WorldStateFragmentIdentity> {
+        let state = self.sections.get(section_id)?;
+        Some(WorldStateFragmentIdentity {
+            role: role.to_string(),
+            fragment_hash: serde_json::from_value(state.clone()).ok(),
+            bounded_open_tag: bounded_world_state_open_tag(
+                section_id,
+                role,
+                &bounded_world_state_state_hash(state),
+            ),
+        })
+    }
+
     /// Seed a baseline from a rollout `TurnContextItem` for rollouts recorded
     /// before world-state items were persisted.
     ///

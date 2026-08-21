@@ -72,6 +72,7 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
             item: response_item.clone(),
             metadata: Some(CodexHarnessMetadata {
                 client_authored: true,
+                ..Default::default()
             }),
         }),
     };
@@ -97,14 +98,15 @@ fn response_item_envelope_stores_metadata_beside_rollout_payload() -> Result<()>
         envelope.metadata,
         Some(CodexHarnessMetadata {
             client_authored: true,
+            ..Default::default()
         })
     );
     Ok(())
 }
 
 #[test]
-/// Keeps future metadata fields from making older binaries reject persisted items.
-fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()> {
+/// Keeps future metadata fields from making older binaries reject or rewrite persisted items.
+fn response_item_envelope_preserves_unknown_harness_metadata_fields() -> Result<()> {
     let line = serde_json::from_value::<RolloutLine>(json!({
         "timestamp": "2025-01-03T12:00:00.000Z",
         "ordinal": 7,
@@ -118,23 +120,48 @@ fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()
             }],
         },
         "metadata": {
+            "context_fragment": "future_kind",
             "future_field": "value",
         },
     }))?;
 
+    let serialized_line = serde_json::to_value(&line)?;
+    assert_eq!(
+        serialized_line["metadata"]["context_fragment"],
+        "future_kind"
+    );
     let RolloutItem::ResponseItem(envelope) = line.item else {
         panic!("expected response item");
     };
-    assert_eq!(envelope.metadata, Some(CodexHarnessMetadata::default()));
+    assert_eq!(
+        envelope.metadata,
+        Some(CodexHarnessMetadata {
+            context_fragment: Some(ContextFragmentKind::Unknown("future_kind".to_string())),
+            additional_fields: BTreeMap::from([("future_field".to_string(), json!("value"),)]),
+            ..Default::default()
+        })
+    );
 
     let compacted = serde_json::from_value::<CompactedItem>(json!({
         "message": "summary",
         "replacement_history": [response_message("user")],
-        "replacement_history_metadata": [{ "future_field": "value" }],
+        "replacement_history_metadata": [{
+            "context_fragment": "future_kind",
+            "future_field": "value",
+        }],
     }))?;
+    let serialized_compacted = serde_json::to_value(&compacted)?;
+    assert_eq!(
+        serialized_compacted["replacement_history_metadata"][0]["context_fragment"],
+        "future_kind"
+    );
     assert_eq!(
         compacted.replacement_history.expect("replacement history")[0].metadata,
-        Some(CodexHarnessMetadata::default())
+        Some(CodexHarnessMetadata {
+            context_fragment: Some(ContextFragmentKind::Unknown("future_kind".to_string())),
+            additional_fields: BTreeMap::from([("future_field".to_string(), json!("value"),)]),
+            ..Default::default()
+        })
     );
     Ok(())
 }
@@ -184,6 +211,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
                 item: developer_message.clone(),
                 metadata: Some(CodexHarnessMetadata {
                     client_authored: true,
+                    ..Default::default()
                 }),
             },
             ResponseItemEnvelope::new(compaction_item.clone()),
@@ -215,6 +243,7 @@ fn compacted_replacement_history_stores_metadata_in_an_aligned_sidecar() -> Resu
                 item: developer_message,
                 metadata: Some(CodexHarnessMetadata {
                     client_authored: true,
+                    ..Default::default()
                 }),
             },
             ResponseItemEnvelope {
@@ -276,6 +305,7 @@ fn compacted_metadata_remains_compatible_with_legacy_response_item_readers() -> 
         item: response_item.clone(),
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
+            ..Default::default()
         }),
     };
     let response_line = serde_json::to_value(RolloutItem::ResponseItem(envelope.clone()))?;

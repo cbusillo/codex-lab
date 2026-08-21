@@ -1,5 +1,6 @@
 use super::*;
 use codex_history::CodexHarnessMetadata;
+use codex_history::ContextFragmentKind;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
@@ -61,6 +62,37 @@ fn user_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[tokio::test]
+async fn v1_compacted_history_retains_locally_injected_usage_hint_metadata() {
+    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+    let turn_context = Arc::new(turn_context);
+    let step_context =
+        crate::session::step_context::StepContext::for_test(Arc::clone(&turn_context));
+    let world_state = Arc::new(
+        session
+            .build_world_state_for_step(&step_context)
+            .await
+            .expect("world state should build"),
+    );
+    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
+        world_state,
+        step_context,
+    };
+
+    let (refreshed, _) = crate::compact_remote::process_annotated_compacted_history(
+        &session,
+        annotated(vec![user_message("summary")]),
+        &initial_context_injection,
+    )
+    .await;
+
+    assert!(refreshed.iter().any(|envelope| {
+        envelope.metadata.as_ref().is_some_and(|metadata| {
+            metadata.context_fragment.as_ref() == Some(&ContextFragmentKind::MultiAgentUsageHint)
+        })
+    }));
 }
 
 #[test]

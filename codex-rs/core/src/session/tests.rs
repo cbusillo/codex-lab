@@ -3264,10 +3264,101 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => None,
     });
-    assert_eq!(
-        persisted_replacement_history.cloned(),
-        Some(live_history.annotated_items().to_vec())
+    assert!(
+        persisted_replacement_history
+            .expect("persisted replacement history")
+            .iter()
+            .any(|item| {
+                item.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.context_fragment.as_ref()
+                        == Some(&codex_history::ContextFragmentKind::MultiAgentUsageHint)
+                })
+            })
     );
+    let mut normalized_persisted = persisted_replacement_history
+        .cloned()
+        .expect("persisted replacement history");
+    for item in &mut normalized_persisted {
+        if item.metadata == Some(CodexHarnessMetadata::default()) {
+            item.metadata = None;
+        }
+    }
+    assert_eq!(normalized_persisted, live_history.annotated_items());
+}
+
+#[tokio::test]
+async fn world_state_patch_batch_persists_usage_hint_identity_before_patch() {
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let rollout_path =
+        attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+    let step_context = session
+        .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
+        .await
+        .expect("a fresh cancellation token cannot be cancelled");
+    let world_state = session
+        .build_world_state_for_step(&step_context)
+        .await
+        .expect("world state should build");
+    let world_state_snapshot = world_state.snapshot();
+    let context_items = session
+        .build_initial_context_with_world_state(turn_context.as_ref(), &world_state)
+        .await;
+
+    session
+        .record_conversation_items_with_rollout_suffix(
+            turn_context.as_ref(),
+            &context_items,
+            vec![RolloutItem::WorldState(WorldStateItem::patch(
+                world_state_snapshot.clone().into_value(),
+            ))],
+            Some(&world_state_snapshot),
+        )
+        .await;
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let mut saw_tagged_usage_hint = false;
+    let mut saw_patch = false;
+    for item in resumed.history.iter() {
+        match item {
+            RolloutItem::ResponseItem(envelope)
+                if envelope.metadata.as_ref().is_some_and(|metadata| {
+                    metadata.context_fragment.as_ref()
+                        == Some(&codex_history::ContextFragmentKind::MultiAgentUsageHint)
+                }) =>
+            {
+                saw_tagged_usage_hint = true;
+            }
+            RolloutItem::WorldState(world_state) if !world_state.full => {
+                assert!(
+                    saw_tagged_usage_hint,
+                    "usage-hint identity must be durable before its world-state patch"
+                );
+                saw_patch = true;
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+    assert!(saw_tagged_usage_hint);
+    assert!(saw_patch);
 }
 
 #[tokio::test]
