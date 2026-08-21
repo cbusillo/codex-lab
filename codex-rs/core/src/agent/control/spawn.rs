@@ -324,7 +324,10 @@ impl AgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
-        if let Some(stored_model_provider) = config
+        if stored_model_provider_id == config.model_provider_id {
+            config.model = stored_model;
+            config.model_reasoning_effort = stored_reasoning_effort;
+        } else if let Some(stored_model_provider) = config
             .model_providers
             .get(&stored_model_provider_id)
             .cloned()

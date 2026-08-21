@@ -8,7 +8,6 @@ use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
-use codex_login::CodexAuth;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::items::TurnItem;
@@ -780,20 +779,6 @@ async fn review_uses_custom_review_model_from_config() {
     let (server, request_log) =
         start_responses_server_with_sse(completed_sse(), /*expected_requests*/ 1).await;
     let codex_home = Arc::new(TempDir::new().unwrap());
-    let test = test_codex()
-        .with_home(Arc::clone(&codex_home))
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            config.model = Some("gpt-4.1".to_string());
-            config.review_model = Some("custom-review-model".to_string());
-            config.model_reasoning_effort = Some(ReasoningEffort::Max);
-        })
-        .build_with_auto_env(&server)
-        .await
-        .expect("custom review conversation should be created");
-    let codex = Arc::clone(&test.codex);
-    std::fs::remove_file(codex_home.path().join("models_cache.json"))
-        .expect("initial empty model catalog should be cached");
     let mut models = codex_models_manager::bundled_models_response()
         .expect("bundled model catalog should parse");
     let model = models
@@ -804,7 +789,18 @@ async fn review_uses_custom_review_model_from_config() {
     model.slug = "custom-review-model".to_string();
     model.node_repl_auto_review_required = true;
     model.node_repl_disabled = true;
-    let models_mock = responses::mount_models_once(&server, models).await;
+    let test = test_codex()
+        .with_home(Arc::clone(&codex_home))
+        .with_config(move |config| {
+            config.model = Some("gpt-4.1".to_string());
+            config.review_model = Some("custom-review-model".to_string());
+            config.model_reasoning_effort = Some(ReasoningEffort::Max);
+            config.model_catalog = Some(models);
+        })
+        .build_with_auto_env(&server)
+        .await
+        .expect("custom review conversation should be created");
+    let codex = Arc::clone(&test.codex);
 
     codex
         .submit(Op::Review {
@@ -847,7 +843,6 @@ async fn review_uses_custom_review_model_from_config() {
     .expect("review request turn metadata json");
     assert_eq!(turn_metadata["node_repl_auto_review_required"], true);
     assert_eq!(turn_metadata["node_repl_disabled"], true);
-    assert_eq!(models_mock.requests().len(), 1);
 
     let _codex_home_guard = codex_home;
     server.verify().await;
