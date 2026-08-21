@@ -1,5 +1,6 @@
 use anyhow::Result;
 use codex_features::Feature;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
@@ -199,6 +200,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
     const EVICT_PROMPT: &str = "spawn the replacement worker";
     const FOLLOWUP_PROMPT: &str = "continue the original worker";
     const FOLLOWUP_TASK: &str = "continue work in the original environment";
+    const RESIDENT_MODEL: &str = "gpt-5.6-terra";
 
     let server = start_mock_server().await;
     mount_root_collaboration_call(
@@ -206,7 +208,13 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         FIRST_PROMPT,
         "first-call",
         "spawn_agent",
-        json!({ "message": FIRST_TASK, "task_name": "first", "fork_turns": "none" }),
+        json!({
+            "message": FIRST_TASK,
+            "task_name": "first",
+            "model": RESIDENT_MODEL,
+            "reasoning_effort": "high",
+            "fork_turns": "none"
+        }),
     )
     .await;
     mount_completed_worker(&server, FIRST_TASK, "first-call").await;
@@ -229,8 +237,6 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         json!({ "target": "first", "message": FOLLOWUP_TASK }),
     )
     .await;
-    let reloaded_worker_request =
-        mount_completed_worker(&server, FOLLOWUP_TASK, "followup-call").await;
 
     let mut builder = test_codex()
         .with_model("gpt-5.6-sol")
@@ -248,7 +254,10 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
                     .expect("test config should allow feature update");
             }
             config.use_experimental_unified_exec_tool = true;
+            config.model_reasoning_effort = Some(ReasoningEffort::Low);
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+            config.multi_agent_v2.non_code_mode_only = false;
+            config.multi_agent_v2.expose_spawn_agent_model_overrides = true;
         });
     let test = builder.build_with_remote_and_local_env(&server).await?;
     let child_environment = test.executor_environment().selection().clone();
@@ -271,6 +280,9 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    let first_config = first_thread.config_snapshot().await;
+    assert_eq!(first_config.model, RESIDENT_MODEL);
+    assert_eq!(first_config.reasoning_effort, Some(ReasoningEffort::High));
 
     test.submit_text_turn(EVICT_PROMPT).await?;
     let replacement_thread_id = created_threads.recv().await?;
@@ -289,44 +301,83 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
             .is_err()
     );
 
+    let first_thread_id_string = first_thread_id.to_string();
+    let expected_thread_id = first_thread_id_string.clone();
+    let reloaded_worker_request = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            request
+                .headers
+                .get("x-codex-turn-metadata")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|metadata| {
+                    serde_json::from_str::<serde_json::Value>(metadata).is_ok_and(|metadata| {
+                        metadata["thread_id"].as_str() == Some(expected_thread_id.as_str())
+                    })
+                })
+        },
+        sse(vec![
+            ev_response_created("resp-worker-followup-call"),
+            ev_assistant_message("msg-worker-followup-call", "worker completed"),
+            ev_completed("resp-worker-followup-call"),
+        ]),
+    )
+    .await;
+
     test.submit_text_turn(FOLLOWUP_PROMPT).await?;
     let reloaded_worker = test.thread_manager.get_thread(first_thread_id).await?;
-    wait_for_event(reloaded_worker.as_ref(), |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    let reloaded_config = reloaded_worker.config_snapshot().await;
     assert_eq!(
-        reloaded_worker
-            .config_snapshot()
-            .await
-            .environments
-            .environments,
+        reloaded_config.environments.environments,
         vec![child_environment]
     );
+    assert_eq!(reloaded_config.model, RESIDENT_MODEL);
+    assert_eq!(
+        reloaded_config.reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
 
-    let worker_tools = |response_mock: &ResponseMock| {
-        response_mock
-            .requests()
-            .into_iter()
-            .find_map(|request| {
-                let body = request.body_json();
-                if body["client_metadata"]["thread_id"] != json!(first_thread_id) {
-                    return None;
-                }
-                body.get("tools")
-                    .or_else(|| {
-                        body["input"]
-                            .as_array()?
-                            .iter()
-                            .find(|item| item["type"] == "additional_tools")?
-                            .get("tools")
-                    })
-                    .cloned()
-            })
-            .expect("expected a model request for the original worker")
-    };
-    let reloaded_tools = worker_tools(&reloaded_worker_request);
+    let reloaded_request = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            if let Some(request) = reloaded_worker_request.last_request() {
+                return request;
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await?;
+    let turn_metadata: serde_json::Value = serde_json::from_str(
+        &reloaded_request
+            .header("x-codex-turn-metadata")
+            .expect("reloaded worker request turn metadata"),
+    )?;
+    let followup_turn_id = turn_metadata["turn_id"]
+        .as_str()
+        .expect("reloaded worker request turn id")
+        .to_string();
+    assert_eq!(
+        turn_metadata["thread_id"].as_str(),
+        Some(first_thread_id_string.as_str())
+    );
+    let body = reloaded_request.body_json();
+    assert_eq!(body["model"].as_str(), Some(RESIDENT_MODEL));
+    assert_eq!(body["reasoning"]["effort"].as_str(), Some("high"));
+    let reloaded_tools = body
+        .get("tools")
+        .or_else(|| {
+            body["input"]
+                .as_array()?
+                .iter()
+                .find(|item| item["type"] == "additional_tools")?
+                .get("tools")
+        })
+        .expect("expected tools in the reloaded worker request");
     assert!(reloaded_tools.to_string().contains("### `exec_command`"));
+    wait_for_event(
+        reloaded_worker.as_ref(),
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == followup_turn_id),
+    )
+    .await;
 
     Ok(())
 }
