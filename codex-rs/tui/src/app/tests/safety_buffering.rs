@@ -453,6 +453,7 @@ goals = true
     )
     .await
     .expect("state db should initialize");
+    let goal_accounting_started_at = std::time::Instant::now();
     state_db
         .thread_goals()
         .replace_thread_goal(
@@ -470,11 +471,12 @@ goals = true
         .expect("source goal should be readable")
         .expect("source goal")
         .goal_id;
+    let seeded_goal_time_seconds: i64 = 12;
     state_db
         .thread_goals()
         .account_thread_goal_usage(
             source_thread_id,
-            /*time_delta_seconds*/ 12,
+            seeded_goal_time_seconds,
             /*token_delta*/ 50,
             codex_state::GoalAccountingMode::ActiveOrStopped,
             Some(source_goal_id.as_str()),
@@ -753,12 +755,20 @@ goals = true
         .goal
         .expect("retry goal");
     let expected_source_tokens = if committed_steer.is_some() { 150 } else { 50 };
+    let max_source_goal_time_seconds = seeded_goal_time_seconds.saturating_add(
+        i64::try_from(goal_accounting_started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+    );
     assert_eq!(source_goal.objective, RETRY_GOAL);
     assert_eq!(source_goal.tokens_used, expected_source_tokens);
-    assert_eq!(source_goal.time_used_seconds, 12);
+    assert!(
+        (seeded_goal_time_seconds..=max_source_goal_time_seconds)
+            .contains(&source_goal.time_used_seconds),
+        "source goal time should preserve seeded usage without exceeding test elapsed time: {}",
+        source_goal.time_used_seconds
+    );
     assert_eq!(retry_goal.objective, RETRY_GOAL);
     assert!(retry_goal.tokens_used >= expected_source_tokens);
-    assert!(retry_goal.time_used_seconds >= 12);
+    assert!(retry_goal.time_used_seconds >= seeded_goal_time_seconds);
 
     let request_bodies = server
         .requests()
