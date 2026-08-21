@@ -628,7 +628,6 @@ async fn amazon_bedrock_automatic_compaction_uses_v1_endpoint_when_v2_is_enabled
         item["type"] == "compaction"
             && item["encrypted_content"] == "BEDROCK_AUTOMATIC_REMOTE_COMPACTED_SUMMARY"
     }));
-
     Ok(())
 }
 

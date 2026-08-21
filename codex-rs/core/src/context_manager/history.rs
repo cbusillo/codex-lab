@@ -3,6 +3,7 @@ use crate::context::ModelSwitchInstructions;
 use crate::context::ProjectValidationFailure;
 use crate::context::is_project_validation_correction_consumed;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::WorldStateFragmentIdentity;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
@@ -12,6 +13,7 @@ use crate::session::turn_context::TurnContext;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_history::CodexHarnessMetadata;
+use codex_history::ContextFragmentKind;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
@@ -23,6 +25,7 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
@@ -392,7 +395,15 @@ impl ContextManager {
     /// `reference_context_item`. The surviving history no longer contains the full bundle that
     /// established the prior baseline, so future turns must fall back to full reinjection instead
     /// of diffing against stale state.
-    pub(crate) fn drop_last_n_user_turns(&mut self, num_turns: u32) {
+    ///
+    /// `multi_agent_usage_hint_identities` identifies persisted standalone V2 usage-hint messages,
+    /// which intentionally have no model-visible wrapper markers but still belong to the
+    /// rolled-back turn's startup context.
+    pub(crate) fn drop_last_n_user_turns(
+        &mut self,
+        num_turns: u32,
+        multi_agent_usage_hint_identities: &[WorldStateFragmentIdentity],
+    ) {
         if num_turns == 0 {
             return;
         }
@@ -411,8 +422,12 @@ impl ContextManager {
             user_positions[user_positions.len() - n_from_end]
         };
 
-        cut_idx =
-            self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
+        cut_idx = self.trim_pre_turn_context_updates(
+            &snapshot,
+            first_instruction_turn_idx,
+            cut_idx,
+            multi_agent_usage_hint_identities,
+        );
 
         let mut retained_items = snapshot[..cut_idx].to_vec();
         if cut_idx == first_instruction_turn_idx
@@ -605,12 +620,26 @@ impl ContextManager {
         snapshot: &[ResponseItemEnvelope],
         first_instruction_turn_idx: usize,
         mut cut_idx: usize,
+        multi_agent_usage_hint_identities: &[WorldStateFragmentIdentity],
     ) -> usize {
+        // New rollouts tag usage hints directly in harness metadata. For older rollouts, initial
+        // and diff context deliberately emit the unwrapped hint immediately before the marked
+        // multi-agent mode message; keep that strict adjacency requirement for the fingerprint
+        // fallback so unrelated plain developer text cannot match an older hint accidentally.
+        let mut expect_multi_agent_usage_hint = false;
         while cut_idx > first_instruction_turn_idx {
-            match &snapshot[cut_idx - 1].item {
+            let envelope = &snapshot[cut_idx - 1];
+            match &envelope.item {
                 ResponseItem::Message { role, content, .. }
                     if role == "developer" && is_contextual_dev_message_content(content) =>
                 {
+                    expect_multi_agent_usage_hint = content.iter().any(|item| {
+                        matches!(
+                            item,
+                            ContentItem::InputText { text }
+                                if text.contains(MULTI_AGENT_MODE_OPEN_TAG)
+                        )
+                    });
                     if has_non_contextual_dev_message_content(content) {
                         // Mixed `build_initial_context` bundles are not reconstructible from
                         // steady-state diffs once trimmed, so the next real turn must fully
@@ -620,10 +649,36 @@ impl ContextManager {
                     cut_idx -= 1;
                 }
                 ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && !envelope
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.client_authored)
+                        && (envelope.metadata.as_ref().is_some_and(|metadata| {
+                            metadata.context_fragment.as_ref()
+                                == Some(&ContextFragmentKind::MultiAgentUsageHint)
+                        }) || (envelope
+                            .metadata
+                            .as_ref()
+                            .is_none_or(|metadata| metadata.context_fragment.is_none())
+                            && expect_multi_agent_usage_hint
+                            && multi_agent_usage_hint_identities.iter().any(|identity| {
+                                matches!(
+                                    content.as_slice(),
+                                    [ContentItem::InputText { text }]
+                                        if identity.matches(role, text)
+                                )
+                            }))) =>
+                {
+                    expect_multi_agent_usage_hint = false;
+                    cut_idx -= 1;
+                }
+                ResponseItem::Message { role, content, .. }
                     if role == "user"
                         && is_contextual_user_message_content(content)
                         && !is_project_validation_correction_consumed_content(content) =>
                 {
+                    expect_multi_agent_usage_hint = false;
                     cut_idx -= 1;
                 }
                 _ => break,

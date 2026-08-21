@@ -11,7 +11,6 @@ use crate::client_common::ResponseEvent;
 use crate::compact::CompactionJobConfig;
 use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
-use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
@@ -88,6 +87,7 @@ use codex_history::CompactedItem;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
+use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ModeKind;
@@ -724,7 +724,7 @@ async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizat
             .replace_all_images(INVALID_IMAGE_PLACEHOLDER)?;
         (
             source,
-            state.history.raw_items().cloned().map(Into::into).collect(),
+            state.history.annotated_items().to_vec(),
             state.auto_compact_window_number(),
             state.auto_compact_window_ids(),
             state.history.world_state_baseline().cloned(),
@@ -1429,11 +1429,12 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    if should_use_remote_compact_task(turn_context.provider.info()) {
-        if turn_context
-            .config
-            .features
-            .enabled(Feature::RemoteCompactionV2)
+    match turn_context.provider.capabilities().remote_compaction {
+        RemoteCompactionSupport::V2
+            if turn_context
+                .config
+                .features
+                .enabled(Feature::RemoteCompactionV2) =>
         {
             emit_compact_metric(
                 &sess.services.session_telemetry,
@@ -1448,28 +1449,31 @@ async fn run_auto_compact(
                 config,
             )
             .await?;
-            return Ok(());
         }
-        emit_compact_metric(
-            &sess.services.session_telemetry,
-            "remote",
-            /*manual*/ false,
-        );
-        run_inline_remote_auto_compact_task(
-            Arc::clone(sess),
-            step_context,
-            fallback_step_context,
-            client_session.turn_state(),
-            config,
-        )
-        .await?;
-    } else {
-        emit_compact_metric(
-            &sess.services.session_telemetry,
-            "local",
-            /*manual*/ false,
-        );
-        run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), config).await?;
+        RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
+            emit_compact_metric(
+                &sess.services.session_telemetry,
+                "remote",
+                /*manual*/ false,
+            );
+            run_inline_remote_auto_compact_task(
+                Arc::clone(sess),
+                step_context,
+                fallback_step_context,
+                client_session.turn_state(),
+                config,
+            )
+            .await?;
+        }
+        RemoteCompactionSupport::Unsupported => {
+            emit_compact_metric(
+                &sess.services.session_telemetry,
+                "local",
+                /*manual*/ false,
+            );
+            run_inline_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context), config)
+                .await?;
+        }
     }
     Ok(())
 }

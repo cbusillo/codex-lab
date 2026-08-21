@@ -1,6 +1,7 @@
 //! Model-history and persisted-rollout domain types.
 
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::ops::DerefMut;
 use std::path::PathBuf;
@@ -46,6 +47,59 @@ pub struct CodexHarnessMetadata {
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
+    /// Stable identity for harness-authored context that has no model-visible markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_fragment: Option<ContextFragmentKind>,
+    /// Future harness metadata retained verbatim by older binaries.
+    #[serde(default, flatten)]
+    pub additional_fields: BTreeMap<String, serde_json::Value>,
+}
+
+/// Harness-authored context fragments that need durable, model-invisible identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextFragmentKind {
+    MultiAgentUsageHint,
+    Unknown(String),
+}
+
+impl Serialize for ContextFragmentKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let value = match self {
+            Self::MultiAgentUsageHint => "multi_agent_usage_hint",
+            Self::Unknown(value) => value,
+        };
+        serializer.serialize_str(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContextFragmentKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "multi_agent_usage_hint" => Self::MultiAgentUsageHint,
+            _ => Self::Unknown(value),
+        })
+    }
+}
+
+impl JsonSchema for ContextFragmentKind {
+    fn schema_name() -> String {
+        "ContextFragmentKind".to_string()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContextFragmentKind"))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        String::json_schema(generator)
+    }
 }
 
 impl ResponseItemEnvelope {

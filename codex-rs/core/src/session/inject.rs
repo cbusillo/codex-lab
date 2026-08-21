@@ -72,6 +72,7 @@ impl Session {
             && matches!(&item, ResponseItem::Message { role, .. } if role == "developer"))
         .then_some(CodexHarnessMetadata {
             client_authored: true,
+            ..Default::default()
         });
 
         ResponseItemEnvelope { item, metadata }
@@ -110,8 +111,13 @@ impl Session {
                 }
             }));
         }
-        self.record_prepared_conversation_items(turn_context, annotated_items, image_preparations)
-            .await;
+        self.record_prepared_conversation_items(
+            turn_context,
+            annotated_items,
+            image_preparations,
+            Vec::new(),
+        )
+        .await;
     }
 
     /// Injects items into active work, or records them without starting a turn.
