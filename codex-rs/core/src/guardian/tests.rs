@@ -2874,7 +2874,8 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    // Match the supported production stack budget for the full Guardian retry/fork path.
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let handle =
         std::thread::Builder::new()
