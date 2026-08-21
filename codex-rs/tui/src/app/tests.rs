@@ -1910,10 +1910,9 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 app.attach_live_thread_for_selection(&mut app_server, child_thread_id)
                     .await?
             );
-            assert_eq!(
-                app.agent_navigation.is_parent_owned(child_thread_id),
-                multi_agent_version == MultiAgentVersion::V2
-            );
+            // The server reports both recorded versions as V2-capable in this fork, so even a
+            // V1-recorded child remains parent-owned and view-only after attachment.
+            assert!(app.agent_navigation.is_parent_owned(child_thread_id));
             child_thread_ids.push(child_thread_id);
         }
 
@@ -1940,7 +1939,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 is_closed: false,
             })
         );
-        assert!(!app.agent_navigation.is_parent_owned(child_thread_ids[0]));
+        assert!(app.agent_navigation.is_parent_owned(child_thread_ids[0]));
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -1948,11 +1947,14 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .await?;
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
-            .restore_user_message_to_composer("v1 remains writable".into());
+            .restore_user_message_to_composer("server capability stays view-only".into());
+        let draft = app.chat_widget.composer_text_with_pending();
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
         assert!(
-            std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            !std::iter::from_fn(|| app_event_rx.try_recv().ok())
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
