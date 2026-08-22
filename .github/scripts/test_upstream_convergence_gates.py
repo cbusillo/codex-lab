@@ -43,12 +43,36 @@ def write_fixture(
     return manifest, contracts
 
 
+def semantic_reachability_fixture(
+    edges: list[dict[str, object]],
+    *,
+    waivers: list[dict[str, object]] | None = None,
+    max_waivers: int = 0,
+) -> dict[str, object]:
+    return {
+        "kind": "semantic_reachability",
+        "description": "production edge proof",
+        "baseline": {
+            "derivedFrom": "baseline.json",
+            "issue": 664,
+            "maxWaivers": max_waivers,
+        },
+        "edges": edges,
+        "waivers": waivers or [],
+        "ciTier": "blocking",
+    }
+
+
 class GateManifestTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         (self.root / "proof.rs").write_text("fn proof() {}\n", encoding="utf-8")
+        (self.root / "baseline.json").write_text(
+            json.dumps({"schemaVersion": 1, "contracts": {"HOME-1": {"maxWaivers": 1}}}),
+            encoding="utf-8",
+        )
 
     def verify_fixture(
         self, manifest: Path, contracts: Path
@@ -86,6 +110,131 @@ class GateManifestTest(unittest.TestCase):
                 "passed": True,
             },
             report,
+        )
+
+    def test_reports_unreachable_rust_module_edge(self) -> None:
+        (self.root / "lib.rs").write_text("", encoding="utf-8")
+        (self.root / "feature.rs").write_text("fn install() {}\n", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                semantic_reachability_fixture(
+                    [
+                        {
+                            "id": "feature-module",
+                            "kind": "rust_module",
+                            "root": "lib.rs",
+                            "path": "feature.rs",
+                            "token": "",
+                        }
+                    ]
+                )
+            ],
+        )
+        report = self.verify_fixture(manifest, contracts)
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
+        )
+
+    def test_reports_token_edge_in_unreachable_rust_module(self) -> None:
+        (self.root / "lib.rs").write_text("", encoding="utf-8")
+        (self.root / "feature.rs").write_text("fn install() {}\n", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                semantic_reachability_fixture(
+                    [
+                        {
+                            "id": "feature-callsite",
+                            "kind": "token",
+                            "root": "lib.rs",
+                            "path": "feature.rs",
+                            "token": "install()",
+                        }
+                    ]
+                )
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
+        )
+
+    def test_issue_backed_semantic_waiver_clears_matching_edge(self) -> None:
+        (self.root / "lib.rs").write_text("", encoding="utf-8")
+        (self.root / "feature.rs").write_text("fn install() {}\n", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                semantic_reachability_fixture(
+                    [
+                        {
+                            "id": "feature-module",
+                            "kind": "rust_module",
+                            "root": "lib.rs",
+                            "path": "feature.rs",
+                            "token": "",
+                        }
+                    ],
+                    waivers=[
+                        {
+                            "edge": "feature-module",
+                            "rationale": "tracked cleanup",
+                            "issue": 664,
+                            "owner": "Codex Lab",
+                            "expires": "2099-01-01",
+                        }
+                    ],
+                    max_waivers=1,
+                )
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertEqual([], report["errors"])
+        self.assertTrue(report["passed"])
+
+    def test_reports_stale_semantic_waiver(self) -> None:
+        (self.root / "lib.rs").write_text("mod feature;\n", encoding="utf-8")
+        (self.root / "feature.rs").write_text("fn install() {}\n", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                semantic_reachability_fixture(
+                    [
+                        {
+                            "id": "feature-module",
+                            "kind": "rust_module",
+                            "root": "lib.rs",
+                            "path": "feature.rs",
+                            "token": "",
+                        }
+                    ],
+                    waivers=[
+                        {
+                            "edge": "feature-module",
+                            "rationale": "tracked cleanup",
+                            "issue": 664,
+                            "owner": "Codex Lab",
+                            "expires": "2099-01-01",
+                        }
+                    ],
+                    max_waivers=1,
+                )
+            ],
+        )
+
+        report = self.verify_fixture(manifest, contracts)
+
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "HOME-1.evidence[0].waivers: stale waiver for reachable edge feature-module",
+            report["errors"],
         )
 
     def test_reports_missing_symbol(self) -> None:
