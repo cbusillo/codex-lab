@@ -4,7 +4,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from typing import cast
 
 import upstream_convergence_gates as gates
 
@@ -54,7 +53,7 @@ def semantic_reachability_fixture(
         "kind": "semantic_reachability",
         "description": "production edge proof",
         "baseline": {
-            "derivedFrom": "proof.rs",
+            "derivedFrom": "baseline.json",
             "issue": 664,
             "maxWaivers": max_waivers,
         },
@@ -64,16 +63,16 @@ def semantic_reachability_fixture(
     }
 
 
-def report_errors(report: dict[str, object]) -> list[str]:
-    return cast(list[str], report["errors"])
-
-
 class GateManifestTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         (self.root / "proof.rs").write_text("fn proof() {}\n", encoding="utf-8")
+        (self.root / "baseline.json").write_text(
+            json.dumps({"schemaVersion": 1, "contracts": {"HOME-1": {"maxWaivers": 1}}}),
+            encoding="utf-8",
+        )
 
     def verify_fixture(
         self, manifest: Path, contracts: Path
@@ -132,12 +131,37 @@ class GateManifestTest(unittest.TestCase):
                 )
             ],
         )
+        report = self.verify_fixture(manifest, contracts)
+        self.assertFalse(report["passed"])
+        self.assertTrue(
+            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
+        )
+
+    def test_reports_token_edge_in_unreachable_rust_module(self) -> None:
+        (self.root / "lib.rs").write_text("", encoding="utf-8")
+        (self.root / "feature.rs").write_text("fn install() {}\n", encoding="utf-8")
+        manifest, contracts = write_fixture(
+            self.root,
+            evidence=[
+                semantic_reachability_fixture(
+                    [
+                        {
+                            "id": "feature-callsite",
+                            "kind": "token",
+                            "root": "lib.rs",
+                            "path": "feature.rs",
+                            "token": "install()",
+                        }
+                    ]
+                )
+            ],
+        )
 
         report = self.verify_fixture(manifest, contracts)
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report_errors(report))
+            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
         )
 
     def test_issue_backed_semantic_waiver_clears_matching_edge(self) -> None:
@@ -172,7 +196,7 @@ class GateManifestTest(unittest.TestCase):
 
         report = self.verify_fixture(manifest, contracts)
 
-        self.assertEqual([], report_errors(report))
+        self.assertEqual([], report["errors"])
         self.assertTrue(report["passed"])
 
     def test_reports_stale_semantic_waiver(self) -> None:
@@ -210,7 +234,7 @@ class GateManifestTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn(
             "HOME-1.evidence[0].waivers: stale waiver for reachable edge feature-module",
-            report_errors(report),
+            report["errors"],
         )
 
     def test_reports_missing_symbol(self) -> None:
@@ -220,7 +244,7 @@ class GateManifestTest(unittest.TestCase):
         report = self.verify_fixture(manifest, contracts)
 
         self.assertFalse(report["passed"])
-        self.assertIn("'fn proof()' is absent from proof.rs", report_errors(report)[0])
+        self.assertIn("'fn proof()' is absent from proof.rs", report["errors"][0])
 
     def test_reports_missing_file_evidence(self) -> None:
         manifest, contracts = write_fixture(
@@ -234,7 +258,7 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("file is missing: missing.rs" in error for error in report_errors(report))
+            any("file is missing: missing.rs" in error for error in report["errors"])
         )
 
     def test_reports_unregistered_suite_proof(self) -> None:
@@ -257,7 +281,7 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("suite proof is not registered" in error for error in report_errors(report))
+            any("suite proof is not registered" in error for error in report["errors"])
         )
 
     def test_reports_missing_and_extra_contract_ids(self) -> None:
@@ -269,10 +293,10 @@ class GateManifestTest(unittest.TestCase):
 
         report = self.verify_fixture(manifest, contracts)
 
-        self.assertIn("manifest is missing contract IDs: ['HOME-1']", report_errors(report))
+        self.assertIn("manifest is missing contract IDs: ['HOME-1']", report["errors"])
         self.assertIn(
             "manifest has contract IDs absent from Markdown: ['AUTH-1']",
-            report_errors(report),
+            report["errors"],
         )
 
     def test_rejects_path_escape(self) -> None:
@@ -286,7 +310,7 @@ class GateManifestTest(unittest.TestCase):
         report = self.verify_fixture(manifest, contracts)
 
         self.assertFalse(report["passed"])
-        self.assertIn("path must stay inside the repository", report_errors(report)[0])
+        self.assertIn("path must stay inside the repository", report["errors"][0])
 
     def test_rejects_narrative_without_issue(self) -> None:
         manifest, contracts = write_fixture(
@@ -303,7 +327,7 @@ class GateManifestTest(unittest.TestCase):
         report = self.verify_fixture(manifest, contracts)
 
         self.assertFalse(report["passed"])
-        self.assertIn("missing ['issue']", report_errors(report)[0])
+        self.assertIn("missing ['issue']", report["errors"][0])
 
     def test_rejects_narrative_only_contract(self) -> None:
         manifest, contracts = write_fixture(
@@ -322,7 +346,7 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("must retain at least one file-backed" in error for error in report_errors(report))
+            any("must retain at least one file-backed" in error for error in report["errors"])
         )
 
     def test_rejects_unknown_schema_version(self) -> None:
@@ -334,7 +358,7 @@ class GateManifestTest(unittest.TestCase):
         report = self.verify_fixture(manifest, contracts)
 
         self.assertFalse(report["passed"])
-        self.assertIn("unsupported schemaVersion 2", report_errors(report)[0])
+        self.assertIn("unsupported schemaVersion 2", report["errors"][0])
 
     def test_cli_returns_nonzero_for_invalid_manifest(self) -> None:
         manifest, contracts = write_fixture(self.root)
@@ -368,7 +392,7 @@ class CheckedInGateManifestTest(unittest.TestCase):
             gates.DEFAULT_CONTRACTS,
         )
 
-        self.assertEqual([], report_errors(report))
+        self.assertEqual([], report["errors"])
         self.assertTrue(report["passed"])
 
 

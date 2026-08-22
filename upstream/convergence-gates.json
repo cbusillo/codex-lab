@@ -194,7 +194,7 @@
           "kind": "semantic_reachability",
           "description": "First #664 production-edge proof for app-server extension composition and native external-agent routing.",
           "baseline": {
-            "derivedFrom": "upstream/convergence-guard.json",
+            "derivedFrom": "upstream/convergence-reachability-baseline.json",
             "issue": 664,
             "maxWaivers": 0
           },

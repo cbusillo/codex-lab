@@ -290,6 +290,26 @@ def semantic_waivers(
     return indexed
 
 
+def baseline_waiver_limit(
+    repo_root: Path, contract_id: str, baseline_path: str, location: str
+) -> int:
+    path = repo_root / baseline_path
+    if path.is_symlink() or not path.is_file():
+        raise GateManifestError(f"{location}: baseline file is missing: {baseline_path}")
+    if path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise GateManifestError(f"{location}: baseline file exceeds {MAX_MANIFEST_BYTES} bytes")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        limit = document["contracts"][contract_id]["maxWaivers"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise GateManifestError(
+            f"{location}: baseline must define contracts.{contract_id}.maxWaivers"
+        ) from error
+    if document.get("schemaVersion") != 1 or not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise GateManifestError(f"{location}: invalid semantic reachability baseline")
+    return limit
+
+
 def verify_semantic_edge(
     repo_root: Path,
     edge: dict[str, object],
@@ -313,10 +333,10 @@ def verify_semantic_edge(
         return f"{edge_id}: semantic edge path is missing: {relative}"
     if path.is_symlink():
         return f"{edge_id}: semantic edge path must not be a symlink: {relative}"
+    reachable = rust_cache.setdefault(root, reachable_rust_modules(repo_root, root))
+    if relative not in reachable:
+        return f"{edge_id}: {relative} is not reachable from Rust module root {root}"
     if edge_kind == "rust_module":
-        reachable = rust_cache.setdefault(root, reachable_rust_modules(repo_root, root))
-        if relative not in reachable:
-            return f"{edge_id}: {relative} is not reachable from Rust module root {root}"
         return None
     if not token:
         raise GateManifestError(f"{location}.token: expected a non-empty string")
@@ -349,13 +369,22 @@ def verify_semantic_reachability(
     if not isinstance(baseline, dict):
         raise GateManifestError(f"{location}.baseline: expected an object")
     require_exact_keys(baseline, {"derivedFrom", "issue", "maxWaivers"}, f"{location}.baseline")
-    validate_repo_path(repo_root, baseline["derivedFrom"], f"{location}.baseline.derivedFrom")
+    baseline_path = validate_repo_path(
+        repo_root, baseline["derivedFrom"], f"{location}.baseline.derivedFrom"
+    )
     issue = baseline["issue"]
     max_waivers = baseline["maxWaivers"]
     if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
         raise GateManifestError(f"{location}.baseline.issue: expected a positive integer")
     if not isinstance(max_waivers, int) or isinstance(max_waivers, bool) or max_waivers < 0:
         raise GateManifestError(f"{location}.baseline.maxWaivers: expected a non-negative integer")
+    baseline_limit = baseline_waiver_limit(
+        repo_root, contract_id, baseline_path, f"{location}.baseline.derivedFrom"
+    )
+    if max_waivers > baseline_limit:
+        raise GateManifestError(
+            f"{location}.baseline.maxWaivers: {max_waivers} exceeds derived baseline {baseline_limit}"
+        )
     waivers = semantic_waivers(evidence, location)
     if len(waivers) > max_waivers:
         raise GateManifestError(
@@ -367,7 +396,9 @@ def verify_semantic_reachability(
     used_waivers: set[str] = set()
     rust_cache: dict[str, set[str]] = {}
     seen_edges: set[str] = set()
+    invalid_edges: set[str] = set()
     for index, edge in enumerate(edges):
+        edge_id = None
         edge_location = f"{location}.edges[{index}]"
         if not isinstance(edge, dict):
             errors.append(f"{edge_location}: expected an object")
@@ -380,6 +411,8 @@ def verify_semantic_reachability(
             failure = verify_semantic_edge(repo_root, edge, edge_location, rust_cache)
         except GateManifestError as error:
             errors.append(str(error))
+            if edge_id is not None:
+                invalid_edges.add(edge_id)
             continue
         if failure is None:
             continue
@@ -387,7 +420,7 @@ def verify_semantic_reachability(
             used_waivers.add(edge_id)
         else:
             errors.append(f"{location}: {contract_id} semantic reachability failed: {failure}")
-    for edge_id in sorted(set(waivers) - used_waivers):
+    for edge_id in sorted(set(waivers) - used_waivers - invalid_edges):
         errors.append(f"{location}.waivers: stale waiver for reachable edge {edge_id}")
     return tier
 
@@ -409,16 +442,6 @@ def verify(
             "errors": [str(error)],
             "passed": False,
         }
-    contracts = document["contracts"]
-    if not isinstance(contracts, list):
-        return {
-            "schemaVersion": 1,
-            "contracts": 0,
-            "evidence": 0,
-            "tierCounts": {},
-            "errors": [f"{manifest_path}.contracts: expected an array"],
-            "passed": False,
-        }
     try:
         resolved_contracts = contracts_path.resolve()
         resolved_contracts.relative_to(repo_root.resolve())
@@ -438,7 +461,7 @@ def verify(
     manifest_ids: set[str] = set()
     evidence_count = 0
     tiers: Counter[str] = Counter()
-    for index, contract in enumerate(contracts):
+    for index, contract in enumerate(document["contracts"]):
         location = f"contracts[{index}]"
         if not isinstance(contract, dict):
             errors.append(f"{location}: expected an object")
@@ -495,10 +518,7 @@ def verify(
 
 
 def print_report(report: dict[str, object]) -> None:
-    errors = report["errors"]
-    if not isinstance(errors, list):
-        errors = []
-    for error in errors:
+    for error in report["errors"]:
         print(f"::error::{error}", file=sys.stderr)
     if report["passed"]:
         print(
@@ -508,7 +528,7 @@ def print_report(report: dict[str, object]) -> None:
         print(f"CI tier inventory: {json.dumps(report['tierCounts'], sort_keys=True)}")
     else:
         print(
-            f"Upstream convergence gates failed with {len(errors)} errors.",
+            f"Upstream convergence gates failed with {len(report['errors'])} errors.",
             file=sys.stderr,
         )
 
