@@ -2,7 +2,7 @@ name: Upstream Convergence Inspection
 
 on:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -36,11 +36,11 @@ jobs:
           BASE=$(git merge-base HEAD refs/remotes/openai/main)
           UPSTREAM=$(git rev-parse refs/remotes/openai/main)
           LOCAL=$(git rev-parse HEAD)
-          
+
           echo "Base: $BASE"
           echo "Upstream: $UPSTREAM"
           echo "Local: $LOCAL"
-          
+
           python3 .github/scripts/upstream_convergence.py inspect \
             --base "$BASE" \
             --upstream "$UPSTREAM" \
