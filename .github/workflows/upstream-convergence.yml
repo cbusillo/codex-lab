@@ -1,0 +1,46 @@
+name: Upstream Convergence Inspection
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect
+    runs-on: macos-26
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure canonical upstream provenance
+        run: |
+          set -euo pipefail
+          git remote add openai https://github.com/openai/codex.git
+          git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main
+
+      - name: Run convergence inspection
+        run: |
+          set -euo pipefail
+          BASE=$(git merge-base HEAD refs/remotes/openai/main)
+          UPSTREAM=$(git rev-parse refs/remotes/openai/main)
+          LOCAL=$(git rev-parse HEAD)
+          
+          echo "Base: $BASE"
+          echo "Upstream: $UPSTREAM"
+          echo "Local: $LOCAL"
+          
+          python3 .github/scripts/upstream_convergence.py inspect \
+            --base "$BASE" \
+            --upstream "$UPSTREAM" \
+            --local "$LOCAL" \
+            --json > report.json
+
+      - name: Publish compact report
+        run: |
+          python3 .github/scripts/upstream_convergence_report.py --report report.json
