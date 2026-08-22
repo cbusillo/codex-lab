@@ -23,6 +23,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_EXTERNAL_AGENT_OK. Do not inspect or change files.\",\"task_name\":\"live_copilot\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"github-copilot\",\"fork_turns\":\"none\"}",
               "call_id": "call-live-copilot-spawn",
+              "encrypted_function_args": [],
               "namespace": "agents"
             }
           }

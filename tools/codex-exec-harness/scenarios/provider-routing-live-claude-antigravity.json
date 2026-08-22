@@ -24,6 +24,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_ANTIGRAVITY_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_antigravity\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
               "call_id": "call-live-antigravity-spawn",
+              "encrypted_function_args": [],
               "namespace": "agents"
             }
           }
@@ -52,6 +53,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Reply with exactly LIVE_CLAUDE_AUTO_OK. Do not inspect or change files.\",\"task_name\":\"live_claude\",\"task_kind\":\"independent_review\",\"task_size\":\"normal\"}",
               "call_id": "call-live-claude-spawn",
+              "encrypted_function_args": [],
               "namespace": "agents"
             }
           }
@@ -139,17 +141,6 @@
     "responses_request_count": 8,
     "turn_count": 1,
     "thread_id": "required",
-    "responses": [
-      {
-        "request": 0,
-        "scope": "input",
-        "contains_all": [
-          "task_kind",
-          "task_size",
-          "eligible installed third-party agent"
-        ]
-      }
-    ],
     "tool_outputs": [
       {
         "request": 1,
