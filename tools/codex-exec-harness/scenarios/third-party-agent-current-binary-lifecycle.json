@@ -35,7 +35,8 @@
               "namespace": "agents",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Read handoff-context.txt from the workspace and return its byte count plus first and last markers. Do not inline the file into this message.\",\"task_name\":\"fixture_agent\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external\",\"fork_turns\":\"none\"}",
-              "call_id": "call-third-party-agent-spawn"
+              "call_id": "call-third-party-agent-spawn",
+              "encrypted_function_args": []
             }
           }
         ]

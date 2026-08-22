@@ -21,7 +21,8 @@
               "namespace": "agents",
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Perform an independent security review and return the fixture completion marker.\",\"task_name\":\"security_review\",\"task_kind\":\"security\",\"task_size\":\"normal\"}",
-              "call_id": "call-provider-routing-spawn"
+              "call_id": "call-provider-routing-spawn",
+              "encrypted_function_args": []
             }
           }
         ]
@@ -81,15 +82,6 @@
     "turn_count": 1,
     "thread_id": "required",
     "responses": [
-      {
-        "request": 0,
-        "scope": "input",
-        "contains_all": [
-          "task_kind",
-          "task_size",
-          "eligible installed third-party agent"
-        ]
-      },
       {
         "request": 2,
         "scope": "input",

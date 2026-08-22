@@ -23,6 +23,7 @@
               "name": "spawn_agent",
               "arguments": "{\"message\":\"Fail with the configured authentication diagnostic.\",\"task_name\":\"provider_failure\",\"task_kind\":\"other\",\"task_size\":\"normal\",\"agent_type\":\"fixture_external_failure\",\"fork_turns\":\"none\"}",
               "call_id": "call-provider-failure-spawn",
+              "encrypted_function_args": [],
               "namespace": "agents"
             }
           }
