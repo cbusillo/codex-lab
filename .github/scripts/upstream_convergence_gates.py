@@ -7,6 +7,8 @@ import json
 import re
 import sys
 from collections import Counter
+from datetime import date
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 
@@ -18,8 +20,9 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = 4 * 1024 * 1024
 CONTRACT_ID = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 CONTRACT_ROW = re.compile(r"^\|\s*`(?P<id>[A-Z][A-Z0-9]*-[0-9]+)`\s*\|")
-EVIDENCE_KINDS = {"file", "symbol", "narrative"}
+EVIDENCE_KINDS = {"file", "symbol", "narrative", "semantic_reachability"}
 CI_TIERS = {"blocking", "nightly", "release", "narrative"}
+SEMANTIC_EDGE_KINDS = {"rust_module", "token"}
 
 
 class GateManifestError(ValueError):
@@ -121,14 +124,16 @@ def verify_evidence(
     if not isinstance(kind, str) or kind not in EVIDENCE_KINDS:
         errors.append(f"{location}.kind: expected one of {sorted(EVIDENCE_KINDS)}")
         return None
-    expected = (
-        {"kind", "description", "issue", "ciTier"}
-        if kind == "narrative"
-        else {"kind", "path", "ciTier"}
-        if kind == "file"
-        else {"kind", "path", "token", "ciTier"}
-    )
     try:
+        if kind == "semantic_reachability":
+            return verify_semantic_reachability(repo_root, contract_id, evidence, location, errors)
+        expected = (
+            {"kind", "description", "issue", "ciTier"}
+            if kind == "narrative"
+            else {"kind", "path", "ciTier"}
+            if kind == "file"
+            else {"kind", "path", "token", "ciTier"}
+        )
         require_exact_keys(evidence, expected, location)
         tier = require_string(evidence["ciTier"], f"{location}.ciTier")
         if tier not in CI_TIERS:
@@ -193,6 +198,233 @@ def verify_evidence(
         return None
 
 
+def rust_module_children(repo_root: Path, module_path: str) -> list[str]:
+    path = repo_root / module_path
+    if path.stat().st_size > MAX_EVIDENCE_FILE_BYTES:
+        raise GateManifestError(
+            f"rust module source exceeds {MAX_EVIDENCE_FILE_BYTES} bytes: {module_path}"
+        )
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    children: list[str] = []
+    for index, line in enumerate(lines):
+        match = re.match(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;",
+            line,
+        )
+        if match is None:
+            continue
+        module_name = match.group(1)
+        path_attr = None
+        scan = index - 1
+        while scan >= 0 and lines[scan].strip().startswith("#"):
+            attr_match = re.match(r'^\s*#\[path\s*=\s*"([^"]+)"\]\s*$', lines[scan])
+            if attr_match is not None:
+                path_attr = attr_match.group(1)
+                break
+            scan -= 1
+        parent = PurePosixPath(module_path).parent
+        stem = PurePosixPath(module_path).stem
+        if stem not in {"lib", "main", "mod"}:
+            parent /= stem
+        if path_attr is not None:
+            candidates = [parent / path_attr]
+        else:
+            candidates = [parent / f"{module_name}.rs", parent / module_name / "mod.rs"]
+        for candidate in candidates:
+            candidate_path = candidate.as_posix()
+            if (repo_root / candidate_path).is_file():
+                children.append(candidate_path)
+                break
+    return children
+
+
+def reachable_rust_modules(repo_root: Path, root: str) -> set[str]:
+    if not (repo_root / root).is_file():
+        raise GateManifestError(f"semantic root is missing: {root}")
+    reachable = {root}
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        for child in rust_module_children(repo_root, current):
+            if child not in reachable:
+                reachable.add(child)
+                pending.append(child)
+    return reachable
+
+
+def semantic_waivers(
+    evidence: dict[str, object], location: str
+) -> dict[str, dict[str, object]]:
+    waivers = evidence["waivers"]
+    if not isinstance(waivers, list):
+        raise GateManifestError(f"{location}.waivers: expected an array")
+    indexed: dict[str, dict[str, object]] = {}
+    for index, waiver in enumerate(waivers):
+        waiver_location = f"{location}.waivers[{index}]"
+        if not isinstance(waiver, dict):
+            raise GateManifestError(f"{waiver_location}: expected an object")
+        require_exact_keys(
+            waiver,
+            {"edge", "rationale", "issue", "owner", "expires"},
+            waiver_location,
+        )
+        edge = require_string(waiver["edge"], f"{waiver_location}.edge")
+        require_string(waiver["rationale"], f"{waiver_location}.rationale")
+        require_string(waiver["owner"], f"{waiver_location}.owner")
+        expires = require_string(waiver["expires"], f"{waiver_location}.expires")
+        issue = waiver["issue"]
+        if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+            raise GateManifestError(f"{waiver_location}.issue: expected a positive integer")
+        try:
+            expiry = datetime.strptime(expires, "%Y-%m-%d").date()
+        except ValueError as error:
+            raise GateManifestError(
+                f"{waiver_location}.expires: expected YYYY-MM-DD"
+            ) from error
+        if expiry < date.today():
+            raise GateManifestError(f"{waiver_location}.expires: waiver expired on {expires}")
+        if edge in indexed:
+            raise GateManifestError(f"{waiver_location}.edge: duplicate waiver for {edge}")
+        indexed[edge] = waiver
+    return indexed
+
+
+def baseline_waiver_limit(
+    repo_root: Path, contract_id: str, baseline_path: str, location: str
+) -> int:
+    path = repo_root / baseline_path
+    if path.is_symlink() or not path.is_file():
+        raise GateManifestError(f"{location}: baseline file is missing: {baseline_path}")
+    if path.stat().st_size > MAX_MANIFEST_BYTES:
+        raise GateManifestError(f"{location}: baseline file exceeds {MAX_MANIFEST_BYTES} bytes")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        limit = document["contracts"][contract_id]["maxWaivers"]
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise GateManifestError(
+            f"{location}: baseline must define contracts.{contract_id}.maxWaivers"
+        ) from error
+    if document.get("schemaVersion") != 1 or not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise GateManifestError(f"{location}: invalid semantic reachability baseline")
+    return limit
+
+
+def verify_semantic_edge(
+    repo_root: Path,
+    edge: dict[str, object],
+    location: str,
+    rust_cache: dict[str, set[str]],
+) -> str | None:
+    require_exact_keys(edge, {"id", "kind", "root", "path", "token"}, location)
+    edge_id = require_string(edge["id"], f"{location}.id")
+    edge_kind = require_string(edge["kind"], f"{location}.kind")
+    if edge_kind not in SEMANTIC_EDGE_KINDS:
+        raise GateManifestError(
+            f"{location}.kind: expected one of {sorted(SEMANTIC_EDGE_KINDS)}"
+        )
+    root = validate_repo_path(repo_root, edge["root"], f"{location}.root")
+    relative = validate_repo_path(repo_root, edge["path"], f"{location}.path")
+    token = edge["token"]
+    if not isinstance(token, str):
+        raise GateManifestError(f"{location}.token: expected a string")
+    path = repo_root / relative
+    if not path.is_file():
+        return f"{edge_id}: semantic edge path is missing: {relative}"
+    if path.is_symlink():
+        return f"{edge_id}: semantic edge path must not be a symlink: {relative}"
+    reachable = rust_cache.setdefault(root, reachable_rust_modules(repo_root, root))
+    if relative not in reachable:
+        return f"{edge_id}: {relative} is not reachable from Rust module root {root}"
+    if edge_kind == "rust_module":
+        return None
+    if not token:
+        raise GateManifestError(f"{location}.token: expected a non-empty string")
+    if path.stat().st_size > MAX_EVIDENCE_FILE_BYTES:
+        raise GateManifestError(
+            f"{location}.path: file exceeds {MAX_EVIDENCE_FILE_BYTES} bytes"
+        )
+    if token not in path.read_text(encoding="utf-8"):
+        return f"{edge_id}: {token!r} is absent from {relative}"
+    return None
+
+
+def verify_semantic_reachability(
+    repo_root: Path,
+    contract_id: str,
+    evidence: dict[str, object],
+    location: str,
+    errors: list[str],
+) -> str | None:
+    require_exact_keys(
+        evidence,
+        {"kind", "description", "baseline", "edges", "waivers", "ciTier"},
+        location,
+    )
+    tier = require_string(evidence["ciTier"], f"{location}.ciTier")
+    if tier not in CI_TIERS - {"narrative"}:
+        raise GateManifestError(f"{location}.ciTier: expected blocking, nightly, or release")
+    require_string(evidence["description"], f"{location}.description")
+    baseline = evidence["baseline"]
+    if not isinstance(baseline, dict):
+        raise GateManifestError(f"{location}.baseline: expected an object")
+    require_exact_keys(baseline, {"derivedFrom", "issue", "maxWaivers"}, f"{location}.baseline")
+    baseline_path = validate_repo_path(
+        repo_root, baseline["derivedFrom"], f"{location}.baseline.derivedFrom"
+    )
+    issue = baseline["issue"]
+    max_waivers = baseline["maxWaivers"]
+    if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
+        raise GateManifestError(f"{location}.baseline.issue: expected a positive integer")
+    if not isinstance(max_waivers, int) or isinstance(max_waivers, bool) or max_waivers < 0:
+        raise GateManifestError(f"{location}.baseline.maxWaivers: expected a non-negative integer")
+    baseline_limit = baseline_waiver_limit(
+        repo_root, contract_id, baseline_path, f"{location}.baseline.derivedFrom"
+    )
+    if max_waivers > baseline_limit:
+        raise GateManifestError(
+            f"{location}.baseline.maxWaivers: {max_waivers} exceeds derived baseline {baseline_limit}"
+        )
+    waivers = semantic_waivers(evidence, location)
+    if len(waivers) > max_waivers:
+        raise GateManifestError(
+            f"{location}.waivers: {len(waivers)} exceeds ratchet maximum {max_waivers}"
+        )
+    edges = evidence["edges"]
+    if not isinstance(edges, list) or not edges:
+        raise GateManifestError(f"{location}.edges: expected a non-empty array")
+    used_waivers: set[str] = set()
+    rust_cache: dict[str, set[str]] = {}
+    seen_edges: set[str] = set()
+    invalid_edges: set[str] = set()
+    for index, edge in enumerate(edges):
+        edge_id = None
+        edge_location = f"{location}.edges[{index}]"
+        if not isinstance(edge, dict):
+            errors.append(f"{edge_location}: expected an object")
+            continue
+        try:
+            edge_id = require_string(edge.get("id"), f"{edge_location}.id")
+            if edge_id in seen_edges:
+                raise GateManifestError(f"{edge_location}.id: duplicate edge {edge_id}")
+            seen_edges.add(edge_id)
+            failure = verify_semantic_edge(repo_root, edge, edge_location, rust_cache)
+        except GateManifestError as error:
+            errors.append(str(error))
+            if edge_id is not None:
+                invalid_edges.add(edge_id)
+            continue
+        if failure is None:
+            continue
+        if edge_id in waivers:
+            used_waivers.add(edge_id)
+        else:
+            errors.append(f"{location}: {contract_id} semantic reachability failed: {failure}")
+    for edge_id in sorted(set(waivers) - used_waivers - invalid_edges):
+        errors.append(f"{location}.waivers: stale waiver for reachable edge {edge_id}")
+    return tier
+
+
 def verify(
     repo_root: Path,
     manifest_path: Path,
@@ -253,6 +485,7 @@ def verify(
                 if isinstance(evidence, dict) and evidence.get("kind") in {
                     "file",
                     "symbol",
+                    "semantic_reachability",
                 }:
                     executable_evidence += 1
                 if tier := verify_evidence(

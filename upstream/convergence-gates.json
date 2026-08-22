@@ -191,6 +191,96 @@
           "ciTier": "blocking"
         },
         {
+          "kind": "semantic_reachability",
+          "description": "First #664 production-edge proof for app-server extension composition and native external-agent routing.",
+          "baseline": {
+            "derivedFrom": "upstream/convergence-reachability-baseline.json",
+            "issue": 664,
+            "maxWaivers": 0
+          },
+          "edges": [
+            {
+              "id": "app-server-extension-root-module",
+              "kind": "rust_module",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/extensions.rs",
+              "token": ""
+            },
+            {
+              "id": "app-server-thread-extensions-callsite",
+              "kind": "token",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/message_processor.rs",
+              "token": "thread_extensions("
+            },
+            {
+              "id": "extension-goal-registry-edge",
+              "kind": "token",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/extensions.rs",
+              "token": "codex_goal_extension::install_with_backend("
+            },
+            {
+              "id": "extension-skills-registry-edge",
+              "kind": "token",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/extensions.rs",
+              "token": "codex_skills_extension::install_with_providers_and_metrics("
+            },
+            {
+              "id": "extension-guardian-registry-edge",
+              "kind": "token",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/extensions.rs",
+              "token": "codex_guardian::install("
+            },
+            {
+              "id": "turn-processor-agent-runner-module",
+              "kind": "rust_module",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/request_processors/turn_processor.rs",
+              "token": ""
+            },
+            {
+              "id": "turn-processor-agent-runner-callsite",
+              "kind": "token",
+              "root": "codex-rs/app-server/src/lib.rs",
+              "path": "codex-rs/app-server/src/request_processors/turn_processor.rs",
+              "token": "AgentRunner::new("
+            },
+            {
+              "id": "core-multi-agent-v2-spawn-module",
+              "kind": "rust_module",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
+              "token": ""
+            },
+            {
+              "id": "core-native-external-routing-callsite",
+              "kind": "token",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
+              "token": "select_provider_route("
+            },
+            {
+              "id": "core-external-agent-spawn-module",
+              "kind": "rust_module",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/agent/control/external.rs",
+              "token": ""
+            },
+            {
+              "id": "core-external-command-module",
+              "kind": "rust_module",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/agent/external_command.rs",
+              "token": ""
+            }
+          ],
+          "waivers": [],
+          "ciTier": "blocking"
+        },
+        {
           "kind": "file",
           "path": "tools/codex-exec-harness/scenarios/third-party-agent-current-binary-lifecycle.json",
           "ciTier": "nightly"
