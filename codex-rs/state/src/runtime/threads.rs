@@ -120,12 +120,28 @@ WHERE threads.id = ?
             .transpose()
     }
 
-    /// Permanently promote a thread to paginated history without changing metadata or recency.
-    pub async fn mark_thread_paginated(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
-        let result = sqlx::query("UPDATE threads SET history_mode = 'paginated' WHERE id = ?")
-            .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
-            .await?;
+    /// Permanently promote a thread, preserving its canonical name or a legacy-visible fallback.
+    pub async fn mark_thread_paginated(
+        &self,
+        thread_id: ThreadId,
+        legacy_name: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let result = sqlx::query(
+            r#"
+UPDATE threads
+SET
+    history_mode = 'paginated',
+    name = CASE
+        WHEN name IS NULL OR trim(name) = '' THEN ?
+        ELSE name
+    END
+WHERE id = ?
+            "#,
+        )
+        .bind(legacy_name)
+        .bind(thread_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -622,6 +638,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
                 model_providers,
                 cwd_filters: None,
                 section: None,
+                project_id: None,
                 anchor: None,
                 sort_key: crate::SortKey::UpdatedAt,
                 sort_direction: SortDirection::Desc,
@@ -747,6 +764,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
                 model_providers,
                 cwd_filters: None,
                 section: None,
+                project_id: None,
                 anchor,
                 sort_key,
                 sort_direction: SortDirection::Desc,
@@ -1532,6 +1550,7 @@ pub struct ThreadFilterOptions<'a> {
     pub model_providers: Option<&'a [String]>,
     pub cwd_filters: Option<&'a [PathBuf]>,
     pub section: Option<Option<&'a str>>,
+    pub project_id: Option<Option<&'a str>>,
     pub anchor: Option<&'a crate::Anchor>,
     pub sort_key: SortKey,
     pub sort_direction: SortDirection,
@@ -1563,6 +1582,7 @@ fn push_thread_filters_with_preview<'a>(
         model_providers,
         cwd_filters,
         section,
+        project_id,
         anchor,
         sort_key,
         sort_direction,
@@ -1574,7 +1594,7 @@ fn push_thread_filters_with_preview<'a>(
     } else {
         builder.push(" AND threads.archived = 0");
     }
-    if !include_empty_preview {
+    if !include_empty_preview && !matches!(section, Some(Some(_))) {
         builder.push(" AND threads.preview <> ''");
     }
     match section {
@@ -1584,6 +1604,16 @@ fn push_thread_filters_with_preview<'a>(
         }
         Some(None) => {
             builder.push(" AND threads.thread_section_id IS NULL");
+        }
+        None => {}
+    }
+    match project_id {
+        Some(Some(project_id)) => {
+            builder.push(" AND threads.project_id = ");
+            builder.push_bind(project_id);
+        }
+        Some(None) => {
+            builder.push(" AND threads.project_id IS NULL");
         }
         None => {}
     }

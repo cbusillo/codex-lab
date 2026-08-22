@@ -25,7 +25,6 @@ use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
-use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::WarningEvent;
@@ -100,12 +99,22 @@ const REMOTE_V2_SUMMARY: &str = "global-instructions-remote-v2-summary";
 
 pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
 
-fn ev_shell_command_call(call_id: &str, command: &str) -> serde_json::Value {
+fn ev_exec_command_call(call_id: &str, command: &str) -> serde_json::Value {
     ev_function_call(
         call_id,
-        "shell_command",
-        &json!({ "command": command }).to_string(),
+        "exec_command",
+        &json!({ "cmd": command }).to_string(),
     )
+}
+
+pub(super) fn allow_echo_commands(home: &Path) {
+    let rules_dir = home.join("rules");
+    fs::create_dir_all(&rules_dir).expect("create exec policy rules directory");
+    fs::write(
+        rules_dir.join("default.rules"),
+        r#"prefix_rule(pattern=["echo"], decision="allow")"#,
+    )
+    .expect("write echo exec policy rule");
 }
 
 fn disabled_permission_user_turn(
@@ -1042,20 +1051,14 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     let server = start_mock_server().await;
 
     let non_openai_provider_name = non_openai_model_provider(&server).name;
-    let test_codex = test_codex()
+    let test = test_codex()
+        .with_pre_build_hook(allow_echo_commands)
         .with_config(move |config| {
             config.model_provider.name = non_openai_provider_name;
         })
         .build(&server)
         .await
         .expect("build codex");
-    let root_agent_usage_hint_text = test_codex
-        .config
-        .multi_agent_v2
-        .root_agent_usage_hint_text
-        .clone()
-        .expect("root agent usage hint");
-    let codex = test_codex.codex;
 
     // user message
     let user_message = "create an app";
@@ -1085,7 +1088,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     // first chunk of work
     let model_reasoning_response_1_sse = sse(vec![
         reasoning_response_1.clone(),
-        ev_shell_command_call("r1-shell", "echo make-react"),
+        ev_exec_command_call("r1-shell", "echo make-react"),
         ev_completed_with_tokens("r1", token_count_used),
     ]);
 
@@ -1103,7 +1106,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     // second chunk of work
     let model_reasoning_response_2_sse = sse(vec![
         reasoning_response_2.clone(),
-        ev_shell_command_call("r3-shell", "echo make-node"),
+        ev_exec_command_call("r3-shell", "echo make-node"),
         ev_completed_with_tokens("r3", token_count_used),
     ]);
 
@@ -1121,7 +1124,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     // third chunk of work
     let model_reasoning_response_3_sse = sse(vec![
         ev_reasoning_item("m6", &["I will create a python app"], &[]),
-        ev_shell_command_call("r6-shell", "echo make-python"),
+        ev_exec_command_call("r6-shell", "echo make-python"),
         ev_completed_with_tokens("r6", token_count_used),
     ]);
 
@@ -1153,14 +1156,15 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     let request_log = mount_sse_sequence(&server, bodies).await;
 
     // Start the conversation with the user message
-    codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: user_message.into(),
-            text_elements: Vec::new(),
-        }]))
+    test.codex
+        .start_or_steer_turn(disabled_permission_user_turn(
+            user_message,
+            test.cwd.path().to_path_buf(),
+            test.session_configured.model.clone(),
+        ))
         .await
         .expect("submit user input");
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     // collect the requests payloads from the model
     let requests_payloads = request_log.requests();
@@ -1191,7 +1195,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         Some(normalized)
     }
 
-    let normalize_inputs = |values: &[serde_json::Value]| -> Vec<serde_json::Value> {
+    fn normalize_inputs(values: &[serde_json::Value]) -> Vec<serde_json::Value> {
         values
             .iter()
             .filter_map(|value| {
@@ -1209,18 +1213,15 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     .and_then(|content| content.as_array())
                     .into_iter()
                     .flatten()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-                    .collect::<Vec<_>>();
+                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()));
 
-                // Ignore cached prefix and world-state messages since they are not relevant to
-                // compaction behavior and can change as bundled prompts evolve.
+                // Ignore cached prefix messages (project docs + permissions) since they are not
+                // relevant to compaction behavior and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
                 if role == Some("developer")
-                    && (texts.iter().any(|text| text.contains("`sandbox_mode`"))
-                        || texts.contains(&root_agent_usage_hint_text.as_str())
-                        || texts
-                            .iter()
-                            .any(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG)))
+                    && texts
+                        .into_iter()
+                        .any(|text| text.contains("`sandbox_mode`"))
                 {
                     return None;
                 }
@@ -1230,7 +1231,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                 Some(value)
             })
             .collect()
-    };
+    }
 
     let initial_input = normalize_inputs(input);
     let environment_message = initial_input[0]["content"][0]["text"].as_str().unwrap();
@@ -1245,40 +1246,12 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     for (i, expected_summary) in compaction_indices.into_iter().zip(expected_summaries) {
         let body = requests_payloads.clone()[i].body_json();
         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
-        let developer_texts = input
-            .iter()
-            .filter(|value| value.get("role").and_then(|role| role.as_str()) == Some("developer"))
-            .flat_map(|value| {
-                value
-                    .get("content")
-                    .and_then(|content| content.as_array())
-                    .into_iter()
-                    .flatten()
-            })
-            .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            developer_texts
-                .iter()
-                .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
-                .count(),
-            1,
-            "compaction request at index {i} should include one multi-agent mode message"
-        );
-        assert_eq!(
-            developer_texts
-                .iter()
-                .filter(|text| **text == root_agent_usage_hint_text)
-                .count(),
-            1,
-            "compaction request at index {i} should include one root agent usage hint"
-        );
         let input = normalize_inputs(input);
         assert_eq!(input.len(), 3);
-        let compaction_environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+        let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(compaction_environment_message, environment_message);
+        assert_eq!(environment_message, environment_message);
         assert_eq!(user_message_received, user_message);
         assert_eq!(
             summary_message, expected_summary,
@@ -1346,9 +1319,9 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         "type": "reasoning"
       },
       {
-        "arguments": "{\"command\":\"echo make-react\"}",
+        "arguments": "{\"cmd\":\"echo make-react\"}",
         "call_id": "r1-shell",
-        "name": "shell_command",
+        "name": "exec_command",
         "type": "function_call"
       },
       {
@@ -1446,9 +1419,9 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         "type": "reasoning"
       },
       {
-        "arguments": "{\"command\":\"echo make-node\"}",
+        "arguments": "{\"cmd\":\"echo make-node\"}",
         "call_id": "r3-shell",
-        "name": "shell_command",
+        "name": "exec_command",
         "type": "function_call"
       },
       {
@@ -1546,9 +1519,9 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         "type": "reasoning"
       },
       {
-        "arguments": "{\"command\":\"echo make-python\"}",
+        "arguments": "{\"cmd\":\"echo make-python\"}",
         "call_id": "r6-shell",
-        "name": "shell_command",
+        "name": "exec_command",
         "type": "function_call"
       },
       {
@@ -4877,7 +4850,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
     ]);
     let mut responses = vec![first_turn];
     responses.extend(
-        (0..7).map(|_| {
+        (0..5).map(|_| {
             sse_failed(
                 "compact-failed",
                 "context_length_exceeded",

@@ -7,7 +7,6 @@ use std::time::Instant;
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
-use codex_core_plugins::PluginAuthContext;
 use codex_core_plugins::store::PluginStore;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::ExtensionRegistryBuilder;
@@ -77,6 +76,7 @@ fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
         orchestrator_skills_enabled: config.orchestrator_skills_enabled,
         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
@@ -88,7 +88,7 @@ fn sample_plugin_root(home: &TempDir) -> std::path::PathBuf {
     home.path().join("plugins/cache/test/sample/local")
 }
 
-fn write_sample_plugin_manifest_and_config(home: &TempDir) -> std::path::PathBuf {
+pub(super) fn write_sample_plugin_manifest_and_config(home: &TempDir) -> std::path::PathBuf {
     write_sample_plugin_manifest_and_config_at_root(
         home,
         sample_plugin_root(home),
@@ -388,7 +388,7 @@ async fn persisted_remote_plugin_command_attribution_flows_through_turn_context(
     let command = shlex::try_join(["/bin/sh", script_path.to_string_lossy().as_ref()])?;
     let call_id = "remote-plugin-command";
     let arguments = serde_json::to_string(&serde_json::json!({
-        "command": command,
+        "cmd": command,
         "login": false,
     }))?;
     mount_sse_sequence(
@@ -396,7 +396,7 @@ async fn persisted_remote_plugin_command_attribution_flows_through_turn_context(
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call(call_id, "shell_command", &arguments),
+                ev_function_call(call_id, "exec_command", &arguments),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -827,6 +827,13 @@ async fn curated_plugin_skills_follow_auth_switch() -> Result<()> {
             expected_target_skill_description: "chatgpt description",
         },
         Fixture {
+            name: "ChatGPT with a custom provider",
+            target_auth: TargetAuth::Chatgpt,
+            target_model_provider_id: "ollama",
+            expected_target_loaded_plugin_skills: &[CHATGPT_CURATED_PLUGIN_SKILL],
+            expected_target_skill_description: "chatgpt description",
+        },
+        Fixture {
             name: "API key",
             target_auth: TargetAuth::ApiKey,
             target_model_provider_id: OPENAI_PROVIDER_ID,
@@ -847,24 +854,34 @@ async fn curated_plugin_skills_follow_auth_switch() -> Result<()> {
             expected_target_loaded_plugin_skills: &[API_CURATED_PLUGIN_SKILL],
             expected_target_skill_description: "api description before",
         },
+        Fixture {
+            name: "unauthenticated OpenAI",
+            target_auth: TargetAuth::NoCodexAuth,
+            target_model_provider_id: OPENAI_PROVIDER_ID,
+            expected_target_loaded_plugin_skills: &[API_CURATED_PLUGIN_SKILL],
+            expected_target_skill_description: "api description before",
+        },
+        Fixture {
+            name: "unauthenticated custom provider",
+            target_auth: TargetAuth::NoCodexAuth,
+            target_model_provider_id: "ollama",
+            expected_target_loaded_plugin_skills: &[API_CURATED_PLUGIN_SKILL],
+            expected_target_skill_description: "api description before",
+        },
     ];
 
     async fn loaded_plugin_skills_for_config(test_codex: &TestCodex, config: &Config) -> String {
         let plugins_input = config.plugins_config_input();
-        let auth_context = PluginAuthContext::from_auth_mode(
-            test_codex.thread_manager.auth_manager().get_api_auth_mode(),
-        );
-        let plugin_snapshot = test_codex
-            .thread_manager
-            .plugins_manager()
-            .plugin_snapshot_for_config_with_auth_context(&plugins_input, auth_context)
-            .await;
+        let plugins_manager = test_codex.thread_manager.plugins_manager();
+        let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
         let skills_input = HostSkillsLoadInput::new(
             config.cwd.clone(),
-            plugin_snapshot.outcome.effective_plugin_skill_roots(),
+            plugin_outcome.effective_plugin_skill_roots(),
             config.config_layer_stack.clone(),
         )
-        .with_plugin_skill_snapshots(plugin_snapshot.skill_snapshots);
+        .with_plugin_skill_snapshots(
+            plugins_manager.plugin_skill_snapshots_for_config(&plugins_input),
+        );
         let skills_snapshot = test_codex
             .thread_manager
             .skills_service()
@@ -956,10 +973,8 @@ enabled = true
         let mut builder = test_codex()
             .with_home(Arc::clone(&codex_home))
             .with_extensions(skills_extensions())
-            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-            .with_home_backed_auth_manager();
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
         let test_codex = builder.build_with_auto_env(&server).await?;
-
         let initial_skills = loaded_plugin_skills_for_config(&test_codex, &test_codex.config).await;
         assert_loaded_plugin_skills(
             fixture.name,
@@ -1096,6 +1111,13 @@ async fn explicit_plugin_mentions_use_apps_for_chatgpt_dual_surface_plugins(
             .any(|text| text.contains("Apps from this plugin")),
         app_enabled,
         "plugin app guidance should match app enablement: {developer_messages:?}"
+    );
+    assert_eq!(
+        developer_messages
+            .iter()
+            .any(|text| text.contains("if `tool_search` is available")),
+        app_enabled,
+        "plugin app search guidance should match app enablement: {developer_messages:?}"
     );
     assert!(
         request
@@ -1428,7 +1450,7 @@ async fn implicit_plugin_skill_invocation_tracks_remote_plugin_id(
         }
     };
     let command_args = serde_json::json!({
-        "command": command,
+        "cmd": command,
         "login": false,
     })
     .to_string();
@@ -1437,7 +1459,7 @@ async fn implicit_plugin_skill_invocation_tracks_remote_plugin_id(
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call("call-1", "shell_command", &command_args),
+                ev_function_call("call-1", "exec_command", &command_args),
                 ev_completed("resp-1"),
             ]),
             sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),

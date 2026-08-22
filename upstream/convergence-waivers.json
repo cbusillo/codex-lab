@@ -46,13 +46,6 @@
       "violation": "reverted_to_upstream"
     },
     {
-      "disposition": "converged_with_upstream",
-      "issue": 307,
-      "path": "codex-rs/core/src/session/multi_agents.rs",
-      "reason": "Issue #307 adopts the current upstream V2 session policy and reasoning-aware multi-agent mode; Every Code external-provider routing remains additive in guarded handler and agent-control paths.",
-      "violation": "reverted_to_upstream"
-    },
-    {
       "disposition": "upstream_deletion_adopted",
       "issue": 307,
       "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs",

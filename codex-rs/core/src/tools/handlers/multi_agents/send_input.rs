@@ -34,7 +34,6 @@ impl Handler {
         let ToolInvocation {
             session,
             turn,
-            step_context,
             payload,
             call_id,
             ..
@@ -54,8 +53,7 @@ impl Handler {
             .agent_control
             .get_agent_metadata(receiver_thread_id);
         if receiver_agent.is_some() {
-            let resume_config =
-                build_agent_resume_config(turn.as_ref(), step_context.environments.primary())?;
+            let resume_config = build_agent_resume_config(turn.as_ref())?;
             session
                 .services
                 .agent_control
@@ -152,7 +150,7 @@ pub(crate) struct SendInputResult {
 }
 
 impl ToolOutput for SendInputResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "send_input")
     }
 

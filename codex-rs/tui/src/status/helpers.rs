@@ -108,6 +108,10 @@ pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
         "Enterprise".to_string()
     } else if plan_type == PlanType::ProLite {
         "Pro Lite".to_string()
+    } else if plan_type == PlanType::EduPlus {
+        "Edu Plus".to_string()
+    } else if plan_type == PlanType::EduPro {
+        "Edu Pro".to_string()
     } else {
         title_case(format!("{plan_type:?}").as_str())
     }
@@ -237,6 +241,12 @@ mod tests {
         for (plan_type, expected) in cases {
             assert_eq!(plan_type_display_name(plan_type), expected);
         }
+        insta::assert_snapshot!(
+            "education_plan_display_names",
+            [PlanType::Edu, PlanType::EduPlus, PlanType::EduPro]
+                .map(plan_type_display_name)
+                .join("\n")
+        );
     }
 
     #[test]

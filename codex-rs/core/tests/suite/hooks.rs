@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
@@ -74,6 +75,37 @@ const SECOND_CONTINUATION_PROMPT: &str = "Now tighten it to just: meow.";
 const BLOCKED_PROMPT_CONTEXT: &str = "Remember the blocked lighthouse note.";
 const PERMISSION_REQUEST_HOOK_MATCHER: &str = "^Bash$";
 const PERMISSION_REQUEST_ALLOW_REASON: &str = "should not be used for allow";
+
+#[tokio::test]
+async fn managed_hook_discovery_failure_rejects_session_startup_when_hooks_enabled() -> Result<()> {
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_cloud_config_bundle(
+        CloudConfigBundleFixture::loader_with_enterprise_requirement(
+            r#"
+[hooks]
+
+[[hooks.PreToolUse]]
+matcher = "["
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo managed"
+"#,
+        ),
+    );
+
+    let result = builder.build_with_auto_env(&server).await;
+    let Err(error) = result else {
+        panic!("session startup should reject an invalid managed hook matcher");
+    };
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("managed") && error.contains("invalid matcher"),
+        "unexpected managed hook startup error: {error}"
+    );
+
+    Ok(())
+}
 
 fn restrictive_workspace_write_profile() -> PermissionProfile {
     PermissionProfile::workspace_write_with(
@@ -1681,9 +1713,9 @@ async fn async_hook_context_is_injected_into_the_active_turn() -> Result<()> {
     let server = start_mock_server().await;
     let gate = TempDir::new()?;
     let release_path = gate.path().join("release");
-    let call_id = "async-hook-context-gated-shell-command";
+    let call_id = "async-hook-context-gated-exec-command";
     let args = serde_json::json!({
-        "command": format!(
+        "cmd": format!(
             r#"python3 -c 'import time; from pathlib import Path; gate = Path(r"{}"); exec("while not gate.exists(): time.sleep(0.01)")'"#,
             release_path.display()
         )
@@ -1693,7 +1725,7 @@ async fn async_hook_context_is_injected_into_the_active_turn() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -2016,9 +2048,9 @@ async fn pre_tool_use_hook_spills_large_additional_context() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "pretooluse-shell-command-large-context";
+    let call_id = "pretooluse-exec-command-large-context";
     let command = "printf pre-tool-output".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -2026,7 +2058,7 @@ async fn pre_tool_use_hook_spills_large_additional_context() -> Result<()> {
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -2833,14 +2865,14 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Resu
 }
 
 #[tokio::test]
-async fn permission_request_hook_allows_shell_command_without_user_approval() -> Result<()> {
+async fn permission_request_hook_allows_exec_command_without_user_approval() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "permissionrequest-shell-command";
-    let marker = std::env::temp_dir().join("permissionrequest-shell-command-marker");
+    let call_id = "permissionrequest-exec-command";
+    let marker = std::env::temp_dir().join("permissionrequest-exec-command-marker");
     let command = format!("rm -f {}", marker.display());
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -2848,7 +2880,7 @@ async fn permission_request_hook_allows_shell_command_without_user_approval() ->
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -2915,8 +2947,8 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
 
     let server = start_mock_server().await;
     let permission_call_id = "strict-hook-permissions";
-    let command_call_id = "strict-hook-shell-command";
-    let marker_name = "strict-hook-shell-command-marker";
+    let command_call_id = "strict-hook-exec-command";
+    let marker_name = "strict-hook-exec-command-marker";
     let command = match test_target_os() {
         TestTargetOs::Linux | TestTargetOs::MacOs => format!("rm -f {marker_name}"),
         TestTargetOs::Windows => {
@@ -2933,7 +2965,7 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
         "reason": "Enable strict auto review",
         "permissions": requested_permissions,
     });
-    let command_args = serde_json::json!({ "command": command });
+    let command_args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -2950,7 +2982,7 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
                 ev_response_created("resp-strict-hook-2"),
                 ev_function_call(
                     command_call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&command_args)?,
                 ),
                 ev_completed("resp-strict-hook-2"),
@@ -2985,7 +3017,12 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
         .cwd
         .join(marker_name)?;
     test.fs()
-        .write_file(&marker, b"seed".to_vec(), /*sandbox*/ None)
+        .write_file(
+            &marker,
+            b"seed".to_vec(),
+            Default::default(),
+            /*sandbox*/ None,
+        )
         .await
         .context("create strict auto-review marker")?;
     let (sandbox_policy, permission_profile) =
@@ -3034,7 +3071,7 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
     requests[2].function_call_output(command_call_id);
     assert!(
         test.fs()
-            .read_file(&marker, /*sandbox*/ None)
+            .read_file(&marker, Default::default(), /*sandbox*/ None)
             .await
             .is_err(),
         "hook-approved command should remove marker without Guardian review"
@@ -3162,12 +3199,7 @@ async fn permission_request_hook_sees_raw_exec_command_input() -> Result<()> {
                 .expect("failed to write permission request hook test fixture");
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             trust_discovered_hooks(config);
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 
@@ -3248,13 +3280,13 @@ mode = "limited"
 allow_local_binding = true
 "#,
     )?;
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-network-hook-1"),
-                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
                 ev_completed("resp-network-hook-1"),
             ]),
             sse(vec![
@@ -3362,15 +3394,15 @@ allow_local_binding = true
 }
 
 #[tokio::test]
-async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
+async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "pretooluse-shell-command";
+    let call_id = "pretooluse-exec-command";
     let marker_dir = TempDir::new()?;
-    let marker = marker_dir.path().join("pretooluse-shell-command-marker");
+    let marker = marker_dir.path().join("pretooluse-exec-command-marker");
     let command = format!("git init --quiet {}", marker.display());
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -3378,7 +3410,7 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -3453,13 +3485,13 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
 }
 
 #[tokio::test]
-async fn pre_tool_use_records_additional_context_for_shell_command() -> Result<()> {
+async fn pre_tool_use_records_additional_context_for_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "pretooluse-shell-command-context";
+    let call_id = "pretooluse-exec-command-context";
     let command = "printf pre-tool-output".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -3467,7 +3499,7 @@ async fn pre_tool_use_records_additional_context_for_shell_command() -> Result<(
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -3515,14 +3547,14 @@ async fn pre_tool_use_records_additional_context_for_shell_command() -> Result<(
 }
 
 #[tokio::test]
-async fn blocked_pre_tool_use_records_additional_context_for_shell_command() -> Result<()> {
+async fn blocked_pre_tool_use_records_additional_context_for_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "pretooluse-shell-command-blocked-context";
-    let marker = std::env::temp_dir().join("pretooluse-shell-command-blocked-context-marker");
+    let call_id = "pretooluse-exec-command-blocked-context";
+    let marker = std::env::temp_dir().join("pretooluse-exec-command-blocked-context-marker");
     let command = format!("printf blocked > {}", marker.display());
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -3530,7 +3562,7 @@ async fn blocked_pre_tool_use_records_additional_context_for_shell_command() -> 
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -3599,19 +3631,19 @@ async fn async_pre_tool_use_cannot_block_or_rewrite_and_still_records_additional
     let hook_finished_path_for_fixture = hook_finished_path.clone();
     let original_marker = gate.path().join("original");
     let rewritten_marker = gate.path().join("rewritten");
-    let call_id = "async-pretooluse-shell-command";
+    let call_id = "async-pretooluse-exec-command";
     let original_command = format!(
         r#"python3 -c 'import time; from pathlib import Path; gate = Path(r"{}"); exec("while not gate.exists(): time.sleep(0.01)"); Path(r"{}").write_text("original"); print("original-output")'"#,
         release_path.display(),
         original_marker.display()
     );
-    let args = serde_json::json!({ "command": original_command });
+    let args = serde_json::json!({ "cmd": original_command });
     let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -3749,80 +3781,28 @@ Path(r"{hook_finished_path}").write_text("finished", encoding="utf-8")
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum BashRewriteSurface {
-    ExecCommand,
-    ShellCommand,
-}
-
-impl BashRewriteSurface {
-    fn slug(self) -> &'static str {
-        match self {
-            BashRewriteSurface::ExecCommand => "exec-command",
-            BashRewriteSurface::ShellCommand => "shell-command",
-        }
-    }
-
-    fn tool_call(self, call_id: &str, command_text: &str) -> Result<Value> {
-        match self {
-            BashRewriteSurface::ExecCommand => Ok(ev_function_call(
-                call_id,
-                "exec_command",
-                &serde_json::to_string(&serde_json::json!({ "cmd": command_text }))?,
-            )),
-            BashRewriteSurface::ShellCommand => Ok(ev_function_call(
-                call_id,
-                "shell_command",
-                &serde_json::to_string(&serde_json::json!({ "command": command_text }))?,
-            )),
-        }
-    }
-
-    fn original_command(self, marker: &Path) -> String {
-        match self {
-            BashRewriteSurface::ExecCommand | BashRewriteSurface::ShellCommand => {
-                format!("git init --quiet {}", marker.display())
-            }
-        }
-    }
-
-    fn rewritten_command(self, marker: &Path) -> String {
-        match self {
-            BashRewriteSurface::ExecCommand | BashRewriteSurface::ShellCommand => {
-                format!("git init {}", marker.display())
-            }
-        }
-    }
-
-    fn configure(self, config: &mut Config) {
-        trust_discovered_hooks(config);
-        if matches!(self, BashRewriteSurface::ExecCommand) {
-            config.use_experimental_unified_exec_tool = true;
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
-        }
-    }
-}
-
-async fn assert_pre_tool_use_rewrites_bash_surface(surface: BashRewriteSurface) -> Result<()> {
+#[tokio::test]
+async fn pre_tool_use_rewrites_exec_command_before_execution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let slug = surface.slug();
+    let slug = "exec-command";
     let call_id = format!("pretooluse-{slug}-rewrite");
     let marker_dir = TempDir::new()?;
     let original_marker = marker_dir.path().join("original");
     let rewritten_marker = marker_dir.path().join("rewritten");
-    let original_command = surface.original_command(&original_marker);
-    let rewritten_command = surface.rewritten_command(&rewritten_marker);
+    let original_command = format!("git init --quiet {}", original_marker.display());
+    let rewritten_command = format!("git init {}", rewritten_marker.display());
     let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-1"),
-                surface.tool_call(&call_id, &original_command)?,
+                ev_function_call(
+                    &call_id,
+                    "exec_command",
+                    &serde_json::to_string(&serde_json::json!({ "cmd": original_command }))?,
+                ),
                 ev_completed("resp-1"),
             ]),
             sse(vec![
@@ -3840,7 +3820,7 @@ async fn assert_pre_tool_use_rewrites_bash_surface(surface: BashRewriteSurface) 
             write_updating_pre_tool_use_hook(home, "^Bash$", &updated_input)
                 .expect("failed to write updating pre tool use hook fixture");
         })
-        .with_config(move |config| surface.configure(config));
+        .with_config(trust_discovered_hooks);
     let test = builder.build(&server).await?;
 
     test.submit_turn_with_permission_profile(
@@ -3866,16 +3846,6 @@ async fn assert_pre_tool_use_rewrites_bash_surface(surface: BashRewriteSurface) 
     assert_eq!(hook_inputs[0]["tool_input"]["command"], original_command);
 
     Ok(())
-}
-
-#[tokio::test]
-async fn pre_tool_use_rewrites_shell_command_before_execution() -> Result<()> {
-    assert_pre_tool_use_rewrites_bash_surface(BashRewriteSurface::ShellCommand).await
-}
-
-#[tokio::test]
-async fn pre_tool_use_rewrites_exec_command_before_execution() -> Result<()> {
-    assert_pre_tool_use_rewrites_bash_surface(BashRewriteSurface::ExecCommand).await
 }
 
 #[tokio::test]
@@ -4139,14 +4109,14 @@ async fn post_tool_use_exit_two_rejects_code_mode_tool_promise() -> Result<()> {
 }
 
 #[tokio::test]
-async fn plugin_pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
+async fn plugin_pre_tool_use_blocks_exec_command_before_execution() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "plugin-pretooluse-shell-command";
-    let marker = std::env::temp_dir().join("plugin-pretooluse-shell-command-marker");
+    let call_id = "plugin-pretooluse-exec-command";
+    let marker = std::env::temp_dir().join("plugin-pretooluse-exec-command-marker");
     let command = format!("printf blocked > {}", marker.display());
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -4154,7 +4124,7 @@ async fn plugin_pre_tool_use_blocks_shell_command_before_execution() -> Result<(
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -4297,7 +4267,7 @@ async fn pre_tool_use_blocks_shell_when_defined_in_config_toml() -> Result<()> {
     let call_id = "pretooluse-config-toml";
     let marker = std::env::temp_dir().join("pretooluse-config-toml-marker");
     let command = format!("printf blocked > {}", marker.display());
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -4305,7 +4275,7 @@ async fn pre_tool_use_blocks_shell_when_defined_in_config_toml() -> Result<()> {
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -4380,7 +4350,7 @@ async fn pre_tool_use_merges_hooks_json_and_config_toml() -> Result<()> {
     let server = start_mock_server().await;
     let call_id = "pretooluse-merged-sources";
     let command = "printf merged-hooks".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -4388,7 +4358,7 @@ async fn pre_tool_use_merges_hooks_json_and_config_toml() -> Result<()> {
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -4510,12 +4480,7 @@ async fn pre_tool_use_blocks_exec_command_before_execution() -> Result<()> {
                 .expect("failed to write pre tool use hook test fixture");
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             trust_discovered_hooks(config);
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 
@@ -4889,13 +4854,13 @@ async fn pre_tool_use_rewrites_local_function_tool_before_execution() -> Result<
 }
 
 #[tokio::test]
-async fn post_tool_use_records_additional_context_for_shell_command() -> Result<()> {
+async fn post_tool_use_records_additional_context_for_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "posttooluse-shell-command";
+    let call_id = "posttooluse-exec-command";
     let command = "printf post-tool-output".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -4903,7 +4868,7 @@ async fn post_tool_use_records_additional_context_for_shell_command() -> Result<
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -4978,13 +4943,13 @@ async fn post_tool_use_records_additional_context_for_shell_command() -> Result<
 }
 
 #[tokio::test]
-async fn post_tool_use_block_decision_replaces_shell_command_output_with_reason() -> Result<()> {
+async fn post_tool_use_block_decision_replaces_exec_command_output_with_reason() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "posttooluse-shell-command-block";
+    let call_id = "posttooluse-exec-command-block";
     let command = "printf blocked-output".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -4992,7 +4957,7 @@ async fn post_tool_use_block_decision_replaces_shell_command_output_with_reason(
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -5038,14 +5003,14 @@ async fn post_tool_use_block_decision_replaces_shell_command_output_with_reason(
 }
 
 #[tokio::test]
-async fn post_tool_use_continue_false_replaces_shell_command_output_with_stop_reason() -> Result<()>
+async fn post_tool_use_continue_false_replaces_exec_command_output_with_stop_reason() -> Result<()>
 {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "posttooluse-shell-command-stop";
+    let call_id = "posttooluse-exec-command-stop";
     let command = "printf stop-output".to_string();
-    let args = serde_json::json!({ "command": command });
+    let args = serde_json::json!({ "cmd": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
@@ -5053,7 +5018,7 @@ async fn post_tool_use_continue_false_replaces_shell_command_output_with_stop_re
                 ev_response_created("resp-1"),
                 core_test_support::responses::ev_function_call(
                     call_id,
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&args)?,
                 ),
                 ev_completed("resp-1"),
@@ -5134,12 +5099,7 @@ async fn post_tool_use_exit_two_replaces_one_shot_exec_command_output_with_feedb
                 .expect("failed to write post tool use hook test fixture");
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             trust_discovered_hooks(config);
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 
@@ -5206,12 +5166,7 @@ async fn post_tool_use_spills_large_feedback_message() -> Result<()> {
             }
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             trust_discovered_hooks(config);
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 
@@ -5290,12 +5245,7 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
                 .expect("failed to write tool use hook test fixture");
         })
         .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
             trust_discovered_hooks(config);
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
 

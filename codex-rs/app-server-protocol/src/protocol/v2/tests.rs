@@ -2,7 +2,6 @@ use super::*;
 use crate::ServerNotification;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::dynamic_tools::normalize_dynamic_tool_specs;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
@@ -259,6 +258,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
                 appearance: None,
             }),
             section_entered_at: Some(1),
+            project_id: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
             created_at: 1,
@@ -269,9 +269,9 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             cwd: absolute_path("tmp"),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Exec,
-            session_provenance: None,
             can_accept_direct_input: None,
             thread_source: None,
+            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -316,10 +316,12 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         .expect("serialized thread should be an object");
     legacy_thread_fields.remove("section");
     legacy_thread_fields.remove("sectionEnteredAt");
+    legacy_thread_fields.remove("projectId");
     let legacy_thread =
         serde_json::from_value::<Thread>(legacy_thread).expect("deserialize legacy thread");
     assert_eq!(legacy_thread.section, None);
     assert_eq!(legacy_thread.section_entered_at, None);
+    assert_eq!(legacy_thread.project_id, None);
 
     assert_eq!(
         value.get("initialTurnsPage"),
@@ -413,59 +415,6 @@ fn thread_items_list_round_trips() {
 }
 
 #[test]
-fn thread_turns_items_list_legacy_shape_round_trips() {
-    let params = ThreadTurnsItemsListParams {
-        thread_id: "thr_123".to_string(),
-        turn_id: "turn_456".to_string(),
-        cursor: Some("cursor_1".to_string()),
-        limit: Some(50),
-        sort_direction: Some(SortDirection::Asc),
-    };
-
-    assert_eq!(
-        serde_json::to_value(&params).expect("serialize legacy params"),
-        json!({
-            "threadId": "thr_123",
-            "turnId": "turn_456",
-            "cursor": "cursor_1",
-            "limit": 50,
-            "sortDirection": "asc",
-        })
-    );
-    assert_eq!(
-        ThreadItemsListParams::from(params),
-        ThreadItemsListParams {
-            thread_id: "thr_123".to_string(),
-            turn_id: Some("turn_456".to_string()),
-            cursor: Some("cursor_1".to_string()),
-            limit: Some(50),
-            sort_direction: Some(SortDirection::Asc),
-        }
-    );
-
-    // The turn is pinned by the request, so the legacy response keeps items
-    // unwrapped instead of echoing the per-item turn id.
-    let response = ThreadTurnsItemsListResponse::from(ThreadItemsListResponse {
-        data: vec![ThreadItemEntry {
-            turn_id: "turn_456".to_string(),
-            item: ThreadItem::ContextCompaction {
-                id: "item_1".to_string(),
-            },
-        }],
-        next_cursor: None,
-        backwards_cursor: Some("cursor_0".to_string()),
-    });
-    assert_eq!(
-        serde_json::to_value(response).expect("serialize legacy response"),
-        json!({
-            "data": [{"type": "contextCompaction", "id": "item_1"}],
-            "nextCursor": null,
-            "backwardsCursor": "cursor_0",
-        })
-    );
-}
-
-#[test]
 fn thread_list_params_accepts_single_cwd() {
     let params = serde_json::from_value::<ThreadListParams>(json!({
         "cwd": "/workspace",
@@ -553,6 +502,13 @@ fn thread_list_params_accepts_section_id_filter() {
 
 #[test]
 fn thread_section_list_params_and_response_round_trip() {
+    let legacy = serde_json::from_value::<ThreadSection>(json!({
+        "id": "legacy",
+        "name": "Legacy",
+    }))
+    .expect("legacy sections without appearance should deserialize");
+    assert_eq!(legacy.appearance, None);
+
     let params = serde_json::from_value::<ThreadSectionListParams>(json!({
         "cursor": "section-cursor",
         "limit": 25,
@@ -591,6 +547,21 @@ fn thread_section_list_params_and_response_round_trip() {
             .expect("section list should deserialize"),
         response
     );
+}
+
+#[test]
+fn thread_section_updates_distinguish_omitted_and_cleared_appearance() {
+    for (value, appearance) in [
+        (json!({ "sectionId": "section", "name": "Work" }), None),
+        (
+            json!({ "sectionId": "section", "name": "Work", "appearance": null }),
+            Some(None),
+        ),
+    ] {
+        let params = serde_json::from_value::<ThreadSectionUpdateParams>(value)
+            .expect("section update should deserialize");
+        assert_eq!(params.appearance, appearance);
+    }
 }
 
 #[test]
@@ -868,6 +839,52 @@ fn additional_file_system_permissions_preserves_canonical_entries() {
         CoreFileSystemPermissions::try_from(permissions)
             .expect("API paths should convert to native paths"),
         core_permissions
+    );
+
+    for path in [r"C:\workspace\read-only", r"\\server\share\read-only"] {
+        let path = LegacyAppPathString::from_string(path);
+        let core_permissions = CoreFileSystemPermissions::from_read_write_path_uris(
+            Some(vec![
+                PathUri::try_from(path.clone()).expect("valid foreign permission path"),
+            ]),
+            /*write*/ None,
+        );
+        let permissions = AdditionalFileSystemPermissions::from(core_permissions.clone());
+        assert_eq!(permissions.read, Some(vec![path]));
+        assert_eq!(permissions.entries.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            CoreFileSystemPermissions::try_from(permissions)
+                .expect("foreign API paths should round-trip"),
+            core_permissions
+        );
+    }
+    #[cfg(windows)]
+    for path in ["//server/share/read-only", r"/\server/share/read-only"] {
+        let path = LegacyAppPathString::from_string(path);
+        let core_permissions =
+            CoreFileSystemPermissions::try_from(AdditionalFileSystemPermissions {
+                read: Some(vec![path.clone()]),
+                write: None,
+                glob_scan_max_depth: None,
+                entries: None,
+            })
+            .expect("native slash UNC permission path");
+        let permissions = AdditionalFileSystemPermissions::from(core_permissions);
+        assert_eq!(
+            permissions.read,
+            Some(vec![LegacyAppPathString::from_string(
+                r"\\server\share\read-only"
+            )])
+        );
+    }
+    assert!(
+        CoreFileSystemPermissions::try_from(AdditionalFileSystemPermissions {
+            read: Some(vec![LegacyAppPathString::from_string(r"\\localhost\share")]),
+            write: None,
+            glob_scan_max_depth: None,
+            entries: None,
+        })
+        .is_ok()
     );
 }
 
@@ -1980,6 +1997,8 @@ fn config_granular_approval_policy_is_marked_experimental() {
         service_tier: None,
         analytics: None,
         apps: None,
+        browser_use: None,
+        computer_use: None,
         desktop: None,
         additional: HashMap::new(),
     });
@@ -2013,6 +2032,8 @@ fn config_approvals_reviewer_is_marked_experimental() {
         service_tier: None,
         analytics: None,
         apps: None,
+        browser_use: None,
+        computer_use: None,
         desktop: None,
         additional: HashMap::new(),
     });
@@ -2024,6 +2045,9 @@ fn config_approvals_reviewer_is_marked_experimental() {
 fn config_requirements_granular_allowed_approval_policy_is_marked_experimental() {
     let reason =
         crate::experimental_api::ExperimentalApi::experimental_reason(&ConfigRequirements {
+            cli_auth_credentials_store: None,
+            chatgpt_base_url: None,
+            additional_developer_instructions: None,
             allowed_approval_policies: Some(vec![AskForApproval::Granular {
                 sandbox_approval: true,
                 rules: true,
@@ -2038,10 +2062,12 @@ fn config_requirements_granular_allowed_approval_policy_is_marked_experimental()
             default_permissions: None,
             allowed_web_search_modes: None,
             allow_managed_hooks_only: None,
+            allow_browser_and_computer_use: None,
             allow_appshots: None,
             allow_remote_control: None,
             computer_use: None,
             browser_use: None,
+            in_app_browser: None,
             feature_requirements: None,
             hooks: None,
             enforce_residency: None,
@@ -2481,6 +2507,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
             name: "not-ready".to_string(),
+            runtime_status: None,
             plugin_id: None,
             server_info: None,
             tools: HashMap::new(),
@@ -2496,6 +2523,7 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
         json!({
             "data": [{
                 "name": "not-ready",
+                "runtimeStatus": null,
                 "pluginId": null,
                 "serverInfo": null,
                 "tools": {},
@@ -2505,6 +2533,33 @@ fn mcp_server_status_serializes_absent_server_info_as_null() {
             }],
             "nextCursor": null,
         })
+    );
+}
+
+#[test]
+fn mcp_server_status_accepts_older_inventory_without_runtime_status() {
+    let status: McpServerStatus = serde_json::from_value(json!({
+        "name": "older-server",
+        "pluginId": null,
+        "serverInfo": null,
+        "tools": {},
+        "resources": [],
+        "resourceTemplates": [],
+        "authStatus": "unknown",
+    }))
+    .expect("older app-server inventory should deserialize");
+    assert_eq!(
+        status,
+        McpServerStatus {
+            name: "older-server".to_string(),
+            runtime_status: None,
+            plugin_id: None,
+            server_info: None,
+            tools: HashMap::new(),
+            resources: Vec::new(),
+            resource_templates: Vec::new(),
+            auth_status: McpAuthStatus::Unknown,
+        }
     );
 }
 
@@ -2568,7 +2623,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
     let response = ListMcpServerStatusResponse {
         data: vec![McpServerStatus {
             name: "initialized".to_string(),
-            plugin_id: None,
+            runtime_status: None,
+            plugin_id: Some("lookup@test".to_string()),
             server_info: Some(McpServerInfo {
                 name: "lookup-server".to_string(),
                 title: None,
@@ -2590,7 +2646,8 @@ fn mcp_server_status_serializes_absent_server_info_metadata_as_null() {
         json!({
             "data": [{
                 "name": "initialized",
-                "pluginId": null,
+                "runtimeStatus": null,
+                "pluginId": "lookup@test",
                 "serverInfo": {
                     "name": "lookup-server",
                     "title": null,
@@ -2841,36 +2898,6 @@ fn network_requirements_serializes_canonical_and_legacy_fields() {
     );
 }
 
-/// `dynamicToolCall.error` is published from the persisted core item, so
-/// historical items that recorded a failure keep reporting it.
-#[test]
-fn dynamic_tool_call_error_is_published_from_persisted_items() {
-    let persisted = serde_json::from_value::<DynamicToolCallItem>(json!({
-        "id": "dynamic-2",
-        "tool": "lookup",
-        "arguments": {},
-        "status": "failed",
-        "success": false,
-        "error": "dynamic tool call was cancelled before receiving a response",
-    }))
-    .expect("persisted dynamic tool call item");
-
-    assert_eq!(
-        ThreadItem::from(TurnItem::DynamicToolCall(persisted)),
-        ThreadItem::DynamicToolCall {
-            id: "dynamic-2".to_string(),
-            namespace: None,
-            tool: "lookup".to_string(),
-            arguments: json!({}),
-            status: DynamicToolCallStatus::Failed,
-            content_items: None,
-            success: Some(false),
-            error: Some("dynamic tool call was cancelled before receiving a response".to_string()),
-            duration_ms: None,
-        }
-    );
-}
-
 #[test]
 fn core_turn_item_into_thread_item_converts_supported_variants() {
     let user_item = TurnItem::UserMessage(UserMessageItem {
@@ -2954,6 +2981,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ],
         phase: None,
         memory_citation: None,
+        delivery: None,
     });
 
     assert_eq!(
@@ -2963,6 +2991,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             text: "Hello world".to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
         }
     );
 
@@ -2981,6 +3010,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             }],
             rollout_ids: vec!["rollout-1".to_string()],
         }),
+        delivery: None,
     });
 
     assert_eq!(
@@ -2998,6 +3028,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
                 }],
                 thread_ids: vec!["rollout-1".to_string()],
             }),
+            delivery: None,
         }
     );
 
@@ -3461,6 +3492,45 @@ fn user_input_into_core_preserves_media_fields() {
 }
 
 #[test]
+fn hook_handler_metadata_only_exposes_async_for_commands() {
+    assert_eq!(
+        serde_json::to_value(HookHandlerMetadata::Command {
+            command: "echo hello".to_string(),
+            r#async: true,
+        })
+        .unwrap(),
+        json!({
+            "handlerType": "command",
+            "command": "echo hello",
+            "async": true,
+        }),
+    );
+    assert_eq!(
+        serde_json::from_value::<HookHandlerMetadata>(json!({
+            "handlerType": "command",
+            "command": "echo hello",
+        }))
+        .unwrap(),
+        HookHandlerMetadata::Command {
+            command: "echo hello".to_string(),
+            r#async: false,
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(HookHandlerMetadata::McpTool {
+            server: "security".to_string(),
+            tool: "scan".to_string(),
+        })
+        .unwrap(),
+        json!({
+            "handlerType": "mcpTool",
+            "server": "security",
+            "tool": "scan",
+        }),
+    );
+}
+
+#[test]
 fn skills_list_params_serialization_uses_force_reload() {
     assert_eq!(
         serde_json::to_value(SkillsListParams {
@@ -3852,14 +3922,14 @@ fn plugin_install_params_serialization_omits_force_remote_sync() {
         serde_json::to_value(PluginInstallParams {
             marketplace_path: Some(marketplace_path.clone()),
             remote_marketplace_name: None,
-            install_attempt_id: None,
+            install_attempt_id: Some("94c79f7b-cceb-4415-9a3e-b51b2f718d43".to_string()),
             plugin_name: "gmail".to_string(),
         })
         .unwrap(),
         json!({
             "marketplacePath": marketplace_path_json,
             "remoteMarketplaceName": null,
-            "installAttemptId": null,
+            "installAttemptId": "94c79f7b-cceb-4415-9a3e-b51b2f718d43",
             "pluginName": "gmail",
         }),
     );
@@ -4442,85 +4512,6 @@ fn dynamic_tool_response_serializes_text_image_and_audio_content_items() {
 }
 
 #[test]
-fn dynamic_tool_spec_deserializes_defer_loading() {
-    let value = json!({
-        "name": "lookup_ticket",
-        "description": "Fetch a ticket",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "id": { "type": "string" }
-            }
-        },
-        "deferLoading": true,
-    });
-
-    let actual = normalize_dynamic_tool_specs(vec![value])
-        .expect("deserialize")
-        .pop()
-        .expect("one dynamic tool");
-
-    assert_eq!(
-        actual,
-        DynamicToolSpec::Function(DynamicToolFunctionSpec {
-            name: "lookup_ticket".to_string(),
-            description: "Fetch a ticket".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" }
-                }
-            }),
-            defer_loading: true,
-        })
-    );
-}
-
-#[test]
-fn dynamic_tool_spec_defaults_missing_input_schema_to_empty_object() {
-    let actual = normalize_dynamic_tool_specs(vec![json!({
-        "name": "lookup_ticket",
-        "description": "Fetch a ticket",
-    })])
-    .expect("deserialize")
-    .pop()
-    .expect("one dynamic tool");
-
-    assert_eq!(
-        actual,
-        DynamicToolSpec::Function(DynamicToolFunctionSpec {
-            name: "lookup_ticket".to_string(),
-            description: "Fetch a ticket".to_string(),
-            input_schema: json!({}),
-            defer_loading: false,
-        })
-    );
-}
-
-#[test]
-fn dynamic_tool_spec_legacy_expose_to_context_inverts_to_defer_loading() {
-    let value = json!({
-        "name": "lookup_ticket",
-        "description": "Fetch a ticket",
-        "inputSchema": {
-            "type": "object",
-            "properties": {}
-        },
-        "exposeToContext": false,
-    });
-
-    let actual = normalize_dynamic_tool_specs(vec![value])
-        .expect("deserialize")
-        .pop()
-        .expect("one dynamic tool");
-
-    let DynamicToolSpec::Function(actual) = actual else {
-        panic!("expected a function dynamic tool");
-    };
-    assert!(actual.defer_loading);
-}
-
-#[test]
 fn thread_start_params_preserve_explicit_null_service_tier() {
     let params: ThreadStartParams =
         serde_json::from_value(json!({ "serviceTier": null })).expect("params should deserialize");
@@ -4947,47 +4938,43 @@ fn realtime_start_deserializes_client_handoff_channel_prefixes() {
 }
 
 #[test]
-fn external_agent_capabilities_read_params_default_to_cache_only() {
-    let params: ExternalAgentCapabilitiesReadParams =
-        serde_json::from_value(serde_json::json!({})).expect("params should deserialize");
+fn tool_request_user_input_params_default_legacy_missing_is_blocking_to_true() {
+    let params = serde_json::from_value::<ToolRequestUserInputParams>(json!({
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "itemId": "call-1",
+        "questions": [{
+            "id": "q1",
+            "header": "Confirm",
+            "question": "Continue?",
+            "options": [{
+                "label": "Yes",
+                "description": "Continue."
+            }]
+        }],
+        "autoResolutionMs": 60_000
+    }))
+    .expect("legacy request_user_input params should deserialize");
 
     assert_eq!(
         params,
-        ExternalAgentCapabilitiesReadParams {
-            cwd: None,
-            families: None,
-            refresh: None,
+        ToolRequestUserInputParams {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item_id: "call-1".to_string(),
+            questions: vec![ToolRequestUserInputQuestion {
+                id: "q1".to_string(),
+                header: "Confirm".to_string(),
+                question: "Continue?".to_string(),
+                is_other: false,
+                is_secret: false,
+                options: Some(vec![ToolRequestUserInputOption {
+                    label: "Yes".to_string(),
+                    description: "Continue.".to_string(),
+                }]),
+            }],
+            is_blocking: true,
+            auto_resolution_ms: Some(60_000),
         }
-    );
-}
-
-#[test]
-fn external_agent_capability_failure_kind_uses_stable_wire_names() {
-    assert_eq!(
-        serde_json::to_value(ExternalAgentCapabilityFailureKind::AuthenticationRequired)
-            .expect("failure kind should serialize"),
-        serde_json::json!("authenticationRequired")
-    );
-    assert_eq!(
-        serde_json::to_value(ExternalAgentCapabilityFailureKind::PermissionDenied)
-            .expect("failure kind should serialize"),
-        serde_json::json!("permissionDenied")
-    );
-}
-
-#[test]
-fn external_agent_capabilities_refresh_uses_client_id() {
-    let params: ExternalAgentCapabilitiesReadParams = serde_json::from_value(serde_json::json!({
-        "families": ["antigravity"],
-        "refresh": { "refreshId": "refresh-1" }
-    }))
-    .expect("params should deserialize");
-
-    assert_eq!(params.families, Some(vec!["antigravity".to_string()]));
-    assert_eq!(
-        params.refresh,
-        Some(ExternalAgentCapabilitiesRefreshParams {
-            refresh_id: "refresh-1".to_string(),
-        })
     );
 }

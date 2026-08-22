@@ -365,7 +365,7 @@ async fn responses_lite_exposes_standalone_tools_for_actor_authorized_provider()
             config.model_provider.requires_openai_auth = false;
             config.model_provider.http_headers = Some(HashMap::from([(
                 "x-openai-actor-authorization".to_string(),
-                "test-actor-authorization".to_string(),
+                "test-actor-authorization".into(),
             )]));
         });
     let test = builder.build(&server).await?;
@@ -532,7 +532,6 @@ async fn responses_lite_compact_request_uses_lite_transport_contract() -> Result
     let mut builder = test_codex()
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.use_responses_lite = true;
-            model_info.supports_parallel_tool_calls = true;
         })
         .with_config(|config| {
             let _ = config.features.disable(Feature::RemoteCompactionV2);

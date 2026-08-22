@@ -15,6 +15,7 @@ use crate::session::thread_settings;
 use crate::session::turn_input;
 
 use crate::config::Config;
+use crate::context::NodeReplReviewEvidence;
 use crate::review_prompts::resolve_review_request;
 use crate::session::spawn_review_thread;
 use crate::tasks::CompactTask;
@@ -332,6 +333,16 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .collect::<Vec<_>>();
     sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
         .await;
+    if sess
+        .services
+        .thread_extension_data
+        .remove::<NodeReplReviewEvidence>()
+        .is_some()
+    {
+        sess.guardian_review_session
+            .invalidate_for_node_repl_evidence()
+            .await;
+    }
     sess.services
         .agent_control
         .rollout_budget()
@@ -391,7 +402,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
     }
 }
 
-async fn shutdown_session_runtime(sess: &Arc<Session>) {
+pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
@@ -419,7 +430,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
     crate::hook_runtime::run_session_end_hooks(sess).await;
 }
 
-async fn emit_thread_stop_lifecycle(sess: &Session) {
+pub(super) async fn emit_thread_stop_lifecycle(sess: &Session) {
     for contributor in sess.services.extensions.thread_lifecycle_contributors() {
         contributor
             .on_thread_stop(codex_extension_api::ThreadStopInput {
@@ -674,6 +685,19 @@ pub(super) async fn submission_loop(
                         turn_input::handle_recovery(&sess, thread_settings, sub.id.clone()).await;
                     let _ = reply.send(result);
                     false
+                }
+                Op::SuspendTurnAndShutdown { reply } => {
+                    let result =
+                        super::turn_suspension::suspend_turn_and_shutdown(&sess, sub.id.clone())
+                            .await;
+                    // Exit only after history is durable and its writer has closed; an error
+                    // must leave responsibility for the thread with the current worker.
+                    let should_exit = matches!(
+                        &result,
+                        Ok(codex_protocol::turn_input::SuspendTurnOutcome::Suspended { .. })
+                    );
+                    let _ = reply.send(result);
+                    should_exit
                 }
                 Op::ThreadSettings { thread_settings } => {
                     thread_settings::update(&sess, sub.id.clone(), thread_settings).await;

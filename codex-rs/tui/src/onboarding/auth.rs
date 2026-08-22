@@ -1071,7 +1071,8 @@ mod tests {
                 auth_config.clone(),
                 /*enable_codex_api_key_env*/ false,
             )
-            .await,
+            .await
+            .expect("test cloud config loader"),
             feedback: codex_feedback::CodexFeedback::new(),
             log_db: None,
             state_db: None,

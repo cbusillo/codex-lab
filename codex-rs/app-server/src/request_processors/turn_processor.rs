@@ -16,7 +16,6 @@ use codex_auto_review::ReviewCoordination;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEntry;
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -28,7 +27,7 @@ use codex_skills::system_cache_root_dir;
 use crate::image_url::REMOTE_IMAGE_URL_ERROR;
 use crate::image_url::is_remote_image_url;
 
-const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
+pub(super) const DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR: &str =
     "direct app-server input is not allowed for multi-agent v2 sub-agents";
 
 /// Mirrors the direct-input policy in both request validation and thread capability responses.
@@ -43,7 +42,9 @@ pub(super) fn can_accept_direct_input(
         )
 }
 
-fn validate_user_input_image_urls(input: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
+pub(super) fn validate_user_input_image_urls(
+    input: &[V2UserInput],
+) -> Result<(), JSONRPCErrorError> {
     if input.iter().any(|item| {
         matches!(
             item,
@@ -110,6 +111,7 @@ pub(crate) struct TurnRequestProcessor {
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<Semaphore>,
     skills_watcher: Arc<SkillsWatcher>,
+    turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
 }
 
 fn map_additional_context(
@@ -165,6 +167,7 @@ impl TurnRequestProcessor {
         thread_watch_manager: ThreadWatchManager,
         thread_list_state_permit: Arc<Semaphore>,
         skills_watcher: Arc<SkillsWatcher>,
+        turn_cost_worker: Option<crate::turn_cost_worker::TurnCostWorkerHandle>,
     ) -> Self {
         let agent_runner = AgentRunner::new(Arc::downgrade(&thread_manager));
         Self {
@@ -181,6 +184,7 @@ impl TurnRequestProcessor {
             thread_watch_manager,
             thread_list_state_permit,
             skills_watcher,
+            turn_cost_worker,
         }
     }
 
@@ -794,7 +798,7 @@ impl TurnRequestProcessor {
             .await
     }
 
-    fn input_too_large_error(actual_chars: usize) -> JSONRPCErrorError {
+    pub(super) fn input_too_large_error(actual_chars: usize) -> JSONRPCErrorError {
         let mut error = invalid_params(format!(
             "Input exceeds the maximum length of {MAX_USER_INPUT_TEXT_CHARS} characters."
         ));
@@ -806,7 +810,7 @@ impl TurnRequestProcessor {
         error
     }
 
-    fn validate_v2_input_limit(items: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
+    pub(super) fn validate_v2_input_limit(items: &[V2UserInput]) -> Result<(), JSONRPCErrorError> {
         let actual_chars: usize = items.iter().map(V2UserInput::text_char_count).sum();
         if actual_chars > MAX_USER_INPUT_TEXT_CHARS {
             return Err(Self::input_too_large_error(actual_chars));
@@ -889,14 +893,6 @@ impl TurnRequestProcessor {
                 },
             )
             .await?;
-        let parent_permission_profile_override =
-            thread_settings.permission_profile.clone().or_else(|| {
-                thread_settings
-                    .sandbox_policy
-                    .as_ref()
-                    .map(PermissionProfile::from_legacy_sandbox_policy)
-            });
-
         let submission = thread
             .start_or_steer_turn(
                 TurnInputRequest::new(TurnInput::UserInput {
@@ -930,17 +926,17 @@ impl TurnRequestProcessor {
 
         if turn_has_input && started {
             let config_snapshot = thread.config_snapshot().await;
-            let parent_permission_profile =
-                parent_permission_profile_override.unwrap_or(config_snapshot.permission_profile);
-            codex_memories_write::start_memories_startup_task(
-                Arc::clone(&self.thread_manager),
-                Arc::clone(&self.auth_manager),
-                thread_id,
-                Arc::clone(&thread),
-                thread.config().await,
-                parent_permission_profile,
-                &config_snapshot.session_source,
-            );
+            if config_snapshot.is_primary_environment_configured() {
+                codex_memories_write::start_memories_startup_task(
+                    Arc::clone(&self.thread_manager),
+                    Arc::clone(&self.auth_manager),
+                    thread_id,
+                    Arc::clone(&thread),
+                    thread.config().await,
+                    config_snapshot.permission_profile,
+                    &config_snapshot.session_source,
+                );
+            }
         }
 
         self.outgoing
@@ -1171,6 +1167,8 @@ impl TurnRequestProcessor {
         params: ThreadSettingsUpdateParams,
     ) -> Result<ThreadSettingsUpdateResponse, JSONRPCErrorError> {
         let (_, thread) = self.load_thread(&params.thread_id).await?;
+        self.ensure_direct_input_allowed(request_id, thread.as_ref())
+            .await?;
         let cwd = resolve_request_cwd(params.cwd)?;
         let environments = self
             .build_environment_override(
@@ -1427,6 +1425,36 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         params: ThreadRealtimeStartParams,
     ) -> Result<Option<ThreadRealtimeStartResponse>, JSONRPCErrorError> {
+        let attaches_existing_call = matches!(
+            &params.transport,
+            Some(ThreadRealtimeStartTransport::ExistingCall { .. })
+        );
+        if attaches_existing_call {
+            let unsupported_option = if params.include_startup_context == Some(true) {
+                Some("includeStartupContext")
+            } else if params.prompt.is_some() {
+                Some("prompt")
+            } else if params
+                .initial_items
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+            {
+                Some("initialItems")
+            } else if params.model.is_some() {
+                Some("model")
+            } else if params.voice.is_some() {
+                Some("voice")
+            } else if params.delegation_ack_filler.is_some() {
+                Some("delegationAckFiller")
+            } else {
+                None
+            };
+            if let Some(option) = unsupported_option {
+                return Err(invalid_request(format!(
+                    "existingCall transport does not support {option}"
+                )));
+            }
+        }
         let Some((_, thread)) = self
             .prepare_realtime_conversation_thread(request_id, &params.thread_id)
             .await?
@@ -1449,7 +1477,9 @@ impl TurnRequestProcessor {
                     .codex_response_handoff_channel_prefixes,
                 model: params.model,
                 output_modality: params.output_modality,
-                include_startup_context: params.include_startup_context.unwrap_or(true),
+                include_startup_context: params
+                    .include_startup_context
+                    .unwrap_or(!attaches_existing_call),
                 initial_items: params
                     .initial_items
                     .unwrap_or_default()
@@ -1469,6 +1499,9 @@ impl TurnRequestProcessor {
                     }
                     ThreadRealtimeStartTransport::Webrtc { sdp } => {
                         ConversationStartTransport::Webrtc { sdp }
+                    }
+                    ThreadRealtimeStartTransport::ExistingCall { call_id } => {
+                        ConversationStartTransport::ExistingCall { call_id }
                     }
                 }),
                 version: params.version,
@@ -2109,6 +2142,7 @@ impl TurnRequestProcessor {
             fallback_model_provider: self.config.model_provider_id.clone(),
             codex_home: self.config.codex_home.to_path_buf(),
             skills_watcher: Arc::clone(&self.skills_watcher),
+            turn_cost_worker: self.turn_cost_worker.clone(),
         }
     }
 
