@@ -1,98 +1,119 @@
 import json
-import os
-import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
-from unittest.mock import patch, MagicMock
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from pathlib import Path
+from unittest.mock import patch
 
-import upstream_convergence_report as ucr
+import upstream_convergence_report as report
+
+
+NOW = datetime(2026, 8, 22, 18, 0, tzinfo=timezone.utc)
+
+
+def inspection_report() -> dict[str, object]:
+    return {
+        "refs": {"base": "base-sha", "upstream": "upstream-sha", "local": "local-sha"},
+        "inventory": {
+            "summary": {"conflicts": 2, "residualLocalInfluence": 7},
+            "laneCounts": {"red_manual_review": 1, "green_bulk_adopt": 4},
+        },
+    }
+
 
 class TestUpstreamConvergenceReport(unittest.TestCase):
-    @patch('upstream_convergence_report.run_git')
-    def test_build_report_no_alert(self, mock_git):
-        # mock rev-list and show
-        def mock_git_call(*args):
-            if args[0] == 'rev-list':
-                return '10'
-            if args[0] == 'show':
-                return datetime.now(timezone.utc).isoformat()
-            return ''
-        mock_git.side_effect = mock_git_call
-        
-        report_data = {
-            "refs": {
-                "base": "0000base",
-                "upstream": "0000up",
-                "local": "0000loc"
-            },
-            "inventory": {
-                "summary": {
-                    "conflicts": 2,
-                    "residualLocalInfluence": 1
+    @patch("upstream_convergence_report.run_git")
+    def test_builds_compact_report_without_alerts(self, run_git_mock) -> None:
+        run_git_mock.side_effect = ["10", (NOW - timedelta(hours=12)).isoformat()]
+
+        compact, markdown = report.build_report(
+            inspection_report(),
+            NOW,
+            NOW - timedelta(hours=6),
+            report.DEFAULT_MAX_LAG_COMMITS,
+            report.DEFAULT_MAX_MERGE_BASE_AGE_HOURS,
+            report.DEFAULT_MAX_REPORT_AGE_HOURS,
+        )
+
+        self.assertEqual(
+            compact,
+            {
+                "schemaVersion": 1,
+                "generatedAt": "2026-08-22T18:00:00Z",
+                "refs": {
+                    "base": "base-sha",
+                    "upstream": "upstream-sha",
+                    "local": "local-sha",
                 },
-                "laneCounts": {
-                    "LANE-1": 1
-                }
-            }
-        }
-        
-        now = datetime.now(timezone.utc)
-        text, alert = ucr.build_report(report_data, now)
-        
-        self.assertFalse(alert)
-        self.assertIn("- **Lag**: 10 commits", text)
-        self.assertIn("- **Age**: 0.0 hours", text)
-        self.assertIn("- **Conflicts**: 2", text)
-        self.assertIn("- **Residuals**: 1", text)
-        self.assertIn("- **Lanes**: 1", text)
-        self.assertNotIn("⚠️ **ALERT**", text)
+                "counts": {
+                    "upstreamLagCommits": 10,
+                    "conflicts": 2,
+                    "residualLocalInfluence": 7,
+                    "laneCounts": {
+                        "green_bulk_adopt": 4,
+                        "red_manual_review": 1,
+                    },
+                },
+                "agesHours": {
+                    "mergeBase": 12.0,
+                    "previousSuccessfulReport": 6.0,
+                },
+                "thresholds": {
+                    "maxLagCommits": 50,
+                    "maxMergeBaseAgeHours": 24,
+                    "maxReportAgeHours": 8,
+                },
+                "alerts": [],
+            },
+        )
+        self.assertIn("**Lane counts**", markdown)
 
-    @patch('upstream_convergence_report.run_git')
-    def test_build_report_lag_alert(self, mock_git):
-        def mock_git_call(*args):
-            if args[0] == 'rev-list':
-                return '100' # > 75
-            if args[0] == 'show':
-                return datetime.now(timezone.utc).isoformat()
-            return ''
-        mock_git.side_effect = mock_git_call
-        
-        report_data = {
-            "refs": {
-                "base": "0000base",
-                "upstream": "0000up",
-                "local": "0000loc"
-            }
-        }
-        
-        now = datetime.now(timezone.utc)
-        text, alert = ucr.build_report(report_data, now)
-        self.assertTrue(alert)
-        self.assertIn("exceeds threshold (75 commits)", text)
+    @patch("upstream_convergence_report.run_git")
+    def test_reports_lag_snapshot_and_report_freshness_alerts(self, run_git_mock) -> None:
+        run_git_mock.side_effect = ["51", (NOW - timedelta(hours=25)).isoformat()]
 
-    @patch('upstream_convergence_report.run_git')
-    def test_build_report_stale_alert(self, mock_git):
-        def mock_git_call(*args):
-            if args[0] == 'rev-list':
-                return '10'
-            if args[0] == 'show':
-                return (datetime.now(timezone.utc) - timedelta(hours=80)).isoformat()
-            return ''
-        mock_git.side_effect = mock_git_call
-        
-        report_data = {
-            "refs": {
-                "base": "0000base",
-                "upstream": "0000up",
-                "local": "0000loc"
-            }
-        }
-        
-        now = datetime.now(timezone.utc)
-        text, alert = ucr.build_report(report_data, now)
-        self.assertTrue(alert)
-        self.assertIn("exceeds threshold (72 hours)", text)
+        compact, markdown = report.build_report(
+            inspection_report(),
+            NOW,
+            NOW - timedelta(hours=9),
+            report.DEFAULT_MAX_LAG_COMMITS,
+            report.DEFAULT_MAX_MERGE_BASE_AGE_HOURS,
+            report.DEFAULT_MAX_REPORT_AGE_HOURS,
+        )
 
-if __name__ == '__main__':
+        self.assertEqual(len(compact["alerts"]), 3)
+        self.assertIn("50-commit threshold", markdown)
+        self.assertIn("24-hour threshold", markdown)
+        self.assertIn("8-hour threshold", markdown)
+
+    def test_rejects_missing_refs(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing refs"):
+            report.build_report({}, NOW, None, 50, 24, 8)
+
+    @patch("upstream_convergence_report.run_git")
+    def test_main_writes_compact_artifact(self, run_git_mock) -> None:
+        run_git_mock.side_effect = ["10", (NOW - timedelta(hours=12)).isoformat()]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "report.json"
+            output_path = Path(temp_dir) / "summary.json"
+            report_path.write_text(json.dumps(inspection_report()), encoding="utf-8")
+
+            exit_code = report.main(
+                [
+                    "--report",
+                    str(report_path),
+                    "--output",
+                    str(output_path),
+                    "--previous-success-at",
+                    "2026-08-22T12:00:00Z",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(json.loads(output_path.read_text())["alerts"], [])
+
+
+if __name__ == "__main__":
     unittest.main()

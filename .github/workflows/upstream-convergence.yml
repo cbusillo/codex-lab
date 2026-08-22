@@ -6,12 +6,18 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+
+concurrency:
+  group: upstream-convergence-inspection
+  cancel-in-progress: false
 
 jobs:
   inspect:
     name: Inspect
     runs-on: macos-26
+    timeout-minutes: 20
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,6 +47,32 @@ jobs:
             --local "$LOCAL" \
             --json > report.json
 
+      - name: Find newest successful report
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          UPDATED_AT=$(gh run list \
+            --workflow upstream-convergence.yml \
+            --branch main \
+            --status success \
+            --limit 1 \
+            --json updatedAt \
+            --jq '.[0].updatedAt // ""')
+          echo "updated_at=$UPDATED_AT" >> "$GITHUB_OUTPUT"
+
       - name: Publish compact report
         run: |
-          python3 .github/scripts/upstream_convergence_report.py --report report.json
+          python3 .github/scripts/upstream_convergence_report.py \
+            --report report.json \
+            --output convergence-summary.json \
+            --previous-success-at '${{ steps.previous.outputs.updated_at }}'
+
+      - name: Upload compact report
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-convergence-${{ github.run_id }}
+          path: convergence-summary.json
+          if-no-files-found: error
+          retention-days: 14
