@@ -497,7 +497,7 @@ pub async fn run_main(
         auth_config,
         /*enable_codex_api_key_env*/ false,
     )
-    .await;
+    .await?;
     let run_cli_overrides = cli_kv_overrides.clone();
     let run_loader_overrides = loader_overrides.clone();
     let run_cloud_config_bundle = cloud_config_bundle.clone();
