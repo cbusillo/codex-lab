@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import queue
 import shutil
+import socket
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -271,6 +273,16 @@ class _ResponsesHttpServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, handler_class)
         self.mock = mock
+
+    def handle_error(
+        self,
+        request: socket.socket | tuple[bytes, socket.socket],
+        client_address: tuple[str, int],
+    ) -> None:
+        """Ignore expected client disconnects while preserving other tracebacks."""
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class _ResponsesHandler(BaseHTTPRequestHandler):
