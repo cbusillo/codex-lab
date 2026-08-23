@@ -203,6 +203,46 @@ fn section_budget_override_remains_bounded_by_section_and_total_limits() {
     );
 }
 
+#[test]
+fn generic_sections_keep_the_default_cap() {
+    let fragment = PendingWorldStateFragment::new(
+        "generic",
+        /*state_hash*/ None,
+        MAX_WORLD_STATE_SECTION_BYTES,
+        Box::new(TestFragment("x".repeat(MAX_WORLD_STATE_SECTION_BYTES + 1))),
+    );
+    let budgets = allocate_world_state_budgets(&[fragment]);
+
+    assert_eq!(budgets, vec![MAX_WORLD_STATE_SECTION_BYTES]);
+}
+
+#[test]
+fn elevated_section_cap_does_not_starve_other_sections() {
+    let fragments = (0..MAX_WORLD_STATE_SECTION_COUNT)
+        .map(|index| {
+            PendingWorldStateFragment::new(
+                Box::leak(format!("section_{index}").into_boxed_str()),
+                /*state_hash*/ None,
+                if index == 0 {
+                    crate::config::AGENTS_MD_MAX_BYTES
+                } else {
+                    MAX_WORLD_STATE_SECTION_BYTES
+                },
+                Box::new(TestFragment("x".repeat(crate::config::AGENTS_MD_MAX_BYTES))),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let budgets = allocate_world_state_budgets(&fragments);
+
+    assert_eq!(budgets.iter().sum::<usize>(), MAX_WORLD_STATE_TOTAL_BYTES);
+    assert!(
+        budgets
+            .iter()
+            .all(|budget| *budget >= MIN_WORLD_STATE_SECTION_BYTES)
+    );
+}
+
 struct DuplicateTestSection;
 
 impl WorldStateSection for DuplicateTestSection {

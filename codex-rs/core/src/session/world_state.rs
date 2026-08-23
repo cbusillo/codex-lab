@@ -141,7 +141,10 @@ impl Session {
                 .as_ref()
                 .and_then(|instructions| instructions.end.as_deref()),
         ));
-        world_state.add_section(AgentsMdState::new(step_context.loaded_agents_md.as_deref()));
+        world_state.add_section(AgentsMdState::new(
+            step_context.loaded_agents_md.as_deref(),
+            turn_context.config.project_doc_max_bytes,
+        ));
         let exec_policy = self
             .services
             .exec_policy

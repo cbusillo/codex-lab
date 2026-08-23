@@ -1,6 +1,8 @@
+use super::MIN_WORLD_STATE_SECTION_BYTES;
 use super::PreviousSectionState;
 use super::WorldStateSection;
 use crate::agents_md::LoadedAgentsMd;
+use crate::config::AGENTS_MD_MAX_BYTES;
 use crate::context::ContextualUserFragment;
 use crate::context::UserInstructions;
 use serde::Deserialize;
@@ -11,9 +13,10 @@ const REPLACEMENT_NOTICE: &str =
 const REMOVAL_NOTICE: &str = "The previously provided AGENTS.md instructions no longer apply.";
 
 /// The AGENTS.md instructions currently visible to the model.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct AgentsMdState {
     instructions: Option<UserInstructions>,
+    max_rendered_bytes: usize,
 }
 
 /// Persisted model-visible AGENTS.md state, without filesystem provenance.
@@ -24,10 +27,18 @@ pub(crate) struct AgentsMdSnapshot {
 }
 
 impl AgentsMdState {
-    pub(crate) fn new(loaded: Option<&LoadedAgentsMd>) -> Self {
+    pub(crate) fn new(loaded: Option<&LoadedAgentsMd>, project_doc_max_bytes: usize) -> Self {
         Self {
             instructions: loaded.map(LoadedAgentsMd::contextual_user_fragment),
+            max_rendered_bytes: project_doc_max_bytes
+                .clamp(MIN_WORLD_STATE_SECTION_BYTES, AGENTS_MD_MAX_BYTES),
         }
+    }
+}
+
+impl Default for AgentsMdState {
+    fn default() -> Self {
+        Self::new(/*loaded*/ None, AGENTS_MD_MAX_BYTES)
     }
 }
 
@@ -43,6 +54,10 @@ impl WorldStateSection for AgentsMdState {
             },
             None => AgentsMdSnapshot::default(),
         }
+    }
+
+    fn max_rendered_bytes(&self) -> usize {
+        self.max_rendered_bytes
     }
 
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {

@@ -46,6 +46,8 @@ const NEW_PROJECT_INSTRUCTIONS: &str = "new project instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const PROJECT_INSTRUCTIONS: &str = "project instructions";
 const PROJECT_SEPARATOR: &str = "--- project-doc ---";
+const POST_FORMER_BOUNDARY_INSTRUCTION: &str =
+    "rules after the former world-state boundary still apply";
 const SPAWN_CALL_ID: &str = "spawn-global-instructions-child";
 const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
 const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
@@ -282,9 +284,14 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
                     /*sandbox*/ None,
                 )
                 .await?;
+                let root_doc = format!(
+                    "root doc\n{}\n{POST_FORMER_BOUNDARY_INSTRUCTION}\n{}",
+                    "a".repeat(12 * 1024),
+                    "b".repeat(12 * 1024),
+                );
                 fs.write_file(
                     &root_agents_uri,
-                    b"root doc".to_vec(),
+                    root_doc.into_bytes(),
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -311,10 +318,14 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
     let child_pos = instructions
         .find("child doc")
         .expect("expected child doc in AGENTS instructions");
+    let post_boundary_pos = instructions
+        .find(POST_FORMER_BOUNDARY_INSTRUCTION)
+        .expect("expected instruction after former 9 KiB boundary");
     assert!(
-        root_pos < child_pos,
-        "expected root doc before child doc: {instructions}"
+        root_pos < post_boundary_pos && post_boundary_pos < child_pos,
+        "expected root instructions before nested instructions: {instructions}"
     );
+    assert!(!instructions.contains("world-state content truncated"));
 
     Ok(())
 }
