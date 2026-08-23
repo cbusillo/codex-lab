@@ -95,7 +95,13 @@ class TestUpstreamConvergenceReport(unittest.TestCase):
     @patch("upstream_convergence_report.run_git")
     def test_main_writes_compact_artifact(self, run_git_mock) -> None:
         run_git_mock.side_effect = ["10", (NOW - timedelta(hours=12)).isoformat()]
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with (
+            patch(
+                "upstream_convergence_report.datetime", wraps=datetime
+            ) as datetime_mock,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            datetime_mock.now.return_value = NOW
             report_path = Path(temp_dir) / "report.json"
             output_path = Path(temp_dir) / "summary.json"
             report_path.write_text(json.dumps(inspection_report()), encoding="utf-8")
