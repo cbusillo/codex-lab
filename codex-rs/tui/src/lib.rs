@@ -1254,23 +1254,29 @@ pub async fn run_main(
         }
     }
 
-    if !app_server_target.uses_remote_workspace() {
-        let auth_route_config = config.auth_route_config();
+    if let Err(err) = enforce_startup_login_restrictions(
+        &app_server_target,
+        workload_identity_selected,
+        || async {
+            enforce_login_restrictions(&AuthConfig {
+                codex_home: config.auth_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                keyring_backend_kind: config.auth_keyring_backend_kind(),
+                forced_login_method: config.forced_login_method,
+                forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+                chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
+                managed_auth_policy: config
+                    .config_layer_stack
+                    .requirements()
+                    .managed_auth_policy(),
+                auth_route_config: config.auth_route_config(),
+            })
+            .await
+        },
+    )
+    .await
+    {
         #[allow(clippy::print_stderr)]
-        if let Err(err) = enforce_login_restrictions(&AuthConfig {
-            codex_home: config.auth_home.to_path_buf(),
-            auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
-            keyring_backend_kind: config.auth_keyring_backend_kind(),
-            forced_login_method: config.forced_login_method,
-            forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
-            chatgpt_base_url: Some(config.chatgpt_base_url.clone()),
-            managed_auth_policy: config
-                .config_layer_stack
-                .requirements()
-                .managed_auth_policy(),
-            auth_route_config,
-        })
-        .await
         {
             eprintln!("{err}");
             std::process::exit(1);
@@ -1390,6 +1396,7 @@ async fn run_ratatui_app(
     product_identity: codex_version::ProductIdentity,
 ) -> color_eyre::Result<AppExitInfo> {
     let uses_remote_workspace = app_server_target.uses_remote_workspace();
+    let workload_identity_selected = is_workload_identity_selected();
     color_eyre::install()?;
 
     tooltips::announcement::prewarm(initial_config.http_client_factory());
@@ -1480,14 +1487,17 @@ async fn run_ratatui_app(
         !uses_remote_workspace && should_show_trust_screen(&initial_config);
     #[cfg(target_os = "windows")]
     let mut trust_decision_was_made = false;
-    let login_status = if initial_config.model_provider.requires_openai_auth {
-        let Some(app_server) = app_server.as_mut() else {
-            unreachable!("app server should exist when auth is required");
-        };
-        get_login_status(app_server, &initial_config).await?
-    } else {
-        LoginStatus::NotAuthenticated
-    };
+    let login_status = startup_login_status(
+        workload_identity_selected,
+        initial_config.model_provider.requires_openai_auth,
+        || async {
+            let Some(app_server) = app_server.as_mut() else {
+                unreachable!("app server should exist when auth is required");
+            };
+            get_login_status(app_server, &initial_config).await
+        },
+    )
+    .await?;
     let should_show_onboarding =
         should_show_onboarding(login_status, &initial_config, should_show_trust_screen_flag);
 
@@ -1983,6 +1993,40 @@ async fn get_login_status(
     })
 }
 
+async fn startup_login_status<F, Fut>(
+    workload_identity_selected: bool,
+    requires_openai_auth: bool,
+    detect_account: F,
+) -> color_eyre::Result<LoginStatus>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = color_eyre::Result<LoginStatus>>,
+{
+    if workload_identity_selected {
+        Ok(LoginStatus::AuthMode(AuthMode::Chatgpt))
+    } else if requires_openai_auth {
+        detect_account().await
+    } else {
+        Ok(LoginStatus::NotAuthenticated)
+    }
+}
+
+async fn enforce_startup_login_restrictions<F, Fut>(
+    app_server_target: &AppServerTarget,
+    workload_identity_selected: bool,
+    enforce: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
+{
+    if app_server_target.uses_remote_workspace() || workload_identity_selected {
+        Ok(())
+    } else {
+        enforce().await
+    }
+}
+
 async fn load_config_or_exit(
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
@@ -2120,6 +2164,87 @@ mod tests {
             .codex_home(temp_dir.path().to_path_buf())
             .build()
             .await
+    }
+
+    #[tokio::test]
+    async fn workload_identity_skips_account_detection_and_login_onboarding()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let config = build_config(&temp_dir).await?;
+        let account_detection_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts = Arc::clone(&account_detection_attempts);
+
+        let login_status = startup_login_status(
+            /*workload_identity_selected*/ true,
+            /*requires_openai_auth*/ true,
+            || async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(LoginStatus::NotAuthenticated)
+            },
+        )
+        .await?;
+
+        assert_eq!(login_status, LoginStatus::AuthMode(AuthMode::Chatgpt));
+        assert_eq!(
+            account_detection_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(!should_show_login_screen(login_status, &config));
+        assert!(!should_show_onboarding(
+            login_status,
+            &config,
+            /*show_trust_screen*/ false,
+        ));
+        assert!(should_show_onboarding(
+            login_status,
+            &config,
+            /*show_trust_screen*/ true,
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_login_restrictions_are_isolated_from_workload_identity_and_remote_sessions()
+    -> color_eyre::Result<()> {
+        let enforcement_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let embedded_target = AppServerTarget::Embedded;
+        let remote_target = AppServerTarget::Remote {
+            endpoint: RemoteAppServerEndpoint::WebSocket {
+                websocket_url: "ws://127.0.0.1:4500/".to_string(),
+                auth_token: None,
+            },
+        };
+
+        for (target, workload_identity_selected) in
+            [(&embedded_target, true), (&remote_target, false)]
+        {
+            let attempts = Arc::clone(&enforcement_attempts);
+            enforce_startup_login_restrictions(target, workload_identity_selected, || async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            })
+            .await?;
+        }
+        assert_eq!(
+            enforcement_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+
+        let attempts = Arc::clone(&enforcement_attempts);
+        enforce_startup_login_restrictions(
+            &embedded_target,
+            /*workload_identity_selected*/ false,
+            || async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .await?;
+        assert_eq!(
+            enforcement_attempts.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        Ok(())
     }
 
     fn write_session_rollout(
