@@ -2,23 +2,33 @@ use super::super::PreviousSectionState;
 use super::super::WorldState;
 use super::super::test_support::render_section_cases;
 use super::*;
+use codex_utils_output_truncation::approx_token_count;
 use pretty_assertions::assert_eq;
 
-const TEST_AGENTS_MD_SECTION_BYTES: usize = 2 * 1024;
-
-fn state_for_rendered_byte_count(rendered_byte_count: usize) -> AgentsMdState {
+fn state_for_rendered_byte_count_with_markers(
+    rendered_byte_count: usize,
+    head: &str,
+    tail: &str,
+) -> AgentsMdState {
     let probe = LoadedAgentsMd::from_text_for_testing("x");
-    let probe_state = AgentsMdState::new(Some(&probe), TEST_AGENTS_MD_SECTION_BYTES);
+    let probe_state = AgentsMdState::new(Some(&probe));
     let envelope_byte_count = probe_state
         .render_diff(PreviousSectionState::Absent)
         .expect("probe instructions should render")
         .render()
         .len()
         .saturating_sub(1);
-    let loaded = LoadedAgentsMd::from_text_for_testing(
-        "x".repeat(rendered_byte_count.saturating_sub(envelope_byte_count)),
-    );
-    AgentsMdState::new(Some(&loaded), TEST_AGENTS_MD_SECTION_BYTES)
+    let instruction_byte_count = rendered_byte_count.saturating_sub(envelope_byte_count);
+    assert!(head.len().saturating_add(tail.len()) <= instruction_byte_count);
+    let loaded = LoadedAgentsMd::from_text_for_testing(format!(
+        "{head}{}{tail}",
+        "x".repeat(
+            instruction_byte_count
+                .saturating_sub(head.len())
+                .saturating_sub(tail.len())
+        )
+    ));
+    AgentsMdState::new(Some(&loaded))
 }
 
 fn render_full(state: AgentsMdState) -> String {
@@ -40,11 +50,11 @@ fn snapshots() {
 
     let empty = AgentsMdState::default();
     let project_formatter = LoadedAgentsMd::from_text_for_testing("use the project formatter");
-    let project_formatter = AgentsMdState::new(Some(&project_formatter), AGENTS_MD_MAX_BYTES);
+    let project_formatter = AgentsMdState::new(Some(&project_formatter));
     let old = LoadedAgentsMd::from_text_for_testing("old instructions");
-    let old = AgentsMdState::new(Some(&old), AGENTS_MD_MAX_BYTES);
+    let old = AgentsMdState::new(Some(&old));
     let new = LoadedAgentsMd::from_text_for_testing("new instructions");
-    let new = AgentsMdState::new(Some(&new), AGENTS_MD_MAX_BYTES);
+    let new = AgentsMdState::new(Some(&new));
 
     insta::assert_snapshot!(render_section_cases(&[
         (Absent, Absent),
@@ -61,7 +71,7 @@ fn snapshots() {
 #[test]
 fn retained_matcher_recognizes_rendered_agents_md() {
     let loaded = LoadedAgentsMd::from_text_for_testing("use the project formatter");
-    let state = AgentsMdState::new(Some(&loaded), AGENTS_MD_MAX_BYTES);
+    let state = AgentsMdState::new(Some(&loaded));
     let fragment = state
         .render_diff(PreviousSectionState::Absent)
         .expect("AGENTS.md state should render");
@@ -74,26 +84,37 @@ fn retained_matcher_recognizes_rendered_agents_md() {
 }
 
 #[test]
-fn configured_budget_preserves_exact_fit_and_bounds_over_cap() {
-    let exact_fit = render_full(state_for_rendered_byte_count(TEST_AGENTS_MD_SECTION_BYTES));
-    let over_cap = render_full(state_for_rendered_byte_count(
-        TEST_AGENTS_MD_SECTION_BYTES + 1,
+fn rendered_budget_preserves_exact_fit_and_structurally_truncates_over_cap() {
+    let head = "agents prefix survives\n";
+    let tail = "\nagents suffix survives";
+    let exact_fit = render_full(state_for_rendered_byte_count_with_markers(
+        AGENTS_MD_RENDERED_MAX_BYTES,
+        head,
+        tail,
+    ));
+    let over_cap = render_full(state_for_rendered_byte_count_with_markers(
+        AGENTS_MD_RENDERED_MAX_BYTES + 1,
+        head,
+        tail,
     ));
 
-    assert_eq!(exact_fit.len(), TEST_AGENTS_MD_SECTION_BYTES);
+    assert_eq!(exact_fit.len(), AGENTS_MD_RENDERED_MAX_BYTES);
     assert!(!exact_fit.contains("world-state content truncated"));
-    assert_eq!(over_cap.len(), TEST_AGENTS_MD_SECTION_BYTES);
+    assert!(exact_fit.contains(head));
+    assert!(exact_fit.contains(tail));
+    assert_eq!(over_cap.len(), AGENTS_MD_RENDERED_MAX_BYTES);
     assert!(over_cap.contains("<bounded_world_state_section "));
     assert!(over_cap.contains("world-state content truncated"));
+    assert!(over_cap.contains(head));
+    assert!(over_cap.contains(tail));
+    assert!(over_cap.starts_with("# AGENTS.md instructions"));
+    assert!(over_cap.ends_with("</INSTRUCTIONS>"));
 }
 
 #[test]
-fn configured_budget_is_clamped_to_the_dedicated_agents_md_cap() {
-    let loaded = LoadedAgentsMd::from_text_for_testing("x".repeat(AGENTS_MD_MAX_BYTES * 2));
-    let state = AgentsMdState::new(Some(&loaded), AGENTS_MD_MAX_BYTES * 2);
+fn rendered_budget_stays_below_context_item_token_limit() {
+    let estimated_tokens = approx_token_count(&"x".repeat(AGENTS_MD_RENDERED_MAX_BYTES));
 
-    assert_eq!(state.max_rendered_bytes(), AGENTS_MD_MAX_BYTES);
-    let rendered = render_full(state);
-    assert_eq!(rendered.len(), AGENTS_MD_MAX_BYTES);
-    assert!(rendered.contains("world-state content truncated"));
+    assert_eq!(estimated_tokens, 8_192);
+    assert!(estimated_tokens <= 10_000);
 }

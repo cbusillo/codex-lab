@@ -46,8 +46,13 @@ const NEW_PROJECT_INSTRUCTIONS: &str = "new project instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const PROJECT_INSTRUCTIONS: &str = "project instructions";
 const PROJECT_SEPARATOR: &str = "--- project-doc ---";
+// Integration visibility for the production cap; the unit token-estimator guard prevents this
+// expected boundary from drifting above the repository's 10,000-token contextual-item limit.
+const EXPECTED_AGENTS_MD_RENDERED_MAX_BYTES: usize = 32 * 1024;
+const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024;
 const POST_FORMER_BOUNDARY_INSTRUCTION: &str =
     "rules after the former world-state boundary still apply";
+const NESTED_INSTRUCTION_TAIL: &str = "nested instruction tail survives rendering";
 const SPAWN_CALL_ID: &str = "spawn-global-instructions-child";
 const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
 const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
@@ -88,6 +93,12 @@ fn write_global_file(
     let path = home.path().join(filename);
     std::fs::write(&path, contents)?;
     Ok(path.abs())
+}
+
+fn fixed_size_instructions(byte_count: usize, head: &str, tail: &str) -> String {
+    let fixed_byte_count = head.len().saturating_add(tail.len());
+    assert!(fixed_byte_count <= byte_count);
+    format!("{head}{}{tail}", "x".repeat(byte_count - fixed_byte_count))
 }
 
 fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
@@ -285,7 +296,7 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
                 )
                 .await?;
                 let root_doc = format!(
-                    "root doc\n{}\n{POST_FORMER_BOUNDARY_INSTRUCTION}\n{}",
+                    "root doc\n{}\n{}\n{POST_FORMER_BOUNDARY_INSTRUCTION}",
                     "a".repeat(12 * 1024),
                     "b".repeat(12 * 1024),
                 );
@@ -303,7 +314,7 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
                 .await?;
                 fs.write_file(
                     &nested_agents_uri,
-                    b"child doc".to_vec(),
+                    format!("child doc\n{NESTED_INSTRUCTION_TAIL}").into_bytes(),
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -321,11 +332,236 @@ async fn agents_docs_are_concatenated_from_project_root_to_cwd() -> Result<()> {
     let post_boundary_pos = instructions
         .find(POST_FORMER_BOUNDARY_INSTRUCTION)
         .expect("expected instruction after former 9 KiB boundary");
+    let nested_tail_pos = instructions
+        .find(NESTED_INSTRUCTION_TAIL)
+        .expect("expected nested instruction tail");
     assert!(
-        root_pos < post_boundary_pos && post_boundary_pos < child_pos,
-        "expected root instructions before nested instructions: {instructions}"
+        root_pos < post_boundary_pos
+            && post_boundary_pos < child_pos
+            && child_pos < nested_tail_pos,
+        "expected root, post-boundary, nested, and nested-tail ordering; positions: root={root_pos}, post_boundary={post_boundary_pos}, child={child_pos}, nested_tail={nested_tail_pos}, rendered_bytes={}",
+        instructions.len(),
+    );
+    let expected_suffix = format!("{NESTED_INSTRUCTION_TAIL}\n</INSTRUCTIONS>");
+    let observed_tail = instructions
+        .chars()
+        .rev()
+        .take(512)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    assert!(
+        instructions.ends_with(&expected_suffix),
+        "expected rendered AGENTS.md tail {expected_suffix:?}; observed tail: {observed_tail:?}"
+    );
+    assert!(
+        !instructions.contains("world-state content truncated"),
+        "expected post-boundary and nested tail to render without truncation; observed tail: {observed_tail:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_project_budget_preserves_long_global_instructions() -> Result<()> {
+    let home = Arc::new(TempDir::new()?);
+    let global_instructions = fixed_size_instructions(
+        20 * 1024,
+        "global instruction head\n",
+        "\nglobal instruction tail",
+    );
+    write_global_file(home.as_ref(), GLOBAL_AGENTS_FILENAME, &global_instructions)?;
+
+    let instructions = agents_instructions(
+        test_codex()
+            .with_home(home)
+            .with_config(|config| config.project_doc_max_bytes = 0),
+    )
+    .await?;
+
+    assert_eq!(
+        instructions,
+        expected_provider_only_instruction_fragment(&global_instructions)
     );
     assert!(!instructions.contains("world-state content truncated"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn combined_global_and_project_instructions_render_in_order_below_the_cap() -> Result<()> {
+    let home = Arc::new(TempDir::new()?);
+    let global_instructions =
+        fixed_size_instructions(4 * 1024, "combined global head\n", "\ncombined global tail");
+    let project_instructions = fixed_size_instructions(
+        20 * 1024,
+        "combined project head\n",
+        "\ncombined project tail",
+    );
+    write_global_file(home.as_ref(), GLOBAL_AGENTS_FILENAME, &global_instructions)?;
+    let project_instructions_for_setup = project_instructions.clone();
+    let instructions = agents_instructions(test_codex().with_home(home).with_workspace_setup(
+        move |cwd, fs| async move {
+            let agents_md_uri = PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?;
+            fs.write_file(
+                &agents_md_uri,
+                project_instructions_for_setup.into_bytes(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        },
+    ))
+    .await?;
+
+    let global_position = instructions
+        .find("combined global head")
+        .expect("global head");
+    let separator_position = instructions
+        .find(PROJECT_SEPARATOR)
+        .expect("project separator");
+    let project_position = instructions
+        .find("combined project head")
+        .expect("project head");
+    assert!(global_position < separator_position && separator_position < project_position);
+    assert!(instructions.contains("combined project tail"));
+    assert!(!instructions.contains("world-state content truncated"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn combined_global_and_project_instructions_preserve_ends_above_the_cap() -> Result<()> {
+    let home = Arc::new(TempDir::new()?);
+    let global_instructions = fixed_size_instructions(
+        20 * 1024,
+        "oversized combined global head\n",
+        "\noversized combined global tail",
+    );
+    let project_instructions = fixed_size_instructions(
+        20 * 1024,
+        "oversized combined project head\n",
+        "\noversized combined project tail",
+    );
+    write_global_file(home.as_ref(), GLOBAL_AGENTS_FILENAME, &global_instructions)?;
+    let project_instructions_for_setup = project_instructions.clone();
+    let instructions = agents_instructions(test_codex().with_home(home).with_workspace_setup(
+        move |cwd, fs| async move {
+            let agents_md_uri = PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?;
+            fs.write_file(
+                &agents_md_uri,
+                project_instructions_for_setup.into_bytes(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        },
+    ))
+    .await?;
+
+    assert_eq!(instructions.len(), EXPECTED_AGENTS_MD_RENDERED_MAX_BYTES);
+    assert!(instructions.contains("<bounded_world_state_section "));
+    assert!(instructions.contains("world-state content truncated"));
+    assert!(instructions.contains("oversized combined global head"));
+    assert!(instructions.contains("oversized combined project tail"));
+    let global_position = instructions
+        .find("oversized combined global head")
+        .expect("global head");
+    let project_tail_position = instructions
+        .find("oversized combined project tail")
+        .expect("project tail");
+    assert!(global_position < project_tail_position);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exact_project_budget_is_structurally_middle_truncated() -> Result<()> {
+    let project_instructions = fixed_size_instructions(
+        PROJECT_DOC_MAX_BYTES,
+        "project instruction head\n",
+        "\nproject instruction tail",
+    );
+    let project_instructions_for_setup = project_instructions.clone();
+    let instructions = agents_instructions(test_codex().with_workspace_setup(
+        move |cwd, fs| async move {
+            let agents_md_uri = PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?;
+            fs.write_file(
+                &agents_md_uri,
+                project_instructions_for_setup.into_bytes(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        },
+    ))
+    .await?;
+
+    assert_eq!(project_instructions.len(), PROJECT_DOC_MAX_BYTES);
+    assert_eq!(instructions.len(), EXPECTED_AGENTS_MD_RENDERED_MAX_BYTES);
+    assert!(instructions.contains("project instruction head"));
+    assert!(instructions.contains("project instruction tail"));
+    assert!(instructions.contains("<bounded_world_state_section "));
+    assert!(instructions.contains("world-state content truncated"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn comfortably_near_cap_project_budget_renders_without_truncation() -> Result<()> {
+    let project_instructions = fixed_size_instructions(
+        PROJECT_DOC_MAX_BYTES - 2 * 1024,
+        "near-cap project instruction head\n",
+        "\nnear-cap project instruction tail",
+    );
+    let project_instructions_for_setup = project_instructions.clone();
+    let instructions = agents_instructions(test_codex().with_workspace_setup(
+        move |cwd, fs| async move {
+            let agents_md_uri = PathUri::from_host_native_path(cwd.join(GLOBAL_AGENTS_FILENAME))?;
+            fs.write_file(
+                &agents_md_uri,
+                project_instructions_for_setup.into_bytes(),
+                /*sandbox*/ None,
+            )
+            .await?;
+            Ok(())
+        },
+    ))
+    .await?;
+
+    assert!(instructions.contains(&project_instructions));
+    assert!(instructions.len() < EXPECTED_AGENTS_MD_RENDERED_MAX_BYTES);
+    assert!(!instructions.contains("world-state content truncated"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_global_instructions_are_structurally_middle_truncated() -> Result<()> {
+    let home = Arc::new(TempDir::new()?);
+    let global_instructions = fixed_size_instructions(
+        64 * 1024,
+        "oversized global head\n",
+        "\noversized global tail",
+    );
+    write_global_file(home.as_ref(), GLOBAL_AGENTS_FILENAME, global_instructions)?;
+
+    let instructions = agents_instructions(
+        test_codex()
+            .with_home(home)
+            .with_config(|config| config.project_doc_max_bytes = 0),
+    )
+    .await?;
+
+    assert_eq!(instructions.len(), EXPECTED_AGENTS_MD_RENDERED_MAX_BYTES);
+    assert!(instructions.starts_with("# AGENTS.md instructions"));
+    assert!(instructions.ends_with("</INSTRUCTIONS>"));
+    assert!(instructions.contains("<bounded_world_state_section "));
+    assert!(instructions.contains("</bounded_world_state_section>"));
+    assert!(instructions.contains("world-state content truncated"));
+    assert!(instructions.contains("oversized global head"));
+    assert!(instructions.contains("oversized global tail"));
 
     Ok(())
 }
@@ -942,6 +1178,84 @@ async fn cold_resume_invalidates_deleted_legacy_agents_md_once() -> Result<()> {
         vec![initial.clone(), removal.clone()]
     );
     assert_eq!(instruction_fragments(&requests[2]), vec![initial, removal]);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_resume_unknown_state_replaces_agents_md_with_notice() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("initial-replacement-response"),
+                responses::ev_completed("initial-replacement-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("resumed-replacement-response"),
+                responses::ev_completed("resumed-replacement-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("second-resumed-replacement-response"),
+                responses::ev_completed("second-resumed-replacement-response"),
+            ]),
+        ],
+    )
+    .await;
+    let home = Arc::new(TempDir::new()?);
+    write_global_file(
+        home.as_ref(),
+        GLOBAL_AGENTS_FILENAME,
+        OLD_GLOBAL_INSTRUCTIONS,
+    )?;
+    let mut initial_builder = test_codex().with_home(Arc::clone(&home));
+    let initial = initial_builder.build(&server).await?;
+    initial
+        .submit_turn("persist instructions before replacement")
+        .await?;
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    initial.codex.shutdown_and_wait().await?;
+    remove_agents_md_world_state_section(&rollout_path)?;
+
+    let replacement_instructions = fixed_size_instructions(
+        4 * 1024,
+        "replacement instruction head\n",
+        "\nreplacement instruction tail",
+    );
+    write_global_file(
+        home.as_ref(),
+        GLOBAL_AGENTS_OVERRIDE_FILENAME,
+        &replacement_instructions,
+    )?;
+    let mut resume_builder = test_codex().with_home(Arc::clone(&home));
+    let resumed = resume_builder
+        .resume(&server, Arc::clone(&home), rollout_path)
+        .await?;
+
+    resumed
+        .submit_turn("continue with replaced instructions")
+        .await?;
+    resumed
+        .submit_turn("continue with replacement again")
+        .await?;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_instruction_replacement_once(
+        &requests,
+        OLD_GLOBAL_INSTRUCTIONS,
+        &replacement_instructions,
+    );
+    assert!(
+        instruction_fragments(&requests[1])
+            .iter()
+            .all(|fragment| !fragment.contains("world-state content truncated"))
+    );
 
     Ok(())
 }
