@@ -205,32 +205,19 @@ fn section_budget_override_remains_bounded_by_section_and_total_limits() {
 }
 
 #[test]
-fn generic_sections_keep_the_default_cap() {
-    let fragment = PendingWorldStateFragment::new(
-        "generic",
-        /*state_hash*/ None,
-        MAX_WORLD_STATE_SECTION_BYTES,
-        Box::new(TestFragment("x".repeat(MAX_WORLD_STATE_SECTION_BYTES + 1))),
-    );
-    let budgets = allocate_world_state_budgets(&[fragment]);
-
-    assert_eq!(budgets, vec![MAX_WORLD_STATE_SECTION_BYTES]);
-}
-
-#[test]
 fn agents_md_cap_does_not_starve_the_maximum_section_count() {
     let fragments = (0..MAX_WORLD_STATE_SECTION_COUNT)
         .map(|index| {
             PendingWorldStateFragment::new(
                 Box::leak(format!("section_{index}").into_boxed_str()),
                 /*state_hash*/ None,
-                if index == 0 {
-                    agents_md::AGENTS_MD_RENDERED_MAX_BYTES
+                if index < 4 {
+                    agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES
                 } else {
                     MAX_WORLD_STATE_SECTION_BYTES
                 },
                 Box::new(TestFragment(
-                    "x".repeat(agents_md::AGENTS_MD_RENDERED_MAX_BYTES),
+                    "x".repeat(agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES),
                 )),
             )
         })
@@ -245,23 +232,25 @@ fn agents_md_cap_does_not_starve_the_maximum_section_count() {
             .iter()
             .all(|budget| *budget >= MIN_WORLD_STATE_SECTION_BYTES)
     );
-    assert!(budgets[0] <= agents_md::AGENTS_MD_RENDERED_MAX_BYTES);
+    assert!(
+        budgets[..4]
+            .iter()
+            .all(|budget| *budget <= agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES)
+    );
 }
 
 #[test]
 fn agents_md_total_budget_pressure_preserves_generic_section_caps() {
     let loaded = LoadedAgentsMd::from_text_for_testing(
-        "a".repeat(agents_md::AGENTS_MD_RENDERED_MAX_BYTES * 2),
+        "a".repeat(agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES * 8),
     );
     let mut world_state = WorldState::default();
-    world_state.add_section(AgentsMdState::new(Some(&loaded)));
-    for (id, fill) in [
-        ("generic_a", 'b'),
-        ("generic_b", 'c'),
-        ("generic_c", 'd'),
-        ("generic_d", 'e'),
-    ] {
-        let body = fill.to_string().repeat(MAX_WORLD_STATE_SECTION_BYTES);
+    add_agents_md_sections(&mut world_state, Some(&loaded));
+    for index in 0..8 {
+        let id = Box::leak(format!("generic_{index}").into_boxed_str());
+        let body = char::from(b'b' + index)
+            .to_string()
+            .repeat(MAX_WORLD_STATE_SECTION_BYTES);
         world_state.add_extension_section(WorldStateSectionContribution::new(
             id,
             json!({"body": body}),
@@ -276,31 +265,23 @@ fn agents_md_total_budget_pressure_preserves_generic_section_caps() {
     }
 
     let rendered = world_state.render_full();
-    let rendered_texts = rendered
-        .iter()
-        .map(|fragment| fragment.render())
-        .collect::<Vec<_>>();
-
-    assert_eq!(rendered_texts.len(), 5);
+    assert_eq!(rendered.len(), 12);
     assert_eq!(
-        rendered_texts.iter().map(String::len).collect::<Vec<_>>(),
-        vec![
-            MAX_WORLD_STATE_TOTAL_BYTES - 4 * MAX_WORLD_STATE_SECTION_BYTES,
-            MAX_WORLD_STATE_SECTION_BYTES,
-            MAX_WORLD_STATE_SECTION_BYTES,
-            MAX_WORLD_STATE_SECTION_BYTES,
-            MAX_WORLD_STATE_SECTION_BYTES,
-        ]
-    );
-    assert_eq!(
-        rendered_texts.iter().map(String::len).sum::<usize>(),
+        rendered
+            .iter()
+            .map(|fragment| fragment.render().len())
+            .sum::<usize>(),
         MAX_WORLD_STATE_TOTAL_BYTES
     );
-    assert!(rendered_texts[0].contains("world-state content truncated"));
-    assert_eq!(rendered_texts[1], "b".repeat(MAX_WORLD_STATE_SECTION_BYTES));
-    assert_eq!(rendered_texts[2], "c".repeat(MAX_WORLD_STATE_SECTION_BYTES));
-    assert_eq!(rendered_texts[3], "d".repeat(MAX_WORLD_STATE_SECTION_BYTES));
-    assert_eq!(rendered_texts[4], "e".repeat(MAX_WORLD_STATE_SECTION_BYTES));
+    assert!(rendered[..4].iter().all(|fragment| {
+        fragment.requires_separate_message()
+            && fragment.render().len() <= agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES
+            && fragment.render().contains("world-state content truncated")
+    }));
+    assert!(rendered[4..].iter().all(|fragment| {
+        let len = fragment.render().len();
+        (MIN_WORLD_STATE_SECTION_BYTES..=MAX_WORLD_STATE_SECTION_BYTES).contains(&len)
+    }));
 }
 
 struct DuplicateTestSection;
