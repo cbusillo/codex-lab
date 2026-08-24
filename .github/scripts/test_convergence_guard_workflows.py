@@ -22,6 +22,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 LINTED_WORKFLOWS = (
     WORKFLOWS / "repo-checks.yml",
     WORKFLOWS / "exec-harness.yml",
+    WORKFLOWS / "upstream-convergence.yml",
 )
 LINTED_SHELL = (
     ROOT / "scripts" / "local" / "cleanup-space.sh",
@@ -173,6 +174,76 @@ class RepoCheckWiringTest(unittest.TestCase):
             "python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'",
             contents,
         )
+
+
+class UpstreamConvergenceWorkflowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.contents = (WORKFLOWS / "upstream-convergence.yml").read_text(
+            encoding="utf-8"
+        )
+
+    def step(self, name: str) -> str:
+        match = re.search(
+            rf"^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - name: |\Z)",
+            self.contents,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(match)
+        return match.group("body")
+
+    def test_reports_are_written_outside_the_checkout(self) -> None:
+        self.assertIn('report_dir="$RUNNER_TEMP/upstream-convergence"', self.contents)
+        self.assertIn('--json > "$raw_report"', self.contents)
+        self.assertIn(
+            '--output "$RUNNER_TEMP/upstream-convergence/convergence-summary.json"',
+            self.contents,
+        )
+        self.assertNotIn("> report.json", self.contents)
+        self.assertNotIn("path: convergence-summary.json", self.contents)
+
+    def test_inspection_evidence_is_preserved_before_failure(self) -> None:
+        self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', self.contents)
+        inspection = self.step("Run convergence inspection")
+        diagnostics = self.step("Print bounded inspection diagnostics")
+        clean_check = self.step("Verify inspection leaves checkout clean")
+        raw_upload = self.step("Upload raw inspection report")
+        failure = self.step("Fail when inspection fails")
+
+        self.assertIn("id: inspection", inspection)
+        self.assertIn("set -euo pipefail", inspection)
+        self.assertIn("if not isinstance(report, dict):", inspection)
+        self.assertIn('echo "status=$status" >> "$GITHUB_OUTPUT"', inspection)
+        for step in (diagnostics, clean_check, raw_upload, failure):
+            self.assertIn("always() && !cancelled()", step)
+            self.assertIn("steps.inspection.outcome != 'skipped'", step)
+        self.assertIn('test -f "$RUNNER_TEMP/upstream-convergence/report.json"', diagnostics)
+        self.assertIn('cat "$RUNNER_TEMP/upstream-convergence/diagnostics.json"', diagnostics)
+        self.assertIn("if-no-files-found: error", raw_upload)
+        self.assertIn(
+            "steps.inspection.outputs.status != '0'", failure
+        )
+        self.assertNotIn("continue-on-error: true", self.contents)
+
+    def test_compact_report_only_runs_after_success(self) -> None:
+        publish = self.step("Publish compact report")
+        upload = self.step("Upload compact report")
+
+        for step in (self.step("Find newest successful report"), publish, upload):
+            self.assertIn(
+                "success() && steps.inspection.outputs.status == '0'", step
+            )
+        self.assertIn(
+            'PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}', publish
+        )
+        self.assertIn('--previous-success-at "$PREVIOUS_SUCCESS_AT"', publish)
+        self.assertIn("name: upstream-convergence-${{ github.run_id }}", upload)
+        self.assertIn(
+            "path: ${{ runner.temp }}/upstream-convergence/convergence-summary.json",
+            upload,
+        )
+
+    def test_permissions_remain_read_only(self) -> None:
+        self.assertIn("permissions:\n  actions: read\n  contents: read", self.contents)
 
 
 if __name__ == "__main__":
