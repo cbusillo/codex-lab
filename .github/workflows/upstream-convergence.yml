@@ -18,6 +18,8 @@ jobs:
     name: Inspect
     runs-on: macos-26
     timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,8 +33,13 @@ jobs:
           git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main
 
       - name: Run convergence inspection
+        id: inspection
         run: |
           set -euo pipefail
+          report_dir="$RUNNER_TEMP/upstream-convergence"
+          raw_report="$report_dir/report.json"
+          diagnostics="$report_dir/diagnostics.json"
+          mkdir -p "$report_dir"
           BASE=$(git merge-base HEAD refs/remotes/openai/main)
           UPSTREAM=$(git rev-parse refs/remotes/openai/main)
           LOCAL=$(git rev-parse HEAD)
@@ -41,14 +48,70 @@ jobs:
           echo "Upstream: $UPSTREAM"
           echo "Local: $LOCAL"
 
+          status=0
           python3 .github/scripts/upstream_convergence.py inspect \
             --base "$BASE" \
             --upstream "$UPSTREAM" \
             --local "$LOCAL" \
-            --json > report.json
+            --json > "$raw_report" || status=$?
+
+          RAW_REPORT="$raw_report" DIAGNOSTICS="$diagnostics" INSPECT_STATUS="$status" \
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          report_path = Path(os.environ["RAW_REPORT"])
+          diagnostics_path = Path(os.environ["DIAGNOSTICS"])
+          status = int(os.environ["INSPECT_STATUS"])
+          try:
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+          except (OSError, UnicodeError, json.JSONDecodeError) as error:
+              report = {"errors": [f"unable to read inspection report: {error}"]}
+          if not isinstance(report, dict):
+              report = {
+                  "errors": [
+                      f"inspection report must be a JSON object, got {type(report).__name__}"
+                  ]
+              }
+          errors = report.get("errors")
+          if not isinstance(errors, list):
+              errors = []
+          first_error = str(errors[0])[:1000] if errors else None
+          diagnostics = {
+              "inspectStatus": status,
+              "reportBytes": report_path.stat().st_size if report_path.exists() else 0,
+              "operation": report.get("operation"),
+              "passed": report.get("passed"),
+              "errorCount": len(errors),
+              "firstError": first_error,
+          }
+          diagnostics_path.write_text(
+              json.dumps(diagnostics, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Print bounded inspection diagnostics
+        if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' }}
+        run: |
+          test -f "$RUNNER_TEMP/upstream-convergence/report.json"
+          cat "$RUNNER_TEMP/upstream-convergence/diagnostics.json"
+
+      - name: Verify inspection leaves checkout clean
+        if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          status=$(git status --porcelain=v1 --untracked-files=all)
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" | head -n 50
+            exit 1
+          fi
 
       - name: Find newest successful report
         id: previous
+        if: ${{ success() && steps.inspection.outputs.status == '0' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -63,16 +126,42 @@ jobs:
           echo "updated_at=$UPDATED_AT" >> "$GITHUB_OUTPUT"
 
       - name: Publish compact report
+        if: ${{ success() && steps.inspection.outputs.status == '0' }}
+        env:
+          PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}
         run: |
           python3 .github/scripts/upstream_convergence_report.py \
-            --report report.json \
-            --output convergence-summary.json \
-            --previous-success-at '${{ steps.previous.outputs.updated_at }}'
+            --report "$RUNNER_TEMP/upstream-convergence/report.json" \
+            --output "$RUNNER_TEMP/upstream-convergence/convergence-summary.json" \
+            --previous-success-at "$PREVIOUS_SUCCESS_AT"
+
+      - name: Upload raw inspection report
+        if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-convergence-raw-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/upstream-convergence/report.json
+            ${{ runner.temp }}/upstream-convergence/diagnostics.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload compact report
+        if: ${{ success() && steps.inspection.outputs.status == '0' }}
         uses: actions/upload-artifact@v4
         with:
           name: upstream-convergence-${{ github.run_id }}
-          path: convergence-summary.json
+          path: ${{ runner.temp }}/upstream-convergence/convergence-summary.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Fail when inspection fails
+        if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' && steps.inspection.outputs.status != '0' }}
+        env:
+          INSPECT_STATUS: ${{ steps.inspection.outputs.status }}
+        run: |
+          status="$INSPECT_STATUS"
+          if [[ ! "$status" =~ ^[0-9]+$ ]]; then
+            status=1
+          fi
+          exit "$status"

@@ -425,6 +425,10 @@ class SafetyStateTest(unittest.TestCase):
         with self.assertRaisesRegex(convergence.ConvergenceError, "complete Git history"):
             convergence.require_read_safety(self.state(shallow=True))
 
+    def test_inspection_rejects_dirty_worktree(self) -> None:
+        with self.assertRaisesRegex(convergence.ConvergenceError, "worktree must be clean"):
+            convergence.require_read_safety(self.state(clean=False))
+
     def test_inspection_rejects_replacement_refs(self) -> None:
         with self.assertRaisesRegex(convergence.ConvergenceError, "replacement refs"):
             convergence.require_read_safety(
