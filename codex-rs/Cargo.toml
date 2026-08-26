@@ -181,7 +181,6 @@ codex-backend-client = { path = "backend-client" }
 codex-browser = { path = "browser" }
 codex-chatgpt = { path = "chatgpt" }
 codex-client = { path = "codex-client" }
-codex-cli = { path = "cli" }
 codex-collaboration-mode-templates = { path = "collaboration-mode-templates" }
 codex-cloud-config = { path = "cloud-config" }
 codex-cloud-tasks-client = { path = "cloud-tasks-client" }
@@ -594,6 +593,11 @@ strip = false
 
 # Balance parallel release code generation against binary size.
 codegen-units = 4
+
+[profile.ci-app]
+inherits = "release"
+codegen-units = 16
+lto = "off"
 
 [profile.profiling]
 inherits = "release"

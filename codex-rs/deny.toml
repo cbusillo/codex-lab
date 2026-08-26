@@ -244,9 +244,15 @@ deny = [
         # upstream HTTP transport independently of Codex.
         "codex-responses-api-proxy",
         # Temporary migration exceptions.
+        "codex-app-server",
+        "codex-browser",
+        "codex-code-bridge-client",
+        "codex-code-bridge-service",
+        "codex-core",
         "codex-otel",
         # Third-party crates that own their reqwest integration. These are not part of the
         # first-party migration count above.
+        "chromiumoxide",
         "oauth2",
         "opentelemetry-http",
         "opentelemetry-otlp",
