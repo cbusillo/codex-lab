@@ -103,6 +103,7 @@ mod agent_execution;
 mod agent_websocket;
 mod agents_md;
 mod apply_patch_cli;
+mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
 mod audio_truncation;
@@ -112,6 +113,7 @@ mod catalog_permission_messages;
 mod cli_stream;
 mod client;
 mod client_websockets;
+mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
 mod codex_delegate;
@@ -122,6 +124,7 @@ mod compact_remote_parity;
 mod compact_resume_fork;
 mod context_annotations;
 mod current_time_reminder;
+mod cyber_exec_policy;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
@@ -132,10 +135,17 @@ mod external_agent_preflight;
 mod external_auth;
 mod fork_thread;
 mod git_enrichment;
+mod guardian_mcp_elicitation;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
+mod guardian_review_cancellation;
+#[cfg(not(target_os = "windows"))]
+mod guardian_subagent_authorization;
+#[cfg(not(target_os = "windows"))]
 mod hooks;
+#[cfg(not(target_os = "windows"))]
+mod hooks_executor;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
 mod image_rollout;
@@ -194,6 +204,7 @@ mod responses_lite;
 mod responses_system_proxy;
 mod resume;
 mod resume_warning;
+mod retry_after;
 mod review;
 mod rmcp_client;
 mod rollout_budget;
@@ -201,6 +212,7 @@ mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
 mod search_tool;
+mod send_user_message_async;
 mod session_provenance;
 mod shell_snapshot;
 mod skill_approval;
@@ -213,6 +225,7 @@ mod stream_no_completed;
 mod subagent_notifications;
 mod token_budget;
 mod tool_harness;
+mod tool_lifecycle;
 mod tool_parallelism;
 mod tools;
 mod tools_disabled;
@@ -234,3 +247,4 @@ mod window_headers;
 #[cfg(target_os = "windows")]
 mod windows_sandbox;
 mod workspace_roots;
+mod worktree_trust;
