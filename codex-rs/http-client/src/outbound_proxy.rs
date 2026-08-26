@@ -627,6 +627,11 @@ pub fn cache_system_proxy_route_for_test(request_url: &str, proxy_url: String) {
     cache_system_proxy_decision(request_url, SystemProxyDecision::Proxy { url: proxy_url });
 }
 
+/// Primes a direct proxy decision for cross-crate integration tests.
+pub fn cache_direct_system_proxy_route_for_test(request_url: &str) {
+    cache_system_proxy_decision(request_url, SystemProxyDecision::Direct);
+}
+
 fn insert_system_proxy_cache_entry(
     cache: &mut HashMap<String, CachedSystemProxyDecision>,
     cache_key: &str,

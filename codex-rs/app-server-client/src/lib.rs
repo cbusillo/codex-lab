@@ -1185,6 +1185,7 @@ mod tests {
                 text: text.to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
             },
         })
     }
@@ -2171,6 +2172,7 @@ mod tests {
                             text: "hello".to_string(),
                             phase: None,
                             memory_citation: None,
+                            delivery: None,
                         },
                     }
                 )
