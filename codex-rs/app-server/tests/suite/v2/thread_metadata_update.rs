@@ -88,6 +88,7 @@ async fn thread_section_move_pins_before_first_turn() -> Result<()> {
         model_providers: None,
         source_kinds: None,
         archived: None,
+        descendant_of_thread_id: None,
         section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
         project_id: None,
         cwd: None,

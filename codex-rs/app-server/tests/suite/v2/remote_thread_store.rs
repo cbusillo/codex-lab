@@ -27,6 +27,7 @@ use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -232,7 +233,10 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
-            params: ThreadStartParams::default(),
+            params: ThreadStartParams {
+                environments: Some(Vec::new()),
+                ..ThreadStartParams::default()
+            },
         })
         .await?
         .expect("thread/start should succeed");
@@ -361,67 +365,55 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     Ok(())
 }
 
-#[tokio::test]
-async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
+#[test]
+fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        tokio::spawn(run_cold_thread_resume_reuses_non_local_history_probe()).await??;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+async fn run_cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
     create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
 
-    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
-    let config = Arc::new(
-        ConfigBuilder::default()
-            .codex_home(codex_home.path().to_path_buf())
-            .fallback_cwd(Some(codex_home.path().to_path_buf()))
-            .loader_overrides(loader_overrides.clone())
-            .build()
-            .await?,
-    );
     let thread_store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
-    let mut client = start_in_process_client(config.clone(), loader_overrides.clone()).await?;
+    let thread_id = start_pathless_thread_for_cold_resume(codex_home.path()).await?;
+    assert_cold_resume_reuses_history_probe(codex_home.path(), &thread_store, thread_id).await
+}
+
+async fn start_pathless_thread_for_cold_resume(codex_home: &Path) -> Result<String> {
+    let client = start_in_process_server(codex_home).await?;
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
-            params: ThreadStartParams::default(),
+            params: ThreadStartParams {
+                environments: Some(Vec::new()),
+                ..ThreadStartParams::default()
+            },
         })
         .await?
         .expect("thread/start should succeed");
     let ThreadStartResponse { thread, .. } = serde_json::from_value(response)?;
-
-    client
-        .request(ClientRequest::TurnStart {
-            request_id: RequestId::Integer(2),
-            params: TurnStartParams {
-                thread_id: thread.id.clone(),
-                client_user_message_id: None,
-                input: vec![V2UserInput::Text {
-                    text: "Materialize the thread".to_string(),
-                    text_elements: Vec::new(),
-                }],
-                ..Default::default()
-            },
-        })
-        .await?
-        .expect("turn/start should succeed");
-    timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let Some(event) = client.next_event().await else {
-                anyhow::bail!("in-process app-server stopped before turn/completed");
-            };
-            if let InProcessServerEvent::ServerNotification(notification) = event
-                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
-                && completed.thread_id == thread.id
-            {
-                return Ok::<(), anyhow::Error>(());
-            }
-        }
-    })
-    .await??;
     client.shutdown().await?;
+    Ok(thread.id)
+}
 
-    let client = start_in_process_client(config, loader_overrides).await?;
+async fn assert_cold_resume_reuses_history_probe(
+    codex_home: &Path,
+    thread_store: &InMemoryThreadStore,
+    thread_id: String,
+) -> Result<()> {
+    let client = start_in_process_server(codex_home).await?;
     let reads_before_resume = thread_store.calls().await.read_thread_with_history;
     // The in-memory store is pathless, so resume currently fails later while
     // assembling the response. The history-bearing probe must still be reused.
@@ -429,7 +421,7 @@ async fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
         .request(ClientRequest::ThreadResume {
             request_id: RequestId::Integer(3),
             params: ThreadResumeParams {
-                thread_id: thread.id.clone(),
+                thread_id,
                 ..Default::default()
             },
         })
@@ -462,9 +454,11 @@ async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
 ) -> std::io::Result<InProcessClientHandle> {
+    let mut config = config.as_ref().clone();
+    config.analytics_enabled = Some(false);
     in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
-        config,
+        config: Arc::new(config),
         cli_overrides: Vec::new(),
         loader_overrides,
         strict_config: false,
@@ -484,7 +478,10 @@ async fn start_in_process_client(
                 title: None,
                 version: "0.1.0".to_string(),
             },
-            capabilities: None,
+            capabilities: Some(InitializeCapabilities {
+                experimental_api: true,
+                ..Default::default()
+            }),
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })

@@ -95,11 +95,8 @@ async fn handle_spawn_agent(
             }),
         )
         .await;
-    let mut config = build_agent_spawn_config(
-        &session.get_base_instructions().await,
-        turn.as_ref(),
-        step_context.environments.primary(),
-    )?;
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
@@ -124,11 +121,7 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(
-        &mut config,
-        turn.as_ref(),
-        step_context.environments.primary(),
-    )?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
         config,
@@ -274,7 +267,7 @@ pub(crate) struct SpawnAgentResult {
 }
 
 impl ToolOutput for SpawnAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "spawn_agent")
     }
 

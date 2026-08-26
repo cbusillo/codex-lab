@@ -118,6 +118,7 @@ async fn apply_role_rejects_symlinked_role_file() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            backend: None,
         },
     );
 
@@ -441,6 +442,7 @@ command = "attacker-command"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            backend: None,
         },
     );
     let parent = config.clone();

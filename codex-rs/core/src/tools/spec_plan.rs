@@ -148,8 +148,7 @@ pub(crate) fn build_tool_router(
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
 
-    let hosted_specs = if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
-    {
+    let hosted_specs = if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         Vec::new()
     } else {
         let registered_mcp_tools = session.services.mcp_handler_cache.append_mcp_tools(
@@ -291,7 +290,7 @@ pub(crate) fn append_source_tools(
     if !turn_context.config.tools_enabled {
         return Vec::new();
     }
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return Vec::new();
     }
 
@@ -562,7 +561,7 @@ fn hosted_model_tool_specs(
 ) -> Vec<ToolSpec> {
     // Responses Lite accepts schemas for client-executed tools, not hosted Responses tools.
     if turn_context.model_info.use_responses_lite
-        || crate::guardian::is_guardian_reviewer_source(&turn_context.session_source)
+        || crate::guardian::is_basic_session_source(&turn_context.session_source)
     {
         return Vec::new();
     }
@@ -920,27 +919,40 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
     // Guardian reviewers receive only `exec_command`, `write_stdin`, and `view_image`
     // when a managed sandbox can enforce the parent's filesystem restrictions;
     // all general tool sources stay excluded.
-    if crate::guardian::is_guardian_reviewer_source(&context.turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&context.turn_context.session_source) {
         let turn_context = context.turn_context;
         if !matches!(
             turn_context.permission_profile(),
             PermissionProfile::Managed { .. }
-        ) {
+        ) || context.environments.turn_environments().any(|environment| {
+            !matches!(
+                environment.permission_profile(),
+                PermissionProfile::Managed { .. }
+            )
+        }) {
             return;
         }
         let environment_mode = tool_environment_mode(context.environments);
         if environment_mode.has_environment() {
             let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-            registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
-                allow_login_shell: any_environment_allows_login_shell(context.environments),
-                exec_permission_approvals_enabled: false,
-                include_environment_id,
-                include_shell_parameter: unified_exec_should_include_shell_parameter(
-                    turn_context,
-                    context.environments,
-                ),
-            }));
-            registry.add(WriteStdinHandler);
+            if turn_context.config.features.enabled(Feature::ShellTool)
+                && turn_context.config.features.enabled(Feature::UnifiedExec)
+                && !matches!(
+                    turn_context.model_info.shell_type,
+                    ConfigShellToolType::Disabled
+                )
+            {
+                registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
+                    allow_login_shell: any_environment_allows_login_shell(context.environments),
+                    exec_permission_approvals_enabled: false,
+                    include_environment_id,
+                    include_shell_parameter: unified_exec_should_include_shell_parameter(
+                        turn_context,
+                        context.environments,
+                    ),
+                }));
+                registry.add(WriteStdinHandler);
+            }
             if turn_context.config.features.enabled(Feature::ViewImage) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
                     can_request_original_image_detail: can_request_original_image_detail(
@@ -1224,6 +1236,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 tool_namespace,
                 exposure,
             );
+            registry.add_with_exposure(ResumeAgentHandler, ToolExposure::Hidden);
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);

@@ -34,6 +34,8 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use std::sync::Arc;
 
+use super::configure_hermetic_skill_catalog;
+
 async fn write_repo_skill(
     cwd: AbsolutePathBuf,
     fs: Arc<dyn ExecutorFileSystem>,
@@ -148,6 +150,7 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
         }),
         "expected skill instructions in user input, got {user_texts:?}"
     );
+    assert!(request.has_content_kinds(&["skills.selected_skill_instructions"]));
 
     Ok(())
 }
@@ -188,7 +191,8 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
                 discovery_root.join("linked-demo").as_path(),
             );
             Ok(())
-        });
+        })
+        .with_config(configure_hermetic_skill_catalog);
     let test = builder.build_with_auto_env(&server).await?;
     let discovery_root = test.config.cwd.join(".agents/skills").canonicalize()?;
     let discovery_path = discovery_root.join("linked-demo/SKILL.md");

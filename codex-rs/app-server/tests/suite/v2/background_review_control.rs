@@ -81,7 +81,7 @@ async fn background_auto_review_control_cancels_a_running_review() -> Result<()>
     let (server, _completions) = start_streaming_sse_server(vec![
         vec![
             chunk(responses::ev_response_created("resp-turn-tool")),
-            chunk(responses::ev_apply_patch_shell_command_call_via_heredoc(
+            chunk(responses::ev_apply_patch_exec_command_call_via_heredoc(
                 "call-patch",
                 ADD_FEATURE_PATCH,
             )),

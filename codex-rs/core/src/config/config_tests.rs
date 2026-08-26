@@ -394,11 +394,42 @@ web_search = true
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
         })
     );
+}
+
+#[test]
+fn tools_enabled_defaults_to_true_and_can_be_disabled() {
+    let default_tools: ConfigToml = toml::from_str("[tools]").expect("parse default tools");
+    let disabled_tools: ConfigToml =
+        toml::from_str("[tools]\nenabled = false").expect("parse disabled tools");
+
+    assert!(default_tools.tools.expect("default tools").enabled);
+    assert!(!disabled_tools.tools.expect("disabled tools").enabled);
+}
+
+#[tokio::test]
+async fn load_config_resolves_tools_enabled() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            tools: Some(ToolsToml {
+                enabled: false,
+                ..ToolsToml::default()
+            }),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert!(!config.tools_enabled);
+    Ok(())
 }
 
 #[test]
@@ -414,6 +445,7 @@ web_search = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: None,
             update_plan: None,
@@ -433,6 +465,7 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
             update_plan: None,
@@ -453,6 +486,7 @@ enabled = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            enabled: true,
             web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
             update_plan: None,
@@ -466,6 +500,7 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
     let config = Config::load_from_base_config_with_overrides(
         ConfigToml {
             tools: Some(ToolsToml {
+                enabled: true,
                 web_search: None,
                 experimental_request_user_input: Some(ExperimentalRequestUserInput {
                     enabled: false,
@@ -8089,6 +8124,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -8126,6 +8162,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("Use the user-configured guardian policy.".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -8156,6 +8193,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
     let cfg = ConfigToml {
         auto_review: Some(AutoReviewToml {
             policy: Some("   ".to_string()),
+            ..Default::default()
         }),
         ..Default::default()
     };
@@ -8218,12 +8256,14 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    backend: None,
                 },
             )]),
         }),
@@ -9233,6 +9273,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
@@ -9242,6 +9283,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    backend: None,
                 },
             )]),
         }),
@@ -9279,12 +9321,14 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    backend: None,
                 },
             )]),
         }),
@@ -9319,12 +9363,14 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
@@ -9359,12 +9405,14 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
             default_subagent_reasoning_effort: None,
             job_max_runtime_seconds: None,
             interrupt_message: None,
+            selectors: BTreeMap::new(),
             roles: BTreeMap::from([(
                 "researcher".to_string(),
                 AgentRoleToml {
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    backend: None,
                 },
             )]),
         }),
@@ -11156,6 +11204,28 @@ in_app_dictation = false
         .await?;
 
     assert!(!config.features.enabled(Feature::InAppDictation));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_app_local_automation_feature_requirements_are_valid() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[features]
+in_app_local_automation = false
+"#,
+            ),
+        )
+        .build()
+        .await?;
+
+    assert!(!config.features.enabled(Feature::InAppLocalAutomation));
 
     Ok(())
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshotFile;
@@ -13,9 +14,13 @@ use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::permissions::RawFileSystemSandboxPolicy;
+use codex_protocol::protocol::EnvironmentConfig;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -33,48 +38,55 @@ use tracing::instrument;
 
 pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSnapshotFile>>>>;
 
-/// Effective per-environment config; fields move here as executor config is migrated.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TurnEnvironmentConfig {
-    pub(crate) allow_login_shell: bool,
-    pub(crate) permission_profile: PermissionProfileSnapshot,
-    /// None preserves legacy executor roots; Some, including empty, is owner-installed.
-    pub(crate) selected_capability_roots: Option<Vec<SelectedCapabilityRoot>>,
-}
-
 #[derive(Clone)]
 pub(crate) struct TurnEnvironment {
-    pub(crate) environment_id: String,
+    pub(crate) selection: TurnEnvironmentSelection,
+    pub(crate) config_origin: EnvironmentConfigOrigin,
     pub(crate) environment: Arc<Environment>,
-    cwd: PathUri,
-    workspace_roots: Vec<PathUri>,
     pub(crate) shell: Option<shell::Shell>,
-    pub(crate) config: TurnEnvironmentConfig,
     pub(crate) shell_snapshot: ShellSnapshotTask,
+    pub(crate) shell_snapshot_v2_supported: bool,
 }
 
 impl TurnEnvironment {
     pub(crate) fn new(
-        environment_id: String,
+        selection: TurnEnvironmentSelection,
+        config_origin: EnvironmentConfigOrigin,
         environment: Arc<Environment>,
-        cwd: PathUri,
-        workspace_roots: Vec<PathUri>,
         shell: Option<shell::Shell>,
-        config: TurnEnvironmentConfig,
     ) -> Self {
+        debug_assert!(matches!(selection.config, EnvironmentConfigState::Ready(_)));
         Self {
-            environment_id,
+            selection,
+            config_origin,
             environment,
-            cwd,
-            workspace_roots,
             shell,
-            config,
             shell_snapshot: futures::future::ready(None).boxed().shared(),
+            shell_snapshot_v2_supported: false,
         }
     }
 
+    pub(crate) fn config(&self) -> &EnvironmentConfig {
+        let EnvironmentConfigState::Ready(config) = &self.selection.config else {
+            unreachable!("ready turn environments always carry resolved configuration")
+        };
+        config
+    }
+
+    pub(crate) fn shell_environment_policy(&self) -> &ShellEnvironmentPolicy {
+        &self.config().shell_environment_policy
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_mut(&mut self) -> &mut EnvironmentConfig {
+        let EnvironmentConfigState::Ready(config) = &mut self.selection.config else {
+            unreachable!("ready turn environments always carry resolved configuration")
+        };
+        config
+    }
+
     pub(crate) fn shell_snapshot(&self, cwd: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
-        if self.cwd != PathUri::from_abs_path(cwd) {
+        if self.selection.cwd != PathUri::from_abs_path(cwd) {
             return None;
         }
         self.shell_snapshot
@@ -84,19 +96,19 @@ impl TurnEnvironment {
     }
 
     pub(crate) fn cwd(&self) -> &PathUri {
-        &self.cwd
+        &self.selection.cwd
     }
 
     pub(crate) fn workspace_roots(&self) -> &[PathUri] {
-        &self.workspace_roots
+        &self.selection.workspace_roots
     }
 
     pub(crate) fn permission_profile(&self) -> &PermissionProfile {
-        self.config.permission_profile.permission_profile()
+        self.config().permission_profile.permission_profile()
     }
 
     pub(crate) fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
-        self.config.permission_profile.active_permission_profile()
+        self.config().permission_profile.active_permission_profile()
     }
 
     pub(crate) fn permission_profile_with_workspace_roots(&self) -> PermissionProfile {
@@ -111,23 +123,21 @@ impl TurnEnvironment {
     }
 
     pub(crate) fn selection(&self) -> TurnEnvironmentSelection {
-        TurnEnvironmentSelection {
-            environment_id: self.environment_id.clone(),
-            cwd: self.cwd.clone(),
-            workspace_roots: self.workspace_roots.clone(),
-        }
+        self.config_origin
+            .into_input_selection(self.selection.clone())
     }
 }
 
 impl std::fmt::Debug for TurnEnvironment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnEnvironment")
-            .field("environment_id", &self.environment_id)
+            .field("environment_id", &self.selection.environment_id)
             .field("environment", &self.environment)
-            .field("cwd", &self.cwd)
-            .field("workspace_roots", &self.workspace_roots)
+            .field("cwd", &self.selection.cwd)
+            .field("workspace_roots", &self.selection.workspace_roots)
             .field("shell", &self.shell)
-            .field("config", &self.config)
+            .field("config", self.config())
+            .field("config_origin", &self.config_origin)
             .finish_non_exhaustive()
     }
 }
@@ -185,6 +195,28 @@ enum TurnMultiAgentRuntime {
 }
 
 impl TurnContext {
+    pub(crate) fn effective_workspace_roots(&self) -> Vec<AbsolutePathBuf> {
+        let Some(environment) = self.environments.primary() else {
+            return self.config.effective_workspace_roots();
+        };
+
+        let mut workspace_roots = environment
+            .workspace_roots()
+            .iter()
+            .filter_map(|root| root.to_abs_path().ok())
+            .collect::<Vec<_>>();
+        for root in environment
+            .config()
+            .permission_profile
+            .profile_workspace_roots()
+        {
+            if !workspace_roots.contains(root) {
+                workspace_roots.push(root.clone());
+            }
+        }
+        workspace_roots
+    }
+
     pub(crate) fn skills_snapshot(&self) -> Arc<HostSkillsSnapshot> {
         let Some(snapshot) = self.extension_data.get::<HostSkillsSnapshot>() else {
             unreachable!("every turn has a host skills snapshot");
@@ -354,21 +386,26 @@ impl TurnContext {
         }
     }
 
+    /// Returns the selected environment's permissions, or the thread's permissions when none is ready.
     pub(crate) fn permission_profile(&self) -> PermissionProfile {
-        self.config.permissions.effective_permission_profile()
+        self.environments
+            .permission_profile_or_else(|| self.config.permissions.effective_permission_profile())
     }
 
     pub(crate) fn file_system_sandbox_policy(&self) -> FileSystemSandboxPolicy {
-        self.config.permissions.file_system_sandbox_policy()
+        self.permission_profile().file_system_sandbox_policy()
     }
 
     pub(crate) fn network_sandbox_policy(&self) -> NetworkSandboxPolicy {
-        self.config.permissions.network_sandbox_policy()
+        self.permission_profile().network_sandbox_policy()
     }
 
     pub(crate) fn sandbox_policy(&self) -> SandboxPolicy {
         #[allow(deprecated)]
-        self.config.permissions.legacy_sandbox_policy(&self.cwd)
+        codex_sandboxing::compatibility_sandbox_policy_for_permission_profile(
+            &self.permission_profile(),
+            &self.cwd,
+        )
     }
 
     pub(crate) fn effective_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
@@ -527,7 +564,7 @@ impl TurnContext {
         }
     }
 
-    fn non_legacy_file_system_sandbox_policy(&self) -> Option<FileSystemSandboxPolicy> {
+    fn non_legacy_file_system_sandbox_policy(&self) -> Option<RawFileSystemSandboxPolicy> {
         // Omit the derived split filesystem policy when it is equivalent to
         // the legacy sandbox policy. This keeps turn-context payloads stable
         // while both fields exist; once callers consume only the split policy,
@@ -540,11 +577,12 @@ impl TurnContext {
             );
         let file_system_sandbox_policy = self.file_system_sandbox_policy();
         (file_system_sandbox_policy != legacy_file_system_sandbox_policy)
-            .then_some(file_system_sandbox_policy)
+            .then(|| RawFileSystemSandboxPolicy::try_from(file_system_sandbox_policy).ok())
+            .flatten()
     }
 
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
-        let workspace_roots = self.config.effective_workspace_roots();
+        let workspace_roots = self.effective_workspace_roots();
         #[allow(deprecated)]
         let cwd = self.cwd.clone();
         TurnContextItem {
@@ -558,6 +596,10 @@ impl TurnContext {
             approvals_reviewer: Some(self.config.approvals_reviewer),
             sandbox_policy: self.sandbox_policy(),
             permission_profile: Some(self.permission_profile()),
+            active_permission_profile: self
+                .environments
+                .primary()
+                .and_then(TurnEnvironment::active_permission_profile),
             network: self.turn_context_network_item(),
             file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info.slug.clone(),
@@ -583,7 +625,7 @@ impl TurnContext {
             .turn_environments()
             .filter_map(|environment| {
                 Some(TurnContextEnvironmentItem {
-                    environment_id: environment.environment_id.clone(),
+                    environment_id: environment.selection.environment_id.clone(),
                     cwd: environment.cwd().to_abs_path().ok()?,
                     shell: environment
                         .shell
@@ -716,7 +758,7 @@ impl Session {
         let session_telemetry_for_context = session_telemetry;
         let available_models = models_manager.try_list_models().unwrap_or_default();
         let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
-            codex_tools::unified_exec_feature_mode_for_features(per_turn_config.features.get()),
+            per_turn_config.features.get(),
             crate::tools::tool_user_shell_type(user_shell),
             shell_zsh_path,
             main_execve_wrapper_exe,
@@ -806,11 +848,17 @@ impl Session {
         updates: SessionSettingsUpdate,
     ) -> CodexResult<Arc<TurnContext>> {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
+        let current_environments = self.services.turn_environments.selections();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
-            match state.session_configuration.clone().apply(&updates) {
+            match state
+                .session_configuration
+                .clone()
+                .apply(&updates, &current_environments)
+            {
                 Ok(next) => {
-                    let mcp_inputs_changed = state.session_configuration.mcp_inputs_differ(&next);
+                    let mcp_inputs_changed =
+                        self.mcp_inputs_differ(&state.session_configuration, &next, &updates);
                     let previous_permission_profile =
                         state.session_configuration.permission_profile();
                     let next_permission_profile = next.permission_profile();
@@ -822,16 +870,16 @@ impl Session {
                     let new_config = notify_config_contributors
                         .then(|| Self::build_effective_session_config(&next));
                     let environment_config = next.turn_environment_config();
-                    if updates.environments.is_some() {
+                    if let Some(environments) = &updates.environments {
                         self.services
                             .turn_environments
-                            .update_selections(next.environment_selections(), &environment_config);
+                            .update_selections(&environments.environments, &environment_config);
                     } else if state.session_configuration.turn_environment_config()
                         != environment_config
                     {
                         self.services
                             .turn_environments
-                            .update_environment_configs(&environment_config);
+                            .update_thread_config(&environment_config);
                     }
                     if mcp_inputs_changed {
                         self.mark_mcp_runtime_dirty();

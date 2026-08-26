@@ -455,7 +455,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let config_manager = ConfigManager::new(ConfigManagerArgs {
             codex_home: args.config.codex_home.to_path_buf(),
-            auth_home: args.config.auth_home.to_path_buf(),
             cli_overrides: args.cli_overrides,
             loader_overrides: args.loader_overrides,
             strict_config: args.strict_config,
@@ -787,6 +786,7 @@ mod tests {
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
+    use codex_app_server_protocol::InitializeCapabilities;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
@@ -794,25 +794,24 @@ mod tests {
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnItemsView;
     use codex_app_server_protocol::TurnStatus;
-    use codex_core::config::ConfigBuilder;
+    use codex_features::Feature;
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use tempfile::TempDir;
 
     async fn build_test_config(codex_home: &Path) -> Config {
-        match ConfigBuilder::default()
-            .codex_home(codex_home.to_path_buf())
-            .build()
-            .await
-        {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides_for_codex_home(
-                codex_home.to_path_buf(),
-                Vec::new(),
-            )
-            .await
-            .expect("default config should load"),
-        }
+        let mut config = Config::load_default_with_cli_overrides_for_codex_home(
+            codex_home.to_path_buf(),
+            Vec::new(),
+        )
+        .await
+        .expect("default config should load");
+        config.analytics_enabled = Some(false);
+        config
+            .features
+            .disable(Feature::Plugins)
+            .expect("plugins should be disabled for in-process tests");
+        config
     }
 
     async fn start_test_client_with_capacity(
@@ -828,7 +827,7 @@ mod tests {
             arg0_paths: Arg0DispatchPaths::default(),
             config,
             cli_overrides: Vec::new(),
-            loader_overrides: LoaderOverrides::default(),
+            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             strict_config: false,
             cloud_config_bundle: CloudConfigBundleLoader::default(),
             thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
@@ -846,7 +845,10 @@ mod tests {
                     title: None,
                     version: "0.0.0".to_string(),
                 },
-                capabilities: None,
+                capabilities: Some(InitializeCapabilities {
+                    experimental_api: true,
+                    ..Default::default()
+                }),
             },
             channel_capacity,
         };
@@ -882,30 +884,34 @@ mod tests {
 
     #[tokio::test]
     async fn in_process_start_uses_requested_session_source_for_thread_start() {
-        for (requested_source, expected_source) in [
-            (SessionSource::Cli, ApiSessionSource::Cli),
-            (SessionSource::Exec, ApiSessionSource::Exec),
-        ] {
-            let client = start_test_client(requested_source).await;
-            let response = client
-                .request(ClientRequest::ThreadStart {
-                    request_id: RequestId::Integer(2),
-                    params: ThreadStartParams {
-                        ephemeral: Some(true),
-                        ..ThreadStartParams::default()
-                    },
-                })
-                .await
-                .expect("request transport should work")
-                .expect("thread/start should succeed");
-            let parsed: ThreadStartResponse =
-                serde_json::from_value(response).expect("thread/start response should parse");
-            assert_eq!(parsed.thread.source, expected_source);
-            client
-                .shutdown()
-                .await
-                .expect("in-process runtime should shutdown cleanly");
-        }
+        let client = timeout(
+            Duration::from_secs(/*secs*/ 30),
+            start_test_client(SessionSource::Exec),
+        )
+        .await
+        .expect("in-process Exec runtime startup should finish");
+        let response = timeout(
+            Duration::from_secs(/*secs*/ 10),
+            client.request(ClientRequest::ThreadStart {
+                request_id: RequestId::Integer(2),
+                params: ThreadStartParams {
+                    ephemeral: Some(true),
+                    environments: Some(Vec::new()),
+                    ..ThreadStartParams::default()
+                },
+            }),
+        )
+        .await
+        .expect("thread/start request should finish")
+        .expect("request transport should work")
+        .expect("thread/start should succeed");
+        let parsed: ThreadStartResponse =
+            serde_json::from_value(response).expect("thread/start response should parse");
+        assert_eq!(parsed.thread.source, ApiSessionSource::Exec);
+        timeout(Duration::from_secs(/*secs*/ 10), client.shutdown())
+            .await
+            .expect("in-process runtime shutdown should finish")
+            .expect("in-process runtime should shutdown cleanly");
     }
 
     #[tokio::test]

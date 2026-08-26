@@ -116,6 +116,7 @@ pub(crate) async fn run_stateless_model_request(
         session_source.clone(),
         "codex_app_server_structured_request".to_string(),
         config.model_verbosity,
+        config.features.enabled(Feature::ContentItemKinds),
         config.features.enabled(Feature::EnableRequestCompression),
         config.features.enabled(Feature::RuntimeMetrics),
         /*beta_features_header*/ None,

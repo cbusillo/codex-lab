@@ -128,6 +128,9 @@ impl codex_extension_api::ContextContributor for GuardianMemoryContextProbe {
             {
                 vec![codex_extension_api::PromptFragment::developer_policy(
                     GUARDIAN_MEMORY_CONTEXT_PROBE,
+                    codex_extension_api::ContentItemKind(
+                        "guardian.memory_context_probe".to_string(),
+                    ),
                 )]
             } else {
                 Vec::new()
@@ -1181,12 +1184,10 @@ async fn build_guardian_prompt_items_keeps_required_node_repl_reviews_generic() 
 {
     let (session, mut turn) =
         guardian_test_session_and_turn_with_base_url("http://localhost").await;
-    Arc::make_mut(
-        &mut Arc::get_mut(&mut turn)
-            .expect("turn should be uniquely owned")
-            .model_info,
-    )
-    .node_repl_auto_review_required = true;
+    Arc::get_mut(&mut turn)
+        .expect("turn should be uniquely owned")
+        .model_info
+        .node_repl_auto_review_required = true;
     seed_guardian_parent_history(&session, &turn).await;
     let context = GuardianReviewContext::from(&turn);
 
@@ -1763,7 +1764,7 @@ async fn guardian_request_model_for_auto_review(
     match catalog {
         GuardianTestCatalog::Bundled => {}
         GuardianTestCatalog::ParentOnly => {
-            let parent_model = turn.model_info.as_ref().clone();
+            let parent_model = turn.model_info.clone();
             let auth_manager = Arc::clone(&session.services.auth_manager);
             let models_manager = StaticModelsManager::new(
                 Some(auth_manager),
@@ -1777,12 +1778,10 @@ async fn guardian_request_model_for_auto_review(
                 .models_manager = Arc::new(models_manager);
         }
     }
-    Arc::make_mut(
-        &mut Arc::get_mut(&mut turn)
-            .expect("turn should be unique")
-            .model_info,
-    )
-    .auto_review_model_override = auto_review_model_override;
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .model_info
+        .auto_review_model_override = auto_review_model_override;
     let parent_model = turn.model_info.slug.clone();
     let preferred_model = turn.provider.approval_review_preferred_model().to_string();
     let parent_turn_id = turn.sub_id.clone();
@@ -2008,8 +2007,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     session.services.skills_service.clear_cache();
     turn.config = Arc::clone(&config);
     turn.provider = create_model_provider(config.model_provider.clone(), turn.auth_manager.clone());
-    Arc::make_mut(&mut turn.model_info).auto_review_model_override =
-        Some("codex-auto-review".to_string());
+    turn.model_info.auto_review_model_override = Some("codex-auto-review".to_string());
     let session = Arc::new(session);
     let turn = Arc::new(turn);
     seed_guardian_parent_history(&session, &turn).await;
@@ -2283,8 +2281,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         .enable(Feature::GuardianReuseParentCompaction)
         .expect("Guardian parent-compaction reuse should be configurable");
     let turn_mut = Arc::get_mut(&mut turn).expect("turn should be unique");
-    Arc::make_mut(&mut turn_mut.model_info).auto_review_model_override =
-        Some("codex-auto-review".to_string());
+    turn_mut.model_info.auto_review_model_override = Some("codex-auto-review".to_string());
     turn_mut.config = Arc::new(config);
     seed_guardian_parent_history(&session, &turn).await;
 
@@ -3092,7 +3089,7 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
     struct AutoApprovingReviewContributor;
 
     impl codex_extension_api::ApprovalReviewContributor for AutoApprovingReviewContributor {
-        fn contribute<'a>(
+        fn fast_decision<'a>(
             &'a self,
             _session_store: &'a codex_extension_api::ExtensionData,
             _thread_store: &'a codex_extension_api::ExtensionData,
@@ -3496,7 +3493,7 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
 async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
     let server = start_mock_server().await;
     let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
-    let parent_model = turn.model_info.as_ref().clone();
+    let parent_model = turn.model_info.clone();
     let auth_manager = Arc::clone(&session.services.auth_manager);
     Arc::get_mut(&mut session)
         .expect("session should be unique")

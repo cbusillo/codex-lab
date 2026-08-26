@@ -5,6 +5,7 @@ members = [
     "auto-review",
     "agent-graph-store",
     "agent-identity",
+    "agent-roles",
     "backend-client",
     "bwrap",
     "build-info",
@@ -162,6 +163,7 @@ codex-analytics = { path = "analytics" }
 codex-auto-review = { path = "auto-review" }
 codex-agent-graph-store = { path = "agent-graph-store" }
 codex-agent-identity = { path = "agent-identity" }
+codex-agent-roles = { path = "agent-roles" }
 codex-ansi-escape = { path = "ansi-escape" }
 codex-api = { path = "codex-api" }
 codex-aws-auth = { path = "aws-auth" }

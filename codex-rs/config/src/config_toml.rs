@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::ValidationConfig;
 use crate::browser_use::BrowserUseConfigToml;
 use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
@@ -184,6 +185,10 @@ pub struct ConfigToml {
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
 
+    /// Patch-local validation policy.
+    #[serde(default)]
+    pub validation: Option<ValidationConfig>,
+
     pub browser_use: Option<BrowserUseConfigToml>,
 
     pub computer_use: Option<ComputerUseConfigToml>,
@@ -322,17 +327,17 @@ pub struct ConfigToml {
     #[serde(default)]
     pub profiles: HashMap<String, ConfigProfile>,
 
-    /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+    /// Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.
     #[serde(default = "default_history")]
     pub history: Option<History>,
 
     /// Directory where Codex stores the SQLite state DB.
-    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
+    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
-    /// Defaults to `$CODEX_HOME/log`.
+    /// Defaults to `$CODEX_LAB_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
     /// Optional URI-based file opener. If set, citations to files in the model
@@ -370,6 +375,14 @@ pub struct ConfigToml {
 
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
+
+    /// Whether Codex may automatically switch saved accounts when the active
+    /// ChatGPT account is rate or usage limited.
+    pub auto_switch_accounts_on_rate_limit: Option<bool>,
+
+    /// Whether Codex may fall back to a saved API key account once all saved
+    /// ChatGPT accounts are rate or usage limited.
+    pub api_key_fallback_on_all_accounts_limited: Option<bool>,
 
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
@@ -415,6 +428,10 @@ pub struct ConfigToml {
     /// instructions inserted into developer messages when realtime becomes
     /// active.
     pub experimental_realtime_start_instructions: Option<String>,
+
+    /// Experimental / do not use. When set, app-server fetches thread-scoped
+    /// config from a remote service at this endpoint.
+    pub experimental_thread_config_endpoint: Option<String>,
 
     /// Removed. Former remote thread-store endpoint setting kept only so we can
     /// fail fast instead of silently falling back to local persistence.
@@ -533,6 +550,11 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    pub background_max_diff_bytes: Option<usize>,
+    pub background_max_elapsed_seconds: Option<u64>,
+    pub background_max_total_tokens: Option<u64>,
+    pub background_max_output_bytes: Option<usize>,
+    pub background_max_findings: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -604,9 +626,12 @@ pub struct RealtimeAudioToml {
     pub speaker: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolsToml {
+    /// Whether model-visible tools are available for turns using this config.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_web_search_tool_config"
@@ -614,6 +639,17 @@ pub struct ToolsToml {
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
     pub update_plan: Option<UpdatePlanToolConfig>,
+}
+
+impl Default for ToolsToml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            web_search: None,
+            experimental_request_user_input: None,
+            update_plan: None,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -686,6 +722,10 @@ pub struct AgentsToml {
     /// Defaults to true.
     pub interrupt_message: Option<bool>,
 
+    /// Explicit enablement overrides for built-in and discovered agent selectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub selectors: BTreeMap<String, AgentSelectorToml>,
+
     /// User-defined role declarations keyed by role name.
     ///
     /// Example:
@@ -701,6 +741,17 @@ pub struct AgentsToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
+pub struct AgentSelectorToml {
+    /// Whether this selector is available to the model and explicit spawn calls.
+    pub enabled: Option<bool>,
+    /// Provider-native model used when this selector does not name one explicitly.
+    pub model: Option<String>,
+    /// Provider-native effort used when a spawn call does not select one explicitly.
+    pub effort: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
 pub struct AgentRoleToml {
     /// Human-facing role documentation used in spawn tool guidance.
     /// Required unless supplied by the referenced agent role file.
@@ -712,6 +763,46 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// Optional non-Codex backend used to run agents spawned with this role.
+    pub backend: Option<AgentRoleBackendToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[schemars(deny_unknown_fields)]
+pub enum AgentRoleBackendToml {
+    ExternalCommand(ExternalCommandAgentBackendToml),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCommandProtocolToml {
+    #[default]
+    Json,
+    RawCli,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ExternalCommandAgentBackendToml {
+    /// Command to execute for each spawned external agent.
+    #[schemars(length(min = 1))]
+    pub command: String,
+    /// Protocol to communicate with the external agent.
+    #[serde(default)]
+    pub protocol: ExternalCommandProtocolToml,
+    /// Arguments passed to the command after the executable path.
+    pub args: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in read-only mode.
+    pub args_read_only: Option<Vec<String>>,
+    /// Arguments appended when the agent is running in workspace-write mode.
+    pub args_write: Option<Vec<String>>,
+    /// Environment variables to set for the spawned agent.
+    pub env: Option<HashMap<String, String>>,
+    /// Maximum process runtime in milliseconds.
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]

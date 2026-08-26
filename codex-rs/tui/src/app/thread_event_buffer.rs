@@ -51,6 +51,17 @@ impl ThreadEventStore {
         self.evict_overflowing_events();
     }
 
+    pub(super) fn push_auto_review_summary(
+        &mut self,
+        run_id: String,
+        result: Result<super::AutoReviewSummaryReadResponse, String>,
+    ) {
+        self.push_buffered_event(ThreadBufferedEvent::AutoReviewSummaryLoaded {
+            run_id,
+            result: Box::new(result),
+        });
+    }
+
     fn evict_overflowing_events(&mut self) {
         while self.buffer.len() > self.capacity
             || self.buffered_agent_message_delta_bytes > MAX_BUFFERED_AGENT_MESSAGE_DELTA_BYTES
@@ -70,7 +81,8 @@ impl ThreadEventStore {
                     .pending_interactive_replay
                     .note_evicted_server_request(request.as_ref()),
                 ThreadBufferedEvent::HistoryEntryResponse(_)
-                | ThreadBufferedEvent::FeedbackSubmission(_) => {}
+                | ThreadBufferedEvent::FeedbackSubmission(_)
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. } => {}
             }
         }
     }

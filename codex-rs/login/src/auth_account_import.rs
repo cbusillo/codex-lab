@@ -159,7 +159,8 @@ fn import_auth_payload(
         AuthMode::Headers
         | AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
-        | AuthMode::BedrockApiKey => {
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => {
             push_skip(report, source, AuthAccountImportSkipReason::UnsupportedMode);
             return Ok(());
         }

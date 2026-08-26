@@ -565,11 +565,6 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
     let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     let (_home, config, manager, base) = start_test_conversation(&server, /*model*/ None).await;
-    let original_root_agent_usage_hint = config
-        .multi_agent_v2
-        .root_agent_usage_hint_text
-        .as_ref()
-        .expect("root agent usage hint");
 
     user_turn(&base, "hello world").await;
     compact_conversation(&base).await;
@@ -598,6 +593,11 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 4);
+    let original_root_agent_usage_hint = requests[0]
+        .message_input_texts("developer")
+        .into_iter()
+        .find(|text| !text.starts_with('<'))
+        .expect("root agent usage hint");
     assert!(requests[1].body_contains_text(SUMMARIZATION_PROMPT));
     assert!(requests[2].body_contains_text("hello world"));
     assert!(requests[2].body_contains_text(SUMMARY_TEXT));
@@ -644,7 +644,7 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
     assert!(
         after_rollback_developer_texts
             .iter()
-            .all(|text| text != original_root_agent_usage_hint),
+            .all(|text| text != &original_root_agent_usage_hint),
         "post-rollback startup context should not retain the pre-resume usage hint",
     );
 

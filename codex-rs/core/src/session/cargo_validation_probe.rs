@@ -40,7 +40,7 @@ pub(crate) async fn resolve_cargo_toolchain_identity(
         network_environment_id: turn_context
             .environments
             .single_local_environment()
-            .map(|environment| environment.environment_id.clone()),
+            .map(|environment| environment.selection.environment_id.clone()),
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: turn_context.windows_sandbox_level,
         windows_sandbox_private_desktop: turn_context

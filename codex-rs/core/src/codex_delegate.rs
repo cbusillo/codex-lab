@@ -57,6 +57,7 @@ pub(crate) async fn run_codex_thread_interactive(
     cancel_token: CancellationToken,
     subagent_source: SubAgentSource,
     initial_history: Option<InitialHistory>,
+    thread_extension_init: codex_extension_api::ExtensionDataInit,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
@@ -80,7 +81,8 @@ pub(crate) async fn run_codex_thread_interactive(
         warnings: Vec::new(),
     };
     let session_source = SessionSource::SubAgent(subagent_source.clone());
-    let extensions = if crate::guardian::is_guardian_reviewer_source(&session_source) {
+    let is_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source);
+    let extensions = if is_guardian_reviewer {
         codex_extension_api::empty_extension_registry()
     } else {
         Arc::clone(&parent_session.services.extensions)
@@ -96,6 +98,9 @@ pub(crate) async fn run_codex_thread_interactive(
             .services
             .turn_environments
             .environment_manager(),
+        project_validation_coordinator: Arc::clone(
+            &parent_session.services.project_validation_coordinator,
+        ),
         skills_service: Arc::clone(&parent_session.services.skills_service),
         plugins_manager: Arc::clone(&parent_session.services.plugins_manager),
         mcp_manager: Arc::clone(&parent_session.services.mcp_manager),
@@ -105,9 +110,14 @@ pub(crate) async fn run_codex_thread_interactive(
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,
+        session_provenance: None,
         forked_from_thread_id,
         parent_thread_id: Some(parent_session.thread_id),
-        thread_source: Some(ThreadSource::Subagent),
+        thread_source: Some(if is_guardian_reviewer {
+            ThreadSource::GuardianReview
+        } else {
+            ThreadSource::Subagent
+        }),
         originator: parent_ctx.originator.clone(),
         agent_control: parent_session.services.agent_control.clone(),
         dynamic_tools: Vec::new(),
@@ -118,7 +128,7 @@ pub(crate) async fn run_codex_thread_interactive(
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         parent_trace: None,
         environment_selections: parent_environments.to_selections(),
-        thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
+        thread_extension_init,
         client_mcp_extensions: parent_session.services.client_mcp_extensions.clone(),
         reserved_thread_id: None,
         analytics_events_client: Some(parent_session.services.analytics_events_client.clone()),
@@ -182,6 +192,7 @@ pub(crate) async fn run_codex_thread_one_shot(
     subagent_source: SubAgentSource,
     final_output_json_schema: Option<Value>,
     initial_history: Option<InitialHistory>,
+    thread_extension_init: codex_extension_api::ExtensionDataInit,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
     // Use a child token so we can stop the delegate after completion without
     // requiring the caller to cancel the parent token.
@@ -199,6 +210,7 @@ pub(crate) async fn run_codex_thread_one_shot(
         child_cancel.clone(),
         subagent_source,
         initial_history,
+        thread_extension_init,
         GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
     ))
@@ -242,6 +254,7 @@ pub(crate) async fn run_codex_thread_one_shot(
                     .send(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
+                        client_user_message_id: None,
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,

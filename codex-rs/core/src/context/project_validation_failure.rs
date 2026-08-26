@@ -1,3 +1,4 @@
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::ProjectValidationStatus;
 use codex_utils_string::take_bytes_at_char_boundary;
@@ -51,6 +52,10 @@ impl ProjectValidationFailure {
 }
 
 impl ContextualUserFragment for ProjectValidationFailure {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("project_validation.failure".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }

@@ -1,7 +1,9 @@
 use crate::agent::role::apply_role_to_config;
+use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
+use crate::config::PermissionProfileSnapshot;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -249,14 +251,19 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     #[allow(deprecated)]
     let turn_cwd = turn.cwd.clone();
     config.cwd = turn_cwd;
+    let permission_profile = match turn.config.permissions.active_permission_profile() {
+        Some(active_permission_profile) => {
+            PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                turn.permission_profile(),
+                active_permission_profile,
+                turn.config.permissions.profile_workspace_roots().to_vec(),
+            )
+        }
+        None => PermissionProfileSnapshot::legacy(turn.permission_profile()),
+    };
     config
         .permissions
-        .set_permission_profile_from_session_snapshot(
-            turn.config
-                .permissions
-                .permission_profile_state()
-                .snapshot(),
-        )
+        .set_permission_profile_from_session_snapshot(permission_profile)
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("permission_profile is invalid: {err}"))
         })?;
@@ -381,11 +388,49 @@ pub(crate) async fn apply_spawn_agent_role(
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), FunctionCallError> {
+    apply_spawn_agent_role_with_application(
+        session,
+        config,
+        role_name,
+        SpawnAgentRoleApplication::Default,
+    )
+    .await
+}
+
+pub(crate) async fn apply_spawn_agent_role_for_multi_agent_v2(
+    session: &Session,
+    config: &mut Config,
+    role_name: Option<&str>,
+) -> Result<(), FunctionCallError> {
+    apply_spawn_agent_role_with_application(
+        session,
+        config,
+        role_name,
+        SpawnAgentRoleApplication::MultiAgentV2,
+    )
+    .await
+}
+
+enum SpawnAgentRoleApplication {
+    Default,
+    MultiAgentV2,
+}
+
+async fn apply_spawn_agent_role_with_application(
+    session: &Session,
+    config: &mut Config,
+    role_name: Option<&str>,
+    application: SpawnAgentRoleApplication,
+) -> Result<(), FunctionCallError> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    apply_role_to_config(config, role_name)
-        .await
-        .map_err(FunctionCallError::RespondToModel)?;
+    match application {
+        SpawnAgentRoleApplication::Default => apply_role_to_config(config, role_name).await,
+        SpawnAgentRoleApplication::MultiAgentV2 => {
+            apply_role_to_config_for_multi_agent_v2(config, role_name).await
+        }
+    }
+    .map_err(FunctionCallError::RespondToModel)?;
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());

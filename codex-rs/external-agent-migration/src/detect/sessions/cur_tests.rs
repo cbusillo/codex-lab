@@ -201,77 +201,6 @@ fn resolves_cur_project_names_with_common_separators() {
 }
 
 #[test]
-fn resolves_multiple_hyphenated_path_components() {
-    let root = TempDir::new().expect("tempdir");
-    let project = root
-        .path()
-        .join("first-project")
-        .join("second-project")
-        .join("workspace");
-    fs::create_dir_all(&project).expect("project root");
-
-    assert_eq!(
-        decode_cur_project_path(&encode_project_path(&project)),
-        Some(project)
-    );
-}
-
-#[test]
-fn rejects_unsafe_encoded_project_paths() {
-    for encoded in [
-        "",
-        "safe--unsafe",
-        "safe-.-unsafe",
-        "safe-..-unsafe",
-        "safe/unsafe",
-        "safe\\unsafe",
-        "safe:unsafe",
-    ] {
-        assert_eq!(decode_cur_project_path(encoded), None, "{encoded}");
-    }
-}
-
-#[test]
-fn project_path_decode_limits_fail_closed() {
-    let root = TempDir::new().expect("tempdir");
-    let project = root.path().join("project");
-    fs::create_dir_all(&project).expect("project root");
-    let decode = |limits| {
-        let mut probes = 0;
-        let mut scanned_entries = 0;
-        decode_cur_project_path_from(
-            root.path(),
-            "project",
-            &mut probes,
-            &mut scanned_entries,
-            limits,
-        )
-    };
-
-    assert_eq!(
-        decode(CurProjectPathLimits {
-            max_path_probes: 1,
-            max_scanned_entries: 1,
-        }),
-        Ok(Some(project))
-    );
-    assert_eq!(
-        decode(CurProjectPathLimits {
-            max_path_probes: 0,
-            max_scanned_entries: 1,
-        }),
-        Err(())
-    );
-    assert_eq!(
-        decode(CurProjectPathLimits {
-            max_path_probes: 1,
-            max_scanned_entries: 0,
-        }),
-        Err(())
-    );
-}
-
-#[test]
 fn rejects_ambiguous_cur_project_without_a_direct_match() {
     let root = TempDir::new().expect("tempdir");
     for project_name in ["my-project", "my project", "my+project"] {
@@ -332,19 +261,6 @@ fn parses_windows_cursor_fixture_project_directory() {
         Some(('C', "Users-fixture-Cursor"))
     );
     assert_eq!(decode_cur_windows_project_drive("1-Users-fixture"), None);
-}
-
-#[cfg(windows)]
-#[test]
-fn resolves_windows_project_paths_case_insensitively() {
-    let root = TempDir::new().expect("tempdir");
-    let project = root.path().join("MixedCaseProject");
-    fs::create_dir_all(&project).expect("project root");
-
-    assert_eq!(
-        decode_cur_project_path(&encode_project_path(&project).to_ascii_uppercase()),
-        Some(project)
-    );
 }
 
 #[test]

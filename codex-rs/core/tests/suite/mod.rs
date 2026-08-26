@@ -1,5 +1,9 @@
 // Aggregates all former standalone integration tests as modules.
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_config::ConfigLayerEntry;
+use codex_config::ConfigLayerSource;
+use codex_config::ConfigLayerStack;
+use codex_core::config::Config;
 #[cfg(unix)]
 use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
 use codex_exec_server::CODEX_FS_HELPER_ARG1;
@@ -8,6 +12,65 @@ use codex_test_binary_support::TestBinaryDispatchGuard;
 use codex_test_binary_support::TestBinaryDispatchMode;
 use codex_test_binary_support::configure_test_binary_dispatch;
 use ctor::ctor;
+use std::num::NonZeroUsize;
+use walkdir::WalkDir;
+
+fn configure_hermetic_skill_catalog(config: &mut Config) {
+    config.include_skill_instructions = true;
+    config.skill_max_context_tokens = NonZeroUsize::new(10_000);
+
+    let requirements = config.config_layer_stack.requirements().clone();
+    let requirements_toml = config.config_layer_stack.requirements_toml().clone();
+    let mut layers = config
+        .config_layer_stack
+        .all_layers_low_to_high()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::User { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let disabled_skills = dirs::home_dir()
+        .into_iter()
+        .flat_map(|home_dir| {
+            WalkDir::new(home_dir.join(".agents/skills"))
+                .max_depth(6)
+                .follow_links(true)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
+                .filter_map(|entry| entry.path().canonicalize().ok())
+        })
+        .map(|path| {
+            let mut entry = toml::map::Map::new();
+            entry.insert(
+                "path".to_string(),
+                toml::Value::String(path.to_string_lossy().into_owned()),
+            );
+            entry.insert("enabled".to_string(), toml::Value::Boolean(false));
+            toml::Value::Table(entry)
+        })
+        .collect::<Vec<_>>();
+    let mut skills = toml::map::Map::new();
+    skills.insert(
+        "bundled".to_string(),
+        toml::Value::Table(toml::map::Map::from_iter([(
+            "enabled".to_string(),
+            toml::Value::Boolean(false),
+        )])),
+    );
+    skills.insert(
+        "max_context_tokens".to_string(),
+        toml::Value::Integer(10_000),
+    );
+    skills.insert("config".to_string(), toml::Value::Array(disabled_skills));
+    layers.push(ConfigLayerEntry::new(
+        ConfigLayerSource::SessionFlags,
+        toml::Value::Table(toml::map::Map::from_iter([(
+            "skills".to_string(),
+            toml::Value::Table(skills),
+        )])),
+    ));
+    config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
+        .expect("hermetic skill catalog config should be valid");
+}
 
 // This code runs before any other tests are run.
 // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
@@ -57,6 +120,7 @@ mod compact;
 mod compact_remote;
 mod compact_remote_parity;
 mod compact_resume_fork;
+mod context_annotations;
 mod current_time_reminder;
 mod deprecation_notice;
 mod exec;
@@ -135,8 +199,6 @@ mod safety_buffering;
 mod safety_check_downgrade;
 mod search_tool;
 mod session_provenance;
-mod shell_command;
-mod shell_serialization;
 mod shell_snapshot;
 mod skill_approval;
 mod skills;

@@ -8,6 +8,8 @@ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::resolve_windows_sandbox_mode;
 use crate::windows_sandbox::resolve_windows_sandbox_private_desktop;
+use codex_agent_roles::load_agent_roles;
+use codex_auto_review::AutoReviewBudget;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -23,6 +25,8 @@ use codex_config::ResidencyRequirement;
 use codex_config::SandboxModeRequirement;
 use codex_config::Sourced;
 use codex_config::ThreadConfigLoader;
+use codex_config::ValidationConfig;
+use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::DEFAULT_PROJECT_DOC_MAX_BYTES;
 use codex_config::config_toml::ProjectConfig;
@@ -155,7 +159,6 @@ use codex_network_proxy::NetworkProxyConfig;
 use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
-pub(crate) mod agent_roles;
 mod auth_keyring;
 pub mod edit;
 mod managed_features;
@@ -170,6 +173,10 @@ mod resolved_permission_profile;
 mod schema;
 pub use auth_keyring::bootstrap_auth_config;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
+pub use codex_agent_roles::AgentRoleBackendConfig;
+pub use codex_agent_roles::AgentRoleConfig;
+pub use codex_agent_roles::ExternalCommandAgentBackendConfig;
+pub use codex_agent_roles::ExternalCommandProtocol;
 pub use codex_config::ConfigLoadOptions;
 pub use codex_config::Constrained;
 pub use codex_config::ConstraintError;
@@ -193,6 +200,47 @@ pub(crate) use resolved_permission_profile::PermissionProfileState;
 
 const DEFAULT_IGNORE_LARGE_UNTRACKED_DIRS: i64 = 200;
 const DEFAULT_IGNORE_LARGE_UNTRACKED_FILES: i64 = 10 * 1024 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES: usize = 120_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS: u64 = 5 * 60 * 1_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS: u64 = 300_000;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub(crate) const DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS: usize = 20;
+
+fn resolve_background_auto_review_budget(
+    auto_review: Option<&AutoReviewToml>,
+) -> std::io::Result<AutoReviewBudget> {
+    let defaults = Config::default_background_auto_review_budget();
+    let max_elapsed_seconds = auto_review
+        .and_then(|config| config.background_max_elapsed_seconds)
+        .unwrap_or(defaults.max_elapsed_ms / 1_000);
+    let budget = AutoReviewBudget {
+        max_scope_bytes: auto_review
+            .and_then(|config| config.background_max_diff_bytes)
+            .unwrap_or(defaults.max_scope_bytes),
+        max_elapsed_ms: max_elapsed_seconds.checked_mul(1_000).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "[auto_review] background_max_elapsed_seconds is too large",
+            )
+        })?,
+        max_total_tokens: auto_review
+            .and_then(|config| config.background_max_total_tokens)
+            .unwrap_or(defaults.max_total_tokens),
+        max_output_bytes: auto_review
+            .and_then(|config| config.background_max_output_bytes)
+            .unwrap_or(defaults.max_output_bytes),
+        max_findings: auto_review
+            .and_then(|config| config.background_max_findings)
+            .unwrap_or(defaults.max_findings),
+    };
+    budget.validate().map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid [auto_review] background budget: {err}"),
+        )
+    })?;
+    Ok(budget)
+}
 
 /// Signals that a public config selected the retired `untrusted` approval policy.
 #[derive(Debug, thiserror::Error)]
@@ -227,7 +275,7 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usiz
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "agents";
 
 pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
 pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
@@ -615,6 +663,9 @@ pub struct Config {
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
 
+    /// Effective hard limits for automatic background reviews.
+    pub background_auto_review_budget: AutoReviewBudget,
+
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
@@ -648,6 +699,9 @@ pub struct Config {
     /// been escalated. This does not disable separate safety checks such as
     /// ARC.
     pub approvals_reviewer: ApprovalsReviewer,
+
+    /// Patch-local validation policy.
+    pub validation: ValidationConfig,
 
     /// enforce_residency means web traffic cannot be routed outside of a
     /// particular geography. HTTP clients should direct their requests
@@ -877,6 +931,9 @@ pub struct Config {
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
 
+    /// Explicit enablement overrides for built-in and discovered agent selectors.
+    pub agent_selector_overrides: BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+
     /// Maximum token budget allowed for a goal and default budget for new goals.
     pub max_goal_token_budget: Option<i64>,
 
@@ -890,10 +947,10 @@ pub struct Config {
     /// Resolved configuration shared by all Codex SQLite databases.
     pub sqlite: codex_state::SqliteConfig,
 
-    /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
+    /// Directory where Codex writes log files (defaults to `$CODEX_LAB_HOME/log`).
     pub log_dir: PathBuf,
 
-    /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
+    /// Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.
     pub history: History,
 
     /// When true, session is not persisted on disk. Default to `false`
@@ -956,6 +1013,14 @@ pub struct Config {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: String,
 
+    /// Whether Codex may automatically switch saved accounts when the active
+    /// ChatGPT account is rate or usage limited.
+    pub auto_switch_accounts_on_rate_limit: bool,
+
+    /// Whether Codex may fall back to a saved API key account once all saved
+    /// ChatGPT accounts are rate or usage limited.
+    pub api_key_fallback_on_all_accounts_limited: bool,
+
     /// Whether Codex-owned clients should respect host system proxy settings.
     pub respect_system_proxy: bool,
 
@@ -1007,6 +1072,9 @@ pub struct Config {
 
     /// Additional parameters for the web search tool when it is enabled.
     pub web_search_config: Option<WebSearchConfig>,
+
+    /// Whether model-visible tools are available for turns using this config.
+    pub tools_enabled: bool,
 
     /// Whether to register the experimental request_user_input tool.
     pub experimental_request_user_input_enabled: bool,
@@ -1485,6 +1553,16 @@ impl ConfigBuilder {
 }
 
 impl Config {
+    pub fn default_background_auto_review_budget() -> AutoReviewBudget {
+        AutoReviewBudget {
+            max_scope_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_DIFF_BYTES,
+            max_elapsed_ms: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_ELAPSED_MS,
+            max_total_tokens: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_TOTAL_TOKENS,
+            max_output_bytes: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_OUTPUT_BYTES,
+            max_findings: DEFAULT_BACKGROUND_AUTO_REVIEW_MAX_FINDINGS,
+        }
+    }
+
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
         &self.sqlite
     }
@@ -1505,32 +1583,23 @@ impl Config {
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
-        if self.features.enabled(Feature::MultiAgentV2) {
-            Some(MultiAgentVersion::V2)
-        } else if !self.agents_enabled {
+        if !self.agents_enabled {
             Some(MultiAgentVersion::Disabled)
         } else {
-            None
+            Some(MultiAgentVersion::V2)
         }
     }
 
     pub(crate) fn multi_agent_version_from_features(&self) -> MultiAgentVersion {
-        self.multi_agent_version_override().unwrap_or_else(|| {
-            if self.features.enabled(Feature::Collab) {
-                MultiAgentVersion::V1
-            } else {
-                MultiAgentVersion::Disabled
-            }
-        })
+        self.multi_agent_version_override()
+            .unwrap_or(MultiAgentVersion::V2)
     }
 
     pub(crate) fn multi_agent_version_for_model(
         &self,
-        model_multi_agent_version: Option<MultiAgentVersion>,
+        _model_multi_agent_version: Option<MultiAgentVersion>,
     ) -> MultiAgentVersion {
-        self.multi_agent_version_override()
-            .or(model_multi_agent_version)
-            .unwrap_or_else(|| self.multi_agent_version_from_features())
+        self.multi_agent_version_from_features()
     }
 
     pub(crate) fn effective_agent_max_threads(
@@ -2308,17 +2377,6 @@ pub fn set_default_oss_provider(codex_home: &Path, provider: &str) -> std::io::R
         .map_err(|err| std::io::Error::other(format!("failed to persist config.toml: {err}")))
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AgentRoleConfig {
-    /// Human-facing role documentation used in spawn tool guidance.
-    /// Required for loaded user-defined roles after deprecated/new metadata precedence resolves.
-    pub description: Option<String>,
-    /// Path to a role-specific config layer.
-    pub config_file: Option<PathBuf>,
-    /// Candidate nicknames for agents spawned with this role.
-    pub nickname_candidates: Option<Vec<String>>,
-}
-
 fn resolve_tool_suggest_config(
     config_toml: &ConfigToml,
     config_layer_stack: &ConfigLayerStack,
@@ -2612,6 +2670,10 @@ fn resolve_web_search_config(config_toml: &ConfigToml) -> Option<WebSearchConfig
         .and_then(|tools| tools.web_search.as_ref())
         .cloned()
         .map(Into::into)
+}
+
+fn resolve_tools_enabled(config_toml: &ConfigToml) -> bool {
+    config_toml.tools.as_ref().is_none_or(|tools| tools.enabled)
 }
 
 fn resolve_experimental_request_user_input_enabled(config_toml: &ConfigToml) -> bool {
@@ -3096,6 +3158,36 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
         ));
     }
 
+    Ok(())
+}
+
+fn validate_agent_selector_overrides(
+    overrides: &BTreeMap<String, codex_config::config_toml::AgentSelectorToml>,
+) -> std::io::Result<()> {
+    for (selector, override_config) in overrides {
+        for (field, value) in [
+            ("model", override_config.model.as_deref()),
+            ("effort", override_config.effort.as_deref()),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
+            let valid = !value.is_empty()
+                && value.len() <= 128
+                && !value.starts_with('-')
+                && value.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "-_.:/+".contains(character)
+                });
+            if !valid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.selectors.{selector}.{field} must be a non-empty provider value containing only letters, numbers, '-', '_', '.', ':', '/', or '+'"
+                    ),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -3602,6 +3694,8 @@ impl Config {
                     network_proxy,
                 );
             }
+            configured_network_proxy_config
+                .set_credential_broker_openai_base_url(cfg.openai_base_url.as_deref());
             configured_network_proxy_config.enabled = true;
         }
         if cfg.approval_policy == Some(AskForApproval::UnlessTrusted) {
@@ -3649,6 +3743,7 @@ impl Config {
         let web_search_mode =
             resolve_web_search_mode(&cfg, &features).unwrap_or(WebSearchMode::Cached);
         let web_search_config = resolve_web_search_config(&cfg);
+        let tools_enabled = resolve_tools_enabled(&cfg);
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let update_plan_enabled = resolve_update_plan_enabled(&cfg);
@@ -3674,8 +3769,13 @@ impl Config {
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
         let agent_roles =
-            agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
-                .await?;
+            load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings).await?;
+        let agent_selector_overrides = cfg
+            .agents
+            .as_ref()
+            .map(|agents| agents.selectors.clone())
+            .unwrap_or_default();
+        validate_agent_selector_overrides(&agent_selector_overrides)?;
 
         let openai_base_url = cfg
             .openai_base_url
@@ -4100,6 +4200,9 @@ impl Config {
             model,
             service_tier,
             review_model,
+            background_auto_review_budget: resolve_background_auto_review_budget(
+                cfg.auto_review.as_ref(),
+            )?,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
             model_auto_compact_token_limit_scope: cfg
@@ -4125,6 +4228,7 @@ impl Config {
             explicit_permission_profile_mode,
             custom_permission_profiles,
             approvals_reviewer: constrained_approvals_reviewer.value(),
+            validation: cfg.validation.unwrap_or_default(),
             enforce_residency: enforce_residency.value,
             notify: cfg.notify,
             base_instructions,
@@ -4181,6 +4285,7 @@ impl Config {
             agent_default_subagent_reasoning_effort,
             agent_max_depth,
             agent_roles,
+            agent_selector_overrides,
             max_goal_token_budget: cfg
                 .goals
                 .as_ref()
@@ -4224,6 +4329,12 @@ impl Config {
             chatgpt_base_url: cfg
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
+            auto_switch_accounts_on_rate_limit: cfg
+                .auto_switch_accounts_on_rate_limit
+                .unwrap_or(true),
+            api_key_fallback_on_all_accounts_limited: cfg
+                .api_key_fallback_on_all_accounts_limited
+                .unwrap_or(false),
             respect_system_proxy,
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             responses_api_metadata: cfg.responses_api_metadata.unwrap_or_default(),
@@ -4256,6 +4367,7 @@ impl Config {
             forced_login_method,
             web_search_mode: constrained_web_search_mode.value,
             web_search_config,
+            tools_enabled,
             experimental_request_user_input_enabled,
             update_plan_enabled,
             tool_registry,
@@ -4475,6 +4587,8 @@ impl Config {
                         network_proxy,
                     );
                 }
+                configured_network_proxy_config
+                    .set_credential_broker_openai_base_url(cfg.openai_base_url.as_deref());
                 configured_network_proxy_config.enabled = true;
             }
             configured_network_proxy_config

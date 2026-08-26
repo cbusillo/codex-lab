@@ -1087,9 +1087,9 @@ async fn missing_exact_turn_diff_persists_skip_without_launching_review() -> Res
     let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
     let server = responses::start_mock_server().await;
     let shell_arguments = serde_json::json!({
-        "command": "printf 'shell mutation\\n' > shell-created.txt",
+        "cmd": "printf 'shell mutation\\n' > shell-created.txt",
         "login": false,
-        "timeout_ms": 1_000,
+        "yield_time_ms": 1_000,
     });
     let responses_mock = responses::mount_sse_sequence(
         &server,
@@ -1098,7 +1098,7 @@ async fn missing_exact_turn_diff_persists_skip_without_launching_review() -> Res
                 responses::ev_response_created("resp-shell-tool"),
                 responses::ev_function_call(
                     "call-shell",
-                    "shell_command",
+                    "exec_command",
                     &serde_json::to_string(&shell_arguments)?,
                 ),
                 responses::ev_completed("resp-shell-tool"),

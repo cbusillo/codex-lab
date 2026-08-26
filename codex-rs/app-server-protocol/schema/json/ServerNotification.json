@@ -573,6 +573,13 @@
             "bedrockApiKey"
           ],
           "type": "string"
+        },
+        {
+          "description": "Amazon Bedrock AWS access keys managed by Codex.",
+          "enum": [
+            "bedrockAccessKeys"
+          ],
+          "type": "string"
         }
       ]
     },
@@ -4476,7 +4483,8 @@
       "enum": [
         "started",
         "interacted",
-        "interrupted"
+        "interrupted",
+        "completed"
       ],
       "type": "string"
     },
@@ -5976,6 +5984,65 @@
       ],
       "type": "object"
     },
+    "ThreadRealtimeBemItemPresentation": {
+      "description": "EXPERIMENTAL - how an existing agent item appears in a realtime conversation.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "wholeItem"
+              ],
+              "title": "WholeItemThreadRealtimeBemItemPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "WholeItemThreadRealtimeBemItemPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "inlineMarkdown"
+              ],
+              "title": "InlineMarkdownThreadRealtimeBemItemPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "InlineMarkdownThreadRealtimeBemItemPresentation",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "index": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "inlineVisualization"
+              ],
+              "title": "InlineVisualizationThreadRealtimeBemItemPresentationType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "index",
+            "type"
+          ],
+          "title": "InlineVisualizationThreadRealtimeBemItemPresentation",
+          "type": "object"
+        }
+      ]
+    },
     "ThreadRealtimeClosedNotification": {
       "description": "EXPERIMENTAL - emitted when thread realtime transport closes.",
       "properties": {
@@ -6010,6 +6077,112 @@
       ],
       "type": "object"
     },
+    "ThreadRealtimeItem": {
+      "description": "EXPERIMENTAL - a thread-scoped realtime item in the canonical timeline.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "realtimeSessionStarted"
+              ],
+              "title": "RealtimeSessionStartedThreadRealtimeItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "RealtimeSessionStartedThreadRealtimeItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "role": {
+              "$ref": "#/definitions/ThreadRealtimeTranscriptRole"
+            },
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "transcriptSegment"
+              ],
+              "title": "TranscriptSegmentThreadRealtimeItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "text",
+            "type"
+          ],
+          "title": "TranscriptSegmentThreadRealtimeItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "item_id": {
+              "type": "string"
+            },
+            "presentation": {
+              "$ref": "#/definitions/ThreadRealtimeBemItemPresentation"
+            },
+            "turn_id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "bemItemPromoted"
+              ],
+              "title": "BemItemPromotedThreadRealtimeItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "item_id",
+            "presentation",
+            "turn_id",
+            "type"
+          ],
+          "title": "BemItemPromotedThreadRealtimeItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "$ref": "#/definitions/ThreadRealtimeSessionOutcome"
+            },
+            "type": {
+              "enum": [
+                "realtimeSessionClosed"
+              ],
+              "title": "RealtimeSessionClosedThreadRealtimeItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "type"
+          ],
+          "title": "RealtimeSessionClosedThreadRealtimeItem",
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "realtimeSessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "realtimeSessionId"
+      ],
+      "type": "object"
+    },
     "ThreadRealtimeItemAddedNotification": {
       "description": "EXPERIMENTAL - raw non-audio thread realtime item emitted by the backend.",
       "properties": {
@@ -6020,6 +6193,58 @@
       },
       "required": [
         "item",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadRealtimeItemCompletedNotification": {
+      "description": "EXPERIMENTAL - a realtime timeline item published after canonical commit.",
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadRealtimeItem"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadRealtimeItemStartedNotification": {
+      "description": "EXPERIMENTAL - a realtime timeline item started before its content streams.",
+      "properties": {
+        "item": {
+          "$ref": "#/definitions/ThreadRealtimeItem"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadRealtimeItemTranscriptDeltaNotification": {
+      "description": "EXPERIMENTAL - text appended to an active realtime transcript item.",
+      "properties": {
+        "delta": {
+          "type": "string"
+        },
+        "itemId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delta",
+        "itemId",
         "threadId"
       ],
       "type": "object"
@@ -6055,6 +6280,13 @@
         "threadId"
       ],
       "type": "object"
+    },
+    "ThreadRealtimeSessionOutcome": {
+      "enum": [
+        "ended",
+        "failed"
+      ],
+      "type": "string"
     },
     "ThreadRealtimeStartedNotification": {
       "description": "EXPERIMENTAL - emitted when thread realtime startup is accepted.",
@@ -6119,6 +6351,13 @@
         "threadId"
       ],
       "type": "object"
+    },
+    "ThreadRealtimeTranscriptRole": {
+      "enum": [
+        "user",
+        "assistant"
+      ],
+      "type": "string"
     },
     "ThreadRevertedNotification": {
       "properties": {
@@ -8478,6 +8717,66 @@
         "params"
       ],
       "title": "Thread/realtime/itemAddedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/realtime/item/started"
+          ],
+          "title": "Thread/realtime/item/startedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRealtimeItemStartedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/realtime/item/startedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/realtime/item/transcript/delta"
+          ],
+          "title": "Thread/realtime/item/transcript/deltaNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRealtimeItemTranscriptDeltaNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/realtime/item/transcript/deltaNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/realtime/item/completed"
+          ],
+          "title": "Thread/realtime/item/completedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRealtimeItemCompletedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/realtime/item/completedNotification",
       "type": "object"
     },
     {

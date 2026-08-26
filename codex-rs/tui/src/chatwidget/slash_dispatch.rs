@@ -29,7 +29,7 @@ impl ChatWidget {
         &mut self,
         feedback: Option<LoginAccountsFeedback>,
     ) {
-        let default_auth_home_is_current = self.config.auth_home == self.config.codex_home;
+        let default_auth_home_is_current = true;
         let view = LoginAccountsView::new_with_feedback(
             &self.config.codex_home,
             self.app_event_tx.clone(),

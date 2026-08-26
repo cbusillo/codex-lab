@@ -78,7 +78,6 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -115,6 +114,9 @@ use crate::attestation::X_OAI_ATTESTATION_HEADER;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::context::BaseInstructionsFragment;
+use crate::context::ContextualUserFragment;
+use crate::execution_account::ExecutionAccountLease;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
@@ -202,11 +204,14 @@ fn session_telemetry_for_request(
 #[derive(Debug)]
 struct ModelClientState {
     thread_id: ThreadId,
+    execution_account: arc_swap::ArcSwapOption<ExecutionAccountLease>,
     provider: SharedModelProvider,
+    execution_provider: StdMutex<Option<(Arc<AuthManager>, SharedModelProvider)>>,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
     originator: String,
     model_verbosity: Option<VerbosityConfig>,
+    content_item_kinds_enabled: bool,
     enable_request_compression: bool,
     include_timing_metrics: bool,
     beta_features_header: Option<String>,
@@ -215,7 +220,7 @@ struct ModelClientState {
     attestation_provider: Option<Arc<dyn AttestationProvider>>,
     disable_websockets: AtomicBool,
     agent_identity_session_fallback: AgentIdentitySessionFallback,
-    cached_websocket_session: StdMutex<WebsocketSession>,
+    cached_websocket_session: StdMutex<CachedWebsocketSession>,
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -227,6 +232,14 @@ struct CurrentClientSetup {
     api_provider: ApiProvider,
     api_auth: SharedAuthProvider,
     agent_identity_telemetry: Option<AgentIdentityTelemetry>,
+    websocket_auth_cache_key: WebsocketAuthCacheKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WebsocketAuthCacheKey {
+    account_discriminator: Option<String>,
+    auth_revision: Option<u64>,
+    agent_identity_fallback_engaged: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -275,6 +288,7 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    websocket_generation: u64,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -295,8 +309,15 @@ struct LastResponse {
 }
 
 #[derive(Debug, Default)]
+struct CachedWebsocketSession {
+    generation: u64,
+    session: WebsocketSession,
+}
+
+#[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
+    connection_auth_cache_key: Option<WebsocketAuthCacheKey>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
@@ -325,6 +346,7 @@ fn responses_request_properties_match(
         service_tier: previous_service_tier,
         prompt_cache_key: previous_prompt_cache_key,
         text: previous_text,
+        max_output_tokens: previous_max_output_tokens,
         client_metadata: _,
     } = previous;
     let ResponsesApiRequest {
@@ -342,6 +364,7 @@ fn responses_request_properties_match(
         service_tier: current_service_tier,
         prompt_cache_key: current_prompt_cache_key,
         text: current_text,
+        max_output_tokens: current_max_output_tokens,
         client_metadata: _,
     } = current;
 
@@ -359,6 +382,7 @@ fn responses_request_properties_match(
         && previous_service_tier == current_service_tier
         && previous_prompt_cache_key == current_prompt_cache_key
         && previous_text == current_text
+        && previous_max_output_tokens == current_max_output_tokens
 }
 
 fn response_items_equal_ignoring_internal_metadata(
@@ -435,6 +459,7 @@ impl ModelClient {
         session_source: SessionSource,
         originator: String,
         model_verbosity: Option<VerbosityConfig>,
+        content_item_kinds_enabled: bool,
         enable_request_compression: bool,
         include_timing_metrics: bool,
         beta_features_header: Option<String>,
@@ -453,11 +478,14 @@ impl ModelClient {
         Self {
             state: Arc::new(ModelClientState {
                 thread_id,
+                execution_account: arc_swap::ArcSwapOption::empty(),
                 provider: model_provider,
+                execution_provider: StdMutex::new(None),
                 auth_env_telemetry,
                 session_source,
                 originator,
                 model_verbosity,
+                content_item_kinds_enabled,
                 enable_request_compression,
                 include_timing_metrics,
                 beta_features_header,
@@ -466,7 +494,7 @@ impl ModelClient {
                 attestation_provider,
                 disable_websockets: AtomicBool::new(false),
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
-                cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                cached_websocket_session: StdMutex::new(CachedWebsocketSession::default()),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -482,18 +510,65 @@ impl ModelClient {
         self
     }
 
-    fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
-        if let Some(prompt_cache_key) = &self.prompt_cache_key_override {
-            return prompt_cache_key.clone();
+    pub(crate) fn set_execution_account_lease(&self, lease: ExecutionAccountLease) {
+        self.state.execution_account.store(Some(Arc::new(lease)));
+        *self
+            .state
+            .execution_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.invalidate_cached_websocket_session();
+    }
+
+    fn request_provider(&self) -> SharedModelProvider {
+        let Some(execution_account) = self.state.execution_account.load_full() else {
+            return Arc::clone(&self.state.provider);
+        };
+        let auth_manager = execution_account.auth_manager();
+        if self
+            .state
+            .provider
+            .auth_manager()
+            .as_ref()
+            .is_some_and(|control_auth_manager| Arc::ptr_eq(control_auth_manager, &auth_manager))
+        {
+            return Arc::clone(&self.state.provider);
         }
 
-        if let SessionSource::Internal(source) = &self.state.session_source
+        let mut execution_provider = self
+            .state
+            .execution_provider
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_auth_manager, provider)) = execution_provider.as_ref()
+            && Arc::ptr_eq(cached_auth_manager, &auth_manager)
+        {
+            return Arc::clone(provider);
+        }
+
+        let provider = create_model_provider(
+            self.state.provider.info().clone(),
+            Some(Arc::clone(&auth_manager)),
+        );
+        *execution_provider = Some((auth_manager, Arc::clone(&provider)));
+        provider
+    }
+
+    fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
+        let base = if let Some(prompt_cache_key) = &self.prompt_cache_key_override {
+            prompt_cache_key.clone()
+        } else if let SessionSource::Internal(source) = &self.state.session_source
             && let Some(parent_thread_id) = responses_metadata.parent_thread_id
         {
-            return format!("{source}:{parent_thread_id}");
-        }
-
-        responses_metadata.session_id.clone()
+            format!("{source}:{parent_thread_id}")
+        } else {
+            responses_metadata.session_id.clone()
+        };
+        self.state
+            .execution_account
+            .load_full()
+            .and_then(|lease| lease.prompt_cache_discriminator())
+            .map_or(base.clone(), |account_id| format!("{base}:{account_id}"))
     }
 
     /// Creates a fresh turn-scoped streaming session.
@@ -501,9 +576,11 @@ impl ModelClient {
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
     pub fn new_session(&self) -> ModelClientSession {
+        let (websocket_generation, websocket_session) = self.take_cached_websocket_session();
         ModelClientSession {
             client: self.clone(),
-            websocket_session: self.take_cached_websocket_session(),
+            websocket_session,
+            websocket_generation,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -512,21 +589,37 @@ impl ModelClient {
         self.state.provider.auth_manager()
     }
 
-    fn take_cached_websocket_session(&self) -> WebsocketSession {
+    fn take_cached_websocket_session(&self) -> (u64, WebsocketSession) {
         let mut cached_websocket_session = self
             .state
             .cached_websocket_session
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::mem::take(&mut *cached_websocket_session)
+        (
+            cached_websocket_session.generation,
+            std::mem::take(&mut cached_websocket_session.session),
+        )
     }
 
-    fn store_cached_websocket_session(&self, websocket_session: WebsocketSession) {
-        *self
+    fn store_cached_websocket_session(&self, generation: u64, websocket_session: WebsocketSession) {
+        let mut cached_websocket_session = self
             .state
             .cached_websocket_session
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = websocket_session;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cached_websocket_session.generation == generation {
+            cached_websocket_session.session = websocket_session;
+        }
+    }
+
+    pub(crate) fn invalidate_cached_websocket_session(&self) {
+        let mut cached_websocket_session = self
+            .state
+            .cached_websocket_session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cached_websocket_session.generation = cached_websocket_session.generation.wrapping_add(1);
+        cached_websocket_session.session = WebsocketSession::default();
     }
 
     pub(crate) fn force_http_fallback(
@@ -546,7 +639,7 @@ impl ModelClient {
             );
         }
 
-        self.store_cached_websocket_session(WebsocketSession::default());
+        self.invalidate_cached_websocket_session();
         activated
     }
 
@@ -875,18 +968,6 @@ impl ModelClient {
     ) -> Result<ResponsesApiRequest> {
         let mut input = prompt.get_formatted_input_for_request(model_info.use_responses_lite);
         let is_openai = self.state.provider.info().is_openai();
-        if !is_openai {
-            for item in &mut input {
-                item.clear_internal_chat_message_metadata_passthrough();
-                if let ResponseItem::FunctionCall {
-                    encrypted_function_args,
-                    ..
-                } = item
-                {
-                    *encrypted_function_args = None;
-                }
-            }
-        }
         let (instructions, tools) = if model_info.use_responses_lite {
             let tools = if self.state.provider.capabilities().namespace_tools {
                 create_tools_json_for_responses_lite(&prompt.tools)?
@@ -899,24 +980,34 @@ impl ModelClient {
                 tools,
             }];
             if !prompt.base_instructions.text.is_empty() {
-                prefix.push(ResponseItem::Message {
-                    id: None,
-                    role: "developer".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: prompt.base_instructions.text.clone(),
-                    }],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                });
+                prefix.push(ContextualUserFragment::into(BaseInstructionsFragment(
+                    prompt.base_instructions.text.clone(),
+                )));
             }
             input.splice(0..0, prefix);
             (String::new(), None)
         } else {
             (
                 prompt.base_instructions.text.clone(),
-                Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
+                if prompt.tools.is_empty() {
+                    None
+                } else {
+                    Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into())
+                },
             )
         };
+        if !is_openai {
+            for item in &mut input {
+                item.clear_internal_chat_message_metadata_passthrough();
+                if let ResponseItem::FunctionCall {
+                    encrypted_function_args,
+                    ..
+                } = item
+                {
+                    *encrypted_function_args = None;
+                }
+            }
+        }
         let reasoning = Self::build_reasoning(model_info, effort, summary);
         let stream_options = (self.state.concurrent_reasoning_summaries_enabled
             && is_openai
@@ -948,8 +1039,14 @@ impl ModelClient {
             instructions,
             input,
             tools,
-            tool_choice: "auto".to_string(),
-            parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+            tool_choice: if prompt.tools.is_empty() {
+                String::new()
+            } else {
+                "auto".to_string()
+            },
+            parallel_tool_calls: !prompt.tools.is_empty()
+                && prompt.parallel_tool_calls
+                && !model_info.use_responses_lite,
             reasoning: Some(reasoning),
             store: false,
             stream: true,
@@ -958,6 +1055,7 @@ impl ModelClient {
             service_tier,
             prompt_cache_key,
             text,
+            max_output_tokens: prompt.max_output_tokens,
             client_metadata: Some(responses_metadata.client_metadata()),
         };
         Ok(request)
@@ -967,6 +1065,9 @@ impl ModelClient {
         for item in input {
             if item.id().is_some_and(|id| !id.is_prefixed()) {
                 item.set_id(/*new_id*/ None);
+            }
+            if !self.state.content_item_kinds_enabled {
+                item.clear_content_item_kinds();
             }
         }
     }
@@ -989,11 +1090,10 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
-            .provider
+        let provider = self.request_provider();
+        let auth = provider.auth().await;
+        let api_provider = provider.api_provider().await?;
+        let resolved_auth = provider
             .api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
@@ -1005,6 +1105,11 @@ impl ModelClient {
             api_provider,
             api_auth: resolved_auth.auth,
             agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
+            websocket_auth_cache_key: websocket_auth_cache_key(
+                self.state.execution_account.load_full().as_ref(),
+                &provider,
+                self.state.agent_identity_session_fallback.is_engaged(),
+            ),
         })
     }
 
@@ -1183,7 +1288,7 @@ impl Drop for ModelClientSession {
     fn drop(&mut self) {
         let websocket_session = std::mem::take(&mut self.websocket_session);
         self.client
-            .store_cached_websocket_session(websocket_session);
+            .store_cached_websocket_session(self.websocket_generation, websocket_session);
     }
 }
 
@@ -1357,6 +1462,8 @@ impl ModelClientSession {
             )
             .await?;
         self.websocket_session.connection = Some(connection);
+        self.websocket_session.connection_auth_cache_key =
+            Some(client_setup.websocket_auth_cache_key);
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
         Ok(())
@@ -1382,12 +1489,17 @@ impl ModelClientSession {
             session_telemetry,
             api_provider,
             api_auth,
+            websocket_auth_cache_key,
             responses_metadata,
             auth_context,
             request_route_telemetry,
         } = params;
         let needs_new = match self.websocket_session.connection.as_ref() {
-            Some(conn) => conn.is_closed().await,
+            Some(conn) => {
+                conn.is_closed().await
+                    || self.websocket_session.connection_auth_cache_key.as_ref()
+                        != Some(&websocket_auth_cache_key)
+            }
             None => true,
         };
 
@@ -1416,6 +1528,7 @@ impl ModelClientSession {
                 }
             };
             self.websocket_session.connection = Some(new_conn);
+            self.websocket_session.connection_auth_cache_key = Some(websocket_auth_cache_key);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
         } else {
@@ -1470,7 +1583,7 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let auth_manager = self.client.request_provider().auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
@@ -1613,7 +1726,7 @@ impl ModelClientSession {
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
     ) -> Result<WebsocketStreamOutcome> {
-        let provider = Arc::clone(&self.client.state.provider);
+        let provider = self.client.request_provider();
         let auth_manager = provider.auth_manager();
 
         let mut auth_recovery = auth_manager
@@ -1660,6 +1773,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider: client_setup.api_provider,
                     api_auth: client_setup.api_auth,
+                    websocket_auth_cache_key: client_setup.websocket_auth_cache_key,
                     responses_metadata: &websocket_metadata,
                     auth_context: request_auth_context,
                     request_route_telemetry: RequestRouteTelemetry::for_endpoint(
@@ -1726,16 +1840,17 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
-            let ws_payload = ResponseCreateWsRequest {
-                previous_response_id,
-                input: incremental_items.as_deref().unwrap_or(&request.input),
-                generate: if warmup { Some(false) } else { None },
-                client_metadata: response_create_client_metadata(
-                    Some(client_metadata),
-                    request_trace.as_ref(),
-                ),
-                ..ResponseCreateWsRequest::from(&request)
-            };
+            let mut ws_payload = ResponseCreateWsRequest::from(&request);
+            ws_payload.previous_response_id = previous_response_id;
+            ws_payload.input = incremental_items.as_deref().unwrap_or(&request.input);
+            ws_payload.generate = if warmup { Some(false) } else { None };
+            ws_payload.client_metadata =
+                response_create_client_metadata(Some(client_metadata), request_trace.as_ref());
+            if warmup {
+                ws_payload.tools = None;
+                ws_payload.tool_choice = "";
+                ws_payload.parallel_tool_calls = false;
+            }
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
             if !previous_response_id_from_untraced_warmup {
@@ -2224,7 +2339,9 @@ impl AuthRequestTelemetryContext {
         let auth_telemetry = auth_header_telemetry(api_auth);
         Self {
             auth_mode: auth_mode.map(|mode| match mode {
-                AuthMode::ApiKey | AuthMode::BedrockApiKey => "ApiKey",
+                AuthMode::ApiKey | AuthMode::BedrockApiKey | AuthMode::BedrockAccessKeys => {
+                    "ApiKey"
+                }
                 AuthMode::Chatgpt
                 | AuthMode::ChatgptAuthTokens
                 | AuthMode::Headers
@@ -2249,9 +2366,25 @@ struct WebsocketConnectParams<'a> {
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
     api_auth: SharedAuthProvider,
+    websocket_auth_cache_key: WebsocketAuthCacheKey,
     responses_metadata: &'a CodexResponsesMetadata,
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
+}
+
+fn websocket_auth_cache_key(
+    execution_account: Option<&Arc<ExecutionAccountLease>>,
+    provider: &SharedModelProvider,
+    agent_identity_fallback_engaged: bool,
+) -> WebsocketAuthCacheKey {
+    WebsocketAuthCacheKey {
+        account_discriminator: execution_account
+            .map(|lease| lease.cache_identity().connection_discriminator()),
+        auth_revision: provider
+            .auth_manager()
+            .map(|auth_manager| auth_manager.auth_revision()),
+        agent_identity_fallback_engaged,
+    }
 }
 
 async fn handle_unauthorized(

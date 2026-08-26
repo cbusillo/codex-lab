@@ -1,10 +1,10 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_exec_command_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::AutoReviewDetailKind;
 use codex_app_server_protocol::AutoReviewDispositionAction;
 use codex_app_server_protocol::AutoReviewDispositionActor;
@@ -266,16 +266,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
 #[ignore = "TODO(owenlin0): flaky"]
 async fn review_start_exec_approval_item_id_matches_command_execution_item() -> Result<()> {
     let responses = vec![
-        create_shell_command_sse_response(
-            vec![
-                "git".to_string(),
-                "rev-parse".to_string(),
-                "HEAD".to_string(),
-            ],
-            /*workdir*/ None,
-            Some(5000),
-            "review-call-1",
-        )?,
+        create_exec_command_sse_response("review-call-1")?,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;

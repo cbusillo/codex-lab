@@ -143,6 +143,8 @@ mod models;
 mod models_refresh_worker;
 mod otel_reloader;
 mod outgoing_message;
+mod realtime_event_handling;
+mod realtime_history;
 mod request_processors;
 mod request_serialization;
 mod server_request_error;
@@ -513,7 +515,6 @@ pub async fn run_main_with_transport_options(
     let ignore_user_config = loader_overrides.ignore_user_config;
     let config_manager = ConfigManager::new(ConfigManagerArgs {
         codex_home: codex_home.to_path_buf(),
-        auth_home: codex_home.to_path_buf(),
         cli_overrides: cli_kv_overrides.clone(),
         loader_overrides,
         strict_config,

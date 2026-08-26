@@ -2,6 +2,7 @@ use super::ContextualUserFragment;
 use super::world_state::PreviousSectionState;
 use super::world_state::WorldStateSection;
 use codex_protocol::AgentPath;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::protocol::CONTEXT_WINDOW_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_CLOSE_TAG;
 use codex_protocol::protocol::CONTEXT_WINDOW_GUIDANCE_OPEN_TAG;
@@ -91,6 +92,10 @@ fn bounded_thread_hint(hint: &str) -> Option<String> {
 }
 
 impl ContextualUserFragment for TokenBudgetContext {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("token_budget.context_window".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }
@@ -157,6 +162,10 @@ impl ContextWindowGuidance {
 }
 
 impl ContextualUserFragment for ContextWindowGuidance {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("token_budget.context_window_guidance".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }
@@ -195,6 +204,10 @@ impl TokenBudgetRemainingContext {
 }
 
 impl ContextualUserFragment for TokenBudgetRemainingContext {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("token_budget.remaining_tokens".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }
@@ -231,6 +244,10 @@ impl TokenBudgetReminder {
 }
 
 impl ContextualUserFragment for TokenBudgetReminder {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("token_budget.reminder".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }
@@ -262,6 +279,10 @@ impl AutoCompactFallbackPrompt {
 }
 
 impl ContextualUserFragment for AutoCompactFallbackPrompt {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("compaction.auto_fallback_prompt".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }

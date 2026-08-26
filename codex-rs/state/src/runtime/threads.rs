@@ -106,6 +106,7 @@ SELECT
     ) AS section_appearance,
     threads.section_position,
     threads.section_entered_at_ms,
+    threads.project_id,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url
@@ -848,8 +849,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -899,6 +901,7 @@ ON CONFLICT(id) DO NOTHING
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind("enabled")
+        .bind(metadata.project_id.as_deref())
         .execute(self.pool.as_ref())
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
@@ -1126,8 +1129,9 @@ INSERT INTO threads (
     git_sha,
     git_branch,
     git_origin_url,
-    memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    memory_mode,
+    project_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -1207,6 +1211,7 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind(creation_memory_mode.unwrap_or("enabled"))
+        .bind(metadata.project_id.as_deref())
         .execute(self.pool.as_ref())
         .await?;
         self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
@@ -1516,6 +1521,7 @@ SELECT
     ) AS section_appearance,
     threads.section_position,
     threads.section_entered_at_ms,
+    threads.project_id,
     threads.git_sha,
     threads.git_branch,
     threads.git_origin_url
@@ -1532,6 +1538,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
+        | RolloutItem::RealtimeItem(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::EventMsg(_) => None,
     })
@@ -1891,6 +1898,7 @@ mod tests {
             model_providers: None,
             cwd_filters: None,
             section,
+            project_id: None,
             anchor,
             sort_key: SortKey::RecencyAt,
             sort_direction: SortDirection::Desc,
@@ -2024,6 +2032,7 @@ mod tests {
             model_providers: None,
             cwd_filters: None,
             section: Some(Some(CUSTOM_THREAD_SECTION_ID)),
+            project_id: None,
             anchor,
             sort_key: SortKey::SectionPosition,
             sort_direction: SortDirection::Asc,
@@ -2334,6 +2343,7 @@ mod tests {
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
                     section: None,
+                    project_id: None,
                     anchor: Some(&anchor),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -2363,6 +2373,7 @@ mod tests {
                     model_providers: Some(&model_providers),
                     cwd_filters: None,
                     section: None,
+                    project_id: None,
                     anchor: page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Asc,
@@ -2420,6 +2431,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -2453,6 +2465,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: Some(cwd_filters.as_slice()),
                     section: None,
+                    project_id: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -2479,6 +2492,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: Some(&[]),
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::UpdatedAt,
                     sort_direction: SortDirection::Desc,
@@ -2547,6 +2561,7 @@ mod tests {
                         model_providers: Some(&model_providers),
                         cwd_filters,
                         section: None,
+                        project_id: None,
                         anchor,
                         sort_key,
                         sort_direction: SortDirection::Desc,
@@ -2648,6 +2663,7 @@ mod tests {
                 model_providers: None,
                 cwd_filters: None,
                 section: None,
+                project_id: None,
                 anchor: None,
                 sort_key: SortKey::CreatedAt,
                 sort_direction: SortDirection::Desc,
@@ -2677,6 +2693,7 @@ mod tests {
             model_providers: None,
             cwd_filters: None,
             section: None,
+            project_id: None,
             anchor,
             sort_key: SortKey::CreatedAt,
             sort_direction: SortDirection::Desc,
@@ -3363,6 +3380,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: None,
                     section: None,
+                    project_id: None,
                     anchor: None,
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -3396,6 +3414,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: None,
                     section: None,
+                    project_id: None,
                     anchor: first_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,
@@ -3429,6 +3448,7 @@ mod tests {
                     model_providers: None,
                     cwd_filters: None,
                     section: None,
+                    project_id: None,
                     anchor: second_page.next_anchor.as_ref(),
                     sort_key: SortKey::RecencyAt,
                     sort_direction: SortDirection::Desc,

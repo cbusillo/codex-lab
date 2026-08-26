@@ -1105,6 +1105,7 @@ fn account_detail(account: &StoredAccount) -> Option<String> {
         AuthMode::PersonalAccessToken => details.push("personal access token".to_string()),
         AuthMode::Headers => details.push("request headers".to_string()),
         AuthMode::BedrockApiKey => details.push("Bedrock API key".to_string()),
+        AuthMode::BedrockAccessKeys => details.push("Bedrock access keys".to_string()),
     }
     if let Some(created_at) = account.created_at {
         details.push(format!("connected {}", format_timestamp(created_at)));
@@ -1127,6 +1128,7 @@ fn account_list_entry_label(entry: &AccountListEntry) -> String {
         ApiAuthMode::AgentIdentity => "Agent identity".to_string(),
         ApiAuthMode::PersonalAccessToken => "Personal access token".to_string(),
         ApiAuthMode::BedrockApiKey => "Bedrock API key".to_string(),
+        ApiAuthMode::BedrockAccessKeys => "Bedrock access keys".to_string(),
     }
 }
 
@@ -1139,6 +1141,7 @@ fn account_list_entry_detail(entry: &AccountListEntry) -> Option<String> {
         ApiAuthMode::AgentIdentity => "agent identity",
         ApiAuthMode::PersonalAccessToken => "personal access token",
         ApiAuthMode::BedrockApiKey => "Bedrock API key",
+        ApiAuthMode::BedrockAccessKeys => "Bedrock access keys",
     };
     if entry
         .label
@@ -1182,6 +1185,7 @@ fn api_account_mode_priority(mode: ApiAuthMode) -> u8 {
         ApiAuthMode::PersonalAccessToken => 3,
         ApiAuthMode::Headers => 4,
         ApiAuthMode::BedrockApiKey => 5,
+        ApiAuthMode::BedrockAccessKeys => 6,
     }
 }
 

@@ -689,6 +689,57 @@ async fn denied_project_instructions_fail_thread_creation() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symlinked_writable_root_reports_sandbox_failure_instead_of_session_corruption()
+-> Result<()> {
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    let visualization_target = home.path().join("visualization-target");
+    std::fs::create_dir(&visualization_target)?;
+    let visualization_root = home.path().join("visualizations");
+    create_directory_symlink(&visualization_target, &visualization_root);
+
+    let mut builder = test_codex().with_home(home).with_config(move |config| {
+        let mut file_system_policy = FileSystemSandboxPolicy::read_only();
+        file_system_policy.entries.push(FileSystemSandboxEntry::new(
+            config.cwd.join("private.txt").into(),
+            FileSystemAccessMode::Deny,
+        ));
+        file_system_policy.entries.push(FileSystemSandboxEntry::new(
+            visualization_root.abs().into(),
+            FileSystemAccessMode::Write,
+        ));
+        config
+            .permissions
+            .set_permission_profile(PermissionProfile::from_runtime_permissions(
+                &file_system_policy,
+                NetworkSandboxPolicy::Restricted,
+            ))
+            .expect("test config should allow the restricted filesystem policy");
+    });
+
+    let error = match builder.build(&server).await {
+        Ok(_) => anyhow::bail!("thread creation must reject the symlinked writable root"),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains("failed to prepare fs sandbox"),
+        "thread creation should report the sandbox preparation failure: {error}"
+    );
+    assert!(
+        error.contains("symlinked writable roots are not supported"),
+        "thread creation should preserve the rejected writable root: {error}"
+    );
+    assert!(
+        !error.contains("Session data under"),
+        "sandbox preparation failure should not be diagnosed as session corruption: {error}"
+    );
+
+    Ok(())
+}
+
 /// Tightening permissions fails the turn before stale project instructions reach the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tightening_environment_read_permissions_invalidates_cached_project_instructions()
@@ -1332,6 +1383,10 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
     fork_config.model_provider = parent.config.model_provider.clone();
     fork_config.model_catalog = parent.config.model_catalog.clone();
     fork_config.codex_self_exe = parent.config.codex_self_exe.clone();
+    fork_config
+        .features
+        .enable(Feature::ContentItemKinds)
+        .expect("test config should allow ContentItemKinds override");
     let forked = parent
         .thread_manager
         .fork_thread(
@@ -1464,6 +1519,9 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         .with_config(|config| {
             let _ = config.features.enable(Feature::Collab);
             let _ = config.features.disable(Feature::EnableRequestCompression);
+            config.multi_agent_v2.root_agent_usage_hint_text = Some("root usage hint".to_string());
+            config.multi_agent_v2.subagent_usage_hint_text =
+                Some("subagent usage hint".to_string());
         });
     let test = builder.build(&server).await?;
 
@@ -1533,15 +1591,11 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
                 .root_agent_usage_hint_text
                 .as_deref()
                 .expect("root agent usage hint");
-            let replayable_seed_input = seed_input
+            let root_agent_usage_hint_count = seed_input
                 .iter()
                 .filter(|item| {
-                    let is_standalone_root_usage_hint = item
-                        .get("type")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("message")
-                        && item.get("role").and_then(serde_json::Value::as_str)
-                            == Some("developer")
+                    item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                        && item.get("role").and_then(serde_json::Value::as_str) == Some("developer")
                         && item
                             .get("content")
                             .and_then(serde_json::Value::as_array)
@@ -1551,20 +1605,25 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
                                         == Some("input_text")
                                     && content[0].get("text").and_then(serde_json::Value::as_str)
                                         == Some(root_agent_usage_hint)
-                            });
-                    !is_standalone_root_usage_hint
+                            })
                 })
-                .cloned()
-                .collect::<Vec<_>>();
+                .count();
             assert_eq!(
-                replayable_seed_input.len() + 1,
-                seed_input.len(),
+                root_agent_usage_hint_count, 1,
                 "parent seed should contain exactly one standalone root usage hint"
             );
-            assert_eq!(
-                child_input.get(..replayable_seed_input.len()),
-                Some(replayable_seed_input.as_slice()),
-                "forked subagent should replay the parent's structured input prefix after scrubbing the parent-only root usage hint"
+            let spawn_input = spawn_request.input();
+            let seeded_user_item = spawn_input
+                .iter()
+                .find(|item| item.to_string().contains(SPAWN_SEED_PROMPT))
+                .expect("parent spawn request missing seeded user item");
+            assert!(
+                child_input.contains(seeded_user_item),
+                "forked subagent should preserve the structured seeded user item"
+            );
+            assert!(
+                !child_request.body_contains_text(SPAWN_SEED_RESPONSE),
+                "forked subagent should filter non-final assistant history"
             );
             assert!(
                 !child_request

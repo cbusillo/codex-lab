@@ -74,7 +74,8 @@ fn account_has_credentials(account: &StoredAccount) -> bool {
         AuthMode::PersonalAccessToken
         | AuthMode::AgentIdentity
         | AuthMode::Headers
-        | AuthMode::BedrockApiKey => false,
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => false,
     }
 }
 

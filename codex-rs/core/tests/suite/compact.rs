@@ -542,10 +542,16 @@ async fn summarize_context_three_requests_and_instructions() {
 
     // 1) Normal user input – should hit server once.
     codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "hello world".into(),
-            text_elements: Vec::new(),
-        }]))
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![
+            UserInput::Text {
+                text: "hello world".into(),
+                text_elements: Vec::new(),
+            },
+            UserInput::Text {
+                text: " second fragment".into(),
+                text_elements: Vec::new(),
+            },
+        ]))
         .await
         .unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
@@ -644,7 +650,7 @@ async fn summarize_context_three_requests_and_instructions() {
     assert!(
         messages
             .iter()
-            .any(|(r, t)| r == "user" && t == "hello world"),
+            .any(|(r, t)| r == "user" && t == "hello world second fragment"),
         "third request should include the original user message"
     );
     assert!(
@@ -664,6 +670,28 @@ async fn summarize_context_three_requests_and_instructions() {
     codex.submit(Op::Shutdown).await.unwrap();
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
 
+    let replacement_history = replacement_history_from_rollout(&rollout_path)
+        .expect("local compaction should persist replacement history");
+    let compacted_user_message = replacement_history
+        .iter()
+        .find(|item| item["content"][0]["text"] == "hello world second fragment")
+        .expect("persisted replacement history should contain the compacted user message");
+    assert_eq!(
+        json!({
+            "type": compacted_user_message["type"],
+            "role": compacted_user_message["role"],
+            "content": compacted_user_message["content"],
+            "content_item_kinds": compacted_user_message
+                ["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        }),
+        json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "hello world second fragment"}],
+            "content_item_kinds": ["user.text"],
+        }),
+    );
+
     // Verify rollout contains user-turn TurnContext entries and a Compacted entry.
     println!("rollout path: {}", rollout_path.display());
     let text = std::fs::read_to_string(&rollout_path).expect("failed to read rollout file");
@@ -682,6 +710,29 @@ async fn summarize_context_three_requests_and_instructions() {
                 regular_turn_context_count += 1;
             }
             RolloutItem::Compacted(ci) if ci.message == expected_summary_message => {
+                let summary_item = ci
+                    .replacement_history
+                    .as_ref()
+                    .and_then(|history| history.last())
+                    .expect("compacted history should retain its summary");
+                let summary_item =
+                    serde_json::to_value(&summary_item.item).expect("serialize compacted summary");
+                assert_eq!(
+                    json!({
+                        "role": summary_item["role"],
+                        "content": summary_item["content"],
+                        "content_item_kinds": summary_item
+                            ["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+                    }),
+                    json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": expected_summary_message,
+                        }],
+                        "content_item_kinds": ["compaction.summary"],
+                    })
+                );
                 saw_compacted_summary = true;
             }
             _ => {}
@@ -1213,15 +1264,18 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     .and_then(|content| content.as_array())
                     .into_iter()
                     .flatten()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()));
+                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()))
+                    .collect::<Vec<_>>();
 
-                // Ignore cached prefix messages (project docs + permissions) since they are not
-                // relevant to compaction behavior and can change as bundled prompts evolve.
+                // Ignore cached prefix messages since they are not relevant to compaction
+                // behavior and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
                 if role == Some("developer")
-                    && texts
-                        .into_iter()
-                        .any(|text| text.contains("`sandbox_mode`"))
+                    && texts.iter().any(|text| {
+                        text.contains("`sandbox_mode`")
+                            || text.starts_with("You are `/root`")
+                            || text.contains("<multi_agent_mode>")
+                    })
                 {
                     return None;
                 }
@@ -4850,7 +4904,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
     ]);
     let mut responses = vec![first_turn];
     responses.extend(
-        (0..5).map(|_| {
+        (0..7).map(|_| {
             sse_failed(
                 "compact-failed",
                 "context_length_exceeded",

@@ -290,7 +290,8 @@ async fn schedule_startup_prewarm_inner(
     let build_prompt_started_at = Instant::now();
     let startup_prompt = build_prompt(
         Vec::new(),
-        step_context.as_ref(),
+        step_context.tool_router.as_ref(),
+        step_context.turn.as_ref(),
         BaseInstructions {
             text: base_instructions,
             provenance: None,

@@ -80,6 +80,7 @@ const MEMORY_PROMPT_PHRASE: &str =
     "You have access to a memory folder with guidance from prior runs.";
 const REALTIME_CONVERSATION_TEST_SUBPROCESS_ENV_VAR: &str =
     "CODEX_REALTIME_CONVERSATION_TEST_SUBPROCESS";
+const REALTIME_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 struct RealtimeCallRequestCapture {
@@ -291,7 +292,7 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -482,7 +483,7 @@ async fn conversation_start_defaults_to_v2_and_gpt_realtime_1_5() -> Result<()> 
 
     assert!(
         realtime_server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -588,8 +589,13 @@ async fn conversation_existing_call_attaches_without_creating_another_call() -> 
     Ok(())
 }
 
+#[test_case(None, "gpt-live-1-codex"; "default model")]
+#[test_case(Some("session-override-model"), "session-override-model"; "explicit model")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn conversation_webrtc_frameless_chatgpt_sends_codex_headers_to_backend() -> Result<()> {
+async fn conversation_webrtc_frameless_chatgpt_sends_codex_headers_to_backend(
+    model: Option<&str>,
+    expected_model: &str,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -619,7 +625,7 @@ async fn conversation_webrtc_frameless_chatgpt_sends_codex_headers_to_backend() 
             config.experimental_realtime_ws_backend_prompt = Some("backend prompt".to_string());
             config.experimental_realtime_ws_base_url = Some(realtime_ws_base_url);
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
@@ -631,7 +637,7 @@ async fn conversation_webrtc_frameless_chatgpt_sends_codex_headers_to_backend() 
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
             codex_response_handoff_channel_prefixes: None,
-            model: Some("session-override-model".to_string()),
+            model: model.map(str::to_string),
             output_modality: RealtimeOutputModality::Audio,
             include_startup_context: false,
             initial_items: Vec::new(),
@@ -690,10 +696,12 @@ async fn conversation_webrtc_frameless_chatgpt_sends_codex_headers_to_backend() 
         json!({
             "sdp": body["sdp"],
             "delegation": body["session"]["delegation"]["type"],
+            "model": body["session"]["model"],
         }),
         json!({
             "sdp": "v=offer\r\n",
             "delegation": "client",
+            "model": expected_model,
         })
     );
 
@@ -1792,7 +1800,7 @@ async fn conversation_start_uses_openai_env_key_fallback_with_chatgpt_auth() -> 
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2177,7 +2185,7 @@ async fn conversation_second_start_replaces_runtime() -> Result<()> {
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2322,7 +2330,7 @@ async fn conversation_uses_experimental_realtime_ws_base_url_override() -> Resul
     let test = builder.build_with_websocket_server(&startup_server).await?;
     assert!(
         startup_server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2398,7 +2406,7 @@ async fn conversation_uses_default_realtime_backend_prompt() -> Result<()> {
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2478,7 +2486,7 @@ async fn conversation_uses_empty_instructions_for_null_or_empty_prompt() -> Resu
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2559,7 +2567,7 @@ async fn conversation_uses_explicit_start_voice() -> Result<()> {
     let test = test_codex().build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2628,7 +2636,7 @@ async fn conversation_uses_configured_realtime_voice() -> Result<()> {
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2743,7 +2751,7 @@ async fn conversation_uses_experimental_realtime_ws_backend_prompt_override() ->
     let test = builder.build_with_websocket_server(&server).await?;
     assert!(
         server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2827,7 +2835,7 @@ async fn conversation_uses_experimental_realtime_ws_startup_context_override() -
     fs::write(test.workspace_path("README.md"), "workspace marker")?;
     assert!(
         startup_server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 
@@ -2905,7 +2913,7 @@ async fn conversation_disables_realtime_startup_context_with_empty_override() ->
     fs::write(test.workspace_path("README.md"), "workspace marker")?;
     assert!(
         startup_server
-            .wait_for_handshakes(/*expected*/ 1, Duration::from_secs(2))
+            .wait_for_handshakes(/*expected*/ 1, REALTIME_HANDSHAKE_TIMEOUT)
             .await
     );
 

@@ -791,18 +791,20 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         .with_root_config(&format!(
             r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
         ))
+        .disable_feature(codex_features::Feature::Plugins)
         .write(codex_home.path())?;
     let store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
     seed_pathless_store_thread(&store, thread_id).await?;
 
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
         .loader_overrides(loader_overrides.clone())
         .build()
         .await?;
+    config.analytics_enabled = Some(false);
     let client = in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config: Arc::new(config),
@@ -910,6 +912,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
             request_id: RequestId::Integer(1),
             params: ThreadStartParams {
                 model: Some("mock-model".to_string()),
+                environments: Some(Vec::new()),
                 ..Default::default()
             },
         })

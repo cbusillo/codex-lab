@@ -6,6 +6,7 @@
 
 use super::session_lifecycle::ThreadAttachPresentation;
 use super::*;
+use crate::app_event::ThreadTitleDestination;
 use crate::chatwidget::ThreadInputStateRestoreMode;
 use crate::session_resume::read_session_model;
 use codex_app_server_protocol::TurnInterruptParams;
@@ -200,17 +201,6 @@ impl App {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
         store.session.as_ref().map(|session| session.cwd.clone())
-    }
-
-    async fn thread_file_change_changes(
-        &self,
-        thread_id: ThreadId,
-        turn_id: &str,
-        item_id: &str,
-    ) -> Option<Vec<codex_app_server_protocol::FileUpdateChange>> {
-        let channel = self.thread_event_channels.get(&thread_id)?;
-        let store = channel.store.lock().await;
-        store.file_change_changes(turn_id, item_id)
     }
 
     pub(super) async fn interactive_request_for_thread_request(
@@ -780,9 +770,9 @@ impl App {
                 Ok(true)
             }
             AppCommand::SetThreadName { name } => {
-                app_server
-                    .thread_set_name(thread_id, name.to_string())
-                    .await?;
+                let name = name.to_string();
+                app_server.thread_set_name(thread_id, name.clone()).await?;
+                self.chat_widget.expect_manual_thread_name(thread_id, name);
                 Ok(true)
             }
             AppCommand::Review { target } => {
@@ -825,7 +815,7 @@ impl App {
         }
     }
 
-    fn turn_permissions_override_from_config(
+    pub(super) fn turn_permissions_override_from_config(
         config: &Config,
         active_permission_profile: Option<&ActivePermissionProfile>,
         runtime_permission_profile_override: Option<&PermissionProfile>,
@@ -876,7 +866,7 @@ impl App {
     ) -> Result<bool> {
         let Some(resolution) = self
             .pending_app_server_requests
-            .take_resolution(op)
+            .take_resolution(&thread_id.to_string(), op)
             .map_err(|err| color_eyre::eyre::eyre!(err))?
         else {
             return Ok(false);
@@ -1814,7 +1804,70 @@ impl App {
             // thread, so unrelated shutdowns cannot consume this marker.
             self.pending_shutdown_exit_thread_id = None;
         }
-        self.handle_thread_event_now(event);
+        let automatic_title_user_message = if self.chat_widget.thread_name().is_none()
+            && let ThreadBufferedEvent::Notification(notification) = &event
+            && let ServerNotification::ItemCompleted(notification) = notification.as_ref()
+            && let ThreadItem::UserMessage { content, .. } = &notification.item
+        {
+            Some(
+                content
+                    .iter()
+                    .filter_map(|item| match item {
+                        codex_app_server_protocol::UserInput::Text { text, .. } => {
+                            Some(crate::ide_context::extract_prompt_request_with_offset(text).0)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        } else {
+            None
+        };
+        let had_active_view = self.chat_widget.has_active_view();
+        self.handle_thread_event_now_recovering_file_changes(event)
+            .await;
+        if let Some(user_message) = automatic_title_user_message {
+            let expected_title = user_message
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(super::thread_title::THREAD_TITLE_MAX_CHARS)
+                .collect::<String>();
+
+            if !expected_title.is_empty()
+                && let Some(thread_id) = self.active_thread_id
+            {
+                match app_server
+                    .thread_set_name(thread_id, expected_title.clone())
+                    .await
+                {
+                    Ok(()) => {
+                        self.chat_widget
+                            .expect_automatic_thread_name(expected_title.clone());
+                        self.generate_thread_title(
+                            app_server,
+                            thread_id,
+                            ThreadTitleDestination::Automatic { expected_title },
+                            super::thread_title::thread_title_prompt(&user_message),
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "failed to set provisional thread title");
+                    }
+                }
+            }
+        }
+        if !had_active_view
+            && self.chat_widget.has_active_view()
+            && self.startup_protected_input_boundary
+        {
+            self.chat_widget.pre_draw_tick();
+            self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
+            tui.discard_pending_input_before_interactive_screen()?;
+            self.startup_pending_protected_request = false;
+        }
         if self.backtrack_render_pending {
             tui.frame_requester().schedule_frame();
         }

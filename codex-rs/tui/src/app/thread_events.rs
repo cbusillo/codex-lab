@@ -22,6 +22,10 @@ pub(super) enum ThreadBufferedEvent {
     Request(Box<ServerRequest>),
     HistoryEntryResponse(HistoryLookupResponse),
     FeedbackSubmission(FeedbackThreadEvent),
+    AutoReviewSummaryLoaded {
+        run_id: String,
+        result: Box<Result<AutoReviewSummaryReadResponse, String>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +59,9 @@ pub(super) struct ThreadEventStore {
 impl ThreadEventStore {
     pub(super) fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
         match event {
-            ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+            ThreadBufferedEvent::Request(_)
+            | ThreadBufferedEvent::FeedbackSubmission(_)
+            | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. } => true,
             ThreadBufferedEvent::Notification(notification) => matches!(
                 notification.as_ref(),
                 ServerNotification::HookStarted(_)
@@ -186,7 +192,8 @@ impl ThreadEventStore {
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
-                | ThreadBufferedEvent::FeedbackSubmission(_) => None,
+                | ThreadBufferedEvent::FeedbackSubmission(_)
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. } => None,
             })
             .collect()
     }
@@ -214,7 +221,8 @@ impl ThreadEventStore {
                         .should_replay_snapshot_request(request.as_ref()),
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
-                    | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+                    | ThreadBufferedEvent::FeedbackSubmission(_)
+                    | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. } => true,
                 })
                 .cloned()
                 .collect(),

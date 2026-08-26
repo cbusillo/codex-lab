@@ -231,12 +231,13 @@ async fn guardian_delegates_do_not_inherit_parent_extensions() {
         .services
         .extensions = Arc::new(extensions.build());
 
-    for (subagent_source, expected_thread_starts) in [
+    for (subagent_source, expected_thread_starts, expected_thread_source) in [
         (
             SubAgentSource::Other(crate::guardian::GUARDIAN_REVIEWER_NAME.to_string()),
             0,
+            ThreadSource::GuardianReview,
         ),
-        (SubAgentSource::Review, 1),
+        (SubAgentSource::Review, 1, ThreadSource::Subagent),
     ] {
         let mut config = parent_ctx.config.as_ref().clone();
         config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
@@ -250,6 +251,7 @@ async fn guardian_delegates_do_not_inherit_parent_extensions() {
             CancellationToken::new(),
             subagent_source,
             /*initial_history*/ None,
+            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         )
@@ -265,6 +267,10 @@ async fn guardian_delegates_do_not_inherit_parent_extensions() {
             expected_thread_starts
         );
         assert_eq!(thread_starts.load(Ordering::SeqCst), expected_thread_starts);
+        assert_eq!(
+            session.thread_config_snapshot().await.thread_source,
+            Some(expected_thread_source)
+        );
         io.shutdown_and_wait()
             .await
             .expect("delegate session should shut down");

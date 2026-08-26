@@ -1,4 +1,7 @@
 use super::*;
+use crate::context::MultiAgentRoleInstructions;
+use codex_context_fragments::AnnotatedContent;
+use codex_protocol::models::ContentItemKind;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde::Serialize;
@@ -41,6 +44,10 @@ impl WorldStateSection for TestSection {
 struct TestFragment(String);
 
 impl ContextualUserFragment for TestFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("generic.test".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }
@@ -61,6 +68,10 @@ impl ContextualUserFragment for TestFragment {
 struct SeparateDeveloperFragment(String);
 
 impl ContextualUserFragment for SeparateDeveloperFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("generic.test".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }
@@ -156,7 +167,7 @@ fn bounded_world_state_preserves_separate_message_requirement() {
 fn persisted_fragment_identity_matches_bounded_usage_hint() {
     let mut world_state = WorldState::default();
     world_state.add_section(MultiAgentUsageHintState::new(
-        &"x".repeat(MAX_WORLD_STATE_SECTION_BYTES + 1),
+        MultiAgentRoleInstructions::unmarked("x".repeat(MAX_WORLD_STATE_SECTION_BYTES + 1)),
     ));
     let identity = world_state
         .snapshot()
@@ -460,6 +471,38 @@ fn extension_section_limit_is_applied_before_snapshot_and_rendering() {
     assert_eq!(
         world_state.render_full().len(),
         MAX_EXTENSION_WORLD_STATE_SECTION_COUNT
+    );
+}
+
+#[test]
+fn extension_owned_section_uses_its_stable_id_as_content_kind_feature() {
+    let mut world_state = WorldState::default();
+    world_state.add_extension_section(WorldStateSectionContribution::new(
+        "extension_test",
+        json!({"value": "after"}),
+        |_| {
+            Some(RenderedWorldStateFragment::new(
+                "developer",
+                ("<extension_test>", "</extension_test>"),
+                "after",
+            ))
+        },
+    ));
+
+    let rendered = world_state.render_diff(&WorldStateSnapshot::default());
+
+    assert_eq!(
+        rendered
+            .into_iter()
+            .map(|fragment| fragment.render_fragment().into_parts())
+            .collect::<Vec<_>>(),
+        vec![(
+            "developer",
+            AnnotatedContent::input_text(
+                "<extension_test>after</extension_test>",
+                ContentItemKind("extension_test.instructions".to_string()),
+            ),
+        )]
     );
 }
 

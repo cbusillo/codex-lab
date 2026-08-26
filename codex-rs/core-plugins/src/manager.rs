@@ -322,6 +322,28 @@ pub struct PluginListBackgroundTaskOptions {
     pub remote_catalog_cache_refresh_scopes: BTreeSet<RemotePluginScope>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginAuthContext {
+    auth_mode: Option<AuthMode>,
+}
+
+impl PluginAuthContext {
+    pub fn from_auth(auth: Option<&CodexAuth>) -> Self {
+        Self {
+            auth_mode: auth.map(CodexAuth::api_auth_mode),
+        }
+    }
+
+    fn auth_mode(self) -> Option<AuthMode> {
+        self.auth_mode
+    }
+}
+
+pub struct PluginLoadSnapshot {
+    pub outcome: PluginLoadOutcome,
+    pub skill_snapshots: Option<SkillRootSnapshots<PluginSkillRoot>>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct NonCuratedCacheRefreshRequest {
     roots: Vec<AbsolutePathBuf>,
@@ -678,6 +700,58 @@ impl PluginsManager {
     pub async fn plugins_for_config(&self, config: &PluginsConfigInput) -> PluginLoadOutcome {
         self.plugins_for_config_with_force_reload(config, /*force_reload*/ false)
             .await
+    }
+
+    pub async fn plugins_for_config_with_auth_context(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+    ) -> PluginLoadOutcome {
+        self.plugin_snapshot_for_config_with_auth_context(config, auth_context)
+            .await
+            .outcome
+    }
+
+    pub async fn plugin_snapshot_for_config_with_auth_context(
+        &self,
+        config: &PluginsConfigInput,
+        auth_context: PluginAuthContext,
+    ) -> PluginLoadSnapshot {
+        if !config.plugins_enabled {
+            return PluginLoadSnapshot {
+                outcome: PluginLoadOutcome::default(),
+                skill_snapshots: None,
+            };
+        }
+
+        self.plugins_for_config_with_force_reload(config, /*force_reload*/ false)
+            .await;
+        let auth = self.auth_manager.auth_cached();
+        let key = PluginLoadCacheKey::from_config(
+            config,
+            self.codex_home.as_path(),
+            self.remote_global_catalog_active(config),
+            RemoteInstalledPluginsAuthIdentity::from_auth(auth.as_ref()),
+        );
+        let cached = self
+            .loaded_plugins_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry
+            .as_ref()
+            .filter(|cached| cached.key == key)
+            .cloned();
+        let Some(cached) = cached else {
+            return PluginLoadSnapshot {
+                outcome: PluginLoadOutcome::default(),
+                skill_snapshots: None,
+            };
+        };
+
+        PluginLoadSnapshot {
+            outcome: self.resolve_loaded_plugins_for_auth(cached.plugins, auth_context.auth_mode()),
+            skill_snapshots: Some(cached.plugin_skill_snapshots),
+        }
     }
 
     /// Returns skill snapshots parsed while loading the matching plugin cache entry.

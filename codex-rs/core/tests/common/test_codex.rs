@@ -1339,6 +1339,10 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
+            config
+                .features
+                .enable(Feature::ContentItemKinds)
+                .expect("test config should allow ContentItemKinds override");
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],
@@ -1355,6 +1359,12 @@ pub fn test_codex() -> TestCodexBuilder {
         history_mode: None,
         models_manager: None,
     }
+}
+
+pub fn test_codex_with_agents() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config.agents_enabled = true;
+    })
 }
 
 #[cfg(test)]

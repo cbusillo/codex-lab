@@ -94,7 +94,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_execution_account_token() -
         .build()
         .await?;
     config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
-    let plugins_manager = plugins_manager_for_config(&config, Arc::clone(&auth_manager));
+    let plugins_manager = plugins_manager_for_config(&config, Arc::clone(&execution_auth_manager));
     let mcp_config = Arc::new(config.to_mcp_config(&plugins_manager).await);
     let runtime = McpRuntime::new(McpRuntimeInput {
         startup_policy: McpStartupPolicy::Eager,

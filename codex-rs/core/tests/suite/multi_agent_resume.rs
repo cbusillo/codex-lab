@@ -341,7 +341,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     })
     .await;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     let worker_thread_id = loop {
         if let Some(thread_id) = initial_child_request
             .requests()

@@ -17,6 +17,7 @@ use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::items::TurnItem;
+use codex_protocol::mcp::is_node_repl_backed_server;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
@@ -861,6 +862,7 @@ async fn spawn_guardian_review_session(
         cancel_token.clone(),
         SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()),
         initial_history,
+        codex_extension_api::ExtensionDataInit::default(),
         GitEnrichmentPolicy::Skip,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Preserve,
     ))
@@ -955,7 +957,7 @@ async fn run_review_on_session(
                 && matches!(
                     &params.request,
                     GuardianApprovalRequest::McpToolCall { server, tool_name, .. }
-                        if server == "node_repl" && tool_name == "js"
+                        if is_node_repl_backed_server(server) && tool_name == "js"
                 )
             {
                 let policy = GuardianNodeReplPolicy;
@@ -2194,7 +2196,7 @@ mod tests {
                 &review_session,
                 &params,
                 GuardianReviewSessionKind::TrunkReused,
-                tokio::time::Instant::now() + Duration::from_secs(1),
+                tokio::time::Instant::now() + Duration::from_secs(5),
             )
             .await
         });

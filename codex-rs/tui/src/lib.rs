@@ -120,6 +120,8 @@ mod cwd_prompt;
 mod debug_config;
 mod diff_model;
 mod diff_render;
+mod dynamic_tools;
+mod dynamic_tools_mcp;
 mod exec_cell;
 mod exec_command;
 mod external_agent_config_migration;
@@ -181,6 +183,8 @@ mod status;
 mod status_indicator_widget;
 mod streaming;
 mod style;
+mod task_mentions;
+mod temporary_structured_request;
 mod terminal_hyperlinks;
 mod terminal_palette;
 mod terminal_probe;
@@ -624,6 +628,7 @@ fn session_target_from_app_server_thread(
         Ok(thread_id) => Some(resume_picker::SessionTarget {
             path: thread.path,
             thread_id,
+            history_mode: Some(thread.history_mode),
         }),
         Err(err) => {
             warn!(
@@ -743,6 +748,7 @@ fn latest_session_lookup_params(
         archived: Some(false),
         descendant_of_thread_id: None,
         section_id: None,
+        project_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
         cwd: cwd_filter.map(|cwd| ThreadListCwdFilter::One(cwd.to_string_lossy().to_string())),
@@ -988,7 +994,7 @@ pub async fn run_main(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     #[allow(clippy::print_stderr)]
-    let auth_home = match cli.auth_profile.as_deref() {
+    let _auth_home = match cli.auth_profile.as_deref() {
         Some(profile) => match profile_home(&codex_home, profile) {
             Ok(auth_home) => auth_home,
             Err(err) => {
@@ -1096,8 +1102,13 @@ pub async fn run_main(
         if let Some(provider) = resolved {
             Some(provider)
         } else {
-            // No provider configured, prompt the user
-            let selection = oss_selection::select_oss_provider().await?;
+            let selection = match oss_selection::detect_oss_provider().await {
+                oss_selection::OssProviderDetection::AutoSelected(selection) => selection,
+                oss_selection::OssProviderDetection::NeedsSelection {
+                    lmstudio_status,
+                    ollama_status,
+                } => oss_selection::select_oss_provider(lmstudio_status, ollama_status).await?,
+            };
             let provider = selection.provider;
             if provider == "__CANCELLED__" {
                 return Err(std::io::Error::other(
@@ -1176,7 +1187,6 @@ pub async fn run_main(
         loader_overrides.clone(),
         cloud_config_bundle.clone(),
         strict_config,
-        Some(auth_home.clone()),
     )
     .await;
 
@@ -1259,7 +1269,7 @@ pub async fn run_main(
         workload_identity_selected,
         || async {
             enforce_login_restrictions(&AuthConfig {
-                codex_home: config.auth_home.to_path_buf(),
+                codex_home: config.codex_home.to_path_buf(),
                 auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
                 keyring_backend_kind: config.auth_keyring_backend_kind(),
                 forced_login_method: config.forced_login_method,
@@ -1507,6 +1517,7 @@ async fn run_ratatui_app(
             OnboardingScreenArgs {
                 show_login_screen,
                 show_trust_screen: should_show_trust_screen_flag,
+                remote_project_trust: None,
                 login_status,
                 app_server_request_handle: app_server
                     .as_ref()
@@ -1560,7 +1571,6 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
-                Some(initial_config.auth_home.to_path_buf()),
             )
             .await
         } else {
@@ -1721,6 +1731,7 @@ async fn run_ratatui_app(
     .await
     {
         Ok(ResolveCwdOutcome::Continue(cwd)) => cwd,
+        Ok(ResolveCwdOutcome::ContinueAfterPrompt(cwd)) => Some(cwd),
         Ok(ResolveCwdOutcome::Exit) => {
             terminal_restore_guard.restore_silently();
             session_log::log_session_end();
@@ -1744,7 +1755,6 @@ async fn run_ratatui_app(
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
 
-    let session_auth_home = config.auth_home.to_path_buf();
     let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
@@ -1753,7 +1763,6 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
-                Some(session_auth_home.clone()),
                 fallback_cwd,
             )
             .await
@@ -1765,7 +1774,6 @@ async fn run_ratatui_app(
                 loader_overrides.clone(),
                 cloud_config_bundle.clone(),
                 strict_config,
-                Some(session_auth_home),
             )
             .await
         }
@@ -2033,7 +2041,6 @@ async fn load_config_or_exit(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
-    auth_home: Option<PathBuf>,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
@@ -2041,7 +2048,6 @@ async fn load_config_or_exit(
         loader_overrides,
         cloud_config_bundle,
         strict_config,
-        auth_home,
         /*fallback_cwd*/ None,
     )
     .await
@@ -2053,19 +2059,15 @@ async fn load_config_or_exit_with_fallback_cwd(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
-    auth_home: Option<PathBuf>,
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
-    let mut builder = ConfigBuilder::default()
+    let builder = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides)
         .harness_overrides(overrides)
         .loader_overrides(loader_overrides)
         .strict_config(strict_config)
         .cloud_config_bundle(cloud_config_bundle)
         .fallback_cwd(fallback_cwd);
-    if let Some(auth_home) = auth_home {
-        builder = builder.auth_home(auth_home);
-    }
     #[allow(clippy::print_stderr)]
     match builder.build().await {
         Ok(config) => config,
@@ -3297,6 +3299,15 @@ mod tests {
         )?;
 
         assert_eq!(config_cwd, None);
+        let local_daemon = AppServerTarget::LocalDaemon {
+            endpoint: RemoteAppServerEndpoint::UnixSocket {
+                socket_path: AbsolutePathBuf::relative_to_current_dir("codex.sock")?,
+            },
+        };
+        assert!(uses_remote_workspace_or_environment(
+            &local_daemon,
+            &environment_manager
+        ));
         Ok(())
     }
 

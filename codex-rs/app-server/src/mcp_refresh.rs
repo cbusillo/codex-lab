@@ -369,7 +369,6 @@ enabled = false
         });
         let config_manager = ConfigManager::new(ConfigManagerArgs {
             codex_home: temp_dir.path().to_path_buf(),
-            auth_home: temp_dir.path().to_path_buf(),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
             strict_config: false,

@@ -23,7 +23,9 @@ use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
 use codex_config::project_root_markers_from_config;
 use codex_exec_server::ExecutorFileSystem;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::LOCAL_FS;
+use codex_exec_server::ReadFileOptions;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -394,7 +396,13 @@ async fn repo_agents_skill_roots(
             async move {
                 let agents_skills = dir.join(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
                 let agents_skills_uri = PathUri::from_abs_path(&agents_skills);
-                let result = fs.get_metadata(&agents_skills_uri, /*sandbox*/ None).await;
+                let result = fs
+                    .get_metadata(
+                        &agents_skills_uri,
+                        GetMetadataOptions::default(),
+                        /*sandbox*/ None,
+                    )
+                    .await;
                 (agents_skills, result)
             }
         })
@@ -461,7 +469,13 @@ async fn find_project_root(
     let mut results = futures::stream::iter(probes)
         .map(|(ancestor, marker_path)| async move {
             let marker_path_uri = PathUri::from_abs_path(&marker_path);
-            let result = fs.get_metadata(&marker_path_uri, /*sandbox*/ None).await;
+            let result = fs
+                .get_metadata(
+                    &marker_path_uri,
+                    GetMetadataOptions::default(),
+                    /*sandbox*/ None,
+                )
+                .await;
             (ancestor, marker_path, result)
         })
         .buffered(MAX_CONCURRENT_ANCESTOR_PROBES);
@@ -592,7 +606,14 @@ async fn load_skills_under_root(
                     );
                     return None;
                 }
-                match fs.get_metadata(&path_uri, /*sandbox*/ None).await {
+                match fs
+                    .get_metadata(
+                        &path_uri,
+                        GetMetadataOptions::default(),
+                        /*sandbox*/ None,
+                    )
+                    .await
+                {
                     Ok(metadata) if metadata.is_file => {}
                     Ok(_) => {
                         error!(
@@ -705,7 +726,7 @@ async fn parse_skill_file(
     }
     .unwrap_or(SkillMetadataDiscovery::Absent);
     let (contents, loaded_metadata) = tokio::join!(
-        fs.read_file_text(path_uri, /*sandbox*/ None),
+        fs.read_file_text(path_uri, ReadFileOptions::default(), /*sandbox*/ None),
         load_skill_metadata(fs, path, &metadata, plugin_root),
     );
     let contents = contents.map_err(SkillParseError::Read)?;
@@ -810,7 +831,10 @@ async fn load_skill_metadata(
         SkillMetadataDiscovery::Present(path) => path,
         SkillMetadataDiscovery::Absent => return LoadedSkillMetadata::default(),
         SkillMetadataDiscovery::Probe(path) => {
-            match fs.get_metadata(path, /*sandbox*/ None).await {
+            match fs
+                .get_metadata(path, GetMetadataOptions::default(), /*sandbox*/ None)
+                .await
+            {
                 Ok(metadata) if metadata.is_file => {}
                 Ok(_) => return LoadedSkillMetadata::default(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -829,7 +853,14 @@ async fn load_skill_metadata(
         }
     };
 
-    let contents = match fs.read_file_text(metadata_path_uri, /*sandbox*/ None).await {
+    let contents = match fs
+        .read_file_text(
+            metadata_path_uri,
+            ReadFileOptions::default(),
+            /*sandbox*/ None,
+        )
+        .await
+    {
         Ok(contents) => contents,
         Err(error) => {
             tracing::warn!(
@@ -969,6 +1000,7 @@ fn resolve_dependency_tool(tool: DependencyTool) -> Option<SkillToolDependency> 
         transport,
         command,
         url,
+        oauth_callback_port: None,
     })
 }
 
