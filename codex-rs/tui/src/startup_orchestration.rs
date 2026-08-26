@@ -4,12 +4,57 @@
 //! configuration and app-server initialization remain responsive to safe local editing.
 
 use super::*;
+use std::io::IsTerminal;
+
+#[derive(Debug, PartialEq)]
+struct WorkspaceRootConfigOverrides {
+    sandbox_mode: Option<SandboxMode>,
+    default_permissions: Option<String>,
+    workspace_roots: Option<Vec<AbsolutePathBuf>>,
+}
+
+fn resolve_workspace_root_config_overrides(
+    workspace_root: &[PathBuf],
+    config_cwd: Option<&AbsolutePathBuf>,
+    sandbox_mode: Option<SandboxMode>,
+) -> std::io::Result<WorkspaceRootConfigOverrides> {
+    let workspace_roots = if workspace_root.is_empty() {
+        None
+    } else {
+        let workspace_base = config_cwd.ok_or_else(|| {
+            std::io::Error::other("--workspace-root is unavailable for remote workspaces")
+        })?;
+        Some(
+            workspace_root
+                .iter()
+                .cloned()
+                .map(|path| {
+                    AbsolutePathBuf::resolve_path_against_base(path, workspace_base.as_path())
+                })
+                .collect(),
+        )
+    };
+    let exact_workspace_profile = workspace_roots
+        .as_ref()
+        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
+    Ok(WorkspaceRootConfigOverrides {
+        sandbox_mode: if exact_workspace_profile {
+            None
+        } else {
+            sandbox_mode
+        },
+        default_permissions: exact_workspace_profile
+            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
+        workspace_roots,
+    })
+}
 
 pub(super) async fn run_main_inner(
     mut cli: Cli,
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
+    product_identity: codex_version::ProductIdentity,
 ) -> std::io::Result<AppExitInfo> {
     let strict_config = cli.strict_config;
     let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
@@ -65,6 +110,17 @@ pub(super) async fn run_main_inner(
         launch_loader_overrides.user_config_path = Some(user_config_path);
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
+    #[allow(clippy::print_stderr)]
+    let _auth_home = match cli.auth_profile.as_deref() {
+        Some(profile) => match profile_home(&codex_home, profile) {
+            Ok(auth_home) => auth_home,
+            Err(err) => {
+                eprintln!("invalid --auth-profile {profile:?}: {err}");
+                std::process::exit(1);
+            }
+        },
+        None => codex_home.clone(),
+    };
     let workload_identity_selected = is_workload_identity_selected();
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
@@ -85,6 +141,11 @@ pub(super) async fn run_main_inner(
             cli.cwd.as_deref(),
             &validation_target,
             validation_environment_manager.default_environment_is_remote(),
+        )?;
+        let validation_workspace_root_overrides = resolve_workspace_root_config_overrides(
+            &cli.workspace_root,
+            validation_cwd.as_ref(),
+            sandbox_mode,
         )?;
         let mut validation_loader_overrides = launch_loader_overrides.clone();
         validation_loader_overrides.ignore_login_requirements =
@@ -113,7 +174,8 @@ pub(super) async fn run_main_inner(
             ConfigOverrides {
                 model: cli.model.clone(),
                 approval_policy,
-                sandbox_mode,
+                sandbox_mode: validation_workspace_root_overrides.sandbox_mode,
+                default_permissions: validation_workspace_root_overrides.default_permissions,
                 cwd: validation_cwd.map(AbsolutePathBuf::into_path_buf),
                 model_provider: cli
                     .oss
@@ -126,6 +188,7 @@ pub(super) async fn run_main_inner(
                     .flatten(),
                 bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
                 additional_writable_roots: cli.add_dir.clone(),
+                workspace_roots: validation_workspace_root_overrides.workspace_roots,
                 ..Default::default()
             },
             validation_loader_overrides,
@@ -136,6 +199,7 @@ pub(super) async fn run_main_inner(
     }
 
     let reuse_implicit_local_daemon = !workload_identity_selected
+        && cli.auth_profile.is_none()
         && (cli.agents_overview
             || can_reuse_implicit_local_daemon(
                 &cli_kv_overrides,
@@ -173,7 +237,8 @@ pub(super) async fn run_main_inner(
     } else {
         startup_draft::StartupDraftSessionAction::New
     };
-    let mut startup_draft = startup_draft::StartupDraft::new(initial_screen, session_action)?;
+    let mut startup_draft =
+        startup_draft::StartupDraft::new(initial_screen, session_action, product_identity)?;
 
     let default_daemon = if explicit_remote_endpoint.is_none() && reuse_implicit_local_daemon {
         startup_draft
@@ -213,6 +278,11 @@ pub(super) async fn run_main_inner(
         cwd.as_deref(),
         &app_server_target,
         prepared_environment_manager.default_environment_is_remote(),
+    )?;
+    let workspace_root_overrides = resolve_workspace_root_config_overrides(
+        &cli.workspace_root,
+        config_cwd.as_ref(),
+        sandbox_mode,
     )?;
     let mut loader_overrides = loader_overrides;
     if let Some(profile_v2) = cli.config_profile_v2.as_ref() {
@@ -325,7 +395,8 @@ pub(super) async fn run_main_inner(
     let overrides = ConfigOverrides {
         model,
         approval_policy,
-        sandbox_mode,
+        sandbox_mode: workspace_root_overrides.sandbox_mode,
+        default_permissions: workspace_root_overrides.default_permissions,
         cwd: cwd_override,
         model_provider: model_provider_override.clone(),
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -334,6 +405,7 @@ pub(super) async fn run_main_inner(
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
         additional_writable_roots: additional_dirs,
+        workspace_roots: workspace_root_overrides.workspace_roots,
         ..Default::default()
     };
 
@@ -370,7 +442,7 @@ pub(super) async fn run_main_inner(
     let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         codex_app_server_client::build_otel_provider(
             &config,
-            env!("CARGO_PKG_VERSION"),
+            codex_version::CODE_VERSION,
             /*service_name_override*/ None,
             /*default_analytics_enabled*/ true,
         )
@@ -545,6 +617,7 @@ pub(super) async fn run_main_inner(
         state_db,
         environment_manager,
         startup_draft,
+        product_identity,
     )
     .await
     .map_err(|err| {
@@ -562,3 +635,7 @@ pub(super) async fn run_main_inner(
 
     app_result
 }
+
+#[cfg(test)]
+#[path = "startup_orchestration_tests.rs"]
+mod tests;

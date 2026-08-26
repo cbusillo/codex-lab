@@ -7,6 +7,7 @@ use super::*;
 use crate::session_start::SessionStartAction;
 use crate::session_start::cancel_session_start;
 use crate::session_start::complete_session_start;
+use crate::startup_draft::StartupDraftPump;
 use crate::unarchive_prompt::run_unarchive_prompt;
 
 async fn resolve_runtime_model_provider_base_url(provider: &ModelProviderInfo) -> Option<String> {
@@ -90,6 +91,7 @@ impl App {
         startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<HooksListEntry>,
         mut startup_draft: StartupDraftPump,
+        product_identity: codex_version::ProductIdentity,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
 
@@ -116,6 +118,7 @@ impl App {
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
+        emit_pinned_candidate_warning(&app_event_tx, &config);
         emit_project_config_warnings(&app_event_tx, &config);
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
@@ -251,6 +254,8 @@ impl App {
                 &initial_prompt,
                 &initial_images,
             );
+        let should_fetch_auto_review_summary_after_startup =
+            Self::should_fetch_auto_review_summary_after_startup(&session_selection);
         let thread_and_widget_started_at = Instant::now();
         let pending_startup_thread_start = matches!(
             &session_selection,
@@ -310,6 +315,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 let mut chat_widget = ChatWidget::new_with_app_event(init);
                 chat_widget.set_queue_submissions_until_session_configured(
@@ -381,6 +387,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(resumed))
             }
@@ -442,6 +449,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
@@ -464,6 +472,7 @@ See the Codex keymap documentation for supported actions and examples."
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
+            product_identity,
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -520,6 +529,7 @@ See the Codex keymap documentation for supported actions and examples."
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            pending_auto_review_summary_fetches: HashSet::new(),
             dynamic_tool_status_updates,
             dynamic_tool_tasks: HashMap::new(),
             pending_startup_thread_start,
@@ -528,6 +538,11 @@ See the Codex keymap documentation for supported actions and examples."
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
+            agent_settings: Default::default(),
         };
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
@@ -553,6 +568,9 @@ See the Codex keymap documentation for supported actions and examples."
             {
                 Ok(result) => result?,
                 Err(err) => return shutdown_on_startup_error(app_server, err).await,
+            }
+            if should_fetch_auto_review_summary_after_startup {
+                app.fetch_latest_auto_review_summary(&app_server, thread_id);
             }
             if should_prompt_for_paused_goal_after_startup_resume
                 && let Err(err) = startup_draft
@@ -807,6 +825,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
         };
+        if let Err(err) = app.cancel_login_add_account_chatgpt(&mut app_server).await {
+            tracing::warn!("{err}");
+        }
         if let Err(err) = app_server.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }

@@ -2180,7 +2180,7 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
 #[test]
 fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
     const WORKER_THREADS: usize = 1;
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
@@ -2272,7 +2272,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .await?;
         app.enqueue_primary_thread_session(root.session, root.turns)
             .await?;
-        for (child_thread_id, multi_agent_version) in child_thread_ids
+        for (child_thread_id, _multi_agent_version) in child_thread_ids
             .iter()
             .copied()
             .zip([MultiAgentVersion::V1, MultiAgentVersion::V2])
@@ -2284,7 +2284,6 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             // The server reports both recorded versions as V2-capable in this fork, so even a
             // V1-recorded child remains parent-owned and view-only after attachment.
             assert!(app.agent_navigation.is_parent_owned(child_thread_id));
-            child_thread_ids.push(child_thread_id);
         }
 
         app.agent_navigation

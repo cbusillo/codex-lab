@@ -44,7 +44,6 @@ use crate::tui;
 use crate::tui::FrameRequester;
 use crate::tui::Tui;
 use crate::tui::TuiEvent;
-use crate::version::CODEX_CLI_VERSION;
 
 const STARTUP_EVENT_BATCH_SIZE: usize = 64;
 const STARTUP_PASTE_NEWLINE_TIMEOUT: Duration = Duration::from_millis(120);
@@ -87,6 +86,7 @@ pub(crate) struct StartupDraft {
 
 /// Keeps the existing terminal responsive without owning it or permitting startup submission.
 pub(crate) struct StartupDraftPump {
+    product_identity: codex_version::ProductIdentity,
     header: Box<dyn HistoryCell>,
     bottom_pane: BottomPane,
     events: Pin<Box<dyn Stream<Item = TuiEvent> + Send>>,
@@ -101,6 +101,7 @@ impl StartupDraft {
     pub(crate) fn new(
         initial_screen: StartupDraftInitialScreen,
         session_action: StartupDraftSessionAction,
+        product_identity: codex_version::ProductIdentity,
     ) -> io::Result<Self> {
         let mut initialized_terminal = tui::init()?;
         let terminal_restore_guard = TerminalRestoreGuard::new();
@@ -122,7 +123,8 @@ impl StartupDraft {
             tui,
             terminal_restore_guard,
             pump: StartupDraftPump {
-                header: startup_session_header(/*config*/ None),
+                product_identity,
+                header: startup_session_header(product_identity, /*config*/ None),
                 bottom_pane,
                 events,
                 app_event_rx,
@@ -167,7 +169,7 @@ impl StartupDraft {
 impl StartupDraftPump {
     /// Refresh the session header and safe editor shortcuts without enabling modal editing.
     pub(crate) fn apply_config(&mut self, config: &Config) {
-        self.header = startup_session_header(Some(config));
+        self.header = startup_session_header(self.product_identity, Some(config));
         self.bottom_pane
             .set_disable_paste_burst(config.disable_paste_burst);
         self.bottom_pane.request_redraw();
@@ -444,20 +446,23 @@ fn handle_startup_draft_key(bottom_pane: &mut BottomPane, key: KeyEvent) -> io::
     Ok(())
 }
 
-fn startup_session_header(config: Option<&Config>) -> Box<dyn HistoryCell> {
+fn startup_session_header(
+    product_identity: codex_version::ProductIdentity,
+    config: Option<&Config>,
+) -> Box<dyn HistoryCell> {
     let placeholder_style = Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC);
     let directory = config.map_or_else(
         || PathBuf::from("loading"),
         |config| config.cwd.to_path_buf(),
     );
     Box::new(
-        history_cell::SessionHeaderHistoryCell::new_with_style(
+        history_cell::SessionHeaderHistoryCell::new_with_identity_and_style(
+            product_identity,
             "loading".to_string(),
             placeholder_style,
             /*reasoning_effort*/ None,
             /*show_fast_status*/ false,
             directory,
-            CODEX_CLI_VERSION,
         )
         .with_yolo_mode(config.is_some_and(history_cell::is_yolo_mode)),
     )

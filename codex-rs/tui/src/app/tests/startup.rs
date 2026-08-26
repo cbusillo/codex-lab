@@ -104,6 +104,26 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
 }
 
 #[test]
+fn startup_auto_review_summary_gate_is_only_for_resume() {
+    let resume = SessionSelection::Resume(crate::resume_picker::SessionTarget {
+        path: Some(PathBuf::from("/tmp/restore")),
+        thread_id: ThreadId::new(),
+        history_mode: None,
+    });
+    let fork = SessionSelection::Fork(crate::resume_picker::SessionTarget {
+        path: Some(PathBuf::from("/tmp/fork")),
+        thread_id: ThreadId::new(),
+        history_mode: None,
+    });
+
+    assert!(App::should_fetch_auto_review_summary_after_startup(&resume));
+    assert!(!App::should_fetch_auto_review_summary_after_startup(
+        &SessionSelection::StartFresh
+    ));
+    assert!(!App::should_fetch_auto_review_summary_after_startup(&fork));
+}
+
+#[test]
 fn startup_waiting_gate_holds_active_thread_events_until_primary_thread_configured() {
     let mut wait_for_initial_session =
         App::should_wait_for_initial_session(&SessionSelection::StartFresh);
@@ -586,7 +606,11 @@ async fn auto_declined_mcp_elicitations_do_not_leave_startup_quarantine_armed() 
                 .note_server_request(&request);
             let event = ThreadBufferedEvent::Request(Box::new(request));
             if replay {
-                app.handle_thread_event_replay(event);
+                app.handle_thread_event_replay(
+                    event,
+                    &HashSet::new(),
+                    /*fetch_missing_auto_review_summaries*/ false,
+                );
             } else {
                 app.handle_thread_event_now(event);
             }
@@ -845,6 +869,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
             thread_source: None,
+            session_provenance: None,
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             git_info: None,

@@ -203,6 +203,7 @@ async fn startup_typeahead_pty_child() {
     let mut startup_draft = crate::startup_draft::StartupDraft::new(
         crate::startup_draft::StartupDraftInitialScreen::Composer,
         crate::startup_draft::StartupDraftSessionAction::New,
+        codex_version::ProductIdentity::Codex,
     )
     .expect("initialize the real startup composer");
 

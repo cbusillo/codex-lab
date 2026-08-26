@@ -2840,6 +2840,7 @@ mod tests {
             /*remote*/ None,
             /*remote_auth_token_env*/ None,
             Arg0DispatchPaths::default(),
+            codex_version::ProductIdentity::Codex,
         );
         let size = std::mem::size_of_val(&future);
 

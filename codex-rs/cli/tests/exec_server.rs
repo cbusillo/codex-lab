@@ -147,6 +147,7 @@ async fn local_exec_server_forwards_concurrent_requests_flag() -> Result<()> {
             argv: argv.into_iter().map(str::to_string).collect(),
             cwd: cwd.as_str().parse()?,
             env_policy: None,
+            shell_snapshot: None,
             env: HashMap::new(),
             tty: false,
             pipe_stdin: false,
@@ -410,6 +411,7 @@ async fn assert_concurrent_request_dispatch(
         REQUEST_TIMEOUT,
         client.fs_read_file(FsReadFileParams {
             path: probe_url.as_str().parse()?,
+            follow_symlinks: None,
             sandbox: None,
         }),
     )

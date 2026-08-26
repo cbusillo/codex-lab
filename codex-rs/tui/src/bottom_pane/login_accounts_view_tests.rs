@@ -48,6 +48,7 @@ fn current_only_api_key_view(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     LoginAccountsView {
         app_event_tx,

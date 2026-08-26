@@ -61,6 +61,7 @@ fn overview_thread(
         }),
         can_accept_direct_input: Some(parent_thread_id.is_none()),
         thread_source: None,
+        session_provenance: None,
         agent_nickname: None,
         agent_role: None,
         git_info: None,

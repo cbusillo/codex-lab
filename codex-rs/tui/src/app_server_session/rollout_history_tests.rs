@@ -184,7 +184,9 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
         )
         .expect("create paginated rollout"),
     )?;
-    let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
+    let mut app_server = crate::start_embedded_app_server_for_picker(&config)
+        .await?
+        .with_startup_config(&config);
     app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);
     let next_request_id = app_server.next_request_id;
 
@@ -196,7 +198,7 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
         )
         .await?;
     assert_eq!(resumed.session.thread_id, thread_id);
-    assert!(app_server.next_request_id >= next_request_id + 4);
+    assert_eq!(app_server.next_request_id, next_request_id + 4);
     assert_eq!(
         app_server
             .history_pagination

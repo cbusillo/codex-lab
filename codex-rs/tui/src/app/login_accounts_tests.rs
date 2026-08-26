@@ -22,15 +22,9 @@ fn current_account_entry_fills_missing_catalog_identity() {
 #[tokio::test]
 async fn login_storage_routing_keeps_remote_mutations_on_the_server() {
     let mut app = make_test_app().await;
-    let auth_home = tempfile::tempdir().expect("create temporary auth home");
-    app.config.auth_home = auth_home
-        .path()
-        .to_path_buf()
-        .try_into()
-        .expect("temporary auth home should be absolute");
     app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::Keyring;
 
-    assert!(app.use_default_store_login());
+    assert!(!app.use_default_store_login());
     assert!(!app.preserve_existing_app_server_account());
 
     app.app_server_target = crate::AppServerTarget::Remote {

@@ -28,7 +28,8 @@ where
 {
     let (tx, rx) = unbounded_channel();
     StartupDraftPump {
-        header: startup_session_header(/*config*/ None),
+        product_identity: codex_version::ProductIdentity::Codex,
+        header: startup_session_header(codex_version::ProductIdentity::Codex, /*config*/ None),
         bottom_pane: startup_draft_bottom_pane(
             AppEventSender::new(tx),
             FrameRequester::test_dummy(),
