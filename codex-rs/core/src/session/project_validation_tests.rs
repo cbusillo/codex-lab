@@ -5,6 +5,7 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::process::Command;
 
@@ -149,7 +150,7 @@ fn cargo_validation_managed_profile_adds_only_cache_target_write_access() {
         ),
         FileSystemSandboxEntry::new(
             FileSystemPath::Path {
-                path: workspace.clone(),
+                path: PathUri::from_abs_path(&workspace),
             },
             FileSystemAccessMode::Write,
         ),

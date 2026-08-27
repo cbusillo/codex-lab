@@ -40,8 +40,7 @@ fn current_account_list_entry(account: Account, account_id: Option<String>) -> A
 
 impl App {
     fn use_default_store_login(&self) -> bool {
-        matches!(self.app_server_target, crate::AppServerTarget::Embedded)
-            && self.config.auth_home != self.config.codex_home
+        false
     }
 
     fn preserve_existing_app_server_account(&self) -> bool {

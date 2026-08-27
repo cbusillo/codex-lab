@@ -717,6 +717,7 @@ fn activate_api_key_account_writes_auth_and_marks_active() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("read auth json")
@@ -744,6 +745,7 @@ fn commit_active_account_writes_stored_auth_and_marks_active() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     let activated = commit_active_account(
         temp.path(),
@@ -770,6 +772,7 @@ fn commit_active_account_writes_stored_auth_and_marks_active() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         load_auth_dot_json(temp.path(), TEST_AUTH_CREDENTIALS_STORE_MODE)
             .expect("read auth json")
@@ -802,6 +805,7 @@ fn auth_for_account_returns_auth_without_persisting_activation() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         auth
     );
@@ -830,6 +834,7 @@ fn commit_active_account_leaves_existing_state_unchanged_when_account_is_missing
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(temp.path(), &previous_auth, AuthCredentialsStoreMode::File)
         .expect("save previous auth");
@@ -901,6 +906,7 @@ fn commit_active_account_restores_auth_when_accounts_write_fails() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         temp.path(),
@@ -977,6 +983,7 @@ fn activate_chatgpt_account_writes_auth_and_marks_active() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         load_auth_dot_json(temp.path(), AuthCredentialsStoreMode::File)
             .expect("read auth json")
@@ -1092,6 +1099,7 @@ fn clear_active_account_removes_active_marker_and_auth_file() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         AuthCredentialsStoreMode::File,
     )
@@ -1321,6 +1329,7 @@ fn compare_and_swap_catalog_account_auth_preserves_concurrent_login() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         temp.path(),

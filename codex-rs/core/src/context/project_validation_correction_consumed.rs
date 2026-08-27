@@ -1,4 +1,5 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItemKind;
 
 const START_MARKER: &str = "<project_validation_correction_consumed>";
 const END_MARKER: &str = "</project_validation_correction_consumed>";
@@ -10,6 +11,10 @@ const LEGACY_END_MARKER: &str = "</codex_internal_context>";
 pub(crate) struct ProjectValidationCorrectionConsumed;
 
 impl ContextualUserFragment for ProjectValidationCorrectionConsumed {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("project_validation.correction_consumed".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }

@@ -52,6 +52,7 @@ codex-analytics = { workspace = true }
 codex-agent-extension = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-auto-review = { workspace = true }
+codex-aws-auth = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-code-bridge-client = { workspace = true }
 codex-code-bridge-protocol = { workspace = true }
@@ -69,10 +70,11 @@ codex-external-agent-sessions = { workspace = true }
 codex-features = { workspace = true }
 codex-goal-extension = { workspace = true }
 codex-git-attribution = { workspace = true }
-codex-guardian = { workspace = true }
+codex-guardian-v2 = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-file-watcher = { workspace = true }
 codex-hooks = { workspace = true }
+codex-history-notes-extension = { workspace = true }
 codex-http-client = { workspace = true }
 codex-otel = { workspace = true }
 codex-plugin = { workspace = true }
@@ -152,6 +154,7 @@ core_test_support = { workspace = true }
 ctor = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
+http = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }

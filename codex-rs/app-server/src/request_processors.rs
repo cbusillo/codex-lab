@@ -113,6 +113,7 @@ use codex_app_server_protocol::GetWorkspaceMessagesResponse;
 use codex_app_server_protocol::GitDiffToRemoteParams;
 use codex_app_server_protocol::GitDiffToRemoteResponse;
 use codex_app_server_protocol::GitInfo as ApiGitInfo;
+use codex_app_server_protocol::HookHandlerMetadata;
 use codex_app_server_protocol::HookMetadata;
 use codex_app_server_protocol::HooksListParams;
 use codex_app_server_protocol::HooksListResponse;
@@ -272,6 +273,7 @@ use codex_app_server_protocol::ThreadMetadataGitInfoUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateResponse;
 use codex_app_server_protocol::ThreadNameUpdatedNotification;
+use codex_app_server_protocol::ThreadProjectUpdatedNotification;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadRealtimeAppendAudioParams;
@@ -289,6 +291,9 @@ use codex_app_server_protocol::ThreadRealtimeStopResponse;
 use codex_app_server_protocol::ThreadResumeInitialTurnsPageParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadRevertParams;
+use codex_app_server_protocol::ThreadRevertResponse;
+use codex_app_server_protocol::ThreadRevertedNotification;
 use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadSearchOccurrence;
 use codex_app_server_protocol::ThreadSearchOccurrencesParams;
@@ -311,6 +316,8 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::ThreadTimelineListParams;
+use codex_app_server_protocol::ThreadTimelineListResponse;
 use codex_app_server_protocol::ThreadTurnsItemsListParams;
 use codex_app_server_protocol::ThreadTurnsItemsListResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
@@ -362,7 +369,6 @@ use codex_backend_client::RateLimitResetCreditsDetails as BackendRateLimitResetC
 use codex_backend_client::RequestError as BackendRequestError;
 use codex_backend_client::TokenUsageProfile;
 use codex_chatgpt::connectors;
-use codex_chatgpt::workspace_settings;
 use codex_config::CloudConfigBundleLoadError;
 use codex_config::CloudConfigBundleLoadErrorCode;
 use codex_config::ConfigLayerStack;
@@ -482,14 +488,13 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
-#[cfg(test)]
-use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ConversationAudioParams;
 use codex_protocol::protocol::ConversationSpeechParams;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::ConversationStartTransport;
 use codex_protocol::protocol::ConversationTextParams;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 #[cfg(test)]
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
@@ -521,11 +526,13 @@ use codex_state::ThreadMetadata;
 use codex_state::log_db::LogDbLayer;
 use codex_thread_store::ArchiveThreadParams as StoreArchiveThreadParams;
 use codex_thread_store::ArchiveThreadsParams as StoreArchiveThreadsParams;
+use codex_thread_store::ClearableField as StoreClearableField;
 use codex_thread_store::DeleteThreadsParams as StoreDeleteThreadsParams;
 use codex_thread_store::GitInfoPatch as StoreGitInfoPatch;
 use codex_thread_store::ItemSortKey as StoreItemSortKey;
 use codex_thread_store::ListItemsParams as StoreListItemsParams;
 use codex_thread_store::ListThreadsParams as StoreListThreadsParams;
+use codex_thread_store::ListTimelineParams as StoreListTimelineParams;
 use codex_thread_store::ListTurnsParams as StoreListTurnsParams;
 use codex_thread_store::LoadThreadHistoryParams as StoreLoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -590,15 +597,20 @@ mod fs_processor;
 mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;
+mod mcp_event_stream;
 mod mcp_processor;
+mod persisted_resume_settings;
 mod plugins;
 mod process_exec_processor;
+mod projects;
 mod remote_control_processor;
 mod search;
 mod structured_request_processor;
 mod thread_enrichment;
 mod thread_fork_goal;
+mod thread_input;
 mod thread_processor;
+mod thread_queue_processor;
 mod thread_sections;
 mod token_usage_replay;
 mod turn_processor;
@@ -617,14 +629,18 @@ pub(crate) use fs_processor::FsRequestProcessor;
 pub(crate) use git_processor::GitRequestProcessor;
 pub(crate) use initialize_processor::InitializeRequestProcessor;
 pub(crate) use marketplace_processor::MarketplaceRequestProcessor;
+pub(crate) use mcp_event_stream::McpEventStreamReady;
+pub(crate) use mcp_event_stream::McpEventStreams;
 pub(crate) use mcp_processor::McpRequestProcessor;
 pub(crate) use plugins::PluginRequestProcessor;
 pub(crate) use process_exec_processor::ProcessExecRequestProcessor;
+pub(crate) use projects::ProjectRequestProcessor;
 pub(crate) use remote_control_processor::RemoteControlRequestProcessor;
 pub(crate) use search::SearchRequestProcessor;
 pub(crate) use structured_request_processor::StructuredRequestProcessor;
 pub(crate) use thread_goal_processor::ThreadGoalRequestProcessor;
 pub(crate) use thread_processor::ThreadRequestProcessor;
+pub(crate) use thread_queue_processor::ThreadQueueRequestProcessor;
 pub(crate) use turn_processor::TurnRequestProcessor;
 pub(crate) use windows_sandbox_processor::WindowsSandboxRequestProcessor;
 
@@ -688,6 +704,7 @@ fn resolve_turn_environment_selections(
             environment_id,
             cwd,
             workspace_roots,
+            config: EnvironmentConfigState::FromThread,
         });
     }
     thread_manager
@@ -728,7 +745,6 @@ pub(crate) use self::thread_summary::read_summary_from_rollout;
 #[cfg(test)]
 pub(crate) use self::thread_summary::summary_to_thread;
 pub(crate) use self::thread_summary::thread_settings_from_config_snapshot;
-pub(crate) use self::thread_summary::thread_settings_from_core_snapshot;
 
 pub(crate) fn build_legacy_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
     let mut builder = ThreadHistoryBuilder::new();

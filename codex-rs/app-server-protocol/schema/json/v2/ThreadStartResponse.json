@@ -25,6 +25,12 @@
       ],
       "type": "object"
     },
+    "AgentMessageDelivery": {
+      "enum": [
+        "async"
+      ],
+      "type": "string"
+    },
     "AgentPath": {
       "type": "string"
     },
@@ -115,6 +121,7 @@
             "usageLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
+            "misalignmentPolicyViolation",
             "internalServerError",
             "unauthorized",
             "badRequest",
@@ -1052,7 +1059,8 @@
       "enum": [
         "started",
         "interacted",
-        "interrupted"
+        "interrupted",
+        "completed"
       ],
       "type": "string"
     },
@@ -1252,6 +1260,13 @@
           "description": "Usually the first user message in the thread, if available.",
           "type": "string"
         },
+        "projectId": {
+          "description": "Canonical project assignment owned by app-server, if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "recencyAt": {
           "description": "Unix timestamp (in seconds) used for thread recency ordering.",
           "format": "int64",
@@ -1345,6 +1360,7 @@
         "id",
         "modelProvider",
         "preview",
+        "projectId",
         "sessionId",
         "source",
         "status",
@@ -1445,6 +1461,17 @@
         },
         {
           "properties": {
+            "delivery": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AgentMessageDelivery"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "id": {
               "type": "string"
             },

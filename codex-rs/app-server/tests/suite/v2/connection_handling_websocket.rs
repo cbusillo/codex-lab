@@ -27,12 +27,15 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
+use codex_http_client::HttpClient;
+use codex_http_client::HttpClientBuilder;
+use codex_http_client::HttpResponse;
 use codex_protocol::config_types::TrustLevel;
 use futures::SinkExt;
 use futures::StreamExt;
 use hmac::Hmac;
 use hmac::Mac;
-use reqwest::StatusCode;
+use http::StatusCode;
 use serde_json::json;
 use sha2::Sha256;
 use std::net::SocketAddr;
@@ -70,6 +73,7 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::query_param;
 
 // macOS and Windows CI can spend tens of seconds starting the app-server test
 // binary under Bazel before it accepts JSON-RPC or reports its websocket bind
@@ -83,16 +87,16 @@ pub(super) type WsClient = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone)]
-struct GatedWorkspaceSettingsResponse {
+struct GatedRemotePluginListResponse {
     request_started_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     release_rx: Arc<Mutex<Option<std_mpsc::Receiver<()>>>>,
 }
 
-struct WorkspaceSettingsReleaseGuard {
+struct BlockingRequestReleaseGuard {
     release_tx: Option<std_mpsc::Sender<()>>,
 }
 
-impl WorkspaceSettingsReleaseGuard {
+impl BlockingRequestReleaseGuard {
     fn new(release_tx: std_mpsc::Sender<()>) -> Self {
         Self {
             release_tx: Some(release_tx),
@@ -106,13 +110,13 @@ impl WorkspaceSettingsReleaseGuard {
     }
 }
 
-impl Drop for WorkspaceSettingsReleaseGuard {
+impl Drop for BlockingRequestReleaseGuard {
     fn drop(&mut self) {
         self.release();
     }
 }
 
-impl Respond for GatedWorkspaceSettingsResponse {
+impl Respond for GatedRemotePluginListResponse {
     fn respond(&self, _: &WiremockRequest) -> ResponseTemplate {
         let request_started_tx = self
             .request_started_tx
@@ -130,7 +134,8 @@ impl Respond for GatedWorkspaceSettingsResponse {
         if let Some(release_rx) = release_rx {
             let _ = release_rx.recv();
         }
-        ResponseTemplate::new(200).set_body_string(r#"{"beta_settings":{"enable_plugins":true}}"#)
+        ResponseTemplate::new(200)
+            .set_body_string(r#"{"plugins":[],"pagination":{"limit":200,"next_page_token":null}}"#)
     }
 }
 
@@ -290,7 +295,7 @@ async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> R
     std::fs::write(
         config_path,
         format!(
-            "chatgpt_base_url = \"{}/backend-api/\"\n{config}\n[features]\nplugins = true\n",
+            "chatgpt_base_url = \"{}/backend-api/\"\n{config}\n[features]\nplugins = true\nremote_plugin = false\n",
             workspace_server.uri()
         ),
     )?;
@@ -305,15 +310,30 @@ async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> R
     )?;
     let (request_started_tx, request_started_rx) = oneshot::channel();
     let (release_tx, release_rx) = std_mpsc::channel();
-    let mut release_guard = WorkspaceSettingsReleaseGuard::new(release_tx);
+    let mut release_guard = BlockingRequestReleaseGuard::new(release_tx);
     Mock::given(method("GET"))
-        .and(path("/backend-api/accounts/account-123/settings"))
+        .and(path("/backend-api/ps/plugins/list"))
+        .and(query_param("scope", "GLOBAL"))
+        .and(query_param("limit", "200"))
+        .and(query_param("collection", "vertical"))
         .and(header("authorization", "Bearer chatgpt-token"))
         .and(header("chatgpt-account-id", "account-123"))
-        .respond_with(GatedWorkspaceSettingsResponse {
+        .respond_with(GatedRemotePluginListResponse {
             request_started_tx: Arc::new(Mutex::new(Some(request_started_tx))),
             release_rx: Arc::new(Mutex::new(Some(release_rx))),
         })
+        .mount(&workspace_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/ps/plugins/installed"))
+        .and(query_param("scope", "GLOBAL"))
+        .and(header("authorization", "Bearer chatgpt-token"))
+        .and(header("chatgpt-account-id", "account-123"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(
+                r#"{"plugins":[],"pagination":{"limit":50,"next_page_token":null}}"#,
+            ),
+        )
         .mount(&workspace_server)
         .await;
 
@@ -334,14 +354,14 @@ async fn websocket_reinitialize_is_not_blocked_by_disconnected_client_rpc() -> R
         /*id*/ 2,
         Some(serde_json::to_value(PluginListParams {
             cwds: None,
-            marketplace_kinds: Some(vec![PluginListMarketplaceKind::Local]),
+            marketplace_kinds: Some(vec![PluginListMarketplaceKind::Vertical]),
             force_refetch: false,
         })?),
     )
     .await?;
-    timeout(DEFAULT_READ_TIMEOUT, request_started_rx)
+    timeout(Duration::from_secs(/*secs*/ 5), request_started_rx)
         .await
-        .context("plugin/list did not start the blocking workspace-settings request")??;
+        .context("plugin/list did not start the blocking remote-plugin request")??;
 
     drop(ws1);
     wait_for_server_log(&mut server_logs, "connection cleanup started").await?;
@@ -372,7 +392,7 @@ async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Resul
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
 
     let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
-    let client = reqwest::Client::new();
+    let client = HttpClientBuilder::new().build_direct()?;
 
     let readyz = http_get(&client, bind_addr, "/readyz").await?;
     assert_eq!(readyz.status(), StatusCode::OK);
@@ -835,11 +855,7 @@ async fn run_websocket_server_to_completion_with_args(
         .context("failed to run websocket app-server")
 }
 
-async fn http_get(
-    client: &reqwest::Client,
-    bind_addr: SocketAddr,
-    path: &str,
-) -> Result<reqwest::Response> {
+async fn http_get(client: &HttpClient, bind_addr: SocketAddr, path: &str) -> Result<HttpResponse> {
     let connectable_bind_addr = connectable_bind_addr(bind_addr);
     let deadline = Instant::now() + DEFAULT_READ_TIMEOUT;
     loop {

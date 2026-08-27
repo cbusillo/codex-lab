@@ -36,6 +36,9 @@ section: ThreadSection | null, /**
  * Unix timestamp in seconds when the thread entered its current section.
  */
 sectionEnteredAt: number | null, /**
+ * Canonical project assignment owned by app-server, if any.
+ */
+projectId: string | null, /**
  * Persisted thread history contract selected when this thread was created.
  *
  * This field is part of the published stable `Thread` surface; keep it

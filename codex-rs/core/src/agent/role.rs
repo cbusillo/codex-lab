@@ -12,9 +12,9 @@ use crate::config::Config;
 use crate::config::ConfigOverrides;
 use crate::config::ExternalCommandAgentBackendConfig;
 use crate::config::ExternalCommandProtocol;
-use crate::config::agent_roles::parse_agent_role_file_contents;
 use crate::config::deserialize_config_toml_with_base;
 use anyhow::anyhow;
+use codex_agent_roles::parse_agent_role_file_contents;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -111,7 +111,14 @@ async fn apply_role_to_config_inner(
     let preserve_current_provider = role_layer_toml.get("model_provider").is_none();
     let preserve_current_service_tier = role_layer_toml.get("service_tier").is_none();
 
-    *config = reload::build_next_config(
+    let permissions = config.permissions.clone();
+    let approvals_reviewer = config.approvals_reviewer;
+    let mcp_servers = config.mcp_servers.clone();
+    let chatgpt_base_url = config.chatgpt_base_url.clone();
+    let notify = config.notify.clone();
+    let model_provider = config.model_provider.clone();
+    let model_providers = config.model_providers.clone();
+    let mut next_config = reload::build_next_config(
         config,
         role_layer_toml,
         developer_instructions,
@@ -119,6 +126,16 @@ async fn apply_role_to_config_inner(
         preserve_current_service_tier,
     )
     .await?;
+    next_config.permissions = permissions;
+    next_config.approvals_reviewer = approvals_reviewer;
+    next_config.mcp_servers = mcp_servers;
+    next_config.chatgpt_base_url = chatgpt_base_url;
+    next_config.notify = notify;
+    if preserve_current_provider {
+        next_config.model_provider = model_provider;
+    }
+    next_config.model_providers = model_providers;
+    *config = next_config;
     Ok(())
 }
 
@@ -135,17 +152,41 @@ async fn load_role_layer_toml(
         let role_config_toml: TomlValue = toml::from_str(&role_config_contents)?;
         (role_config_toml, config.codex_home.as_path())
     } else {
+        let metadata = tokio::fs::symlink_metadata(config_file).await?;
+        if metadata.file_type().is_symlink() {
+            anyhow::bail!("agent role config must not be a symlink");
+        }
         let role_config_contents = tokio::fs::read_to_string(config_file).await?;
         let role_config_base = config_file
             .parent()
             .ok_or(anyhow!("No corresponding config content"))?;
-        let role_config_toml = parse_agent_role_file_contents(
+        let mut role_config_toml = parse_agent_role_file_contents(
             &role_config_contents,
             config_file,
             role_config_base,
             Some(role_name),
         )?
         .config;
+        if let Some(table) = role_config_toml.as_table_mut() {
+            for key in [
+                "approval_policy",
+                "sandbox_mode",
+                "sandbox_workspace_write",
+                "permissions",
+                "model_provider",
+                "model_providers",
+                "notify",
+                "apps",
+                "mcp_servers",
+                "openai_base_url",
+                "chatgpt_base_url",
+            ] {
+                table.remove(key);
+            }
+            if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut) {
+                features.remove("apps");
+            }
+        }
         (role_config_toml, role_config_base)
     };
 

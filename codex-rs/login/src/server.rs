@@ -1090,6 +1090,7 @@ async fn persist_tokens_async_with_policy(
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         };
         save_auth(
             &persist_codex_home,
@@ -1884,6 +1885,7 @@ mod tests {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         }
     }
 

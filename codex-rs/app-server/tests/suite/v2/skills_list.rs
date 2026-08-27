@@ -27,6 +27,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
 use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::WriteFileOptions;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -143,7 +144,7 @@ fn write_cached_remote_plugin_with_skill(
 }
 
 fn write_cached_local_curated_plugin_with_skill(codex_home: &std::path::Path) -> Result<()> {
-    let plugin_root = codex_home.join("plugins/cache/openai-curated/google-calendar/local");
+    let plugin_root = codex_home.join("plugins/cache/openai-api-curated/google-calendar/local");
     std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
     std::fs::write(
         plugin_root.join(".codex-plugin/plugin.json"),
@@ -406,7 +407,7 @@ async fn runtime_remote_plugin_toggle_updates_local_curated_plugin_skills() -> R
 [features]
 plugins = true
 
-[plugins."google-calendar@openai-curated"]
+[plugins."google-calendar@openai-api-curated"]
 enabled = true
 "#,
             server.uri()
@@ -462,7 +463,7 @@ enabled = true
 
     std::fs::write(
         codex_home.path().join(
-            "plugins/cache/openai-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
+            "plugins/cache/openai-api-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
         ),
         "---\nname: meeting-prep\ndescription: Updated meeting preparation\n---\n\n# Body\n",
     )?;
@@ -690,7 +691,10 @@ async fn skills_list_loads_remote_installed_plugin_skills_from_cache() -> Result
         std::fs::canonicalize(skill.path.as_path())?,
         expected_skill_path
     );
-    assert_eq!(skill.enabled, true);
+    assert_eq!(
+        (skill.enabled, skill.plugin_id.as_deref()),
+        (true, Some("linear@openai-curated-remote")),
+    );
     Ok(())
 }
 
@@ -848,7 +852,7 @@ async fn skills_list_preserves_requested_cwd_order() -> Result<()> {
         r#"[features]
 plugins = true
 
-[plugins."google-calendar@openai-curated"]
+[plugins."google-calendar@openai-api-curated"]
 enabled = true
 "#,
     )?;
@@ -858,7 +862,9 @@ enabled = true
         std::fs::create_dir_all(cwd.join(".codex"))?;
         std::fs::write(
             cwd.join(".codex/config.toml"),
-            format!("[plugins.\"google-calendar@openai-curated\"]\nenabled = {plugin_enabled}\n"),
+            format!(
+                "[plugins.\"google-calendar@openai-api-curated\"]\nenabled = {plugin_enabled}\n"
+            ),
         )?;
         set_project_trust_level(codex_home.path(), cwd, TrustLevel::Trusted)?;
     }
@@ -880,7 +886,10 @@ enabled = true
             file_system
                 .create_directory(
                     directory,
-                    CreateDirectoryOptions { recursive: true },
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
                     /*sandbox*/ None,
                 )
                 .await?;
@@ -889,6 +898,7 @@ enabled = true
             .write_file(
                 &skill_dir.join("SKILL.md")?,
                 format!("---\nname: {name}\ndescription: {name}\n---\n").into_bytes(),
+                WriteFileOptions::default(),
                 /*sandbox*/ None,
             )
             .await?;
@@ -961,7 +971,7 @@ async fn skills_list_force_reload_refreshes_cached_plugin_roots() -> Result<()> 
         r#"[features]
 plugins = true
 
-[plugins."google-calendar@openai-curated"]
+[plugins."google-calendar@openai-api-curated"]
 enabled = true
 "#,
     )?;
@@ -977,7 +987,10 @@ enabled = true
         file_system
             .create_directory(
                 &cwd.join(".git")?,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -991,7 +1004,7 @@ enabled = true
         if force_reload {
             let plugin_root = codex_home
                 .path()
-                .join("plugins/cache/openai-curated/google-calendar/local");
+                .join("plugins/cache/openai-api-curated/google-calendar/local");
             std::fs::write(
                 plugin_root.join(".codex-plugin/plugin.json"),
                 r#"{"name":"google-calendar","skills":"./replacement-skills"}"#,
@@ -1319,6 +1332,7 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
             session_start_source: None,
             thread_source: None,
             session_provenance: None,
+            project_id: None,
             dynamic_tools: None,
             environments: None,
             selected_capability_roots: None,

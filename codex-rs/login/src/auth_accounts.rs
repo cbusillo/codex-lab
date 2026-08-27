@@ -470,7 +470,8 @@ fn upsert_account(
         AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
         | AuthMode::Headers
-        | AuthMode::BedrockApiKey => None,
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => None,
     };
 
     if let Some(idx) = existing_idx {
@@ -604,6 +605,7 @@ fn auth_from_stored_account(account: &StoredAccount) -> io::Result<AuthDotJson> 
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         }),
         AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens => {
             Ok(AuthDotJson {
@@ -616,12 +618,14 @@ fn auth_from_stored_account(account: &StoredAccount) -> io::Result<AuthDotJson> 
                 agent_identity: None,
                 personal_access_token: None,
                 bedrock_api_key: None,
+                bedrock_access_keys: None,
             })
         }
         AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
         | AuthMode::Headers
-        | AuthMode::BedrockApiKey => Err(io::Error::other(
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => Err(io::Error::other(
             "stored account activation is not supported for this authentication mode",
         )),
     }
@@ -647,7 +651,8 @@ fn update_stored_account_from_auth(
         AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
         | AuthMode::Headers
-        | AuthMode::BedrockApiKey => {
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => {
             return Err(io::Error::other(
                 "catalog account storage does not support this authentication mode",
             ));
@@ -977,7 +982,8 @@ pub fn remove_account_matching_credentials(
         AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
         | AuthMode::Headers
-        | AuthMode::BedrockApiKey => None,
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => None,
     }
     .map(|pos| data.accounts.remove(pos));
 

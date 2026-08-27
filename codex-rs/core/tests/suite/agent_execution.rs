@@ -1,7 +1,13 @@
 use anyhow::Result;
+use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
-use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::PermissionProfileSnapshot;
+use codex_protocol::protocol::EnvironmentConfig;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -10,16 +16,18 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;
+use test_case::test_case;
 
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
 const SECOND_TASK: &str = "second worker task";
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -195,12 +203,25 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResidencyReload {
+    Sender,
+    OwnerNarrowsPermissions,
+    OwnerPreservesStricterChild,
+    OwnerRevokesWorkspaceRoot,
+}
+
+#[test_case(ResidencyReload::Sender; "sender preserves stricter child")]
+#[test_case(ResidencyReload::OwnerNarrowsPermissions; "owner narrows cached permissions")]
+#[test_case(ResidencyReload::OwnerPreservesStricterChild; "owner preserves stricter child")]
+#[test_case(ResidencyReload::OwnerRevokesWorkspaceRoot; "owner revokes cached workspace root")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Result<()> {
+async fn v2_residency_reload_preserves_inherited_environment_and_tools(
+    reload: ResidencyReload,
+) -> Result<()> {
     const EVICT_PROMPT: &str = "spawn the replacement worker";
     const FOLLOWUP_PROMPT: &str = "continue the original worker";
     const FOLLOWUP_TASK: &str = "continue work in the original environment";
-    const RESIDENT_MODEL: &str = "gpt-5.6-terra";
 
     let server = start_mock_server().await;
     mount_root_collaboration_call(
@@ -208,13 +229,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         FIRST_PROMPT,
         "first-call",
         "spawn_agent",
-        json!({
-            "message": FIRST_TASK,
-            "task_name": "first",
-            "model": RESIDENT_MODEL,
-            "reasoning_effort": "high",
-            "fork_turns": "none"
-        }),
+        json!({ "message": FIRST_TASK, "task_name": "first", "fork_turns": "none" }),
     )
     .await;
     mount_completed_worker(&server, FIRST_TASK, "first-call").await;
@@ -237,30 +252,72 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
         json!({ "target": "first", "message": FOLLOWUP_TASK }),
     )
     .await;
+    let reloaded_worker_request =
+        mount_completed_worker(&server, FOLLOWUP_TASK, "followup-call").await;
 
     let mut builder = test_codex()
         .with_model("gpt-5.6-sol")
         .with_exec_server_url("none")
         .with_config(|config| {
-            for feature in [
-                Feature::Collab,
-                Feature::MultiAgentV2,
-                Feature::UnifiedExec,
-                Feature::DeferredExecutor,
-            ] {
+            for feature in [Feature::Collab, Feature::MultiAgentV2] {
                 config
                     .features
                     .enable(feature)
                     .expect("test config should allow feature update");
             }
-            config.use_experimental_unified_exec_tool = true;
-            config.model_reasoning_effort = Some(ReasoningEffort::Low);
             config.multi_agent_v2.max_concurrent_threads_per_session = 2;
-            config.multi_agent_v2.non_code_mode_only = false;
-            config.multi_agent_v2.expose_spawn_agent_model_overrides = true;
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::workspace_write())
+                .expect("thread permissions should allow workspace writes");
         });
     let test = builder.build_with_remote_and_local_env(&server).await?;
-    let child_environment = test.executor_environment().selection().clone();
+    let mut child_environment = test.executor_environment().selection().clone();
+    let (child_permissions, parent_permissions) = match reload {
+        ResidencyReload::Sender => (
+            PermissionProfile::read_only(),
+            PermissionProfile::workspace_write(),
+        ),
+        ResidencyReload::OwnerNarrowsPermissions => {
+            (PermissionProfile::Disabled, PermissionProfile::read_only())
+        }
+        ResidencyReload::OwnerPreservesStricterChild => {
+            (PermissionProfile::read_only(), PermissionProfile::Disabled)
+        }
+        ResidencyReload::OwnerRevokesWorkspaceRoot => (
+            PermissionProfile::workspace_write(),
+            PermissionProfile::workspace_write(),
+        ),
+    };
+    if reload == ResidencyReload::OwnerRevokesWorkspaceRoot {
+        child_environment.cwd = test.workspace_path_uri("retained")?;
+        child_environment.workspace_roots = vec![
+            child_environment.cwd.clone(),
+            test.workspace_path_uri("revoked")?,
+        ];
+        for root in &child_environment.workspace_roots {
+            test.fs()
+                .create_directory(
+                    root,
+                    CreateDirectoryOptions {
+                        recursive: true,
+                        follow_symlinks: true,
+                    },
+                    /*sandbox*/ None,
+                )
+                .await?;
+        }
+    } else {
+        child_environment.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+            allow_login_shell: test.config.permissions.allow_login_shell,
+            permission_profile: PermissionProfileSnapshot::legacy(child_permissions),
+            shell_environment_policy: Default::default(),
+            exec_policy: None,
+            mcp_policy: None,
+            network_policy: None,
+            selected_capability_roots: Vec::new(),
+        });
+    }
     if let Some(exec_server_url) = test.executor_environment().exec_server_url() {
         test.thread_manager
             .environment_manager()
@@ -272,18 +329,55 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
     }
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
-    test.submit_turn_with_environments(FIRST_PROMPT, Some(vec![child_environment.clone()]))
-        .await?;
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            environments: Some(TurnEnvironmentSelections::new(
+                test.config.cwd.clone(),
+                vec![child_environment.clone()],
+            )),
+            ..Default::default()
+        },
+    )
+    .await?;
+    test.submit_text_turn(FIRST_PROMPT).await?;
     let first_thread_id = created_threads.recv().await?;
     let first_thread = test.thread_manager.get_thread(first_thread_id).await?;
     wait_for_event(first_thread.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    let first_config = first_thread.config_snapshot().await;
-    assert_eq!(first_config.model, RESIDENT_MODEL);
-    assert_eq!(first_config.reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(
+        first_thread
+            .config_snapshot()
+            .await
+            .environments
+            .environments,
+        vec![child_environment.clone()]
+    );
 
+    let mut parent_environment = child_environment.clone();
+    if reload == ResidencyReload::OwnerRevokesWorkspaceRoot {
+        parent_environment.workspace_roots.truncate(1);
+    } else {
+        let EnvironmentConfigState::Ready(parent_config) = &mut parent_environment.config else {
+            unreachable!("child environment config should be ready");
+        };
+        parent_config.permission_profile = PermissionProfileSnapshot::legacy(parent_permissions);
+    }
+    if reload == ResidencyReload::Sender {
+        submit_thread_settings(
+            &test.codex,
+            ThreadSettingsOverrides {
+                environments: Some(TurnEnvironmentSelections::new(
+                    test.config.cwd.clone(),
+                    vec![parent_environment.clone()],
+                )),
+                ..Default::default()
+            },
+        )
+        .await?;
+    }
     test.submit_text_turn(EVICT_PROMPT).await?;
     let replacement_thread_id = created_threads.recv().await?;
     let replacement_thread = test
@@ -301,83 +395,114 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools() -> Resu
             .is_err()
     );
 
-    let first_thread_id_string = first_thread_id.to_string();
-    let expected_thread_id = first_thread_id_string.clone();
-    let reloaded_worker_request = mount_sse_once_match(
-        &server,
-        move |request: &wiremock::Request| {
-            request
-                .headers
-                .get("x-codex-turn-metadata")
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|metadata| {
-                    serde_json::from_str::<serde_json::Value>(metadata).is_ok_and(|metadata| {
-                        metadata["thread_id"].as_str() == Some(expected_thread_id.as_str())
-                    })
-                })
-        },
-        sse(vec![
-            ev_response_created("resp-worker-followup-call"),
-            ev_assistant_message("msg-worker-followup-call", "worker completed"),
-            ev_completed("resp-worker-followup-call"),
-        ]),
-    )
-    .await;
+    if reload != ResidencyReload::Sender {
+        submit_thread_settings(
+            &test.codex,
+            ThreadSettingsOverrides {
+                environments: Some(TurnEnvironmentSelections::new(
+                    test.config.cwd.clone(),
+                    vec![parent_environment.clone()],
+                )),
+                ..Default::default()
+            },
+        )
+        .await?;
+        assert_eq!(
+            test.codex.config_snapshot().await.environments.environments,
+            vec![parent_environment]
+        );
+        let result = test
+            .thread_manager
+            .ensure_multi_agent_v2_child_loaded(first_thread_id)
+            .await;
+        let expected_error = match reload {
+            ResidencyReload::OwnerRevokesWorkspaceRoot => {
+                Some("no longer matches a ready parent environment")
+            }
+            ResidencyReload::OwnerNarrowsPermissions
+            | ResidencyReload::OwnerPreservesStricterChild
+                if test.executor_environment().environment().is_remote() =>
+            {
+                Some("permissions changed on a remote executor")
+            }
+            ResidencyReload::Sender
+            | ResidencyReload::OwnerNarrowsPermissions
+            | ResidencyReload::OwnerPreservesStricterChild => None,
+        };
+        if let Some(expected_error) = expected_error {
+            let error = result.expect_err("reload must reject stale owner authority");
+            assert!(
+                error.to_string().contains(expected_error),
+                "unexpected reload error: {error}"
+            );
+            assert!(
+                test.thread_manager
+                    .get_thread(first_thread_id)
+                    .await
+                    .is_err()
+            );
+            return Ok(());
+        }
+        result?;
+        let EnvironmentConfigState::Ready(child_config) = &mut child_environment.config else {
+            unreachable!("successfully reloaded child environment config should be ready");
+        };
+        child_config.permission_profile =
+            PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
+        assert_eq!(
+            test.thread_manager
+                .get_thread(first_thread_id)
+                .await?
+                .config_snapshot()
+                .await
+                .environments
+                .environments,
+            vec![child_environment.clone()]
+        );
+    }
 
     test.submit_text_turn(FOLLOWUP_PROMPT).await?;
     let reloaded_worker = test.thread_manager.get_thread(first_thread_id).await?;
-    let reloaded_config = reloaded_worker.config_snapshot().await;
+    wait_for_event(reloaded_worker.as_ref(), |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     assert_eq!(
-        reloaded_config.environments.environments,
+        reloaded_worker
+            .config_snapshot()
+            .await
+            .environments
+            .environments,
         vec![child_environment]
     );
-    assert_eq!(reloaded_config.model, RESIDENT_MODEL);
     assert_eq!(
-        reloaded_config.reasoning_effort,
-        Some(ReasoningEffort::High)
+        reloaded_worker.config_snapshot().await.permission_profile,
+        PermissionProfile::read_only()
     );
 
-    let reloaded_request = tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
-        loop {
-            if let Some(request) = reloaded_worker_request.last_request() {
-                return request;
-            }
-            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
-        }
-    })
-    .await?;
-    let turn_metadata: serde_json::Value = serde_json::from_str(
-        &reloaded_request
-            .header("x-codex-turn-metadata")
-            .expect("reloaded worker request turn metadata"),
-    )?;
-    let followup_turn_id = turn_metadata["turn_id"]
-        .as_str()
-        .expect("reloaded worker request turn id")
-        .to_string();
-    assert_eq!(
-        turn_metadata["thread_id"].as_str(),
-        Some(first_thread_id_string.as_str())
-    );
-    let body = reloaded_request.body_json();
-    assert_eq!(body["model"].as_str(), Some(RESIDENT_MODEL));
-    assert_eq!(body["reasoning"]["effort"].as_str(), Some("high"));
-    let reloaded_tools = body
-        .get("tools")
-        .or_else(|| {
-            body["input"]
-                .as_array()?
-                .iter()
-                .find(|item| item["type"] == "additional_tools")?
-                .get("tools")
-        })
-        .expect("expected tools in the reloaded worker request");
+    let worker_tools = |response_mock: &ResponseMock| {
+        response_mock
+            .requests()
+            .into_iter()
+            .find_map(|request| {
+                let body = request.body_json();
+                if body["client_metadata"]["thread_id"] != json!(first_thread_id) {
+                    return None;
+                }
+                body.get("tools")
+                    .or_else(|| {
+                        body["input"]
+                            .as_array()?
+                            .iter()
+                            .find(|item| item["type"] == "additional_tools")?
+                            .get("tools")
+                    })
+                    .cloned()
+            })
+            .expect("expected a model request for the original worker")
+    };
+    let reloaded_tools = worker_tools(&reloaded_worker_request);
     assert!(reloaded_tools.to_string().contains("### `exec_command`"));
-    wait_for_event(
-        reloaded_worker.as_ref(),
-        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == followup_turn_id),
-    )
-    .await;
 
     Ok(())
 }

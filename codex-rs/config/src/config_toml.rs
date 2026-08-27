@@ -6,6 +6,9 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::ValidationConfig;
+use crate::browser_use::BrowserUseConfigToml;
+use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -28,9 +31,9 @@ use crate::types::ToolSuggestConfig;
 use crate::types::Tui;
 use crate::types::UriBasedFileOpener;
 use crate::types::WindowsToml;
-use crate::validation::ValidationConfig;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
@@ -60,8 +63,9 @@ use serde::Serialize;
 use serde::de::Error as SerdeError;
 use serde_json::Value as JsonValue;
 
-const RESERVED_MODEL_PROVIDER_IDS: [&str; 4] = [
+const RESERVED_MODEL_PROVIDER_IDS: [&str; 5] = [
     AMAZON_BEDROCK_PROVIDER_ID,
+    AMAZON_BEDROCK_RUNTIME_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
     OLLAMA_OSS_PROVIDER_ID,
     LMSTUDIO_OSS_PROVIDER_ID,
@@ -169,6 +173,7 @@ pub struct ConfigToml {
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
     /// Default approval policy for executing commands.
+    #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,
 
     /// Configures who approval requests are routed to for review once they have
@@ -183,6 +188,10 @@ pub struct ConfigToml {
     /// Patch-local validation policy.
     #[serde(default)]
     pub validation: Option<ValidationConfig>,
+
+    pub browser_use: Option<BrowserUseConfigToml>,
+
+    pub computer_use: Option<ComputerUseConfigToml>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
@@ -970,8 +979,10 @@ pub fn validate_reserved_model_provider_ids(
     let mut conflicts = model_providers
         .keys()
         .filter(|key| {
-            key.as_str() != AMAZON_BEDROCK_PROVIDER_ID
-                && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
+            !matches!(
+                key.as_str(),
+                AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+            ) && RESERVED_MODEL_PROVIDER_IDS.contains(&key.as_str())
         })
         .map(|key| format!("`{key}`"))
         .collect::<Vec<_>>();
@@ -992,10 +1003,14 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if key != AMAZON_BEDROCK_PROVIDER_ID {
+        if !matches!(
+            key.as_str(),
+            AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
+        ) {
             if provider.aws.is_some() {
                 return Err(format!(
-                    "model_providers.{key}: provider aws is only supported for `{AMAZON_BEDROCK_PROVIDER_ID}`"
+                    "model_providers.{key}: provider aws is only supported for \
+`{AMAZON_BEDROCK_PROVIDER_ID}` or `{AMAZON_BEDROCK_RUNTIME_PROVIDER_ID}`"
                 ));
             }
             if provider.name.trim().is_empty() {
@@ -1021,6 +1036,10 @@ where
     validate_model_providers(&model_providers).map_err(serde::de::Error::custom)?;
     Ok(model_providers)
 }
+
+#[cfg(test)]
+#[path = "bedrock_runtime_tests.rs"]
+mod bedrock_runtime_tests;
 
 pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {
     match provider {

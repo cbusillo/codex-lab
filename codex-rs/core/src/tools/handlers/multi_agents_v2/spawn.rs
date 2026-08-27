@@ -6,14 +6,19 @@ use crate::agent::provider_routing::AgentTaskKind;
 use crate::agent::provider_routing::AgentTaskSize;
 use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::provider_routing::select_provider_route;
+use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::codex_thread::ThreadConfigSnapshot;
+use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
+use crate::turn_timing::now_unix_timestamp_ms;
 use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -37,13 +42,66 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(async move { handle_spawn_agent(invocation).await.map(boxed_tool_output) })
+        Box::pin(async move {
+            let analytics = invocation.session.services.analytics_events_client.clone();
+            let sender_thread_id = invocation.session.thread_id;
+            let turn_id = invocation.step_context.turn.sub_id.clone();
+            let call_id = invocation.call_id.clone();
+            let started_at_ms = now_unix_timestamp_ms();
+            let result = handle_spawn_agent(invocation).await;
+            let completed_at_ms = now_unix_timestamp_ms();
+            let (status, receiver_thread_ids, agents_states) = match &result {
+                Ok((_, thread_id, agent_status, _)) => (
+                    collab_tool_call_status(agent_status, Some(*thread_id)),
+                    vec![*thread_id],
+                    [(*thread_id, agent_status.clone())].into_iter().collect(),
+                ),
+                Err(_) => (
+                    CollabAgentToolCallStatus::Failed,
+                    Vec::new(),
+                    Default::default(),
+                ),
+            };
+            let agent_snapshot = result
+                .as_ref()
+                .ok()
+                .and_then(|(_, _, _, snapshot)| snapshot.as_ref());
+
+            analytics.track_collab_tool_call(
+                turn_id,
+                CollabAgentToolCallItem {
+                    id: call_id,
+                    tool: CollabAgentTool::SpawnAgent,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    receiver_agents: Vec::new(),
+                    prompt: None,
+                    model: agent_snapshot.map(|snapshot| snapshot.model.clone()),
+                    reasoning_effort: agent_snapshot
+                        .and_then(|snapshot| snapshot.reasoning_effort.clone()),
+                    agents_states,
+                },
+                started_at_ms,
+                completed_at_ms,
+            );
+
+            result.map(|(output, _, _, _)| boxed_tool_output(output))
+        })
     }
 }
 
 async fn handle_spawn_agent(
     invocation: ToolInvocation,
-) -> Result<SpawnAgentResult, FunctionCallError> {
+) -> Result<
+    (
+        SpawnAgentResult,
+        ThreadId,
+        AgentStatus,
+        Option<ThreadConfigSnapshot>,
+    ),
+    FunctionCallError,
+> {
     let ToolInvocation {
         session,
         step_context,
@@ -74,13 +132,9 @@ async fn handle_spawn_agent(
     let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let environment = step_context.environments.primary();
-    let mut config = build_agent_spawn_config(
-        &session.get_base_instructions().await,
-        turn.as_ref(),
-        environment,
-    )?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), environment)?;
+    let mut config =
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
         .map_err(FunctionCallError::RespondToModel)?;
     let explicit_role_name = requested_role_name.map(|role_name| {
@@ -135,7 +189,7 @@ async fn handle_spawn_agent(
         .await?;
     }
     if !is_full_history_fork || explicit_role_name.is_some() {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name).await?;
     }
     if let Some((role_name, role)) = preflighted_external_role {
         config.agent_roles.insert(role_name, role);
@@ -147,13 +201,22 @@ async fn handle_spawn_agent(
         args.service_tier.as_deref(),
     )
     .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref(), environment)?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
+    // Remember an applied configured default so cold reload reapplies its restrictions.
+    let persisted_role_name = role_name.or_else(|| {
+        (!is_full_history_fork
+            && config
+                .agent_roles
+                .get(DEFAULT_ROLE_NAME)
+                .is_some_and(|role| role.config_file.is_some()))
+        .then_some(DEFAULT_ROLE_NAME)
+    });
     let spawn_source = thread_spawn_source(
         session.thread_id,
         &turn.session_source,
         child_depth,
-        role_name,
+        persisted_role_name,
         Some(args.task_name.clone()),
     )?;
     let new_agent_path = spawn_source.get_agent_path().ok_or_else(|| {
@@ -197,6 +260,7 @@ async fn handle_spawn_agent(
     .await
     .map_err(collab_spawn_error)?;
     let new_thread_id = spawned_agent.thread_id;
+    let agent_status = spawned_agent.status;
     let supports_followup_messages = session
         .services
         .agent_control
@@ -235,21 +299,22 @@ async fn handle_spawn_agent(
     let task_name = String::from(new_agent_path);
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
-    if hide_agent_metadata {
-        Ok(SpawnAgentResult::HiddenMetadata {
+    let output = if hide_agent_metadata {
+        SpawnAgentResult::HiddenMetadata {
             task_name,
             supports_followup_messages,
             routing: routing.redacted_summary(),
-        })
+        }
     } else {
-        Ok(SpawnAgentResult::WithNickname {
+        SpawnAgentResult::WithNickname {
             task_name,
             nickname,
             agent_type: routing.agent_type().to_string(),
             supports_followup_messages,
             routing: routing.summary(),
-        })
-    }
+        }
+    };
+    Ok((output, new_thread_id, agent_status, agent_snapshot))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -538,7 +603,7 @@ pub(crate) enum SpawnAgentResult {
 }
 
 impl ToolOutput for SpawnAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "spawn_agent")
     }
 

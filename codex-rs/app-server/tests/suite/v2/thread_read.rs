@@ -332,6 +332,7 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
             source_kinds: None,
             archived: None,
             section_id: None,
+            project_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -615,6 +616,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
                         }],
                         phase: Some(MessagePhase::Commentary),
                         memory_citation: None,
+                        delivery: None,
                     }),
                 ),
                 paginated_completed_item(
@@ -627,6 +629,7 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
                         }],
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
+                        delivery: None,
                     }),
                 ),
                 paginated_turn_completed("turn-1"),
@@ -788,18 +791,20 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         .with_root_config(&format!(
             r#"experimental_thread_store = {{ type = "in_memory", id = "{store_id}" }}"#
         ))
+        .disable_feature(codex_features::Feature::Plugins)
         .write(codex_home.path())?;
     let store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
     seed_pathless_store_thread(&store, thread_id).await?;
 
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
         .loader_overrides(loader_overrides.clone())
         .build()
         .await?;
+    config.analytics_enabled = Some(false);
     let client = in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config: Arc::new(config),
@@ -907,6 +912,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
             request_id: RequestId::Integer(1),
             params: ThreadStartParams {
                 model: Some("mock-model".to_string()),
+                environments: Some(Vec::new()),
                 ..Default::default()
             },
         })
@@ -1023,6 +1029,7 @@ async fn thread_list_includes_store_thread_without_rollout_path() -> Result<()> 
                 source_kinds: None,
                 archived: None,
                 section_id: None,
+                project_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
@@ -1403,6 +1410,7 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
             source_kinds: None,
             archived: None,
             section_id: None,
+            project_id: None,
             cwd: None,
             use_state_db_only: true,
             search_term: None,
@@ -1659,6 +1667,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
                         }],
                         phase: None,
                         memory_citation: None,
+                        delivery: None,
                     }),
                 ),
                 paginated_completed_item(
@@ -1710,6 +1719,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
                 text: "first".to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
             },
         ],
         items_view: TurnItemsView::Full,
@@ -1895,6 +1905,7 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
                     text: "first".to_string(),
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
                 },
             ],
             items_view: TurnItemsView::Summary,
@@ -2217,6 +2228,7 @@ fn append_agent_message(path: &Path, timestamp: &str, text: &str) -> anyhow::Res
                 message: text.to_string(),
                 phase: None,
                 memory_citation: None,
+                delivery: None,
             }))?,
         })
     )?;

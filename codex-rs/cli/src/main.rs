@@ -51,6 +51,7 @@ use supports_color::Stream;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod cloud_config;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod desktop_app;
 mod doctor;
@@ -58,6 +59,7 @@ mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;
 mod plugin_cmd;
+mod queue_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -68,6 +70,7 @@ mod wsl_paths;
 use crate::mcp_cmd::McpCli;
 use crate::plugin_cmd::PluginCli;
 use crate::plugin_cmd::PluginSubcommand;
+use crate::queue_cmd::QueueCommand;
 use crate::remote_control_cmd::RemoteControlCommand;
 use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
@@ -181,6 +184,9 @@ enum Subcommand {
 
     /// Resume a previous interactive session (picker by default; use --last to continue the most recent).
     Resume(ResumeCommand),
+
+    /// Queue a message for an existing session.
+    Queue(QueueCommand),
 
     /// Archive a saved session by id or session name.
     Archive(SessionArchiveCommand),
@@ -804,23 +810,30 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     println!();
     let cmd_str = action.command_str();
     println!("Updating Codex via `{cmd_str}`...");
-
     let status = {
         #[cfg(windows)]
         {
-            if action == UpdateAction::StandaloneWindows {
-                let (cmd, args) = action.command_args();
-                // Run the standalone PowerShell installer with PowerShell
-                // itself. Routing this through `cmd.exe /C` would parse
-                // PowerShell metacharacters like `|` before PowerShell sees
-                // the installer command.
-                std::process::Command::new(cmd).args(args).status()?
+            let (cmd, args) = action.command_args();
+            let cmd = if action == UpdateAction::StandaloneWindows {
+                // These args contain PowerShell metacharacters, so do not let
+                // PATHEXT select a batch shim for this action.
+                "powershell.exe"
             } else {
-                // On Windows, run via cmd.exe so .CMD/.BAT are correctly resolved (PATHEXT semantics).
-                std::process::Command::new("cmd")
-                    .args(["/C", &cmd_str])
-                    .status()?
-            }
+                cmd
+            };
+            let path_env =
+                std::env::var_os("PATH").ok_or_else(|| anyhow::anyhow!("PATH is not set"))?;
+            let command_path = resolve_windows_update_command_from_path(cmd, &path_env)?;
+            // Do not let a project-local command or package-manager config
+            // influence the updater after the user accepts the update prompt.
+            let update_cwd = tempfile::tempdir()?;
+            // Resolve through PATH without consulting the project cwd. When
+            // this returns a .cmd/.bat shim, std::process::Command routes the
+            // absolute path through the system command processor.
+            std::process::Command::new(command_path)
+                .args(args)
+                .current_dir(update_cwd.path())
+                .status()?
         }
         #[cfg(not(windows))]
         {
@@ -840,6 +853,23 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     }
     println!("\n🎉 Update ran successfully! Please restart Codex.");
     Ok(())
+}
+
+#[cfg(windows)]
+fn resolve_windows_update_command_from_path(
+    command: &str,
+    path_env: &std::ffi::OsStr,
+) -> anyhow::Result<PathBuf> {
+    let path_env =
+        std::env::join_paths(std::env::split_paths(path_env).filter(|path| path.is_absolute()))?;
+    if path_env.is_empty() {
+        anyhow::bail!(
+            "Could not find an absolute update command `{command}` on PATH. Please update manually: https://developers.openai.com/codex/cli/"
+        );
+    }
+    which::which_in_global(command, Some(&path_env))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not find update command `{command}` on PATH"))
 }
 
 fn run_update_command() -> anyhow::Result<()> {
@@ -1346,6 +1376,18 @@ async fn cli_main(
             .await?;
             handle_app_exit(exit_info)?;
         }
+        Some(Subcommand::Queue(cmd)) => {
+            let output = queue_cmd::run_queue_command(
+                cmd,
+                interactive,
+                root_config_overrides.clone(),
+                root_remote.clone(),
+                root_remote_auth_token_env.clone(),
+                arg0_paths.clone(),
+            )
+            .await?;
+            println!("{output}");
+        }
         Some(Subcommand::Archive(cmd)) => {
             let output = run_session_archive_cli_command(
                 codex_tui::SessionArchiveAction::Archive,
@@ -1763,6 +1805,7 @@ fn profile_v2_for_subcommand<'a>(
         Subcommand::Exec(_)
         | Subcommand::Review(_)
         | Subcommand::Resume(_)
+        | Subcommand::Queue(_)
         | Subcommand::Archive(_)
         | Subcommand::Delete(_)
         | Subcommand::Unarchive(_)
@@ -1773,7 +1816,7 @@ fn profile_v2_for_subcommand<'a>(
             subcommand: DebugSubcommand::PromptInput(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex queue`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
         ),
     }
 }
@@ -1968,7 +2011,7 @@ async fn load_exec_server_remote_auth(
     missing_auth_error: &'static str,
 ) -> anyhow::Result<codex_login::CodexAuth> {
     let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await?;
 
     let auth = match auth_manager.auth().await {
         Some(auth) => auth,
@@ -2158,7 +2201,7 @@ async fn run_debug_prompt_input_command(
         config.codex_home.clone(),
     ));
     let auth_manager =
-        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+        AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await?;
     let mut extensions = codex_extension_api::ExtensionRegistryBuilder::new();
     codex_git_attribution::install(
         &mut extensions,
@@ -2169,6 +2212,7 @@ async fn run_debug_prompt_input_command(
     codex_skills_extension::install(&mut extensions, |config: &Config| {
         codex_skills_extension::SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: config.bundled_skills_enabled(),
             orchestrator_skills_enabled: config.orchestrator_skills_enabled,
             shadow_selection_enabled: config
@@ -2204,7 +2248,7 @@ async fn run_debug_models_command(
             .build()
             .await?;
         let auth_manager =
-            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
+            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await?;
         let models_manager = build_models_manager(&config, auth_manager);
         models_manager
             .raw_model_catalog(
@@ -2338,6 +2382,7 @@ fn unsupported_subcommand_name_for_strict_config(
         | Some(Subcommand::McpServer(_))
         | Some(Subcommand::ExecServer(_))
         | Some(Subcommand::Resume(_))
+        | Some(Subcommand::Queue(_))
         | Some(Subcommand::Archive(_))
         | Some(Subcommand::Delete(_))
         | Some(Subcommand::Unarchive(_))
@@ -2787,6 +2832,66 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn interactive_tui_future_stays_bounded() {
+        let future = run_interactive_tui(
+            TuiCli::parse_from(["codex"]),
+            /*remote*/ None,
+            /*remote_auth_token_env*/ None,
+            Arg0DispatchPaths::default(),
+            codex_version::ProductIdentity::Codex,
+        );
+        let size = std::mem::size_of_val(&future);
+
+        assert!(size < 64 * 1024, "interactive TUI future is {size} bytes");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_update_command_resolution_ignores_relative_path_entries() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let decoy_dir = tempfile::tempdir_in(&cwd).expect("relative decoy directory");
+        let trusted_dir = tempfile::tempdir().expect("trusted PATH directory");
+        let relative_decoy_dir = decoy_dir
+            .path()
+            .strip_prefix(&cwd)
+            .expect("decoy directory should be relative to cwd");
+
+        for command in ["npm.cmd", "pnpm.cmd", "bun.exe"] {
+            std::fs::write(decoy_dir.path().join(command), "decoy")
+                .expect("write cwd-relative decoy");
+            std::fs::write(trusted_dir.path().join(command), "trusted")
+                .expect("write trusted PATH command");
+            let path_env = std::env::join_paths([relative_decoy_dir, trusted_dir.path()])
+                .expect("join synthetic PATH");
+
+            let resolved = resolve_windows_update_command_from_path(command, &path_env)
+                .expect("resolve update command");
+
+            assert_eq!(resolved, trusted_dir.path().join(command));
+        }
+
+        let cwd_decoy = tempfile::Builder::new()
+            .suffix(".cmd")
+            .tempfile_in(&cwd)
+            .expect("cwd-local decoy");
+        let command = cwd_decoy
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("decoy filename");
+        let relative_only_path_env = std::env::join_paths(["."]).expect("join relative-only PATH");
+        let err = resolve_windows_update_command_from_path(command, &relative_only_path_env)
+            .expect_err("relative-only PATH should not resolve a cwd command");
+
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Could not find an absolute update command `{command}` on PATH. Please update manually: https://developers.openai.com/codex/cli/"
+            )
+        );
+    }
 
     #[tokio::test]
     async fn updater_http_client_factory_honors_respect_system_proxy() {

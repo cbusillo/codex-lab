@@ -10,6 +10,7 @@ use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::protocol::MAX_TURN_ENVIRONMENT_SELECTIONS;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_path_uri::PathUri;
@@ -190,6 +191,10 @@ impl WorldStateSection for EnvironmentsState {
 }
 
 impl ContextualUserFragment for EnvironmentsState {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("environments.environment_context".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }
@@ -224,6 +229,10 @@ enum EnvironmentUpdate {
 }
 
 impl ContextualUserFragment for RenderedEnvironments {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("environments.environment_context".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }
@@ -438,7 +447,7 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
         .enumerate()
         .map(|(index, environment)| {
             (
-                environment.environment_id.clone(),
+                environment.selection.environment_id.clone(),
                 EnvironmentState {
                     cwd: environment.cwd().clone(),
                     status: EnvironmentStatus::Available,

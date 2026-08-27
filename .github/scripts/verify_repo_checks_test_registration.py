@@ -70,6 +70,12 @@ def unregistered_tests(
                 for other_base in discovery_roots.values()
             ):
                 continue
+            if any(
+                (parent / "pyproject.toml").is_file()
+                for parent in test_file.parents
+                if parent != base and parent.is_relative_to(base)
+            ):
+                continue
             relative = test_file.relative_to(repo_root).as_posix()
             if not any(
                 fnmatch.fnmatchcase(test_file.name, pattern) for pattern in patterns

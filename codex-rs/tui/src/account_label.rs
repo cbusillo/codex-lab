@@ -22,7 +22,8 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
                 | AuthMode::Headers
                 | AuthMode::AgentIdentity
                 | AuthMode::PersonalAccessToken
-                | AuthMode::BedrockApiKey => {
+                | AuthMode::BedrockApiKey
+                | AuthMode::BedrockAccessKeys => {
                     return trimmed.to_string();
                 }
             }
@@ -45,6 +46,7 @@ pub(crate) fn account_display_label(account: &StoredAccount) -> String {
         AuthMode::PersonalAccessToken => "Personal access token".to_string(),
         AuthMode::Headers => "Request headers".to_string(),
         AuthMode::BedrockApiKey => "Bedrock API key".to_string(),
+        AuthMode::BedrockAccessKeys => "Bedrock access keys".to_string(),
     }
 }
 
@@ -66,6 +68,7 @@ pub(crate) fn account_mode_priority(mode: AuthMode) -> u8 {
         AuthMode::PersonalAccessToken => 3,
         AuthMode::Headers => 4,
         AuthMode::BedrockApiKey => 5,
+        AuthMode::BedrockAccessKeys => 6,
     }
 }
 

@@ -446,7 +446,7 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
         ),
         (
             "gpt-5-role-override".to_string(),
-            "ollama".to_string(),
+            "openai".to_string(),
             Some(ReasoningEffort::Minimal)
         )
     );
@@ -609,7 +609,7 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .await;
 
     assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
+    assert_eq!(snapshot.model_provider_id, "openai");
     assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
 }
 
@@ -2034,7 +2034,23 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
+    let local_runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+        std::env::current_exe().expect("current exe"),
+        /*codex_linux_sandbox_exe*/ None,
+    )
+    .expect("runtime paths");
+    let environment_manager = codex_exec_server::EnvironmentManager::create_for_tests_with_local(
+        /*exec_server_url*/ None,
+        local_runtime_paths,
+    )
+    .await;
+    let codex_home = tempfile::tempdir().expect("create temp codex home").keep();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        built_in_model_providers(/*openai_base_url*/ None)["openai"].clone(),
+        codex_home,
+        Arc::new(environment_manager),
+    );
     session.services.agent_control = manager.agent_control();
     let expected_sandbox = turn.config.legacy_sandbox_policy();
     #[allow(deprecated)]
@@ -2071,7 +2087,7 @@ async fn spawn_agent_reapplies_runtime_sandbox_after_role_config() {
     else {
         panic!("expected ready primary environment");
     };
-    primary_environment.config.permission_profile =
+    primary_environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(expected_permission_profile.clone());
 
     let invocation = invocation(
@@ -4184,8 +4200,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .expect("approval policy set");
     turn.config = Arc::new(config);
 
-    let config = build_agent_spawn_config(&base_instructions, &turn, /*environment*/ None)
-        .expect("spawn config");
+    let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
     let mut expected = (*turn.config).clone();
     expected.base_instructions = Some(base_instructions.text);
     expected.model = Some(turn.model_info.slug.clone());
@@ -4203,9 +4218,23 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     {
         expected.cwd = turn.cwd.clone();
     }
+    let permission_profile = turn
+        .config
+        .permissions
+        .active_permission_profile()
+        .map_or_else(
+            || PermissionProfileSnapshot::legacy(turn.permission_profile()),
+            |active_permission_profile| {
+                PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                    turn.permission_profile(),
+                    active_permission_profile,
+                    turn.config.permissions.profile_workspace_roots().to_vec(),
+                )
+            },
+        );
     expected
         .permissions
-        .set_permission_profile(turn.permission_profile())
+        .set_permission_profile_from_session_snapshot(permission_profile)
         .expect("permission profile set");
     assert_eq!(config, expected);
 }
@@ -4222,7 +4251,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .expect("approval policy set");
     turn.config = Arc::new(base_config);
 
-    let config = build_agent_resume_config(&turn, /*environment*/ None).expect("resume config");
+    let config = build_agent_resume_config(&turn).expect("resume config");
 
     let mut expected = (*turn.config).clone();
     expected.base_instructions = None;
@@ -4240,9 +4269,23 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
+    let permission_profile = turn
+        .config
+        .permissions
+        .active_permission_profile()
+        .map_or_else(
+            || PermissionProfileSnapshot::legacy(turn.permission_profile()),
+            |active_permission_profile| {
+                PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                    turn.permission_profile(),
+                    active_permission_profile,
+                    turn.config.permissions.profile_workspace_roots().to_vec(),
+                )
+            },
+        );
     expected
         .permissions
-        .set_permission_profile(turn.permission_profile())
+        .set_permission_profile_from_session_snapshot(permission_profile)
         .expect("permission profile set");
     assert_eq!(config, expected);
 }

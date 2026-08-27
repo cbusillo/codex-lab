@@ -188,6 +188,15 @@ fn reqwest_default_route_preserves_transport_proxy_behavior() {
     assert_eq!(route, OutboundProxyRoute::TransportDefault);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_proxy_configuration_rejects_invalid_destination() {
+    assert_eq!(
+        macos_system_proxy_configuration("not a valid destination"),
+        MacosSystemProxyConfiguration::Unavailable
+    );
+}
+
 impl EnvSource for MapEnv {
     fn var(&self, key: &str) -> Option<String> {
         self.values.get(key).cloned()

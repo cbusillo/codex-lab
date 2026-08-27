@@ -232,7 +232,7 @@
               "kind": "token",
               "root": "codex-rs/app-server/src/lib.rs",
               "path": "codex-rs/app-server/src/extensions.rs",
-              "token": "codex_guardian::install("
+              "token": "codex_guardian_v2::install("
             },
             {
               "id": "turn-processor-agent-runner-module",

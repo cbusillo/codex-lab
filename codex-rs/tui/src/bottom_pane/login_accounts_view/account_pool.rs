@@ -61,6 +61,7 @@ pub(super) fn current_auth_account_row(
             AuthMode::AgentIdentity => "Agent identity".to_string(),
             AuthMode::PersonalAccessToken => "Personal access token".to_string(),
             AuthMode::BedrockApiKey => "Bedrock API key".to_string(),
+            AuthMode::BedrockAccessKeys => "Bedrock access keys".to_string(),
         });
     let storage = match auth_credentials_store_mode {
         AuthCredentialsStoreMode::Keyring => "keyring",
@@ -109,7 +110,8 @@ pub(super) fn account_matches_auth(account: &StoredAccount, auth: &AuthDotJson) 
         AuthMode::Headers
         | AuthMode::AgentIdentity
         | AuthMode::PersonalAccessToken
-        | AuthMode::BedrockApiKey => false,
+        | AuthMode::BedrockApiKey
+        | AuthMode::BedrockAccessKeys => false,
     }
 }
 
@@ -122,5 +124,6 @@ pub(super) fn auth_mode_to_api(mode: AuthMode) -> ApiAuthMode {
         AuthMode::AgentIdentity => ApiAuthMode::AgentIdentity,
         AuthMode::PersonalAccessToken => ApiAuthMode::PersonalAccessToken,
         AuthMode::BedrockApiKey => ApiAuthMode::BedrockApiKey,
+        AuthMode::BedrockAccessKeys => ApiAuthMode::BedrockAccessKeys,
     }
 }

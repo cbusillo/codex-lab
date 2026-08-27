@@ -105,7 +105,7 @@ impl TestModelsEndpoint {
 }
 
 impl ModelsEndpointClient for TestModelsEndpoint {
-    fn has_command_auth(&self) -> bool {
+    fn has_configured_credentials(&self) -> bool {
         false
     }
 

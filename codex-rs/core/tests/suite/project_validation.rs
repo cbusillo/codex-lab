@@ -20,6 +20,7 @@ use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
+use codex_exec_server::WriteFileOptions;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
@@ -46,8 +47,8 @@ use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
+use core_test_support::responses::ev_exec_command_call as ev_shell_command_call;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::sse_completed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -106,6 +107,7 @@ async fn run_validation_correction_turn(
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        max_context_tokens: None,
         bundled_skills_enabled: false,
         orchestrator_skills_enabled: false,
         shadow_selection_enabled: false,
@@ -120,7 +122,10 @@ async fn run_validation_correction_turn(
             let skill_dir_uri = PathUri::from_host_native_path(&skill_dir)?;
             fs.create_directory(
                 &skill_dir_uri,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -129,6 +134,9 @@ async fn run_validation_correction_turn(
                 &skill_path,
                 b"---\nname: validation-test\ndescription: Validate correction context\n---\n"
                     .to_vec(),
+                WriteFileOptions {
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -1785,7 +1793,10 @@ async fn project_validation_runs_after_untracked_change_outside_session_cwd() ->
             let cwd = PathUri::from_host_native_path(cwd)?;
             fs.create_directory(
                 &cwd,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;

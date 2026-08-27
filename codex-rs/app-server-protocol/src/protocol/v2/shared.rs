@@ -97,6 +97,7 @@ pub enum CodexErrorInfo {
     UsageLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
+    MisalignmentPolicyViolation,
     HttpConnectionFailed {
         #[serde(rename = "httpStatusCode")]
         #[ts(rename = "httpStatusCode")]
@@ -143,6 +144,9 @@ impl From<CoreCodexErrorInfo> for CodexErrorInfo {
             CoreCodexErrorInfo::UsageLimitExceeded => CodexErrorInfo::UsageLimitExceeded,
             CoreCodexErrorInfo::ServerOverloaded => CodexErrorInfo::ServerOverloaded,
             CoreCodexErrorInfo::CyberPolicy => CodexErrorInfo::CyberPolicy,
+            CoreCodexErrorInfo::MisalignmentPolicyViolation => {
+                CodexErrorInfo::MisalignmentPolicyViolation
+            }
             CoreCodexErrorInfo::HttpConnectionFailed { http_status_code } => {
                 CodexErrorInfo::HttpConnectionFailed { http_status_code }
             }

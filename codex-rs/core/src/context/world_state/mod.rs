@@ -6,6 +6,7 @@ mod context_window_guidance;
 mod environment;
 pub(crate) mod environment_limits;
 mod environments_instructions;
+mod managed_developer_instructions;
 mod model;
 mod multi_agent_mode;
 mod multi_agent_usage_hint;
@@ -23,6 +24,7 @@ use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateSectionContribution;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseItem;
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -49,6 +51,9 @@ pub(crate) use context_window_guidance::ContextWindowGuidanceState;
 pub(crate) use environment::EnvironmentsSnapshot;
 pub(crate) use environment::EnvironmentsState;
 pub(crate) use environments_instructions::EnvironmentsInstructionsState;
+pub(crate) use managed_developer_instructions::ManagedDeveloperInstructions;
+pub(crate) use managed_developer_instructions::ManagedDeveloperInstructionsState;
+pub(crate) use managed_developer_instructions::validate_managed_developer_instructions;
 pub(crate) use model::ModelInstructionsState;
 pub(crate) use multi_agent_mode::MultiAgentModeState;
 pub(crate) use multi_agent_usage_hint::MultiAgentUsageHintState;
@@ -181,25 +186,35 @@ impl ErasedWorldStateSection for ExtensionWorldStateSection {
             PreviousSectionState::Unknown => PreviousWorldStateSection::Unknown,
             PreviousSectionState::Known(previous) => PreviousWorldStateSection::Known(previous),
         };
-        self.0
-            .render_diff(previous)
-            .map(|fragment| Box::new(WorldStateContextFragment(fragment)) as _)
+        self.0.render_diff(previous).map(|fragment| {
+            Box::new(WorldStateContextFragment {
+                fragment,
+                content_kind: ContentItemKind(format!("{}.instructions", self.0.id())),
+            }) as _
+        })
     }
 }
 
-struct WorldStateContextFragment(RenderedWorldStateFragment);
+struct WorldStateContextFragment {
+    fragment: RenderedWorldStateFragment,
+    content_kind: ContentItemKind,
+}
 
 impl ContextualUserFragment for WorldStateContextFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        self.content_kind.clone()
+    }
+
     fn role(&self) -> &'static str {
-        self.0.role()
+        self.fragment.role()
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
-        self.0.markers()
+        self.fragment.markers()
     }
 
     fn body(&self) -> String {
-        self.0.body().to_string()
+        self.fragment.body().to_string()
     }
 
     fn type_markers() -> (&'static str, &'static str) {
@@ -210,6 +225,7 @@ impl ContextualUserFragment for WorldStateContextFragment {
 struct PendingWorldStateFragment {
     id: &'static str,
     state_hash: String,
+    content_kind: ContentItemKind,
     role: &'static str,
     requires_separate_message: bool,
     markers: (&'static str, &'static str),
@@ -224,6 +240,7 @@ impl PendingWorldStateFragment {
         max_rendered_bytes: usize,
         fragment: Box<dyn ContextualUserFragment>,
     ) -> Self {
+        let content_kind = fragment.content_kind();
         let role = fragment.role();
         let requires_separate_message = fragment.requires_separate_message();
         let markers = fragment.markers();
@@ -233,6 +250,7 @@ impl PendingWorldStateFragment {
             id,
             state_hash: state_hash
                 .unwrap_or_else(|| bounded_world_state_hash("rendered", &rendered)),
+            content_kind,
             role,
             requires_separate_message,
             markers,
@@ -255,6 +273,7 @@ impl PendingWorldStateFragment {
 }
 
 struct BoundedWorldStateFragment {
+    content_kind: ContentItemKind,
     role: &'static str,
     requires_separate_message: bool,
     markers: (&'static str, &'static str),
@@ -268,6 +287,7 @@ impl BoundedWorldStateFragment {
         let original_byte_count = fragment.rendered_byte_count();
         if original_byte_count <= max_bytes {
             return Self {
+                content_kind: fragment.content_kind,
                 role: fragment.role,
                 requires_separate_message: fragment.requires_separate_message,
                 markers: fragment.markers,
@@ -312,6 +332,7 @@ impl BoundedWorldStateFragment {
             .saturating_add(markers.1.len());
         debug_assert!(rendered_byte_count <= max_bytes);
         Self {
+            content_kind: fragment.content_kind,
             role: fragment.role,
             requires_separate_message: fragment.requires_separate_message,
             markers,
@@ -327,6 +348,10 @@ impl BoundedWorldStateFragment {
 }
 
 impl ContextualUserFragment for BoundedWorldStateFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        self.content_kind.clone()
+    }
+
     fn role(&self) -> &'static str {
         self.role
     }

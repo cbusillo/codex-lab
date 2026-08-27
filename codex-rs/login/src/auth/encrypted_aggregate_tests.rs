@@ -654,6 +654,7 @@ fn seed_keyring_auth(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth_with_keyring_store(home, &auth, AuthCredentialsStoreMode::Keyring, keyring)?;
     Ok(auth)

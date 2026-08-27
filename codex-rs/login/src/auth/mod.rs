@@ -3,6 +3,7 @@ mod account_catalog_policy;
 mod agent_identity;
 mod atomic_file;
 mod auth_headers;
+mod bedrock_access_keys;
 mod bedrock_api_key;
 mod catalog_storage;
 pub mod default_client;
@@ -23,6 +24,8 @@ mod encrypted_aggregate_tests;
 
 pub(crate) use account_catalog_policy::LoginAccountCatalogPolicy;
 pub use auth_headers::AuthHeaders;
+pub use bedrock_access_keys::BedrockAccessKeysAuth;
+pub use bedrock_access_keys::login_with_bedrock_access_keys;
 pub use bedrock_api_key::BedrockApiKeyAuth;
 pub use bedrock_api_key::login_with_bedrock_api_key;
 pub use error::RefreshTokenFailedError;

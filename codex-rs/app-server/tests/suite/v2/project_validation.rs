@@ -10,9 +10,9 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_exec_command_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
-use app_test_support::create_shell_command_sse_response;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
@@ -74,12 +74,7 @@ fn init_git_repo(path: &Path) -> Result<()> {
 #[tokio::test]
 async fn project_validation_completion_reaches_a_client_without_experimental_api() -> Result<()> {
     let server = create_mock_responses_server_sequence(vec![
-        create_shell_command_sse_response(
-            vec!["true".to_string()],
-            /*workdir*/ None,
-            /*timeout_ms*/ None,
-            "shell-call-1",
-        )?,
+        create_exec_command_sse_response("shell-call-1")?,
         create_final_assistant_message_sse_response("done")?,
     ])
     .await;

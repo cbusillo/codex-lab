@@ -349,6 +349,7 @@ pub(crate) trait Sandboxable {
 pub(crate) struct ToolCtx {
     pub session: Arc<Session>,
     pub step_context: Arc<StepContext>,
+    pub cancellation_token: CancellationToken,
     pub call_id: String,
     pub tool_name: ToolName,
 }
@@ -419,7 +420,12 @@ impl<'a> SandboxAttempt<'a> {
         &'b self,
         fallback: Option<&'b NetworkProxy>,
     ) -> Option<&'b NetworkProxy> {
-        fallback.map(|fallback| self.network_proxy.unwrap_or(fallback))
+        // Execution-only proxies need no fallback; offline attempts must not revive one.
+        if self.enforce_managed_network {
+            self.network_proxy.or(fallback)
+        } else {
+            None
+        }
     }
 
     pub fn env_for(
@@ -453,11 +459,7 @@ impl<'a> SandboxAttempt<'a> {
             .iter()
             .map(PathUri::to_abs_path)
             .collect::<std::io::Result<Vec<_>>>()?;
-        Ok(crate::sandboxing::ExecRequest::from_sandbox_exec_request(
-            request,
-            options,
-            workspace_roots,
-        ))
+        crate::sandboxing::ExecRequest::from_sandbox_exec_request(request, options, workspace_roots)
     }
 
     pub fn env_for_exec_server(
@@ -487,8 +489,11 @@ impl<'a> SandboxAttempt<'a> {
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
             })
             .map_err(CodexErr::from)?;
-        let mut exec_request =
-            crate::sandboxing::ExecRequest::from_sandbox_exec_request(request, options, Vec::new());
+        let mut exec_request = crate::sandboxing::ExecRequest::from_sandbox_exec_request(
+            request,
+            options,
+            Vec::new(),
+        )?;
         exec_request.exec_server_managed_network = managed_network;
         if self.sandbox_requested {
             exec_request.exec_server_sandbox = Some(FileSystemSandboxContext {

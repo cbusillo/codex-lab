@@ -597,7 +597,7 @@ impl Session {
     }
 
     pub(crate) async fn recover_auto_review_after_restart(&self) -> Vec<Event> {
-        let (codex_home, scopes) = {
+        let (codex_home, mut scopes) = {
             let state = self.state.lock().await;
             if state
                 .session_configuration
@@ -606,16 +606,18 @@ impl Session {
             {
                 return Vec::new();
             }
-            let mut scopes = vec![state.session_configuration.cwd().clone()];
-            scopes.extend(
-                state
-                    .session_configuration
-                    .environment_selections()
-                    .iter()
-                    .filter_map(|environment| environment.cwd.to_abs_path().ok()),
-            );
-            (state.session_configuration.codex_home().clone(), scopes)
+            (
+                state.session_configuration.codex_home().clone(),
+                vec![state.session_configuration.cwd().clone()],
+            )
         };
+        scopes.extend(
+            self.services
+                .turn_environments
+                .selections()
+                .iter()
+                .filter_map(|environment| environment.cwd.to_abs_path().ok()),
+        );
         let mut events = Vec::new();
         let mut seen_scopes = HashSet::new();
         for cwd in scopes {

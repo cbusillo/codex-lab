@@ -158,6 +158,7 @@ async fn refresh_token_honors_respect_system_proxy() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home.path(),
@@ -211,6 +212,7 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -398,6 +400,7 @@ async fn concurrent_processes_refresh_once() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home.path(),
@@ -535,6 +538,7 @@ async fn refresh_response_does_not_overwrite_switched_account() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
     let initial_account = upsert_chatgpt_account(
@@ -574,6 +578,7 @@ async fn refresh_response_does_not_overwrite_switched_account() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -656,6 +661,7 @@ async fn catalog_refresh_converges_control_auth_after_reactivation() -> Result<(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home.path(),
@@ -755,6 +761,7 @@ async fn refresh_token_refreshes_when_auth_is_unchanged() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -822,6 +829,7 @@ async fn auth_refreshes_when_access_token_is_near_expiry() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -874,6 +882,7 @@ async fn auth_skips_access_token_outside_refresh_window() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -912,6 +921,7 @@ async fn refresh_token_skips_refresh_when_auth_changed() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -924,6 +934,7 @@ async fn refresh_token_skips_refresh_when_auth_changed() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -982,6 +993,7 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -995,6 +1007,7 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1057,6 +1070,7 @@ async fn returns_fresh_tokens_as_is() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1107,6 +1121,7 @@ async fn refreshes_token_when_access_token_is_expired() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1159,6 +1174,7 @@ async fn auth_reloads_disk_auth_when_cached_auth_is_stale() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1172,6 +1188,7 @@ async fn auth_reloads_disk_auth_when_cached_auth_is_stale() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1227,6 +1244,7 @@ async fn auth_reloads_disk_auth_without_calling_expired_refresh_token() -> Resul
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1240,6 +1258,7 @@ async fn auth_reloads_disk_auth_without_calling_expired_refresh_token() -> Resul
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1293,6 +1312,7 @@ async fn refresh_token_returns_permanent_error_for_expired_refresh_token() -> Re
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1348,6 +1368,7 @@ async fn refresh_token_does_not_retry_after_permanent_failure() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1417,6 +1438,7 @@ async fn refresh_token_does_not_retry_after_bad_request_reused_failure() -> Resu
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1441,6 +1463,138 @@ async fn refresh_token_does_not_retry_after_bad_request_reused_failure() -> Resu
         second_err.failed_reason(),
         Some(RefreshTokenFailedReason::Exhausted)
     );
+
+    let stored = ctx.load_auth()?;
+    assert_eq!(stored, initial_auth);
+    let cached_auth = ctx
+        .auth_manager
+        .auth()
+        .await
+        .context("auth should remain cached")?;
+    let cached = cached_auth
+        .get_token_data()
+        .context("token data should remain cached")?;
+    assert_eq!(cached, initial_tokens);
+
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn refresh_token_does_not_retry_after_standard_invalid_grant_failure() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_grant"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server).await?;
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(initial_last_refresh),
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+        bedrock_access_keys: None,
+    };
+    ctx.write_auth(&initial_auth).await?;
+
+    let first_err = ctx
+        .auth_manager
+        .refresh_token()
+        .await
+        .err()
+        .context("first refresh should fail")?;
+    assert_eq!(
+        first_err.failed_reason(),
+        Some(RefreshTokenFailedReason::Other)
+    );
+
+    let second_err = ctx
+        .auth_manager
+        .refresh_token()
+        .await
+        .err()
+        .context("second refresh should fail without retrying")?;
+    assert_eq!(
+        second_err.failed_reason(),
+        Some(RefreshTokenFailedReason::Other)
+    );
+
+    let stored = ctx.load_auth()?;
+    assert_eq!(stored, initial_auth);
+    let cached_auth = ctx
+        .auth_manager
+        .auth()
+        .await
+        .context("auth should remain cached")?;
+    let cached = cached_auth
+        .get_token_data()
+        .context("token data should remain cached")?;
+    assert_eq!(cached, initial_tokens);
+
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn refresh_token_does_not_cache_other_bad_request_failure() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "invalid_request"
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server).await?;
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(initial_last_refresh),
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+        bedrock_access_keys: None,
+    };
+    ctx.write_auth(&initial_auth).await?;
+
+    let first_err = ctx
+        .auth_manager
+        .refresh_token()
+        .await
+        .err()
+        .context("first refresh should fail")?;
+    assert_eq!(first_err.failed_reason(), None);
+    assert!(matches!(first_err, RefreshTokenError::Transient(_)));
+
+    let second_err = ctx
+        .auth_manager
+        .refresh_token()
+        .await
+        .err()
+        .context("second refresh should retry and fail")?;
+    assert_eq!(second_err.failed_reason(), None);
+    assert!(matches!(second_err, RefreshTokenError::Transient(_)));
 
     let stored = ctx.load_auth()?;
     assert_eq!(stored, initial_auth);
@@ -1486,6 +1640,7 @@ async fn refresh_token_reloads_changed_auth_after_permanent_failure() -> Result<
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1510,6 +1665,7 @@ async fn refresh_token_reloads_changed_auth_after_permanent_failure() -> Result<
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1572,6 +1728,7 @@ async fn refresh_token_returns_transient_error_on_server_failure() -> Result<()>
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1627,6 +1784,7 @@ async fn unauthorized_recovery_reloads_then_refreshes_tokens() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1639,6 +1797,7 @@ async fn unauthorized_recovery_reloads_then_refreshes_tokens() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1726,6 +1885,7 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1739,6 +1899,7 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1800,6 +1961,7 @@ async fn unauthorized_recovery_requires_chatgpt_auth() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&auth).await?;
 

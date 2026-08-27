@@ -11,6 +11,7 @@ use codex_auto_review::AutoReviewRunTarget;
 use codex_auto_review::AutoReviewStore;
 use codex_auto_review::AutoReviewSummary;
 use codex_auto_review::SUMMARY_MAX_BYTES;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::protocol::ReviewTarget;
 
 use crate::review_persistence::collect_auto_review_target;
@@ -51,6 +52,10 @@ impl AutoReviewAwareness {
 }
 
 impl ContextualUserFragment for AutoReviewAwareness {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("auto_review.awareness".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "user"
     }

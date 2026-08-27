@@ -199,10 +199,27 @@ impl RunTurnState {
         Arc::clone(
             self.turn_diff_tracker
                 .get_or_init(|| async {
+                    let display_roots = if step_context
+                        .turn
+                        .config
+                        .features
+                        .enabled(Feature::CwdRelativeTurnDiffs)
+                    {
+                        step_context
+                            .environments
+                            .turn_environments()
+                            .map(|environment| {
+                                (
+                                    environment.selection().environment_id,
+                                    environment.cwd().clone(),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        turn_diff_display_roots(step_context).await
+                    };
                     Arc::new(tokio::sync::Mutex::new(
-                        TurnDiffTracker::with_environment_display_roots(
-                            turn_diff_display_roots(step_context).await,
-                        ),
+                        TurnDiffTracker::with_environment_display_roots(display_roots),
                     ))
                 })
                 .await,
@@ -436,11 +453,9 @@ pub(crate) async fn run_turn(
             let auto_review_awareness_input_item =
                 build_auto_review_awareness_input_item(sess.as_ref(), turn_context.as_ref()).await;
 
-            let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
-                sess.installation_id.clone(),
-                window_id,
-                CodexResponsesRequestKind::Turn,
-            );
+            let responses_metadata = sess
+                .responses_metadata(turn_context.as_ref(), CodexResponsesRequestKind::Turn)
+                .await;
             run_sampling_request(
                 Arc::clone(&sess),
                 Arc::clone(&step_context),
@@ -578,7 +593,7 @@ pub(crate) async fn run_turn(
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
-                        &turn_context,
+                        &step_context,
                         stop_hook_active,
                         last_agent_message.clone(),
                     )
@@ -738,6 +753,7 @@ async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizat
     let checkpoint = RolloutItem::Compacted(CompactedItem {
         message: INVALID_IMAGE_HISTORY_CHECKPOINT_MESSAGE.to_string(),
         replacement_history: Some(replacement_history),
+        mcp_resource_origins: None,
         window_number: Some(window_number),
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
@@ -778,7 +794,7 @@ async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, Pat
         .ok()
         .flatten()
         .unwrap_or_else(|| cwd.clone());
-        display_roots.push((turn_environment.environment_id.clone(), root));
+        display_roots.push((turn_environment.selection.environment_id.clone(), root));
     }
     display_roots
 }
@@ -830,7 +846,7 @@ async fn required_mcp_servers_for_input(
     turn_context: &TurnContext,
     user_input: &[UserInput],
 ) -> (Vec<String>, Vec<crate::plugins::PluginCapabilitySummary>) {
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return (Vec::new(), Vec::new());
     }
 
@@ -940,7 +956,7 @@ async fn build_skills_and_plugins(
     let turn_context = step_context.turn.as_ref();
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
     // plugin mentions from that generated prompt as requests to inject additional instructions.
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return Some((Vec::new(), HashSet::new()));
     }
 
@@ -1096,7 +1112,7 @@ async fn build_extension_turn_input_items(
             // TODO(anp): Migrate extension turn-input environments to PathUri so foreign cwd
             // values are not omitted from extension context.
             TurnInputEnvironment {
-                environment_id: environment.environment_id.clone(),
+                environment_id: environment.selection.environment_id.clone(),
                 cwd: environment.cwd().clone(),
                 is_primary: index == 0,
             }
@@ -1166,9 +1182,12 @@ async fn track_turn_resolved_config_analytics(
     turn_context: &TurnContext,
     input: &[TurnInput],
 ) {
+    let environment_selections = sess.services.turn_environments.selections();
     let thread_config = {
         let state = sess.state.lock().await;
-        state.session_configuration.thread_config_snapshot()
+        state
+            .session_configuration
+            .thread_config_snapshot(environment_selections)
     };
     let is_first_turn = {
         let mut state = sess.state.lock().await;
@@ -1179,6 +1198,7 @@ async fn track_turn_resolved_config_analytics(
         .track_turn_resolved_config(TurnResolvedConfigFact {
             turn_id: turn_context.sub_id.clone(),
             thread_id: sess.thread_id.to_string(),
+            turn_metadata: turn_context.turn_metadata_state.clone(),
             num_input_images: input
                 .iter()
                 .filter_map(|item| match item {
@@ -1441,16 +1461,26 @@ async fn run_auto_compact(
                 "remote_v2",
                 /*manual*/ false,
             );
+            let CompactionJobConfig {
+                initial_context_injection,
+                model_request_history_mode,
+                reason,
+                phase,
+                ..
+            } = config;
             run_inline_remote_auto_compact_task_v2(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
                 client_session,
-                config,
+                initial_context_injection,
+                model_request_history_mode,
+                reason,
+                phase,
             )
             .await?;
         }
-        RemoteCompactionSupport::V1 | RemoteCompactionSupport::V2 => {
+        RemoteCompactionSupport::V2 => {
             emit_compact_metric(
                 &sess.services.session_telemetry,
                 "remote",
@@ -1539,10 +1569,10 @@ pub(crate) fn build_prompt(
     Prompt {
         input,
         tools: router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
+        parallel_tool_calls: true,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
-        output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
+        output_schema_strict: !crate::guardian::is_basic_session_source(
             &turn_context.session_source,
         ),
         max_output_tokens: None,
@@ -2428,6 +2458,7 @@ async fn emit_agent_message_in_plan_mode(
                     content: Vec::new(),
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
                 })
             });
         sess.emit_turn_item_started(turn_context, &start_item).await;
