@@ -212,7 +212,15 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn("id: inspection", inspection)
         self.assertIn("set -euo pipefail", inspection)
         self.assertIn("if not isinstance(report, dict):", inspection)
-        self.assertIn('echo "status=$status" >> "$GITHUB_OUTPUT"', inspection)
+        self.assertIn('echo "status=$status"', inspection)
+        self.assertIn('echo "started_at=$started_at"', inspection)
+        self.assertIn('echo "finished_at=$finished_at"', inspection)
+        self.assertIn('echo "duration_ms=$duration_ms"', inspection)
+        self.assertIn('} >> "$GITHUB_OUTPUT"', inspection)
+        self.assertIn('INSPECTION_STARTED_AT="$started_at"', inspection)
+        self.assertIn('INSPECTION_DURATION_MS="$duration_ms"', inspection)
+        self.assertIn('"inspectionStartedAt": os.environ["INSPECTION_STARTED_AT"]', inspection)
+        self.assertIn('"inspectionDurationMs": int(os.environ["INSPECTION_DURATION_MS"])', inspection)
         for step in (diagnostics, clean_check, raw_upload, failure):
             self.assertIn("always() && !cancelled()", step)
             self.assertIn("steps.inspection.outcome != 'skipped'", step)
@@ -235,15 +243,37 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn(
             'PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}', publish
         )
+        self.assertIn(
+            'INSPECTION_STARTED_AT: ${{ steps.inspection.outputs.started_at }}',
+            publish,
+        )
+        self.assertIn(
+            'INSPECTION_FINISHED_AT: ${{ steps.inspection.outputs.finished_at }}',
+            publish,
+        )
+        self.assertIn(
+            'INSPECTION_DURATION_MS: ${{ steps.inspection.outputs.duration_ms }}',
+            publish,
+        )
         self.assertIn('--previous-success-at "$PREVIOUS_SUCCESS_AT"', publish)
         self.assertIn("name: upstream-convergence-${{ github.run_id }}", upload)
         self.assertIn(
             "path: ${{ runner.temp }}/upstream-convergence/convergence-summary.json",
             upload,
         )
+        self.assertIn("retention-days: 90", upload)
 
     def test_permissions_remain_read_only(self) -> None:
         self.assertIn("permissions:\n  actions: read\n  contents: read", self.contents)
+
+    def test_workflow_has_no_model_or_agent_steps(self) -> None:
+        self.assertNotRegex(self.contents, r"\b(?:code|codex)\s+exec\b")
+        self.assertNotRegex(self.contents, r"\b(?:claude|gemini)\b")
+        self.assertNotIn("gh issue create", self.contents)
+        self.assertNotIn("gh pr create", self.contents)
+        self.assertNotIn("git push", self.contents)
+        self.assertNotIn("create-pull-request", self.contents)
+        self.assertNotIn("contents: write", self.contents)
 
 
 if __name__ == "__main__":
