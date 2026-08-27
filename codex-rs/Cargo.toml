@@ -144,6 +144,7 @@ members = [
     "codex-experimental-api-macros",
     "plugin",
     "model-provider",
+    "owner-control-contract",
 ]
 resolver = "2"
 
@@ -247,6 +248,7 @@ codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
 codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
+codex-owner-control-contract = { path = "owner-control-contract" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
 codex-prompts = { path = "prompts" }

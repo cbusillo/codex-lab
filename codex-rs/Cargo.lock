@@ -4148,6 +4148,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-owner-control-contract"
+version = "0.0.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "codex-plugin"
 version = "0.0.0"
 dependencies = [
