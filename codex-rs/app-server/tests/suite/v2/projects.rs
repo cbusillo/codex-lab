@@ -183,6 +183,7 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             },
         })
         .await?;
@@ -228,6 +229,7 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             },
         })
         .await?;
@@ -276,6 +278,7 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             },
         })
         .await?;
@@ -459,6 +462,7 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             },
         })
         .await?;
@@ -549,6 +553,7 @@ async fn deleted_project_is_dropped_before_first_durable_thread_persistence() ->
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             },
         })
         .await?;
@@ -732,6 +737,7 @@ async fn projects_validate_filters_cursors_and_sqlite_less_assignment() -> Resul
                 search_term: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
+                descendant_of_thread_id: None,
             })
             .await?;
         let error = server
@@ -814,6 +820,7 @@ async fn projects_validate_filters_cursors_and_sqlite_less_assignment() -> Resul
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            descendant_of_thread_id: None,
         })
         .await?;
     let list_error = unsupported_projects

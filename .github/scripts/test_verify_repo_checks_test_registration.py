@@ -93,6 +93,16 @@ class UnregisteredTestsTest(unittest.TestCase):
                 [],
             )
 
+    def test_nested_python_project_is_out_of_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            nested = root / "pkg" / "smoke-tests"
+            nested.mkdir(parents=True)
+            (nested / "pyproject.toml").write_text("")
+            (nested / "test_nested.py").write_text("")
+
+            self.assertEqual(unregistered_tests({"pkg": ["test_*.py"]}, root), [])
+
     def test_missing_discovery_directory_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             problems = unregistered_tests({"gone": ["test_*.py"]}, Path(temp_dir))
