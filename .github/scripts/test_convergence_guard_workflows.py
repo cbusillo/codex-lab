@@ -338,7 +338,8 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn("git worktree remove --force", candidate)
         self.assertIn("git status --porcelain=v1 --untracked-files=all", candidate)
         self.assertIn("always() && !cancelled()", verify)
-        self.assertIn('test ! -e "$RUNNER_TEMP/upstream-convergence-candidate"', verify)
+        self.assertIn('[[ -e "$RUNNER_TEMP/upstream-convergence-candidate" ]]', verify)
+        self.assertIn("worktree_removed=false", verify)
         self.assertIn("retention-days: 90", upload)
         self.assertLess(
             candidate.index("git fetch --no-tags origin"),
@@ -354,22 +355,66 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         )
 
     def test_candidate_stage_has_no_write_or_model_automation(self) -> None:
-        candidate = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        candidates = [
+            self.step("Re-fetch canonical refs and run data-only candidate preflight"),
+            self.step("Run bounded candidate checks and select affected contracts"),
+        ]
 
-        for forbidden in (
-            "git push",
-            "git commit",
-            "gh pr",
-            "gh issue",
-            "create-pull-request",
-            "code exec",
-            "codex exec",
-            "claude",
-            "gemini",
-            "cargo ",
-            "npm ",
-        ):
-            self.assertNotIn(forbidden, candidate)
+        for candidate in candidates:
+            for forbidden in ("git push", "git commit", "gh pr", "gh issue", "create-pull-request", "code exec", "codex exec", "claude", "gemini", "npm ", "just test"):
+                self.assertNotIn(forbidden, candidate)
+        self.assertNotIn("cargo ", candidates[0])
+
+    def test_candidate_stage3b_is_clean_path_only_and_ordered(self) -> None:
+        preflight = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        toolchain = self.step("Install pinned Rust toolchain")
+        checks = self.step("Run bounded candidate checks and select affected contracts")
+
+        self.assertIn("classification=clean", preflight)
+        self.assertIn('echo "stage3b_ready=true"', preflight)
+        self.assertIn("stage3b_ready == 'true'", toolchain)
+        self.assertIn("dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582", toolchain)
+        self.assertIn("toolchain: 1.95.0", toolchain)
+        self.assertIn("python3 .github/scripts/upstream_convergence_gates.py --json", checks)
+        self.assertIn("python3 .github/scripts/upstream_convergence_guard.py --json", checks)
+        self.assertIn("python3 .github/scripts/verify_upstream_convergence_governance.py --json", checks)
+        self.assertIn("python3 .github/scripts/verify_repo_checks_test_registration.py", checks)
+        self.assertIn('(cd "$candidate_dir" && sandbox-exec -f "$sandbox_profile"', checks)
+        self.assertIn("cargo check --workspace --tests --locked", checks)
+        self.assertEqual(checks.count("cargo check --workspace --tests --locked"), 3)
+        self.assertLess(checks.index("verify_repo_checks_test_registration.py"), checks.index("cargo check --workspace --tests --locked"))
+        self.assertIn('CARGO_INCREMENTAL: "0"', checks)
+        self.assertIn('RUSTFLAGS: "-C debuginfo=0"', checks)
+        self.assertIn("CARGO_TARGET_DIR: ${{ runner.temp }}/upstream-convergence-cargo-target", checks)
+        self.assertIn("RUSTY_V8_ARCHIVE: ${{ runner.temp }}/upstream-convergence-candidate-downloads/", checks)
+        self.assertIn("RUSTY_V8_SRC_BINDING_PATH: ${{ runner.temp }}/upstream-convergence-candidate-downloads/", checks)
+        self.assertLess(checks.index("cargo check --workspace --tests --locked"), checks.index("select-affected-contracts"))
+        self.assertIn("sandbox-exec -f", checks)
+        self.assertIn("verify_trusted", checks)
+
+    def test_candidate_stage3b_bounds_evidence_and_uses_trusted_extractors(self) -> None:
+        checks = self.step("Run bounded candidate checks and select affected contracts")
+        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+
+        self.assertIn("bound-log", checks)
+        self.assertIn("--max-input-bytes 65536", checks)
+        self.assertIn("--max-output-bytes 32768", checks)
+        self.assertIn("--max-roots 50", checks)
+        self.assertIn("--max-sources-per-root 8", checks)
+        self.assertIn("extract_ci_root_failures.py", helper)
+        self.assertIn("select-affected-contracts", checks)
+        self.assertIn("upstream-changed-paths.txt", checks)
+        self.assertIn("local-changed-paths.txt", checks)
+        self.assertIn("record-stage3b", checks)
+        self.assertIn("repo-check-outcome.json", checks)
+        self.assertIn("cargo-check-outcome.json", checks)
+        self.assertIn("affected-contracts.json", checks)
+        self.assertIn("root-failure-outcome.json", checks)
+        self.assertIn("::warning title=Candidate repository-check regression::", checks)
+        self.assertIn("::warning title=Candidate cargo regression::", checks)
+        verify = self.step("Verify candidate cleanup and primary checkout")
+        self.assertIn('evidence["temporaryWorktreeRemoved"]', verify)
+        self.assertIn('evidence["primaryCheckoutClean"]', verify)
 
     def test_permissions_remain_read_only(self) -> None:
         self.assertIn("permissions:\n  actions: read\n  contents: read", self.contents)

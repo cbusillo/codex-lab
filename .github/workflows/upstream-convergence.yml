@@ -280,7 +280,7 @@ jobs:
     needs: inspect
     if: ${{ needs.inspect.outputs.candidate_due == 'true' && needs.inspect.outputs.candidate_gate_status == 'ready' && github.ref == 'refs/heads/main' }}
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     concurrency:
@@ -308,6 +308,8 @@ jobs:
           candidate_dir="$RUNNER_TEMP/upstream-convergence-candidate"
           downloads_dir="$RUNNER_TEMP/upstream-convergence-candidate-downloads"
           trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
+          trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
           conflicts="$evidence_dir/conflict-paths.txt"
           all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"
           preflight="$evidence_dir/rusty-v8-preflight.json"
@@ -322,6 +324,19 @@ jobs:
           if ! cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"; then
             helper_ready=false
             reason="unable to materialize trusted candidate helper"
+          elif ! cp upstream/convergence-gates.json "$trusted_gates"; then
+            helper_ready=false
+            reason="unable to materialize trusted convergence gates"
+          elif ! cp .github/scripts/extract_ci_root_failures.py "$trusted_extractor"; then
+            helper_ready=false
+            reason="unable to materialize trusted root-failure extractor"
+          fi
+          if [[ "$helper_ready" == true ]]; then
+            {
+              echo "trusted_helper_sha=$(/usr/bin/shasum -a 256 "$trusted_helper" | /usr/bin/awk '{print $1}')"
+              echo "trusted_gates_sha=$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')"
+              echo "trusted_extractor_sha=$(/usr/bin/shasum -a 256 "$trusted_extractor" | /usr/bin/awk '{print $1}')"
+            } >> "$GITHUB_OUTPUT"
           fi
 
           cleanup_worktree() {
@@ -391,20 +406,25 @@ jobs:
             fi
           fi
 
-          if ! cleanup_worktree; then
+          keep_candidate=false
+          if [[ "$classification" == clean ]]; then
+            keep_candidate=true
+            worktree_removed=false
+          elif ! cleanup_worktree; then
             classification=infrastructure
             reason="temporary candidate worktree cleanup failed"
             worktree_removed=false
           fi
-          trap - EXIT
           if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
             classification=infrastructure
             reason="primary checkout is not clean after candidate preflight"
             primary_checkout_clean=false
           fi
           if [[ "$helper_ready" == true ]]; then
+            evidence_classification="$classification"
+            [[ "$keep_candidate" == true ]] && evidence_classification=validation-pending
             python3 "$trusted_helper" write-evidence \
-              --classification "$classification" \
+              --classification "$evidence_classification" \
               --reason "$reason" \
               --base "$EXPECTED_BASE" \
               --upstream "$EXPECTED_UPSTREAM" \
@@ -421,7 +441,253 @@ jobs:
               --run-id "$GITHUB_RUN_ID"
             rm -f "$evidence_dir/candidate-bootstrap.json"
           fi
+          if [[ "$keep_candidate" == true ]]; then
+            echo "stage3b_ready=true" >> "$GITHUB_OUTPUT"
+            echo "RUSTY_V8_ARCHIVE=$downloads_dir/librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz" >> "$GITHUB_ENV"
+            echo "RUSTY_V8_SRC_BINDING_PATH=$downloads_dir/src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs" >> "$GITHUB_ENV"
+            trap - EXIT
+          else
+            echo "stage3b_ready=false" >> "$GITHUB_OUTPUT"
+            trap - EXIT
+          fi
+          echo "classification=$classification" >> "$GITHUB_OUTPUT"
           if [[ "$classification" == infrastructure ]]; then
+            exit 1
+          fi
+
+      - name: Install pinned Rust toolchain
+        if: ${{ steps.candidate.outputs.stage3b_ready == 'true' }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: 1.95.0
+
+      - name: Run bounded candidate checks and select affected contracts
+        id: candidate_checks
+        if: ${{ steps.candidate.outputs.stage3b_ready == 'true' }}
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C debuginfo=0"
+          CARGO_TARGET_DIR: ${{ runner.temp }}/upstream-convergence-cargo-target
+          RUSTY_V8_ARCHIVE: ${{ runner.temp }}/upstream-convergence-candidate-downloads/librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz
+          RUSTY_V8_SRC_BINDING_PATH: ${{ runner.temp }}/upstream-convergence-candidate-downloads/src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs
+          TRUSTED_HELPER_SHA: ${{ steps.candidate.outputs.trusted_helper_sha }}
+          TRUSTED_GATES_SHA: ${{ steps.candidate.outputs.trusted_gates_sha }}
+          TRUSTED_EXTRACTOR_SHA: ${{ steps.candidate.outputs.trusted_extractor_sha }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/upstream-convergence-candidate-evidence"
+          candidate_dir="$RUNNER_TEMP/upstream-convergence-candidate"
+          trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
+          trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
+          candidate_dir=$(realpath "$candidate_dir")
+          evidence_dir=$(realpath "$evidence_dir")
+          trusted_helper=$(realpath "$trusted_helper")
+          trusted_gates=$(realpath "$trusted_gates")
+          trusted_extractor=$(realpath "$trusted_extractor")
+          sandbox_profile="$(realpath "$RUNNER_TEMP")/upstream-candidate.sb"
+          workspace=$(realpath "$GITHUB_WORKSPACE")
+          github_env=$(realpath "$GITHUB_ENV")
+          github_output=$(realpath "$GITHUB_OUTPUT")
+          github_path=$(realpath "$GITHUB_PATH")
+          python_bin=$(command -v python3)
+          cargo_bin=$(command -v cargo)
+          cargo_home="$(realpath "$RUNNER_TEMP")/upstream-cargo-home"
+          cargo_target=$(mkdir -p "$CARGO_TARGET_DIR" && realpath "$CARGO_TARGET_DIR")
+          candidate_path="$(dirname "$python_bin"):$(dirname "$cargo_bin"):/usr/bin:/bin:/usr/sbin:/sbin"
+          repo_logs="$evidence_dir/repo-check-logs"
+          repo_results="$evidence_dir/repo-check-results.tsv"
+          repo_outcome="$evidence_dir/repo-check-outcome.json"
+          affected="$evidence_dir/affected-contracts.json"
+          cargo_outcome="$evidence_dir/cargo-check-outcome.json"
+          root_outcome="$evidence_dir/root-failure-outcome.json"
+          upstream_paths="$evidence_dir/upstream-changed-paths.txt"
+          local_paths="$evidence_dir/local-changed-paths.txt"
+          mkdir -p "$repo_logs" "$cargo_home"
+          : > "$repo_results"
+          printf '%s\n' '{"status":"not-run"}' > "$repo_outcome"
+          printf '%s\n' '{"status":"not-run"}' > "$affected"
+          printf '%s\n' '{"status":"not-run"}' > "$cargo_outcome"
+          printf '%s\n' '{"status":"not-run"}' > "$root_outcome"
+          repo_infrastructure=0
+          repo_regression=0
+
+          verify_trusted() {
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_helper" | /usr/bin/awk '{print $1}')" == "$TRUSTED_HELPER_SHA" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')" == "$TRUSTED_GATES_SHA" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_extractor" | /usr/bin/awk '{print $1}')" == "$TRUSTED_EXTRACTOR_SHA" ]]
+          }
+          record_stage3b() {
+            verify_trusted && python3 "$trusted_helper" record-stage3b \
+              --evidence "$evidence_dir/candidate-evidence.json" --repo-checks "$repo_outcome" \
+              --cargo-check "$cargo_outcome" --affected-contracts "$affected" --root-failures "$root_outcome"
+          }
+          cat > "$sandbox_profile" <<EOF
+          (version 1)
+          (allow default)
+          (deny file-write* (subpath "$workspace"))
+          (deny file-write* (subpath "$candidate_dir"))
+          (deny file-write* (subpath "$evidence_dir"))
+          (deny file-write* (subpath "$(realpath "$HOME")"))
+          (deny file-write* (subpath "$(dirname "$python_bin")"))
+          (deny file-write* (subpath "$(dirname "$cargo_bin")"))
+          (allow file-write* (subpath "$cargo_home"))
+          (allow file-write* (subpath "$cargo_target"))
+          (deny file-write* (literal "$trusted_helper"))
+          (deny file-write* (literal "$trusted_gates"))
+          (deny file-write* (literal "$trusted_extractor"))
+          (deny file-write* (literal "$sandbox_profile"))
+          (deny file-write* (literal "$github_env"))
+          (deny file-write* (literal "$github_output"))
+          (deny file-write* (literal "$github_path"))
+          EOF
+          trap 'record_stage3b || true' EXIT
+          verify_trusted
+
+          for index in 0 1 2 3; do
+            case "$index" in
+              0) name="convergence gates"; command=(python3 .github/scripts/upstream_convergence_gates.py --json) ;;
+              1) name="convergence guard"; command=(python3 .github/scripts/upstream_convergence_guard.py --json) ;;
+              2) name="convergence governance"; command=(python3 .github/scripts/verify_upstream_convergence_governance.py --json) ;;
+              3) name="repo-check test registration"; command=(python3 .github/scripts/verify_repo_checks_test_registration.py) ;;
+            esac
+            log="$repo_logs/$index.log"
+            set +e
+            (cd "$candidate_dir" && sandbox-exec -f "$sandbox_profile" env -u RUNNER_TEMP -u GITHUB_ENV -u GITHUB_OUTPUT -u GITHUB_PATH -u GITHUB_STATE PATH="$candidate_path" CARGO_HOME="$cargo_home" "${command[@]}") 2>&1 \
+              | python3 "$trusted_helper" bound-log --output "$log"
+            pipeline_status=("${PIPESTATUS[@]}")
+            set -e
+            status="${pipeline_status[0]}"
+            logger_status="${pipeline_status[1]}"
+            if [[ "$logger_status" != 0 ]]; then
+              classification=infrastructure
+              status=1
+            elif [[ "$status" == 0 ]]; then
+              classification=passed
+            else
+              verify_trusted
+              classification=$(python3 "$trusted_helper" classify-failure --status "$status" --log "$log")
+            fi
+            if [[ "$classification" == infrastructure ]]; then
+              repo_infrastructure=1
+            elif [[ "$classification" == regression ]]; then
+              repo_regression=1
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$name" "${command[*]}" "$status" "$classification" >> "$repo_results"
+            cat "$log"
+          done
+
+          python3 - "$repo_results" "$repo_outcome" "$repo_infrastructure" "$repo_regression" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          results = []
+          for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+              name, command, status, classification = line.split("\t")
+              results.append({"name": name, "command": command, "status": int(status), "classification": classification})
+          outcome = {
+              "status": "failed" if any(result["status"] for result in results) else "passed",
+              "classification": "infrastructure" if sys.argv[3] == "1" else ("regression" if sys.argv[4] == "1" else "passed"),
+              "checks": results,
+          }
+          Path(sys.argv[2]).write_text(json.dumps(outcome, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+          cargo_log="$evidence_dir/cargo-check.log"
+          set +e
+          (cd "$candidate_dir/codex-rs" && sandbox-exec -f "$sandbox_profile" env -u RUNNER_TEMP -u GITHUB_ENV -u GITHUB_OUTPUT -u GITHUB_PATH -u GITHUB_STATE PATH="$candidate_path" CARGO_HOME="$cargo_home" cargo check --workspace --tests --locked) 2>&1 \
+            | python3 "$trusted_helper" bound-log --output "$cargo_log"
+          cargo_pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          cargo_status="${cargo_pipeline_status[0]}"
+          cargo_logger_status="${cargo_pipeline_status[1]}"
+          if [[ "$cargo_logger_status" != 0 ]]; then
+            cargo_classification=infrastructure
+            cargo_status=1
+          elif [[ "$cargo_status" == 0 ]]; then
+            cargo_classification=passed
+          else
+            verify_trusted
+            cargo_classification=$(python3 "$trusted_helper" classify-failure --status "$cargo_status" --log "$cargo_log")
+          fi
+          cat "$cargo_log"
+          python3 - "$cargo_outcome" "$cargo_status" "$cargo_classification" "$cargo_log" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          outcome = {
+              "status": "passed" if sys.argv[2] == "0" else "failed",
+              "classification": sys.argv[3],
+              "command": "cargo check --workspace --tests --locked",
+              "workingDirectory": "codex-rs",
+              "log": Path(sys.argv[4]).read_text(encoding="utf-8"),
+          }
+          Path(sys.argv[1]).write_text(json.dumps(outcome, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+
+          git -C "$candidate_dir" -c core.quotePath=false diff --no-renames -z --name-only "$EXPECTED_BASE" "$EXPECTED_UPSTREAM" > "$upstream_paths"
+          git -C "$candidate_dir" -c core.quotePath=false diff --no-renames -z --name-only "$EXPECTED_BASE" "$EXPECTED_LOCAL" > "$local_paths"
+          verify_trusted
+          python3 "$trusted_helper" select-affected-contracts \
+            --gates "$trusted_gates" --upstream-paths "$upstream_paths" --local-paths "$local_paths" \
+            --candidate-dir "$candidate_dir" --output "$affected"
+
+          root_input="$evidence_dir/root-failure-input.json"
+          root_report="$evidence_dir/root-failure-report.json"
+          python3 - "$root_input" "$repo_results" "$cargo_status" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          jobs = []
+          for index, line in enumerate(Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()):
+              name, _command, status, _classification = line.split("\t")
+              conclusion = "success" if status == "0" else "failure"
+              jobs.append({"id": f"candidate-repo-check-{index}", "name": name, "conclusion": conclusion, "steps": [{"name": name, "conclusion": conclusion}]})
+          cargo_success = sys.argv[3] == "0"
+          jobs.append({"id": "candidate-cargo-check", "name": "Candidate cargo check", "conclusion": "success" if cargo_success else "failure", "steps": [{"name": "cargo check --workspace --tests --locked", "conclusion": "success" if cargo_success else "failure"}]})
+          Path(sys.argv[1]).write_text(
+              json.dumps({"jobs": jobs}, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          root_status=0
+          verify_trusted
+          python3 "$trusted_extractor" \
+            --input "$root_input" \
+            --max-input-bytes 65536 \
+            --max-output-bytes 32768 \
+            --max-roots 50 \
+            --max-sources-per-root 8 > "$root_report" || root_status=$?
+          if [[ "$root_status" != 0 ]] || (( $(wc -c < "$root_report") > 32768 )); then
+            printf '%s\n' '{"status":"failed","classification":"infrastructure"}' > "$root_outcome"
+            root_infrastructure=1
+          else
+            python3 - "$root_outcome" "$root_report" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          Path(sys.argv[1]).write_text(
+              json.dumps({"status": "extracted", "classification": "passed", "report": report}, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+            root_infrastructure=0
+          fi
+
+          record_stage3b
+          trap - EXIT
+          if (( repo_regression == 1 )); then
+            echo "::warning title=Candidate repository-check regression::Stage 3b repository checks failed; candidate evidence records a regression while preserving a green job."
+          fi
+          if [[ "$cargo_classification" == regression ]]; then
+            echo "::warning title=Candidate cargo regression::Stage 3b cargo check failed; candidate evidence records a regression while preserving a green job."
+          fi
+          if (( repo_infrastructure == 1 )) || [[ "$cargo_classification" == infrastructure ]] || (( root_infrastructure == 1 )); then
             exit 1
           fi
 
@@ -429,10 +695,51 @@ jobs:
         if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
         run: |
           set -euo pipefail
-          test ! -e "$RUNNER_TEMP/upstream-convergence-candidate"
+          worktree_removed=true
+          if [[ -e "$RUNNER_TEMP/upstream-convergence-candidate" ]]; then
+            if ! git worktree remove --force "$RUNNER_TEMP/upstream-convergence-candidate"; then
+              worktree_removed=false
+            fi
+          fi
+          if ! git worktree prune || [[ -e "$RUNNER_TEMP/upstream-convergence-candidate" ]]; then
+            worktree_removed=false
+          fi
           status=$(git status --porcelain=v1 --untracked-files=all)
+          primary_checkout_clean=true
           if [[ -n "$status" ]]; then
             printf '%s\n' "$status" | head -n 50
+            primary_checkout_clean=false
+          fi
+          python3 - \
+            "$RUNNER_TEMP/upstream-convergence-candidate-evidence/candidate-evidence.json" \
+            "$worktree_removed" \
+            "$primary_checkout_clean" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          if not path.exists():
+              raise SystemExit(0)
+          evidence = json.loads(path.read_text(encoding="utf-8"))
+          evidence["temporaryWorktreeRemoved"] = sys.argv[2] == "true"
+          evidence["primaryCheckoutClean"] = sys.argv[3] == "true"
+          path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          text_path = path.with_name("candidate-evidence.txt")
+          lines = [
+              line
+              for line in text_path.read_text(encoding="utf-8").splitlines()
+              if not line.startswith(("temporary worktree removed:", "primary checkout clean:"))
+          ]
+          lines.extend(
+              [
+                  f"temporary worktree removed: {evidence['temporaryWorktreeRemoved']}",
+                  f"primary checkout clean: {evidence['primaryCheckoutClean']}",
+              ]
+          )
+          text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          if [[ "$worktree_removed" != true || "$primary_checkout_clean" != true ]]; then
             exit 1
           fi
 
