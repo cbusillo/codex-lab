@@ -19,7 +19,8 @@ use crate::guardian::guardian_truncate_text;
 use crate::session::turn_context::TurnContext;
 
 const MAX_RENDERED_BYTES: usize = 32_000;
-const MAX_RENDERED_OMISSION_BYTES: usize = 160;
+const MAX_RENDERED_IMAGES: usize = 4;
+const MAX_RENDERED_OMISSION_BYTES: usize = 256;
 const MAX_PROVENANCE_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,6 +331,8 @@ impl NodeReplReviewEvidenceFragment {
         }
 
         let mut seen_images = HashSet::new();
+        let mut rendered_images = 0_usize;
+        let mut omitted_images = 0_usize;
         let mut inputs = vec![text_input(intro)];
 
         for (response, header) in selected.into_iter().rev() {
@@ -341,7 +344,12 @@ impl NodeReplReviewEvidenceFragment {
                 match item {
                     Text { text, .. } => inputs.push(text_input(format!("{text}\n"))),
                     Image { image_url, .. } if seen_images.insert(image_url) => {
-                        inputs.push(item.clone())
+                        if rendered_images < MAX_RENDERED_IMAGES {
+                            inputs.push(item.clone());
+                            rendered_images = rendered_images.saturating_add(1);
+                        } else {
+                            omitted_images = omitted_images.saturating_add(1);
+                        }
                     }
                     _ => {}
                 }
@@ -351,6 +359,11 @@ impl NodeReplReviewEvidenceFragment {
         if omitted_responses > 0 {
             inputs.push(text_input(format!(
                 "<omitted node_repl_responses=\"{omitted_responses}\" reason=\"resource_bounds\" />\n"
+            )));
+        }
+        if omitted_images > 0 {
+            inputs.push(text_input(format!(
+                "<omitted node_repl_images=\"{omitted_images}\" reason=\"resource_bounds\" />\n"
             )));
         }
         inputs.push(text_input(closing.to_string()));

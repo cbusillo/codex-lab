@@ -5,6 +5,7 @@ use pretty_assertions::assert_eq;
 use super::ContextualUserFragment;
 use super::GUARDIAN_MAX_NODE_REPL_TOOL_RESULT_TOKENS;
 use super::MAX_RENDERED_BYTES;
+use super::MAX_RENDERED_IMAGES;
 use super::NodeReplReviewEvidence;
 use super::NodeReplReviewEvidenceMode;
 
@@ -146,4 +147,31 @@ fn mixed_evidence_bounds_headers_and_empty_response_placeholders() {
         let has_placeholder = text.contains("completed without visible text");
         assert_eq!(has_placeholder, provenance.is_empty());
     }
+}
+
+#[test]
+fn multimodal_evidence_caps_distinct_images() {
+    let evidence = NodeReplReviewEvidence::default();
+    let image_count = MAX_RENDERED_IMAGES + 3;
+    for index in 0..image_count {
+        evidence.record(
+            "browser",
+            "cell",
+            &format!("call-{index}"),
+            vec![image_input(&format!("data:image/png;base64,{index}"))],
+        );
+    }
+
+    let fragment = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
+    let inputs = fragment.into_inputs(NodeReplReviewEvidenceMode::Multimodal);
+    let rendered_images = inputs
+        .iter()
+        .filter(|item| matches!(item, UserInput::Image { .. }))
+        .count();
+
+    assert_eq!(rendered_images, MAX_RENDERED_IMAGES);
+    assert!(rendered_text(&inputs).contains(&format!(
+        "<omitted node_repl_images=\"{}\" reason=\"resource_bounds\" />",
+        image_count - MAX_RENDERED_IMAGES
+    )));
 }

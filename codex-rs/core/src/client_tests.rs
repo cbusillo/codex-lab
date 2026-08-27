@@ -3,6 +3,7 @@ use super::CompactConversationRequestSettings;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ReasoningSummaryConfig;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -158,6 +159,49 @@ fn invalidated_model_client_session_is_not_recached() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(cached.generation, 1);
     assert!(!cached.session.last_response_from_untraced_warmup);
+}
+
+#[test]
+fn responses_lite_omits_empty_additional_tools() {
+    let client = test_model_client(SessionSource::Cli);
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        base_instructions: BaseInstructions {
+            text: String::new(),
+            provenance: None,
+        },
+        ..Default::default()
+    };
+    let mut model_info = test_model_info();
+    model_info.use_responses_lite = true;
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        "test-window".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let request = client
+        .build_responses_request(
+            &prompt,
+            &model_info,
+            /*effort*/ None,
+            ReasoningSummaryConfig::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+        )
+        .expect("build Responses Lite request");
+
+    assert_eq!(request.input, prompt.input);
 }
 
 #[tokio::test]

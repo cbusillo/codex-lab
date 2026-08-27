@@ -974,11 +974,14 @@ impl ModelClient {
             } else {
                 create_tools_json_for_responses_api(&prompt.tools)?
             };
-            let mut prefix = vec![ResponseItem::AdditionalTools {
-                id: None,
-                role: "developer".to_string(),
-                tools,
-            }];
+            let mut prefix = Vec::new();
+            if !tools.is_empty() {
+                prefix.push(ResponseItem::AdditionalTools {
+                    id: None,
+                    role: "developer".to_string(),
+                    tools,
+                });
+            }
             if !prompt.base_instructions.text.is_empty() {
                 prefix.push(ContextualUserFragment::into(BaseInstructionsFragment(
                     prompt.base_instructions.text.clone(),

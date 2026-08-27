@@ -337,8 +337,15 @@ pub(crate) fn strip_images_when_unsupported(
     }
 
     for envelope in items.iter_mut() {
+        let message_contains_image = matches!(
+            &envelope.item,
+            ResponseItem::Message { content, .. }
+                if content
+                    .iter()
+                    .any(|item| matches!(item, ContentItem::InputImage { .. }))
+        );
         match &mut envelope.item {
-            ResponseItem::Message { .. } => {
+            ResponseItem::Message { .. } if message_contains_image => {
                 let Some(mut content) = to_annotated_content(&mut envelope.item) else {
                     continue;
                 };
@@ -387,8 +394,15 @@ pub(crate) fn strip_audio_when_unsupported(
     }
 
     for envelope in items.iter_mut() {
+        let message_contains_audio = matches!(
+            &envelope.item,
+            ResponseItem::Message { content, .. }
+                if content
+                    .iter()
+                    .any(|item| matches!(item, ContentItem::InputAudio { .. }))
+        );
         match &mut envelope.item {
-            ResponseItem::Message { .. } => {
+            ResponseItem::Message { .. } if message_contains_audio => {
                 let Some(mut content) = to_annotated_content(&mut envelope.item) else {
                     continue;
                 };
@@ -418,3 +432,7 @@ pub(crate) fn strip_audio_when_unsupported(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "normalize_tests.rs"]
+mod tests;
