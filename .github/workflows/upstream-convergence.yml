@@ -30,12 +30,18 @@ jobs:
         run: |
           set -euo pipefail
           git remote add openai https://github.com/openai/codex.git
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main
 
       - name: Run convergence inspection
         id: inspection
         run: |
           set -euo pipefail
+          started_at=$(python3 - <<'PY'
+          from datetime import datetime, timezone
+          print(datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
+          PY
+          )
           report_dir="$RUNNER_TEMP/upstream-convergence"
           raw_report="$report_dir/report.json"
           diagnostics="$report_dir/diagnostics.json"
@@ -55,7 +61,29 @@ jobs:
             --local "$LOCAL" \
             --json > "$raw_report" || status=$?
 
+          finished_at=$(python3 - <<'PY'
+          from datetime import datetime, timezone
+          print(datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
+          PY
+          )
+          started_epoch=$(python3 - "$started_at" <<'PY'
+          import sys
+          from datetime import datetime
+
+          print(int(datetime.fromisoformat(sys.argv[1].replace('Z', '+00:00')).timestamp() * 1000))
+          PY
+          )
+          finished_epoch=$(python3 - "$finished_at" <<'PY'
+          import sys
+          from datetime import datetime
+
+          print(int(datetime.fromisoformat(sys.argv[1].replace('Z', '+00:00')).timestamp() * 1000))
+          PY
+          )
+          duration_ms=$((finished_epoch - started_epoch))
+
           RAW_REPORT="$raw_report" DIAGNOSTICS="$diagnostics" INSPECT_STATUS="$status" \
+            INSPECTION_STARTED_AT="$started_at" INSPECTION_DURATION_MS="$duration_ms" \
             python3 - <<'PY'
           import json
           import os
@@ -85,13 +113,20 @@ jobs:
               "passed": report.get("passed"),
               "errorCount": len(errors),
               "firstError": first_error,
+              "inspectionStartedAt": os.environ["INSPECTION_STARTED_AT"],
+              "inspectionDurationMs": int(os.environ["INSPECTION_DURATION_MS"]),
           }
           diagnostics_path.write_text(
               json.dumps(diagnostics, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
           PY
-          echo "status=$status" >> "$GITHUB_OUTPUT"
+          {
+            echo "status=$status"
+            echo "started_at=$started_at"
+            echo "finished_at=$finished_at"
+            echo "duration_ms=$duration_ms"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Print bounded inspection diagnostics
         if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' }}
@@ -129,6 +164,9 @@ jobs:
         if: ${{ success() && steps.inspection.outputs.status == '0' }}
         env:
           PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}
+          INSPECTION_STARTED_AT: ${{ steps.inspection.outputs.started_at }}
+          INSPECTION_FINISHED_AT: ${{ steps.inspection.outputs.finished_at }}
+          INSPECTION_DURATION_MS: ${{ steps.inspection.outputs.duration_ms }}
         run: |
           python3 .github/scripts/upstream_convergence_report.py \
             --report "$RUNNER_TEMP/upstream-convergence/report.json" \
@@ -153,7 +191,7 @@ jobs:
           name: upstream-convergence-${{ github.run_id }}
           path: ${{ runner.temp }}/upstream-convergence/convergence-summary.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
 
       - name: Fail when inspection fails
         if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' && steps.inspection.outputs.status != '0' }}
