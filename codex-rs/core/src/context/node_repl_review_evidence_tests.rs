@@ -153,23 +153,29 @@ fn mixed_evidence_bounds_headers_and_empty_response_placeholders() {
 fn multimodal_evidence_caps_distinct_images() {
     let evidence = NodeReplReviewEvidence::default();
     let image_count = MAX_RENDERED_IMAGES + 3;
-    for index in 0..image_count {
-        evidence.record(
-            "browser",
-            "cell",
-            &format!("call-{index}"),
-            vec![image_input(&format!("data:image/png;base64,{index}"))],
-        );
-    }
+    let first_response = (0..3)
+        .map(|index| image_input(&format!("data:image/png;base64,{index}")))
+        .collect();
+    evidence.record("browser", "cell", "call-1", first_response);
+    let second_response = (3..image_count)
+        .map(|index| image_input(&format!("data:image/png;base64,{index}")))
+        .collect();
+    evidence.record("browser", "cell", "call-2", second_response);
 
     let fragment = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
     let inputs = fragment.into_inputs(NodeReplReviewEvidenceMode::Multimodal);
     let rendered_images = inputs
         .iter()
-        .filter(|item| matches!(item, UserInput::Image { .. }))
-        .count();
+        .filter_map(|item| match item {
+            UserInput::Image { image_url, .. } => Some(image_url.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let expected_images = ((image_count - MAX_RENDERED_IMAGES)..image_count)
+        .map(|index| format!("data:image/png;base64,{index}"))
+        .collect::<Vec<_>>();
 
-    assert_eq!(rendered_images, MAX_RENDERED_IMAGES);
+    assert_eq!(rendered_images, expected_images);
     assert!(rendered_text(&inputs).contains(&format!(
         "<omitted node_repl_images=\"{}\" reason=\"resource_bounds\" />",
         image_count - MAX_RENDERED_IMAGES

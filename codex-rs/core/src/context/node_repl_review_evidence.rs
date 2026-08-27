@@ -331,25 +331,38 @@ impl NodeReplReviewEvidenceFragment {
         }
 
         let mut seen_images = HashSet::new();
-        let mut rendered_images = 0_usize;
+        let mut retained_images = HashSet::new();
         let mut omitted_images = 0_usize;
+        for (response, _) in &selected {
+            for item in response.items.iter().rev() {
+                if let Image { image_url, .. } = item
+                    && seen_images.insert(image_url.as_str())
+                {
+                    if retained_images.len() < MAX_RENDERED_IMAGES {
+                        retained_images.insert(image_url.as_str());
+                    } else {
+                        omitted_images = omitted_images.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        let mut rendered_images = HashSet::new();
         let mut inputs = vec![text_input(intro)];
 
-        for (response, header) in selected.into_iter().rev() {
-            inputs.push(text_input(header));
+        for (response, header) in selected.iter().rev() {
+            inputs.push(text_input(header.clone()));
             if response.items.is_empty() {
                 inputs.push(text_input("<completed without visible text>\n".to_string()));
             }
             for item in &response.items {
                 match item {
                     Text { text, .. } => inputs.push(text_input(format!("{text}\n"))),
-                    Image { image_url, .. } if seen_images.insert(image_url) => {
-                        if rendered_images < MAX_RENDERED_IMAGES {
-                            inputs.push(item.clone());
-                            rendered_images = rendered_images.saturating_add(1);
-                        } else {
-                            omitted_images = omitted_images.saturating_add(1);
-                        }
+                    Image { image_url, .. }
+                        if retained_images.contains(image_url.as_str())
+                            && rendered_images.insert(image_url.as_str()) =>
+                    {
+                        inputs.push(item.clone());
                     }
                     _ => {}
                 }
