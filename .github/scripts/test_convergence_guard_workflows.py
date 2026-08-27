@@ -263,6 +263,114 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         )
         self.assertIn("retention-days: 90", upload)
 
+    def test_inspect_exports_bounded_candidate_inputs(self) -> None:
+        inspect_job = re.search(
+            r"^  inspect:\n(?P<body>.*?)(?=^  candidate:|\Z)",
+            self.contents,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(inspect_job)
+        inspect_contents = inspect_job.group("body")
+        publish = self.step("Publish compact report")
+
+        for output in (
+            "candidate_due",
+            "candidate_gate_status",
+            "candidate_base",
+            "candidate_upstream",
+            "candidate_local",
+            "candidate_snapshot",
+        ):
+            self.assertIn(f"{output}: ${{{{ steps.summary.outputs.{output} }}}}", inspect_contents)
+            self.assertIn(f"{output}=", publish)
+        self.assertIn("id: summary", publish)
+        self.assertIn("exact_ref = re.compile", publish)
+        self.assertIn("[0-9a-f]{40}", publish)
+        self.assertIn("snapshot[\"snapshot\"][:512]", publish)
+        self.assertIn('"\\n" in status', publish)
+        self.assertIn('"\\n" in snapshot_path', publish)
+
+    def test_candidate_job_is_read_only_and_independently_serialized(self) -> None:
+        candidate = re.search(
+            r"^  candidate:\n(?P<body>.*)\Z",
+            self.contents,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(candidate)
+        contents = candidate.group("body")
+
+        self.assertIn("needs: inspect", contents)
+        self.assertIn(
+            "needs.inspect.outputs.candidate_due == 'true' && needs.inspect.outputs.candidate_gate_status == 'ready' && github.ref == 'refs/heads/main'",
+            contents,
+        )
+        self.assertIn("runs-on: macos-26", contents)
+        self.assertIn("permissions:\n      contents: read", contents)
+        self.assertNotIn("actions: read", contents)
+        self.assertIn("group: upstream-convergence-candidate-${{ github.ref }}", contents)
+        self.assertIn("persist-credentials: false", contents)
+        self.assertNotIn("GH_TOKEN", contents)
+        self.assertNotIn("secrets.", contents)
+
+    def test_candidate_stage_uses_trusted_data_only_preflight_and_cleanup(self) -> None:
+        candidate = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        verify = self.step("Verify candidate cleanup and primary checkout")
+        upload = self.step("Upload candidate evidence")
+
+        self.assertIn("https://github.com/cbusillo/codex-lab.git", candidate)
+        self.assertIn("https://github.com/openai/codex.git", candidate)
+        self.assertIn("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main", candidate)
+        self.assertIn("git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main", candidate)
+        self.assertIn('cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"', candidate)
+        self.assertIn("git remote set-url origin https://github.com/cbusillo/codex-lab.git", candidate)
+        self.assertIn('worktree add --detach "$candidate_dir" "$EXPECTED_UPSTREAM"', candidate)
+        self.assertIn('core.hooksPath=/dev/null merge --no-commit --no-ff "$EXPECTED_LOCAL"', candidate)
+        self.assertIn('all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"', candidate)
+        self.assertNotIn('$evidence_dir/all-conflict-paths.txt', candidate)
+        self.assertIn("sed -n '1,200p'", candidate)
+        self.assertIn('python3 "$trusted_helper" preflight', candidate)
+        self.assertNotIn('python3 .github/scripts/', candidate)
+        self.assertNotIn("GITHUB_WORKSPACE", candidate)
+        self.assertNotIn("rusty_v8_bazel.py", candidate)
+        self.assertNotIn("cargo check", candidate)
+        self.assertNotIn("just test", candidate)
+        self.assertIn("cleanup_worktree", candidate)
+        self.assertIn("git worktree remove --force", candidate)
+        self.assertIn("git status --porcelain=v1 --untracked-files=all", candidate)
+        self.assertIn("always() && !cancelled()", verify)
+        self.assertIn('test ! -e "$RUNNER_TEMP/upstream-convergence-candidate"', verify)
+        self.assertIn("retention-days: 90", upload)
+        self.assertLess(
+            candidate.index("git fetch --no-tags origin"),
+            candidate.index('worktree add --detach "$candidate_dir"'),
+        )
+        self.assertLess(
+            candidate.index('worktree add --detach "$candidate_dir"'),
+            candidate.index('core.hooksPath=/dev/null merge --no-commit --no-ff'),
+        )
+        self.assertLess(
+            candidate.index('core.hooksPath=/dev/null merge --no-commit --no-ff'),
+            candidate.index('python3 "$trusted_helper" preflight'),
+        )
+
+    def test_candidate_stage_has_no_write_or_model_automation(self) -> None:
+        candidate = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+
+        for forbidden in (
+            "git push",
+            "git commit",
+            "gh pr",
+            "gh issue",
+            "create-pull-request",
+            "code exec",
+            "codex exec",
+            "claude",
+            "gemini",
+            "cargo ",
+            "npm ",
+        ):
+            self.assertNotIn(forbidden, candidate)
+
     def test_permissions_remain_read_only(self) -> None:
         self.assertIn("permissions:\n  actions: read\n  contents: read", self.contents)
 
