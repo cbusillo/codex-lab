@@ -5281,7 +5281,9 @@ mod tests {
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: blocked },
+                path: FileSystemPath::Path {
+                    path: blocked.into(),
+                },
                 access: FileSystemAccessMode::Deny,
                 missing_path_behavior: None,
             },
@@ -5341,7 +5343,9 @@ mod tests {
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: secret },
+                path: FileSystemPath::Path {
+                    path: secret.into(),
+                },
                 access: FileSystemAccessMode::Deny,
                 missing_path_behavior: None,
             },
@@ -5405,12 +5409,14 @@ mod tests {
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: docs },
+                path: FileSystemPath::Path { path: docs.into() },
                 access: FileSystemAccessMode::Read,
                 missing_path_behavior: None,
             },
             FileSystemSandboxEntry {
-                path: FileSystemPath::Path { path: docs_public },
+                path: FileSystemPath::Path {
+                    path: docs_public.into(),
+                },
                 access: FileSystemAccessMode::Write,
                 missing_path_behavior: None,
             },
@@ -5446,7 +5452,7 @@ mod tests {
         };
         let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
             path: FileSystemPath::Path {
-                path: external_write_path,
+                path: external_write_path.into(),
             },
             access: FileSystemAccessMode::Write,
             missing_path_behavior: None,
@@ -6525,6 +6531,7 @@ mod tests {
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
+            active_permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,
             model: "gpt-5".to_string(),
@@ -6557,19 +6564,22 @@ mod tests {
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
+            active_permission_profile: None,
             network: Some(TurnContextNetworkItem {
                 allowed_domains: vec!["api.example.com".to_string()],
                 denied_domains: vec!["blocked.example.com".to_string()],
             }),
-            file_system_sandbox_policy: Some(FileSystemSandboxPolicy::restricted(vec![
-                FileSystemSandboxEntry {
+            file_system_sandbox_policy: Some(
+                FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
                         pattern: "/tmp/private/**/*.txt".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
                     missing_path_behavior: None,
-                },
-            ])),
+                }])
+                .try_into()
+                .expect("filesystem sandbox policy should serialize"),
+            ),
             model: "gpt-5".to_string(),
             comp_hash: None,
             personality: None,
