@@ -6564,7 +6564,10 @@ mod tests {
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::DangerFullAccess,
             permission_profile: None,
-            active_permission_profile: None,
+            active_permission_profile: Some(ActivePermissionProfile {
+                id: ":workspace".to_string(),
+                extends: Some(":read-only".to_string()),
+            }),
             network: Some(TurnContextNetworkItem {
                 allowed_domains: vec!["api.example.com".to_string()],
                 denied_domains: vec!["blocked.example.com".to_string()],
@@ -6578,7 +6581,7 @@ mod tests {
                     missing_path_behavior: None,
                 }])
                 .try_into()
-                .expect("filesystem sandbox policy should serialize"),
+                .map_err(anyhow::Error::msg)?,
             ),
             model: "gpt-5".to_string(),
             comp_hash: None,
@@ -6597,6 +6600,13 @@ mod tests {
             json!({
                 "allowed_domains": ["api.example.com"],
                 "denied_domains": ["blocked.example.com"],
+            })
+        );
+        assert_eq!(
+            value["active_permission_profile"],
+            json!({
+                "id": ":workspace",
+                "extends": ":read-only",
             })
         );
         assert_eq!(
