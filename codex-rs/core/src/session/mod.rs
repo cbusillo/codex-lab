@@ -3556,6 +3556,7 @@ impl Session {
     ) -> Vec<ResponseItem> {
         let mut developer_sections = Vec::<String>::with_capacity(8);
         let mut contextual_user_sections = Vec::<String>::with_capacity(2);
+        let mut separate_contextual_user_sections = Vec::<String>::new();
         let mut separate_developer_sections = Vec::<String>::new();
         let (session_source, auto_compact_window_ids) = {
             let state = self.state.lock().await;
@@ -3693,6 +3694,9 @@ impl Session {
                     separate_developer_sections.push(fragment.render());
                 }
                 "developer" => developer_sections.push(fragment.render()),
+                "user" if fragment.requires_separate_message() => {
+                    separate_contextual_user_sections.push(fragment.render());
+                }
                 "user" => contextual_user_sections.push(fragment.render()),
                 _ => {}
             }
@@ -3718,6 +3722,13 @@ impl Session {
             crate::context_manager::updates::build_contextual_user_message(contextual_user_sections)
         {
             items.push(contextual_user_message);
+        }
+        for section in separate_contextual_user_sections {
+            if let Some(contextual_user_message) =
+                crate::context_manager::updates::build_contextual_user_message(vec![section])
+            {
+                items.push(contextual_user_message);
+            }
         }
         // Emit the guardian policy prompt as a separate developer item so the guardian
         // subagent sees a distinct, easy-to-audit instruction block.

@@ -5,7 +5,6 @@ use super::step_context::StepContext;
 use crate::connectors;
 use crate::context::ApprovalPromptContext;
 use crate::context::TokenBudgetContext;
-use crate::context::world_state::AgentsMdState;
 use crate::context::world_state::AppsInstructionsState;
 use crate::context::world_state::CollaborationModeState;
 use crate::context::world_state::CompactPermissionsState;
@@ -21,6 +20,7 @@ use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
 use crate::context::world_state::ToolsState;
 use crate::context::world_state::WorldState;
+use crate::context::world_state::add_agents_md_sections;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_extension_api::WorldStateContributionInput;
 use codex_features::Feature;
@@ -141,7 +141,7 @@ impl Session {
                 .as_ref()
                 .and_then(|instructions| instructions.end.as_deref()),
         ));
-        world_state.add_section(AgentsMdState::new(step_context.loaded_agents_md.as_deref()));
+        add_agents_md_sections(&mut world_state, step_context.loaded_agents_md.as_deref());
         let exec_policy = self
             .services
             .exec_policy

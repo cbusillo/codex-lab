@@ -41,7 +41,7 @@ const MAX_EXTENSION_WORLD_STATE_SECTION_COUNT: usize = 64;
 const BOUNDED_WORLD_STATE_CLOSE_TAG: &str = "</bounded_world_state_section>";
 const WORLD_STATE_TRUNCATION_NOTICE: &str = "\n…world-state content truncated…\n";
 
-pub(crate) use agents_md::AgentsMdState;
+pub(crate) use agents_md::add_agents_md_sections;
 pub(crate) use apps_instructions::AppsInstructionsState;
 pub(crate) use collaboration_mode::CollaborationModeState;
 pub(crate) use compact_permissions::CompactPermissionsState;

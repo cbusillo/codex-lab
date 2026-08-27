@@ -1,4 +1,5 @@
 use super::*;
+use crate::agents_md::LoadedAgentsMd;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde::Serialize;
@@ -201,6 +202,86 @@ fn section_budget_override_remains_bounded_by_section_and_total_limits() {
         allocate_world_state_budgets(&fragments),
         vec![MAX_WORLD_STATE_TOTAL_BYTES / 2; 2]
     );
+}
+
+#[test]
+fn agents_md_cap_does_not_starve_the_maximum_section_count() {
+    let fragments = (0..MAX_WORLD_STATE_SECTION_COUNT)
+        .map(|index| {
+            PendingWorldStateFragment::new(
+                Box::leak(format!("section_{index}").into_boxed_str()),
+                /*state_hash*/ None,
+                if index < 4 {
+                    agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES
+                } else {
+                    MAX_WORLD_STATE_SECTION_BYTES
+                },
+                Box::new(TestFragment(
+                    "x".repeat(agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES),
+                )),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let budgets = allocate_world_state_budgets(&fragments);
+
+    assert_eq!(budgets.len(), MAX_WORLD_STATE_SECTION_COUNT);
+    assert_eq!(budgets.iter().sum::<usize>(), MAX_WORLD_STATE_TOTAL_BYTES);
+    assert!(
+        budgets
+            .iter()
+            .all(|budget| *budget >= MIN_WORLD_STATE_SECTION_BYTES)
+    );
+    assert!(
+        budgets[..4]
+            .iter()
+            .all(|budget| *budget <= agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES)
+    );
+}
+
+#[test]
+fn agents_md_total_budget_pressure_preserves_generic_section_caps() {
+    let loaded = LoadedAgentsMd::from_text_for_testing(
+        "a".repeat(agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES * 8),
+    );
+    let mut world_state = WorldState::default();
+    add_agents_md_sections(&mut world_state, Some(&loaded));
+    for index in 0..8 {
+        let id = Box::leak(format!("generic_{index}").into_boxed_str());
+        let body = char::from(b'b' + index)
+            .to_string()
+            .repeat(MAX_WORLD_STATE_SECTION_BYTES);
+        world_state.add_extension_section(WorldStateSectionContribution::new(
+            id,
+            json!({"body": body}),
+            move |_| {
+                Some(RenderedWorldStateFragment::new(
+                    "developer",
+                    ("", ""),
+                    body.clone(),
+                ))
+            },
+        ));
+    }
+
+    let rendered = world_state.render_full();
+    assert_eq!(rendered.len(), 12);
+    assert_eq!(
+        rendered
+            .iter()
+            .map(|fragment| fragment.render().len())
+            .sum::<usize>(),
+        MAX_WORLD_STATE_TOTAL_BYTES
+    );
+    assert!(rendered[..4].iter().all(|fragment| {
+        fragment.requires_separate_message()
+            && fragment.render().len() <= agents_md::AGENTS_MD_SHARD_RENDERED_MAX_BYTES
+            && fragment.render().contains("world-state content truncated")
+    }));
+    assert!(rendered[4..].iter().all(|fragment| {
+        let len = fragment.render().len();
+        (MIN_WORLD_STATE_SECTION_BYTES..=MAX_WORLD_STATE_SECTION_BYTES).contains(&len)
+    }));
 }
 
 struct DuplicateTestSection;
