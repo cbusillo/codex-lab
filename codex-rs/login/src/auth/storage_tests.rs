@@ -195,6 +195,7 @@ fn file_storage_save_repairs_private_auth_file_permissions() -> anyhow::Result<(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
 
     storage.save(&auth_dot_json)?;

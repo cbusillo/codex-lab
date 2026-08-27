@@ -3080,6 +3080,7 @@ async fn chatgpt_account_id_falls_back_to_id_token_claim() {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         },
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),
@@ -3112,6 +3113,7 @@ fn api_key_auth(api_key: &str) -> AuthDotJson {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     }
 }
 

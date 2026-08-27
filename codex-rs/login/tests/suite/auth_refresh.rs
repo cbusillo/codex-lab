@@ -400,6 +400,7 @@ async fn concurrent_processes_refresh_once() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home.path(),
@@ -537,6 +538,7 @@ async fn refresh_response_does_not_overwrite_switched_account() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
     let initial_account = upsert_chatgpt_account(
@@ -576,6 +578,7 @@ async fn refresh_response_does_not_overwrite_switched_account() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -658,6 +661,7 @@ async fn catalog_refresh_converges_control_auth_after_reactivation() -> Result<(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home.path(),

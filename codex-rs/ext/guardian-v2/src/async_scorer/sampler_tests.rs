@@ -1,4 +1,6 @@
 use anyhow::Result;
+use codex_core::context::ContextualUserFragment;
+use codex_core::context::GuardianReviewEvidencePreamble;
 use codex_extension_api::ExtensionMetrics;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -457,9 +459,9 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
             assert_eq!(input[2], serde_json::to_value(&parent_compaction)?);
             assert_eq!(input[3]["role"], "developer");
             assert!(
-                input[3]["content"][0]["text"].as_str().is_some_and(
-                    |text| text.starts_with("<guardian_sync_review_evidence_preamble>")
-                )
+                input[3]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(GuardianReviewEvidencePreamble::matches_text)
             );
             assert_eq!(input[3]["content"][1]["text"], "trusted review");
             assert_eq!(input[4]["role"], "user");

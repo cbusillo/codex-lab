@@ -175,3 +175,29 @@ fn multimodal_evidence_caps_distinct_images() {
         image_count - MAX_RENDERED_IMAGES
     )));
 }
+
+#[test]
+fn multimodal_evidence_bounds_combined_response_and_image_omissions() {
+    let evidence = NodeReplReviewEvidence::default();
+    let response_count = MAX_RENDERED_IMAGES + 6;
+    let response_text = "x".repeat(MAX_RENDERED_BYTES / (MAX_RENDERED_IMAGES + 2));
+    for index in 0..response_count {
+        evidence.record(
+            "browser",
+            "cell",
+            &format!("call-{index}"),
+            vec![
+                text_input(&response_text),
+                image_input(&format!("data:image/png;base64,{index}")),
+            ],
+        );
+    }
+
+    let fragment = evidence.snapshot_since(/*reviewed_sequence*/ 0).unwrap();
+    let inputs = fragment.into_inputs(NodeReplReviewEvidenceMode::Multimodal);
+    let text = rendered_text(&inputs);
+
+    assert!(text.contains("<omitted node_repl_responses="));
+    assert!(text.contains("<omitted node_repl_images="));
+    assert!(text.len() <= MAX_RENDERED_BYTES);
+}
