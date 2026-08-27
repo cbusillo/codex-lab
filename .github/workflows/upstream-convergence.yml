@@ -487,9 +487,9 @@ jobs:
           trusted_extractor=$(realpath "$trusted_extractor")
           sandbox_profile="$(realpath "$RUNNER_TEMP")/upstream-candidate.sb"
           workspace=$(realpath "$GITHUB_WORKSPACE")
-          github_env=$(realpath "$GITHUB_ENV")
-          github_output=$(realpath "$GITHUB_OUTPUT")
-          github_path=$(realpath "$GITHUB_PATH")
+          github_env_path=$(realpath "$GITHUB_ENV")
+          github_output_path=$(realpath "$GITHUB_OUTPUT")
+          github_path_file=$(realpath "$GITHUB_PATH")
           python_bin=$(command -v python3)
           cargo_bin=$(command -v cargo)
           cargo_home="$(realpath "$RUNNER_TEMP")/upstream-cargo-home"
@@ -537,9 +537,9 @@ jobs:
           (deny file-write* (literal "$trusted_gates"))
           (deny file-write* (literal "$trusted_extractor"))
           (deny file-write* (literal "$sandbox_profile"))
-          (deny file-write* (literal "$github_env"))
-          (deny file-write* (literal "$github_output"))
-          (deny file-write* (literal "$github_path"))
+          (deny file-write* (literal "$github_env_path"))
+          (deny file-write* (literal "$github_output_path"))
+          (deny file-write* (literal "$github_path_file"))
           EOF
           trap 'record_stage3b || true' EXIT
           verify_trusted
