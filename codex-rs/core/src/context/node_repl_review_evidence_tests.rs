@@ -152,7 +152,7 @@ fn mixed_evidence_bounds_headers_and_empty_response_placeholders() {
 #[test]
 fn multimodal_evidence_caps_distinct_images() {
     let evidence = NodeReplReviewEvidence::default();
-    let image_count = MAX_RENDERED_IMAGES + 3;
+    let image_count = MAX_RENDERED_IMAGES + 4;
     let first_response = (0..3)
         .map(|index| image_input(&format!("data:image/png;base64,{index}")))
         .collect();

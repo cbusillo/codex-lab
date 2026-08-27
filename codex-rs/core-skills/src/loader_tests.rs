@@ -11,11 +11,14 @@ use codex_exec_server::ExecutorFileSystemFuture;
 use codex_exec_server::FileMetadata;
 use codex_exec_server::FileSystemReadStream;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::LOCAL_FS;
 use codex_exec_server::ReadDirectoryEntry;
+use codex_exec_server::ReadFileOptions;
 use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
+use codex_exec_server::WriteFileOptions;
 use codex_protocol::protocol::Product;
 use codex_protocol::protocol::SkillScope;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -80,9 +83,10 @@ impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
     fn read_file<'a>(
         &'a self,
         path: &'a PathUri,
+        options: ReadFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
-        self.inner.read_file(path, sandbox)
+        self.inner.read_file(path, options, sandbox)
     }
 
     fn read_file_stream<'a>(
@@ -97,9 +101,10 @@ impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
         &'a self,
         path: &'a PathUri,
         contents: Vec<u8>,
+        options: WriteFileOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, ()> {
-        self.inner.write_file(path, contents, sandbox)
+        self.inner.write_file(path, contents, options, sandbox)
     }
 
     fn create_directory<'a>(
@@ -114,14 +119,15 @@ impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
     fn get_metadata<'a>(
         &'a self,
         path: &'a PathUri,
+        options: GetMetadataOptions,
         sandbox: Option<&'a FileSystemSandboxContext>,
     ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
         let repo_skill_root_suffix = Path::new(AGENTS_DIR_NAME).join(SKILLS_DIR_NAME);
         let Ok(path_abs) = path.to_abs_path() else {
-            return self.inner.get_metadata(path, sandbox);
+            return self.inner.get_metadata(path, options, sandbox);
         };
         if !path_abs.ends_with(repo_skill_root_suffix) {
-            return self.inner.get_metadata(path, sandbox);
+            return self.inner.get_metadata(path, options, sandbox);
         }
 
         self.metadata_calls
@@ -137,7 +143,7 @@ impl ExecutorFileSystem for BlockingRepoSkillRootFileSystem {
                 .await
                 .expect("metadata release semaphore")
                 .forget();
-            self.inner.get_metadata(path, sandbox).await
+            self.inner.get_metadata(path, options, sandbox).await
         })
     }
 
@@ -675,6 +681,7 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
                         transport: Some("streamable_http".to_string()),
                         command: None,
                         url: Some("https://example.com/mcp".to_string()),
+                        oauth_callback_port: None,
                     },
                     SkillToolDependency {
                         r#type: "cli".to_string(),
@@ -683,6 +690,7 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
                         transport: None,
                         command: None,
                         url: None,
+                        oauth_callback_port: None,
                     },
                     SkillToolDependency {
                         r#type: "mcp".to_string(),
@@ -691,6 +699,7 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
                         transport: Some("stdio".to_string()),
                         command: Some("gh-mcp".to_string()),
                         url: None,
+                        oauth_callback_port: None,
                     },
                 ],
             }),

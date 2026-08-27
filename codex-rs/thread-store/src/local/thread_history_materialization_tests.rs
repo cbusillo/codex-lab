@@ -586,6 +586,7 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Exec,
+            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),

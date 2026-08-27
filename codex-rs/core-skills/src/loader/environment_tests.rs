@@ -63,6 +63,7 @@ policy:
                     transport: None,
                     command: None,
                     url: None,
+                    oauth_callback_port: None,
                 }],
             }),
             policy: Some(SkillPolicy {
