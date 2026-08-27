@@ -9,15 +9,21 @@ permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: upstream-convergence-inspection
-  cancel-in-progress: false
-
 jobs:
   inspect:
     name: Inspect
     runs-on: macos-26
     timeout-minutes: 20
+    concurrency:
+      group: upstream-convergence-inspection
+      cancel-in-progress: false
+    outputs:
+      candidate_due: ${{ steps.summary.outputs.candidate_due }}
+      candidate_gate_status: ${{ steps.summary.outputs.candidate_gate_status }}
+      candidate_base: ${{ steps.summary.outputs.candidate_base }}
+      candidate_upstream: ${{ steps.summary.outputs.candidate_upstream }}
+      candidate_local: ${{ steps.summary.outputs.candidate_local }}
+      candidate_snapshot: ${{ steps.summary.outputs.candidate_snapshot }}
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -151,16 +157,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          UPDATED_AT=$(gh run list \
+          UPDATED_AT=""
+          while read -r run_id; do
+            if [[ "$run_id" == "$GITHUB_RUN_ID" ]]; then
+              continue
+            fi
+            if completed_at=$(gh run view "$run_id" \
+              --json jobs \
+              --jq '[.jobs[] | select(.name == "Inspect" and .conclusion == "success") | .completedAt][0] // ""'); then
+              if [[ -n "$completed_at" ]]; then
+                UPDATED_AT="$completed_at"
+                break
+              fi
+            fi
+          done < <(gh run list \
             --workflow upstream-convergence.yml \
             --branch main \
-            --status success \
-            --limit 1 \
-            --json updatedAt \
-            --jq '.[0].updatedAt // ""')
+            --limit 50 \
+            --json databaseId \
+            --jq '.[].databaseId')
           echo "updated_at=$UPDATED_AT" >> "$GITHUB_OUTPUT"
 
       - name: Publish compact report
+        id: summary
         if: ${{ success() && steps.inspection.outputs.status == '0' }}
         env:
           PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}
@@ -168,10 +187,62 @@ jobs:
           INSPECTION_FINISHED_AT: ${{ steps.inspection.outputs.finished_at }}
           INSPECTION_DURATION_MS: ${{ steps.inspection.outputs.duration_ms }}
         run: |
+          set -euo pipefail
           python3 .github/scripts/upstream_convergence_report.py \
             --report "$RUNNER_TEMP/upstream-convergence/report.json" \
             --output "$RUNNER_TEMP/upstream-convergence/convergence-summary.json" \
             --previous-success-at "$PREVIOUS_SUCCESS_AT"
+          SUMMARY="$RUNNER_TEMP/upstream-convergence/convergence-summary.json" \
+            python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          summary = json.loads(Path(os.environ["SUMMARY"]).read_text(encoding="utf-8"))
+          refs = summary.get("refs")
+          gate = summary.get("candidateGate")
+          if not isinstance(refs, dict) or not isinstance(gate, dict):
+              raise ValueError("convergence summary is missing candidate inputs")
+          exact_ref = re.compile(r"[0-9a-f]{40}")
+          values = {name: refs.get(name) for name in ("base", "upstream", "local")}
+          if not all(isinstance(value, str) and exact_ref.fullmatch(value) for value in values.values()):
+              raise ValueError("convergence summary has invalid candidate refs")
+          due = gate.get("due")
+          status = gate.get("status")
+          snapshot = gate.get("latestIntegratedSnapshot")
+          if (
+              not isinstance(due, bool)
+              or not isinstance(status, str)
+              or len(status) > 64
+              or "\n" in status
+              or "\r" in status
+          ):
+              raise ValueError("convergence summary has invalid candidate gate")
+          if snapshot is None:
+              snapshot_path = ""
+          elif isinstance(snapshot, dict) and isinstance(snapshot.get("snapshot"), str):
+              snapshot_path = snapshot["snapshot"][:512]
+          else:
+              raise ValueError("convergence summary has invalid candidate snapshot")
+          if "\n" in snapshot_path or "\r" in snapshot_path:
+              raise ValueError("convergence summary has unsafe candidate snapshot")
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as output_file:
+              output_file.write(
+              "\n".join(
+                  [
+                      f"candidate_due={str(due).lower()}",
+                      f"candidate_gate_status={status}",
+                      f"candidate_base={values['base']}",
+                      f"candidate_upstream={values['upstream']}",
+                      f"candidate_local={values['local']}",
+                      f"candidate_snapshot={snapshot_path}",
+                  ]
+              )
+              + "\n"
+              )
+          PY
 
       - name: Upload raw inspection report
         if: ${{ always() && !cancelled() && steps.inspection.outcome != 'skipped' }}
@@ -203,3 +274,173 @@ jobs:
             status=1
           fi
           exit "$status"
+
+  candidate:
+    name: Candidate stage 3a
+    needs: inspect
+    if: ${{ needs.inspect.outputs.candidate_due == 'true' && needs.inspect.outputs.candidate_gate_status == 'ready' && github.ref == 'refs/heads/main' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: upstream-convergence-candidate-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      EXPECTED_BASE: ${{ needs.inspect.outputs.candidate_base }}
+      EXPECTED_UPSTREAM: ${{ needs.inspect.outputs.candidate_upstream }}
+      EXPECTED_LOCAL: ${{ needs.inspect.outputs.candidate_local }}
+      CANDIDATE_GATE_STATUS: ${{ needs.inspect.outputs.candidate_gate_status }}
+      CANDIDATE_SNAPSHOT: ${{ needs.inspect.outputs.candidate_snapshot }}
+    steps:
+      - name: Checkout integration repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-fetch canonical refs and run data-only candidate preflight
+        id: candidate
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/upstream-convergence-candidate-evidence"
+          candidate_dir="$RUNNER_TEMP/upstream-convergence-candidate"
+          downloads_dir="$RUNNER_TEMP/upstream-convergence-candidate-downloads"
+          trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          conflicts="$evidence_dir/conflict-paths.txt"
+          all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"
+          preflight="$evidence_dir/rusty-v8-preflight.json"
+          mkdir -p "$evidence_dir"
+          printf '%s\n' '{"schemaVersion":1,"classification":"infrastructure","reason":"candidate stage did not complete"}' > "$evidence_dir/candidate-bootstrap.json"
+          classification=infrastructure
+          reason="candidate preflight did not start"
+          worktree_removed=true
+          primary_checkout_clean=true
+          conflict_total=0
+          helper_ready=true
+          if ! cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"; then
+            helper_ready=false
+            reason="unable to materialize trusted candidate helper"
+          fi
+
+          cleanup_worktree() {
+            if [[ -e "$candidate_dir" ]]; then
+              git worktree remove --force "$candidate_dir" || return 1
+            fi
+            git worktree prune
+            [[ ! -e "$candidate_dir" ]]
+          }
+          trap 'cleanup_worktree || true' EXIT
+
+          if [[ "$helper_ready" != true ]]; then
+            :
+          elif [[ ! "$EXPECTED_BASE" =~ ^[0-9a-f]{40}$ || ! "$EXPECTED_UPSTREAM" =~ ^[0-9a-f]{40}$ || ! "$EXPECTED_LOCAL" =~ ^[0-9a-f]{40}$ ]]; then
+            reason="inspect outputs did not contain exact 40-hex refs"
+          else
+            git remote remove openai 2>/dev/null || true
+            if ! git remote set-url origin https://github.com/cbusillo/codex-lab.git; then
+              reason="unable to configure canonical origin URL"
+            elif ! git remote add openai https://github.com/openai/codex.git; then
+              reason="unable to configure canonical openai URL"
+            elif [[ "$(git remote get-url origin)" != "https://github.com/cbusillo/codex-lab.git" ]]; then
+              reason="origin URL is not canonical"
+            elif [[ "$(git remote get-url openai)" != "https://github.com/openai/codex.git" ]]; then
+              reason="openai URL is not canonical"
+            elif ! git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main; then
+              reason="unable to fetch canonical origin/main"
+            elif ! git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main; then
+              reason="unable to fetch canonical openai/main"
+            elif ! git cat-file -e "${EXPECTED_BASE}^{commit}" || ! git cat-file -e "${EXPECTED_UPSTREAM}^{commit}" || ! git cat-file -e "${EXPECTED_LOCAL}^{commit}"; then
+              reason="inspect refs are not available as commits"
+            elif ! git merge-base --is-ancestor "$EXPECTED_LOCAL" refs/remotes/origin/main; then
+              reason="inspect local ref is not reachable from canonical origin/main"
+            elif ! git merge-base --is-ancestor "$EXPECTED_UPSTREAM" refs/remotes/openai/main; then
+              reason="inspect upstream ref is not reachable from canonical openai/main"
+            elif [[ "$(git merge-base "$EXPECTED_LOCAL" "$EXPECTED_UPSTREAM")" != "$EXPECTED_BASE" ]]; then
+              reason="inspect merge base does not match the pinned refs"
+            elif ! git -c core.hooksPath=/dev/null worktree add --detach "$candidate_dir" "$EXPECTED_UPSTREAM"; then
+              reason="unable to create isolated upstream worktree"
+            elif git -C "$candidate_dir" -c core.hooksPath=/dev/null merge --no-commit --no-ff "$EXPECTED_LOCAL"; then
+              preflight_status=0
+              python3 "$trusted_helper" preflight \
+                --candidate-dir "$candidate_dir" \
+                --download-dir "$downloads_dir" \
+                --output "$preflight" || preflight_status=$?
+              if (( preflight_status == 0 )); then
+                classification=clean
+                reason="upstream-first merge and trusted rusty_v8 preflight passed"
+              elif (( preflight_status == 3 )); then
+                classification="preflight-blocked"
+                reason="candidate data does not have a usable rusty_v8 artifact set"
+                echo "::warning title=Upstream convergence artifact preflight::Stage 3a recorded a candidate artifact blocker; this is not an infrastructure failure."
+              else
+                reason="trusted rusty_v8 preflight failed"
+              fi
+            else
+              git -C "$candidate_dir" diff --name-only --diff-filter=U > "$all_conflicts"
+              conflict_total=$(wc -l < "$all_conflicts" | tr -d ' ')
+              LC_ALL=C sort "$all_conflicts" | sed -n '1,200p' > "$conflicts"
+              if [[ -s "$conflicts" ]]; then
+                classification=conflict
+                reason="upstream-first merge has conflicts; compilation is deferred to stage 3b"
+                echo "::warning title=Upstream convergence candidate conflict::Stage 3a recorded bounded conflict evidence; this is not an infrastructure failure."
+              else
+                reason="upstream-first merge failed without conflict paths"
+              fi
+            fi
+          fi
+
+          if ! cleanup_worktree; then
+            classification=infrastructure
+            reason="temporary candidate worktree cleanup failed"
+            worktree_removed=false
+          fi
+          trap - EXIT
+          if [[ -n "$(git status --porcelain=v1 --untracked-files=all)" ]]; then
+            classification=infrastructure
+            reason="primary checkout is not clean after candidate preflight"
+            primary_checkout_clean=false
+          fi
+          if [[ "$helper_ready" == true ]]; then
+            python3 "$trusted_helper" write-evidence \
+              --classification "$classification" \
+              --reason "$reason" \
+              --base "$EXPECTED_BASE" \
+              --upstream "$EXPECTED_UPSTREAM" \
+              --local "$EXPECTED_LOCAL" \
+              --gate-status "$CANDIDATE_GATE_STATUS" \
+              --snapshot "$CANDIDATE_SNAPSHOT" \
+              --conflicts "$conflicts" \
+              --conflict-total "$conflict_total" \
+              --preflight "$preflight" \
+              --worktree-removed "$worktree_removed" \
+              --primary-checkout-clean "$primary_checkout_clean" \
+              --output-dir "$evidence_dir" \
+              --workflow-sha "$GITHUB_SHA" \
+              --run-id "$GITHUB_RUN_ID"
+            rm -f "$evidence_dir/candidate-bootstrap.json"
+          fi
+          if [[ "$classification" == infrastructure ]]; then
+            exit 1
+          fi
+
+      - name: Verify candidate cleanup and primary checkout
+        if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          test ! -e "$RUNNER_TEMP/upstream-convergence-candidate"
+          status=$(git status --porcelain=v1 --untracked-files=all)
+          if [[ -n "$status" ]]; then
+            printf '%s\n' "$status" | head -n 50
+            exit 1
+          fi
+
+      - name: Upload candidate evidence
+        if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-convergence-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstream-convergence-candidate-evidence
+          if-no-files-found: error
+          retention-days: 90
