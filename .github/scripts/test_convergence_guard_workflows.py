@@ -416,6 +416,33 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn('evidence["temporaryWorktreeRemoved"]', verify)
         self.assertIn('evidence["primaryCheckoutClean"]', verify)
 
+    def test_stage3c_runs_on_live_conflicts_and_plumbs_guard_digest(self) -> None:
+        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        checks = self.step("Run bounded candidate checks and select affected contracts")
+        packets = self.step("Build bounded model packets")
+
+        self.assertIn('cp upstream/convergence-guard.json "$trusted_guard"', helper)
+        self.assertIn("trusted_guard_sha", helper)
+        self.assertIn("TRUSTED_GUARD_SHA", checks)
+        self.assertIn('trusted_guard"', checks)
+        self.assertIn("TRUSTED_GUARD_SHA", packets)
+        self.assertIn("build-packets", packets)
+        self.assertIn("conflict-paths.txt", packets)
+        self.assertIn("root-failure-outcome.json", packets)
+        self.assertIn("always() && !cancelled()", packets)
+        self.assertNotIn("stage3b_ready", packets)
+        self.assertLess(self.contents.index("Build bounded model packets"), self.contents.index("Verify candidate cleanup"))
+
+    def test_stage3c_preserves_model_free_read_only_controls(self) -> None:
+        packets = self.step("Build bounded model packets")
+
+        for forbidden in ("git push", "git commit", "gh pr", "gh issue", "code exec", "codex exec", "just test", "cargo "):
+            self.assertNotIn(forbidden, packets)
+        self.assertIn("model-packets.json", packets)
+        self.assertIn("model-packets.txt", packets)
+        self.assertIn("model-telemetry.json", packets)
+        self.assertIn("test -f", packets)
+
     def test_permissions_remain_read_only(self) -> None:
         self.assertIn("permissions:\n  actions: read\n  contents: read", self.contents)
 

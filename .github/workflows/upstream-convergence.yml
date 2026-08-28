@@ -308,6 +308,7 @@ jobs:
           candidate_dir="$RUNNER_TEMP/upstream-convergence-candidate"
           downloads_dir="$RUNNER_TEMP/upstream-convergence-candidate-downloads"
           trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          trusted_guard="$RUNNER_TEMP/upstream-convergence-guard.json"
           trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
           trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
           conflicts="$evidence_dir/conflict-paths.txt"
@@ -324,6 +325,9 @@ jobs:
           if ! cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"; then
             helper_ready=false
             reason="unable to materialize trusted candidate helper"
+          elif ! cp upstream/convergence-guard.json "$trusted_guard"; then
+            helper_ready=false
+            reason="unable to materialize trusted convergence guard"
           elif ! cp upstream/convergence-gates.json "$trusted_gates"; then
             helper_ready=false
             reason="unable to materialize trusted convergence gates"
@@ -334,6 +338,7 @@ jobs:
           if [[ "$helper_ready" == true ]]; then
             {
               echo "trusted_helper_sha=$(/usr/bin/shasum -a 256 "$trusted_helper" | /usr/bin/awk '{print $1}')"
+              echo "trusted_guard_sha=$(/usr/bin/shasum -a 256 "$trusted_guard" | /usr/bin/awk '{print $1}')"
               echo "trusted_gates_sha=$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')"
               echo "trusted_extractor_sha=$(/usr/bin/shasum -a 256 "$trusted_extractor" | /usr/bin/awk '{print $1}')"
             } >> "$GITHUB_OUTPUT"
@@ -471,6 +476,7 @@ jobs:
           RUSTY_V8_ARCHIVE: ${{ runner.temp }}/upstream-convergence-candidate-downloads/librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz
           RUSTY_V8_SRC_BINDING_PATH: ${{ runner.temp }}/upstream-convergence-candidate-downloads/src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs
           TRUSTED_HELPER_SHA: ${{ steps.candidate.outputs.trusted_helper_sha }}
+          TRUSTED_GUARD_SHA: ${{ steps.candidate.outputs.trusted_guard_sha }}
           TRUSTED_GATES_SHA: ${{ steps.candidate.outputs.trusted_gates_sha }}
           TRUSTED_EXTRACTOR_SHA: ${{ steps.candidate.outputs.trusted_extractor_sha }}
         run: |
@@ -478,11 +484,13 @@ jobs:
           evidence_dir="$RUNNER_TEMP/upstream-convergence-candidate-evidence"
           candidate_dir="$RUNNER_TEMP/upstream-convergence-candidate"
           trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          trusted_guard="$RUNNER_TEMP/upstream-convergence-guard.json"
           trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
           trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
           candidate_dir=$(realpath "$candidate_dir")
           evidence_dir=$(realpath "$evidence_dir")
           trusted_helper=$(realpath "$trusted_helper")
+          trusted_guard=$(realpath "$trusted_guard")
           trusted_gates=$(realpath "$trusted_gates")
           trusted_extractor=$(realpath "$trusted_extractor")
           sandbox_profile="$(realpath "$RUNNER_TEMP")/upstream-candidate.sb"
@@ -514,6 +522,7 @@ jobs:
 
           verify_trusted() {
             [[ "$(/usr/bin/shasum -a 256 "$trusted_helper" | /usr/bin/awk '{print $1}')" == "$TRUSTED_HELPER_SHA" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_guard" | /usr/bin/awk '{print $1}')" == "$TRUSTED_GUARD_SHA" ]] &&
             [[ "$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')" == "$TRUSTED_GATES_SHA" ]] &&
             [[ "$(/usr/bin/shasum -a 256 "$trusted_extractor" | /usr/bin/awk '{print $1}')" == "$TRUSTED_EXTRACTOR_SHA" ]]
           }
@@ -534,6 +543,7 @@ jobs:
           (allow file-write* (subpath "$cargo_home"))
           (allow file-write* (subpath "$cargo_target"))
           (deny file-write* (literal "$trusted_helper"))
+          (deny file-write* (literal "$trusted_guard"))
           (deny file-write* (literal "$trusted_gates"))
           (deny file-write* (literal "$trusted_extractor"))
           (deny file-write* (literal "$sandbox_profile"))
@@ -689,6 +699,50 @@ jobs:
           fi
           if (( repo_infrastructure == 1 )) || [[ "$cargo_classification" == infrastructure ]] || (( root_infrastructure == 1 )); then
             exit 1
+          fi
+
+      - name: Build bounded model packets
+        if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
+        env:
+          TRUSTED_HELPER_SHA: ${{ steps.candidate.outputs.trusted_helper_sha }}
+          TRUSTED_GUARD_SHA: ${{ steps.candidate.outputs.trusted_guard_sha }}
+          TRUSTED_GATES_SHA: ${{ steps.candidate.outputs.trusted_gates_sha }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/upstream-convergence-candidate-evidence"
+          trusted_helper="$RUNNER_TEMP/upstream-candidate-preflight.py"
+          trusted_guard="$RUNNER_TEMP/upstream-convergence-guard.json"
+          trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
+          verify_trusted() {
+            [[ -f "$trusted_helper" && -f "$trusted_guard" && -f "$trusted_gates" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_helper" | /usr/bin/awk '{print $1}')" == "$TRUSTED_HELPER_SHA" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_guard" | /usr/bin/awk '{print $1}')" == "$TRUSTED_GUARD_SHA" ]] &&
+            [[ "$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')" == "$TRUSTED_GATES_SHA" ]]
+          }
+          verify_trusted
+          started_at=$(python3 - <<'PY'
+          from datetime import datetime, timezone
+          print(datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'))
+          PY
+          )
+          set +e
+          python3 "$trusted_helper" build-packets \
+            --evidence "$evidence_dir/candidate-evidence.json" \
+            --guard "$trusted_guard" \
+            --gates "$trusted_gates" \
+            --conflicts "$evidence_dir/conflict-paths.txt" \
+            --root-failures "$evidence_dir/root-failure-outcome.json" \
+            --output-dir "$evidence_dir" \
+            --cycle-id "$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" \
+            --started-at "$started_at" \
+            --duration-ms 0
+          status=$?
+          set -e
+          for output in model-packets.json model-packets.txt model-telemetry.json; do
+            test -f "$evidence_dir/$output"
+          done
+          if [[ "$status" != 0 ]]; then
+            exit "$status"
           fi
 
       - name: Verify candidate cleanup and primary checkout
