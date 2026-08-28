@@ -433,6 +433,37 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertNotIn("stage3b_ready", packets)
         self.assertLess(self.contents.index("Build bounded model packets"), self.contents.index("Verify candidate cleanup"))
 
+    def test_stage3d_is_trusted_ordered_and_live_read_only(self) -> None:
+        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        packets = self.step("Build bounded model packets")
+        checkpoint = self.step("Checkpoint repair cycles and build handoff")
+        upload = self.step("Upload candidate evidence")
+        self.assertIn('cp .github/scripts/upstream_convergence_repair_ledger.py "$trusted_repair_ledger"', helper)
+        self.assertIn("trusted_repair_ledger_sha", helper)
+        self.assertIn("always() && !cancelled()", checkpoint)
+        self.assertNotIn("stage3b_ready", checkpoint)
+        self.assertIn("--require-live", checkpoint)
+        self.assertIn('RUNNER_TEMP/upstream-convergence-repair-ledger.json', checkpoint)
+        self.assertIn("model-packets.json", checkpoint)
+        self.assertIn("model-telemetry.json", checkpoint)
+        self.assertIn("repair-handoff.txt", checkpoint)
+        self.assertIn("TRUSTED_REPAIR_LEDGER_SHA", checkpoint)
+        self.assertNotIn("secrets.", checkpoint)
+        self.assertNotIn("GH_TOKEN", checkpoint)
+        self.assertNotIn("git push", checkpoint)
+        self.assertNotIn("gh ", checkpoint)
+        self.assertLess(self.contents.index("Checkpoint repair cycles and build handoff"), self.contents.index("Verify candidate cleanup and primary checkout"))
+        self.assertIn("retention-days: 90", upload)
+
+    def test_stage3d_artifacts_are_bounded_and_evidence_is_preserved(self) -> None:
+        checkpoint = self.step("Checkpoint repair cycles and build handoff")
+        self.assertIn('test -f "$evidence_dir/repair-ledger.json"', checkpoint)
+        self.assertIn('test -f "$evidence_dir/repair-checkpoint.json"', checkpoint)
+        self.assertIn('wc -c < "$evidence_dir/repair-handoff.txt"', checkpoint)
+        self.assertIn("<= 8192", checkpoint)
+        self.assertLess(self.contents.index("Checkpoint repair cycles and build handoff"), self.contents.index("Upload candidate evidence"))
+        self.assertIn("${{ runner.temp }}/upstream-convergence-candidate-evidence", self.step("Upload candidate evidence"))
+
     def test_stage3c_preserves_model_free_read_only_controls(self) -> None:
         packets = self.step("Build bounded model packets")
 

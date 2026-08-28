@@ -311,6 +311,7 @@ jobs:
           trusted_guard="$RUNNER_TEMP/upstream-convergence-guard.json"
           trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
           trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
+          trusted_repair_ledger="$RUNNER_TEMP/upstream-convergence-repair-ledger.py"
           conflicts="$evidence_dir/conflict-paths.txt"
           all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"
           preflight="$evidence_dir/rusty-v8-preflight.json"
@@ -334,6 +335,9 @@ jobs:
           elif ! cp .github/scripts/extract_ci_root_failures.py "$trusted_extractor"; then
             helper_ready=false
             reason="unable to materialize trusted root-failure extractor"
+          elif ! cp .github/scripts/upstream_convergence_repair_ledger.py "$trusted_repair_ledger"; then
+            helper_ready=false
+            reason="unable to materialize trusted repair-ledger helper"
           fi
           if [[ "$helper_ready" == true ]]; then
             {
@@ -341,6 +345,7 @@ jobs:
               echo "trusted_guard_sha=$(/usr/bin/shasum -a 256 "$trusted_guard" | /usr/bin/awk '{print $1}')"
               echo "trusted_gates_sha=$(/usr/bin/shasum -a 256 "$trusted_gates" | /usr/bin/awk '{print $1}')"
               echo "trusted_extractor_sha=$(/usr/bin/shasum -a 256 "$trusted_extractor" | /usr/bin/awk '{print $1}')"
+              echo "trusted_repair_ledger_sha=$(/usr/bin/shasum -a 256 "$trusted_repair_ledger" | /usr/bin/awk '{print $1}')"
             } >> "$GITHUB_OUTPUT"
           fi
 
@@ -744,6 +749,30 @@ jobs:
           if [[ "$status" != 0 ]]; then
             exit "$status"
           fi
+
+      - name: Checkpoint repair cycles and build handoff
+        if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
+        env:
+          TRUSTED_REPAIR_LEDGER_SHA: ${{ steps.candidate.outputs.trusted_repair_ledger_sha }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/upstream-convergence-candidate-evidence"
+          trusted_repair_ledger="$RUNNER_TEMP/upstream-convergence-repair-ledger.py"
+          ledger="$RUNNER_TEMP/upstream-convergence-repair-ledger.json"
+          [[ -f "$trusted_repair_ledger" ]]
+          [[ "$(/usr/bin/shasum -a 256 "$trusted_repair_ledger" | /usr/bin/awk '{print $1}')" == "$TRUSTED_REPAIR_LEDGER_SHA" ]]
+          python3 "$trusted_repair_ledger" checkpoint \
+            --ledger "$ledger" \
+            --packets "$evidence_dir/model-packets.json" \
+            --telemetry "$evidence_dir/model-telemetry.json" \
+            --evidence "$evidence_dir/candidate-evidence.json" \
+            --output-dir "$evidence_dir" \
+            --cycle-id "$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" \
+            --require-live
+          test -f "$evidence_dir/repair-ledger.json"
+          test -f "$evidence_dir/repair-checkpoint.json"
+          test -f "$evidence_dir/repair-handoff.txt"
+          (( $(wc -c < "$evidence_dir/repair-handoff.txt") <= 8192 ))
 
       - name: Verify candidate cleanup and primary checkout
         if: ${{ always() && !cancelled() && steps.candidate.outcome != 'skipped' }}
