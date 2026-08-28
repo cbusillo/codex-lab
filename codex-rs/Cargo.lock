@@ -4162,6 +4162,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-owner-control-host"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "codex-owner-control-contract",
+ "ed25519-dalek",
+ "pretty_assertions",
+ "serde_json",
+ "time",
+]
+
+[[package]]
 name = "codex-plugin"
 version = "0.0.0"
 dependencies = [
