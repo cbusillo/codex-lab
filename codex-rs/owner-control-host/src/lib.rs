@@ -6,17 +6,21 @@
 use std::error::Error;
 use std::fmt;
 
+use codex_owner_control_contract::ApprovalRequest;
 use codex_owner_control_contract::ChallengeResponse;
 use codex_owner_control_contract::ChannelBindingRecord;
+use codex_owner_control_contract::Decision;
 use codex_owner_control_contract::OWNER_CONTROL_SCHEMA_VERSION;
 use codex_owner_control_contract::OWNER_CONTROL_SIGNATURE_ALGORITHM;
 use codex_owner_control_contract::OwnerControlConfirmationEnvelope;
 use codex_owner_control_contract::approval_request_digest;
-use codex_owner_control_contract::challenge_response_digest;
+use codex_owner_control_contract::canonical_json_sha256;
 use codex_owner_control_contract::channel_binding_sha256;
 use codex_owner_control_contract::signature_payload_bytes;
+use codex_owner_control_contract::verify_confirmation_signature_proof;
 use serde_json::Value;
 use time::OffsetDateTime;
+use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 
 /// Supplies the current instant without choosing a runtime or clock source.
@@ -115,73 +119,70 @@ impl Error for ConfirmationError {}
 
 /// A server-authored review presented without a caller-provided mutation path.
 pub struct PresentedOwnerConfirmation {
-    challenge_response: ChallengeResponse,
+    approval_request: ApprovalRequest,
     channel_binding: ChannelBindingRecord,
-    challenge_digest: String,
+    approval_request_digest: String,
     channel_binding_digest: String,
-    request_digest: String,
+    gesture_digest: String,
 }
 
 impl PresentedOwnerConfirmation {
     pub fn from_values(
-        challenge_response: Value,
+        approval_request: Value,
         channel_binding: Value,
     ) -> Result<Self, ConfirmationError> {
-        let challenge_response = ChallengeResponse::from_value(challenge_response)
+        let approval_request = ApprovalRequest::from_value(approval_request)
             .map_err(|_| ConfirmationError::InvalidContractInput)?;
         let channel_binding = ChannelBindingRecord::from_value(channel_binding)
             .map_err(|_| ConfirmationError::InvalidContractInput)?;
-        Self::new(challenge_response, channel_binding)
+        Self::new(approval_request, channel_binding)
     }
 
     pub fn new(
-        challenge_response: ChallengeResponse,
+        approval_request: ApprovalRequest,
         channel_binding: ChannelBindingRecord,
     ) -> Result<Self, ConfirmationError> {
-        validate_pair(&challenge_response, &channel_binding)?;
+        validate_pair(&approval_request, &channel_binding)?;
+        let approval_request_digest = approval_request_digest(&approval_request)
+            .map_err(|_| ConfirmationError::InvalidContractInput)?;
+        let channel_binding_digest = channel_binding_sha256(&channel_binding)
+            .map_err(|_| ConfirmationError::InvalidContractInput)?;
         Ok(Self {
-            challenge_digest: challenge_response_digest(&challenge_response)
-                .map_err(|_| ConfirmationError::InvalidContractInput)?,
-            channel_binding_digest: channel_binding_sha256(&channel_binding)
-                .map_err(|_| ConfirmationError::InvalidContractInput)?,
-            request_digest: challenge_response.approval_request.request_digest.clone(),
-            challenge_response,
+            gesture_digest: exact_gesture_digest(
+                &approval_request_digest,
+                &channel_binding_digest,
+            )?,
+            approval_request_digest,
+            channel_binding_digest,
+            approval_request,
             channel_binding,
         })
     }
 
     pub fn review(&self) -> &codex_owner_control_contract::ServerReviewPayload {
-        &self.challenge_response.approval_request.server_review
+        &self.approval_request.server_review
     }
 
-    pub fn acknowledge_owner(
-        self,
-        owner_github_id: i64,
-    ) -> Result<(ConfirmationFlow, OwnerGesture), ConfirmationError> {
-        if owner_github_id != self.challenge_response.approval_request.owner_github_id {
-            return Err(ConfirmationError::OwnerMismatch);
-        }
+    pub fn acknowledge_owner(self) -> (ConfirmationFlow, OwnerGesture) {
         let gesture = OwnerGesture {
-            challenge_digest: self.challenge_digest.clone(),
-            owner_github_id,
+            gesture_digest: self.gesture_digest.clone(),
         };
-        Ok((
+        (
             ConfirmationFlow {
-                challenge_response: self.challenge_response,
+                approval_request: self.approval_request,
                 channel_binding: self.channel_binding,
-                challenge_digest: self.challenge_digest,
+                approval_request_digest: self.approval_request_digest,
                 channel_binding_digest: self.channel_binding_digest,
-                request_digest: self.request_digest,
+                gesture_digest: self.gesture_digest,
             },
             gesture,
-        ))
+        )
     }
 }
 
 /// A private, consuming acknowledgement bound to one exact challenge digest.
 pub struct OwnerGesture {
-    challenge_digest: String,
-    owner_github_id: i64,
+    gesture_digest: String,
 }
 
 impl fmt::Debug for OwnerGesture {
@@ -192,11 +193,11 @@ impl fmt::Debug for OwnerGesture {
 
 /// A confirmation flow that can be consumed exactly once with its matching gesture.
 pub struct ConfirmationFlow {
-    challenge_response: ChallengeResponse,
+    approval_request: ApprovalRequest,
     channel_binding: ChannelBindingRecord,
-    challenge_digest: String,
+    approval_request_digest: String,
     channel_binding_digest: String,
-    request_digest: String,
+    gesture_digest: String,
 }
 
 impl ConfirmationFlow {
@@ -207,11 +208,23 @@ impl ConfirmationFlow {
         custody: &impl OwnerSigningCustody,
         replay_store: &mut impl OwnerControlReplayStore,
     ) -> Result<ConfirmedOwnerControlEnvelope, ConfirmationError> {
-        self.recheck(&gesture, clock.now())?;
+        let now = clock.now();
+        self.recheck(&gesture, now)?;
         replay_store
-            .check_and_insert(&self.challenge_digest)
+            .check_and_insert(&self.gesture_digest)
             .map_err(|_| ConfirmationError::ReplayRejected)?;
-        let payload = signature_payload_bytes(&self.challenge_response)
+        let challenge_response = ChallengeResponse {
+            schema_version: OWNER_CONTROL_SCHEMA_VERSION,
+            approval_request: self.approval_request,
+            approval_request_digest: self.approval_request_digest,
+            decision: Decision::Approved,
+            channel_binding_sha256: self.channel_binding_digest,
+            confirmed_at: canonical_timestamp(now)?,
+        };
+        challenge_response
+            .validate()
+            .map_err(|_| ConfirmationError::InvalidContractInput)?;
+        let payload = signature_payload_bytes(&challenge_response)
             .map_err(|_| ConfirmationError::InvalidContractInput)?;
         let signature = custody
             .sign_owner_confirmation(&payload)
@@ -219,13 +232,16 @@ impl ConfirmationFlow {
         let envelope = OwnerControlConfirmationEnvelope {
             schema_version: OWNER_CONTROL_SCHEMA_VERSION,
             channel_binding: self.channel_binding,
-            challenge_response: self.challenge_response,
+            challenge_response,
             signature_algorithm: OWNER_CONTROL_SIGNATURE_ALGORITHM.to_owned(),
             signature,
         };
         envelope
             .validate()
             .map_err(|_| ConfirmationError::InvalidCustodySignature)?;
+        if !verify_confirmation_signature_proof(&envelope) {
+            return Err(ConfirmationError::InvalidCustodySignature);
+        }
         Ok(ConfirmedOwnerControlEnvelope(envelope))
     }
 
@@ -234,32 +250,30 @@ impl ConfirmationFlow {
         gesture: &OwnerGesture,
         now: OffsetDateTime,
     ) -> Result<(), ConfirmationError> {
-        validate_pair(&self.challenge_response, &self.channel_binding)?;
-        if self.challenge_response.approval_request.request_digest != self.request_digest {
+        validate_pair(&self.approval_request, &self.channel_binding)?;
+        if approval_request_digest(&self.approval_request)
+            .map_err(|_| ConfirmationError::InvalidContractInput)?
+            != self.approval_request_digest
+        {
             return Err(ConfirmationError::InvalidContractInput);
         }
-        if challenge_response_digest(&self.challenge_response)
-            .map_err(|_| ConfirmationError::InvalidContractInput)?
-            != self.challenge_digest
-            || gesture.challenge_digest != self.challenge_digest
+        if exact_gesture_digest(&self.approval_request_digest, &self.channel_binding_digest)?
+            != self.gesture_digest
+            || gesture.gesture_digest != self.gesture_digest
         {
             return Err(ConfirmationError::GestureMismatch);
         }
         if channel_binding_sha256(&self.channel_binding)
             .map_err(|_| ConfirmationError::InvalidContractInput)?
             != self.channel_binding_digest
-            || self.challenge_response.channel_binding_sha256 != self.channel_binding_digest
         {
             return Err(ConfirmationError::InvalidContractInput);
         }
-        let owner_github_id = self.challenge_response.approval_request.owner_github_id;
-        if owner_github_id != self.channel_binding.owner_github_id
-            || owner_github_id != gesture.owner_github_id
-        {
+        if self.approval_request.owner_github_id != self.channel_binding.owner_github_id {
             return Err(ConfirmationError::OwnerMismatch);
         }
-        let request_issued_at = parse_time(&self.challenge_response.approval_request.issued_at)?;
-        let request_expires_at = parse_time(&self.challenge_response.approval_request.expires_at)?;
+        let request_issued_at = parse_time(&self.approval_request.issued_at)?;
+        let request_expires_at = parse_time(&self.approval_request.expires_at)?;
         let session_issued_at = parse_time(&self.channel_binding.session_issued_at)?;
         let session_expires_at = parse_time(&self.channel_binding.session_expires_at)?;
         if now < request_issued_at || now > request_expires_at {
@@ -292,34 +306,57 @@ impl fmt::Debug for ConfirmedOwnerControlEnvelope {
 }
 
 fn validate_pair(
-    challenge_response: &ChallengeResponse,
+    approval_request: &ApprovalRequest,
     channel_binding: &ChannelBindingRecord,
 ) -> Result<(), ConfirmationError> {
-    challenge_response
+    approval_request
         .validate()
         .map_err(|_| ConfirmationError::InvalidContractInput)?;
     channel_binding
         .validate()
         .map_err(|_| ConfirmationError::InvalidContractInput)?;
-    if challenge_response.schema_version != OWNER_CONTROL_SCHEMA_VERSION
-        || challenge_response.approval_request.schema_version != OWNER_CONTROL_SCHEMA_VERSION
-        || challenge_response
-            .approval_request
-            .server_review
-            .schema_version
-            != OWNER_CONTROL_SCHEMA_VERSION
+    if approval_request.schema_version != OWNER_CONTROL_SCHEMA_VERSION
+        || approval_request.server_review.schema_version != OWNER_CONTROL_SCHEMA_VERSION
         || channel_binding.schema_version != OWNER_CONTROL_SCHEMA_VERSION
-        || challenge_response.approval_request.owner_github_id != channel_binding.owner_github_id
-        || challenge_response.channel_binding_sha256
-            != channel_binding_sha256(channel_binding)
-                .map_err(|_| ConfirmationError::InvalidContractInput)?
-        || challenge_response.approval_request_digest
-            != approval_request_digest(&challenge_response.approval_request)
-                .map_err(|_| ConfirmationError::InvalidContractInput)?
+        || approval_request.owner_github_id != channel_binding.owner_github_id
     {
         return Err(ConfirmationError::InvalidContractInput);
     }
+    let request_issued_at = parse_time(&approval_request.issued_at)?;
+    let request_expires_at = parse_time(&approval_request.expires_at)?;
+    let session_issued_at = parse_time(&channel_binding.session_issued_at)?;
+    let session_expires_at = parse_time(&channel_binding.session_expires_at)?;
+    if request_issued_at < session_issued_at || request_expires_at > session_expires_at {
+        return Err(ConfirmationError::ChallengeOutsideSession);
+    }
     Ok(())
+}
+
+fn exact_gesture_digest(
+    approval_request_digest: &str,
+    channel_binding_digest: &str,
+) -> Result<String, ConfirmationError> {
+    canonical_json_sha256(&serde_json::json!({
+        "approval_request_digest": approval_request_digest,
+        "channel_binding_sha256": channel_binding_digest,
+    }))
+    .map_err(|_| ConfirmationError::InvalidContractInput)
+}
+
+fn canonical_timestamp(value: OffsetDateTime) -> Result<String, ConfirmationError> {
+    let value = value.to_offset(UtcOffset::UTC);
+    let year = value.year();
+    if !(1..=9999).contains(&year) {
+        return Err(ConfirmationError::InvalidContractInput);
+    }
+    let month = value.month() as u8;
+    let day = value.day();
+    let hour = value.hour();
+    let minute = value.minute();
+    let second = value.second();
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00"
+    ))
 }
 
 fn parse_time(value: &str) -> Result<OffsetDateTime, ConfirmationError> {

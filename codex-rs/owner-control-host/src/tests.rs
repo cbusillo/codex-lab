@@ -21,14 +21,13 @@ use super::*;
 fn confirms_a_canonical_challenge_as_a_complete_golden_envelope() {
     let (challenge, binding, signing_key) = synthetic_challenge();
     let expected = expected_envelope(&challenge, &binding, &signing_key);
-    let presented = PresentedOwnerConfirmation::new(challenge.clone(), binding).unwrap();
+    let presented =
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding).unwrap();
     assert_eq!(
         presented.review(),
         &challenge.approval_request.server_review
     );
-    let (flow, gesture) = presented
-        .acknowledge_owner(challenge.approval_request.owner_github_id)
-        .unwrap();
+    let (flow, gesture) = presented.acknowledge_owner();
     let custody = SyntheticCustody::new(signing_key);
 
     let envelope = flow
@@ -65,15 +64,14 @@ fn published_structural_confirmation_negatives_remain_rejected() {
 fn gesture_from_one_challenge_cannot_confirm_another() {
     let (first_challenge, first_binding, _) = synthetic_challenge();
     let (second_challenge, second_binding, signing_key) = synthetic_challenge_with_seed([8; 32]);
-    let (_, first_gesture) = PresentedOwnerConfirmation::new(first_challenge, first_binding)
-        .unwrap()
-        .acknowledge_owner(second_challenge.approval_request.owner_github_id)
-        .unwrap();
-    let (second_flow, _) =
-        PresentedOwnerConfirmation::new(second_challenge.clone(), second_binding)
+    let (_, first_gesture) =
+        PresentedOwnerConfirmation::new(first_challenge.approval_request, first_binding)
             .unwrap()
-            .acknowledge_owner(second_challenge.approval_request.owner_github_id)
-            .unwrap();
+            .acknowledge_owner();
+    let (second_flow, _) =
+        PresentedOwnerConfirmation::new(second_challenge.approval_request.clone(), second_binding)
+            .unwrap()
+            .acknowledge_owner();
     let custody = SyntheticCustody::new(signing_key);
 
     let error = second_flow
@@ -92,10 +90,9 @@ fn gesture_from_one_challenge_cannot_confirm_another() {
 #[test]
 fn expiry_between_presentation_and_confirmation_never_calls_custody() {
     let (challenge, binding, signing_key) = synthetic_challenge();
-    let (flow, gesture) = PresentedOwnerConfirmation::new(challenge.clone(), binding)
+    let (flow, gesture) = PresentedOwnerConfirmation::new(challenge.approval_request, binding)
         .unwrap()
-        .acknowledge_owner(challenge.approval_request.owner_github_id)
-        .unwrap();
+        .acknowledge_owner();
     let custody = SyntheticCustody::new(signing_key);
 
     let error = flow
@@ -115,14 +112,13 @@ fn expiry_between_presentation_and_confirmation_never_calls_custody() {
 fn replay_rejection_precedes_custody() {
     let (challenge, binding, signing_key) = synthetic_challenge();
     let (first_flow, first_gesture) =
-        PresentedOwnerConfirmation::new(challenge.clone(), binding.clone())
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding.clone())
             .unwrap()
-            .acknowledge_owner(challenge.approval_request.owner_github_id)
-            .unwrap();
-    let (second_flow, second_gesture) = PresentedOwnerConfirmation::new(challenge.clone(), binding)
-        .unwrap()
-        .acknowledge_owner(challenge.approval_request.owner_github_id)
-        .unwrap();
+            .acknowledge_owner();
+    let (second_flow, second_gesture) =
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding)
+            .unwrap()
+            .acknowledge_owner();
     let custody = SyntheticCustody::new(signing_key);
     let mut replay_store = InMemoryReplayStore::default();
 
@@ -150,10 +146,10 @@ fn replay_rejection_precedes_custody() {
 #[test]
 fn custody_failure_is_redacted_and_never_returns_an_envelope() {
     let (challenge, binding, _) = synthetic_challenge();
-    let (flow, gesture) = PresentedOwnerConfirmation::new(challenge.clone(), binding)
-        .unwrap()
-        .acknowledge_owner(challenge.approval_request.owner_github_id)
-        .unwrap();
+    let (flow, gesture) =
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding)
+            .unwrap()
+            .acknowledge_owner();
     let custody = FailingCustody::default();
 
     let error = flow
@@ -175,13 +171,35 @@ fn custody_failure_is_redacted_and_never_returns_an_envelope() {
 }
 
 #[test]
+fn custody_must_sign_with_the_enrolled_session_key() {
+    let (challenge, binding, _) = synthetic_challenge();
+    let (flow, gesture) =
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding)
+            .unwrap()
+            .acknowledge_owner();
+    let custody = SyntheticCustody::new(SigningKey::from_bytes(&[9; 32]));
+
+    let error = flow
+        .confirm(
+            gesture,
+            &FixedClock::at(&challenge.confirmed_at),
+            &custody,
+            &mut InMemoryReplayStore::default(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error, ConfirmationError::InvalidCustodySignature);
+    assert_eq!(custody.calls.get(), 1);
+}
+
+#[test]
 fn acknowledgement_never_auto_signs() {
     let (challenge, binding, signing_key) = synthetic_challenge();
     let custody = SyntheticCustody::new(signing_key);
-    let (flow, gesture) = PresentedOwnerConfirmation::new(challenge.clone(), binding)
-        .unwrap()
-        .acknowledge_owner(challenge.approval_request.owner_github_id)
-        .unwrap();
+    let (flow, gesture) =
+        PresentedOwnerConfirmation::new(challenge.approval_request.clone(), binding)
+            .unwrap()
+            .acknowledge_owner();
 
     assert_eq!(custody.calls.get(), 0);
     flow.confirm(

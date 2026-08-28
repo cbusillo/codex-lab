@@ -2,8 +2,6 @@
 
 """Guard the inert owner-control contract and host dependency boundary."""
 
-from __future__ import annotations
-
 import sys
 import tomllib
 import unittest
