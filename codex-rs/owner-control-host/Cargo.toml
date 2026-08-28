@@ -1,0 +1,23 @@
+[package]
+name = "codex-owner-control-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_owner_control_host"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-owner-control-contract = { workspace = true }
+serde_json = { workspace = true }
+time = { workspace = true, features = ["parsing"] }
+
+[dev-dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+pretty_assertions = { workspace = true }
