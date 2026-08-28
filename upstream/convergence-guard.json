@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "repository": "openai/codex",
-  "ownershipBaseline": {"base": "b89ce9a2bcedcfddf3a48f387b7912d602d6d87c", "current": "abf16eeccaa6a6be2bd04b41ca25453bc5042a35", "local": "8add494682f7c0674672e8dc5b38a4565cd7629b", "upstream": "4462b9deef211723b781b426f5e5d36a5777115f"},
+  "ownershipBaseline": {"base": "b89ce9a2bcedcfddf3a48f387b7912d602d6d87c", "current": "92892feb4dc2db283dcd97968aceb6ad78f46c79", "local": "8add494682f7c0674672e8dc5b38a4565cd7629b", "upstream": "4462b9deef211723b781b426f5e5d36a5777115f"},
   "policy": {"guardedLanes": ["intentionally_owned", "red_manual_review"], "rule": "An owned path may not be absent from the candidate, and may not match the recorded upstream blob, without an explicit waiver.", "sources": {"current_tree": "Owned path in the candidate tree, so owned work created or restored after the baseline is guarded without hand-editing.", "ownership_baseline": "Owned path that already differed from upstream at the pre-anchor local baseline."}},
   "summary": {"guardedLaneCounts": {"intentionally_owned": 472, "red_manual_review": 27}, "guardedPaths": 499, "guardedSourceCounts": {"current_tree": 224, "ownership_baseline": 275}},
   "guardedPaths": [
@@ -476,7 +476,7 @@
     {"baselineBlob": "e63b1a1152a7ace26aff0dba9d731112f5090044", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/README.md", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
     {"baselineBlob": "2c71fc065155f1717f54f2bdcea58537d6cc7712", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-contracts.md", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
     {"baselineBlob": "fdfc1e04abc585d15be60bcd13bb8bbe15feddb0", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-gates.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
-    {"baselineBlob": "f61c5512d032f2020f2c57ea4172fdb1a3c6b3e2", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-guard.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
+    {"baselineBlob": "3917fa73187066cbd2232f99afffe36f08f4286c", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-guard.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
     {"baselineBlob": "ccccfceeff6dc30fde1cdcadca634579b000b159", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-policy.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
     {"baselineBlob": "ca3a4b5609541b0b191e090b642437c8d42ddff7", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-reachability-baseline.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
     {"baselineBlob": "38d2a37a3a946c5f4cf63bfba672bfa3b278c3d8", "contracts": ["GOVERNANCE-1"], "lane": "intentionally_owned", "path": "upstream/convergence-waivers.json", "reason": "upstream convergence policy, evidence, and enforcement", "source": "current_tree", "upstreamBlob": null},
