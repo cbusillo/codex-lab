@@ -52,7 +52,7 @@ impl ValidationError {
         }
     }
 
-    fn at_field(self, field: &'static str) -> Self {
+    pub(crate) fn at_field(self, field: &'static str) -> Self {
         Self::Nested {
             prefix: vec![ErrorLocation::Field(field.to_owned())],
             source: Box::new(self),
@@ -333,7 +333,7 @@ fn validate_text_length(
     Ok(())
 }
 
-fn validate_identifier(value: &str, field: &'static str) -> Result<(), ValidationError> {
+pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<(), ValidationError> {
     validate_pattern(
         value.as_bytes(),
         field,
@@ -427,7 +427,7 @@ fn is_python_whitespace(character: char) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Timestamp {
+pub(crate) struct Timestamp {
     year: u16,
     month: u8,
     day: u8,
@@ -436,7 +436,10 @@ struct Timestamp {
     second: u8,
 }
 
-fn parse_timestamp(value: &str, field: &'static str) -> Result<Timestamp, ValidationError> {
+pub(crate) fn parse_timestamp(
+    value: &str,
+    field: &'static str,
+) -> Result<Timestamp, ValidationError> {
     let bytes = value.as_bytes();
     let valid_shape = bytes.len() == 25
         && bytes[4] == b'-'
