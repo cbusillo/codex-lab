@@ -218,28 +218,26 @@ impl ChatWidget {
             ThreadItem::ContextCompaction { .. } => {
                 self.add_info_message("Context compacted".to_string(), /*hint*/ None);
             }
-            ThreadItem::ProjectValidation {
-                command,
-                command_truncated,
-                status,
-                skip_reason,
-                changed_file_count,
-                exit_code,
-                output_truncated,
-                duration_ms,
+            ThreadItem::FunctionCallOutput {
+                name,
+                namespace,
+                output,
                 ..
-            } => self.add_to_history(history_cell::new_project_validation_cell(
-                history_cell::ProjectValidationCellData {
-                    status,
-                    skip_reason,
-                    changed_file_count,
-                    command: &command,
-                    command_truncated,
-                    exit_code,
-                    duration_ms,
-                    output_truncated,
-                },
-            )),
+            } => {
+                if let Some((source_thread_id, prompt)) =
+                    crate::dynamic_tools::parse_delegated_tool_output(
+                        &name,
+                        namespace.as_deref(),
+                        &output,
+                    )
+                {
+                    self.add_to_history(history_cell::PrefixedWrappedHistoryCell::new(
+                        format!("Sent by Codex from task {source_thread_id}\n{prompt}"),
+                        "• ".dim(),
+                        "  ",
+                    ));
+                }
+            }
             ThreadItem::HookPrompt { .. } => {}
             ThreadItem::CollabAgentToolCall {
                 id,

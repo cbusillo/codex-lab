@@ -583,53 +583,35 @@
         }
       ]
     },
+    "AuthRecoveryNotification": {
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message",
+        "provider",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "AutoReviewDecisionSource": {
       "description": "[UNSTABLE] Source that produced a terminal approval auto-review decision.",
       "enum": [
         "agent"
       ],
       "type": "string"
-    },
-    "BackgroundAutoReviewStatus": {
-      "enum": [
-        "pending",
-        "running",
-        "completed",
-        "failed",
-        "cancelled",
-        "superseded",
-        "skipped"
-      ],
-      "type": "string"
-    },
-    "BackgroundAutoReviewStatusChangedNotification": {
-      "properties": {
-        "errorSummary": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "reviewTarget": {
-          "$ref": "#/definitions/ReviewTarget"
-        },
-        "runId": {
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/definitions/BackgroundAutoReviewStatus"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "reviewTarget",
-        "runId",
-        "status",
-        "threadId"
-      ],
-      "type": "object"
     },
     "ByteRange": {
       "properties": {
@@ -658,6 +640,7 @@
             "contextWindowExceeded",
             "sessionBudgetExceeded",
             "usageLimitExceeded",
+            "rateLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
             "misalignmentPolicyViolation",
@@ -824,7 +807,11 @@
         "sendInput",
         "resumeAgent",
         "wait",
-        "closeAgent"
+        "closeAgent",
+        "sendMessage",
+        "followupTask",
+        "interruptAgent",
+        "listAgents"
       ],
       "type": "string"
     },
@@ -832,7 +819,8 @@
       "enum": [
         "inProgress",
         "completed",
-        "failed"
+        "failed",
+        "interrupted"
       ],
       "type": "string"
     },
@@ -1054,237 +1042,6 @@
       ],
       "type": "string"
     },
-    "ConfigLayerMetadata": {
-      "properties": {
-        "name": {
-          "$ref": "#/definitions/ConfigLayerSource"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "version"
-      ],
-      "type": "object"
-    },
-    "ConfigLayerSource": {
-      "oneOf": [
-        {
-          "description": "Default configuration supplied with the installed Codex package.",
-          "properties": {
-            "file": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/AbsolutePathBuf"
-                }
-              ],
-              "description": "Path to the packaged default configuration file."
-            },
-            "type": {
-              "enum": [
-                "packagedDefaults"
-              ],
-              "title": "PackagedDefaultsConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "file",
-            "type"
-          ],
-          "title": "PackagedDefaultsConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "Managed preferences layer delivered by MDM (macOS only).",
-          "properties": {
-            "domain": {
-              "type": "string"
-            },
-            "key": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "mdm"
-              ],
-              "title": "MdmConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "domain",
-            "key",
-            "type"
-          ],
-          "title": "MdmConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "Managed config layer from a file (usually `managed_config.toml`).",
-          "properties": {
-            "file": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/AbsolutePathBuf"
-                }
-              ],
-              "description": "This is the path to the system config.toml file, though it is not guaranteed to exist."
-            },
-            "type": {
-              "enum": [
-                "system"
-              ],
-              "title": "SystemConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "file",
-            "type"
-          ],
-          "title": "SystemConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "Enterprise-managed config layer delivered by the cloud config bundle.",
-          "properties": {
-            "id": {
-              "description": "Stable identifier for the delivered layer.",
-              "type": "string"
-            },
-            "name": {
-              "description": "Admin-facing name for the delivered layer. This is surfaced in diagnostics so users know which cloud layer needs administrator attention.",
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "enterpriseManaged"
-              ],
-              "title": "EnterpriseManagedConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "name",
-            "type"
-          ],
-          "title": "EnterpriseManagedConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "User config layer from $CODEX_LAB_HOME/config.toml. This layer is special in that it is expected to be: - writable by the user - generally outside the workspace directory",
-          "properties": {
-            "file": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/AbsolutePathBuf"
-                }
-              ],
-              "description": "This is the path to the user's config.toml file, though it is not guaranteed to exist."
-            },
-            "profile": {
-              "description": "Name of the selected profile-v2 config layered on top of the base user config, when this layer represents one.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "enum": [
-                "user"
-              ],
-              "title": "UserConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "file",
-            "type"
-          ],
-          "title": "UserConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "Path to a .codex/ folder within a project. There could be multiple of these between `cwd` and the project/repo root.",
-          "properties": {
-            "dotCodexFolder": {
-              "$ref": "#/definitions/AbsolutePathBuf"
-            },
-            "type": {
-              "enum": [
-                "project"
-              ],
-              "title": "ProjectConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "dotCodexFolder",
-            "type"
-          ],
-          "title": "ProjectConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "Session-layer overrides supplied via `-c`/`--config`.",
-          "properties": {
-            "type": {
-              "enum": [
-                "sessionFlags"
-              ],
-              "title": "SessionFlagsConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "SessionFlagsConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "description": "`managed_config.toml` was designed to be a config that was loaded as the last layer on top of everything else. This scheme did not quite work out as intended, but we keep this variant as a \"best effort\" while we phase out `managed_config.toml` in favor of `requirements.toml`.",
-          "properties": {
-            "file": {
-              "$ref": "#/definitions/AbsolutePathBuf"
-            },
-            "type": {
-              "enum": [
-                "legacyManagedConfigTomlFromFile"
-              ],
-              "title": "LegacyManagedConfigTomlFromFileConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "file",
-            "type"
-          ],
-          "title": "LegacyManagedConfigTomlFromFileConfigLayerSource",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "legacyManagedConfigTomlFromMdm"
-              ],
-              "title": "LegacyManagedConfigTomlFromMdmConfigLayerSourceType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "LegacyManagedConfigTomlFromMdmConfigLayerSource",
-          "type": "object"
-        }
-      ]
-    },
     "ConfigWarningNotification": {
       "properties": {
         "details": {
@@ -1494,93 +1251,6 @@
       ],
       "type": "object"
     },
-    "ExternalAgentAuthState": {
-      "enum": [
-        "authenticated",
-        "notAuthenticated",
-        "notProbed",
-        "unknown"
-      ],
-      "type": "string"
-    },
-    "ExternalAgentCapabilitiesRefreshStatus": {
-      "enum": [
-        "completed",
-        "cancelled",
-        "deadlineExceeded"
-      ],
-      "type": "string"
-    },
-    "ExternalAgentCapabilitiesUpdatedNotification": {
-      "properties": {
-        "providers": {
-          "items": {
-            "$ref": "#/definitions/ExternalAgentProviderCapabilities"
-          },
-          "type": "array"
-        },
-        "refreshId": {
-          "type": "string"
-        },
-        "status": {
-          "$ref": "#/definitions/ExternalAgentCapabilitiesRefreshStatus"
-        }
-      },
-      "required": [
-        "providers",
-        "refreshId",
-        "status"
-      ],
-      "type": "object"
-    },
-    "ExternalAgentCapabilityFailure": {
-      "properties": {
-        "kind": {
-          "$ref": "#/definitions/ExternalAgentCapabilityFailureKind"
-        },
-        "message": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "kind",
-        "message"
-      ],
-      "type": "object"
-    },
-    "ExternalAgentCapabilityFailureKind": {
-      "enum": [
-        "commandMissing",
-        "authenticationRequired",
-        "quotaOrRateLimited",
-        "permissionDenied",
-        "unsupportedMode",
-        "timedOut",
-        "malformedOutput",
-        "emptyOutput",
-        "launchFailed",
-        "providerFailed"
-      ],
-      "type": "string"
-    },
-    "ExternalAgentCapabilityFreshness": {
-      "enum": [
-        "fresh",
-        "cached",
-        "unknown"
-      ],
-      "type": "string"
-    },
-    "ExternalAgentCapabilitySource": {
-      "enum": [
-        "staticCatalog",
-        "localCli",
-        "notProbed",
-        "conservativeFallback",
-        "cacheMiss"
-      ],
-      "type": "string"
-    },
     "ExternalAgentConfigImportCompletedNotification": {
       "properties": {
         "importId": {
@@ -1736,180 +1406,6 @@
         "SESSIONS"
       ],
       "type": "string"
-    },
-    "ExternalAgentInstallState": {
-      "enum": [
-        "installed",
-        "notInstalled",
-        "unknown"
-      ],
-      "type": "string"
-    },
-    "ExternalAgentProviderCapabilities": {
-      "properties": {
-        "auth": {
-          "$ref": "#/definitions/ExternalAgentAuthState"
-        },
-        "cliVersion": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "command": {
-          "type": "string"
-        },
-        "effortLevels": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "failure": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ExternalAgentCapabilityFailure"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "family": {
-          "type": "string"
-        },
-        "freshness": {
-          "$ref": "#/definitions/ExternalAgentCapabilityFreshness"
-        },
-        "install": {
-          "$ref": "#/definitions/ExternalAgentInstallState"
-        },
-        "observedAt": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "selectors": {
-          "items": {
-            "$ref": "#/definitions/ExternalAgentSelectorState"
-          },
-          "type": "array"
-        },
-        "source": {
-          "$ref": "#/definitions/ExternalAgentCapabilitySource"
-        },
-        "supportsEffortSelection": {
-          "type": "boolean"
-        },
-        "supportsModelSelection": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "auth",
-        "command",
-        "effortLevels",
-        "family",
-        "freshness",
-        "install",
-        "selectors",
-        "source",
-        "supportsEffortSelection",
-        "supportsModelSelection"
-      ],
-      "type": "object"
-    },
-    "ExternalAgentSelectorState": {
-      "properties": {
-        "defaultEffort": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "defaultEffortOrigin": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ExternalAgentSettingOrigin"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "defaultModel": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "defaultModelOrigin": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ExternalAgentSettingOrigin"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "discovered": {
-          "type": "boolean"
-        },
-        "enabled": {
-          "type": "boolean"
-        },
-        "enabledOrigin": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ExternalAgentSettingOrigin"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "explicitOnly": {
-          "type": "boolean"
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "selector": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "discovered",
-        "enabled",
-        "explicitOnly",
-        "selector"
-      ],
-      "type": "object"
-    },
-    "ExternalAgentSettingOrigin": {
-      "properties": {
-        "configPath": {
-          "type": "string"
-        },
-        "layer": {
-          "$ref": "#/definitions/ConfigLayerMetadata"
-        },
-        "readOnly": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "configPath",
-        "layer",
-        "readOnly"
-      ],
-      "type": "object"
     },
     "FileChangeOutputDeltaNotification": {
       "description": "Deprecated legacy notification for `apply_patch` textual output.\n\nThe server no longer emits this notification.",
@@ -2205,6 +1701,114 @@
       ],
       "type": "object"
     },
+    "FunctionCallOutputBody": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/definitions/FunctionCallOutputContentItem"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "FunctionCallOutputContentItem": {
+      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_text"
+              ],
+              "title": "InputTextFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_image"
+              ],
+              "title": "InputImageFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "title": "InputImageFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "audio_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_audio"
+              ],
+              "title": "InputAudioFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "audio_url",
+            "type"
+          ],
+          "title": "InputAudioFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "encrypted_content": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "encrypted_content"
+              ],
+              "title": "EncryptedContentFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "encrypted_content",
+            "type"
+          ],
+          "title": "EncryptedContentFunctionCallOutputContentItem",
+          "type": "object"
+        }
+      ]
+    },
     "FuzzyFileSearchMatchType": {
       "enum": [
         "file",
@@ -2410,6 +2014,39 @@
             "type"
           ],
           "title": "ExecveGuardianApprovalReviewAction",
+          "type": "object"
+        },
+        {
+          "description": "A child approval for input to an existing command execution item.",
+          "properties": {
+            "approvalId": {
+              "type": "string"
+            },
+            "cwd": {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            "processId": {
+              "type": "string"
+            },
+            "stdin": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "writeStdin"
+              ],
+              "title": "WriteStdinGuardianApprovalReviewActionType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "approvalId",
+            "cwd",
+            "processId",
+            "stdin",
+            "type"
+          ],
+          "title": "WriteStdinGuardianApprovalReviewAction",
           "type": "object"
         },
         {
@@ -2918,7 +2555,7 @@
           "type": "integer"
         },
         "targetItemId": {
-          "description": "Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+          "description": "Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - stdin reviews, which refer to the existing parent command item and have a separate approval ID in the action payload - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
           "type": [
             "string",
             "null"
@@ -2962,7 +2599,7 @@
           "type": "integer"
         },
         "targetItemId": {
-          "description": "Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
+          "description": "Identifier for the reviewed item or tool call when one exists.\n\nIn most cases, one review maps to one target item. The exceptions are - execve reviews, where a single command may contain multiple execve calls to review (only possible when using the shell_zsh_fork feature) - stdin reviews, which refer to the existing parent command item and have a separate approval ID in the action payload - network policy reviews, where there is no target item\n\nA network call is triggered by a CommandExecution item, so having a target_item_id set to the CommandExecution item would be misleading because the review is about the network call, not the command execution. Therefore, target_item_id is set to None for network policy reviews.",
           "type": [
             "string",
             "null"
@@ -3277,6 +2914,47 @@
           "type": "string"
         }
       ]
+    },
+    "MisalignmentErrorDetails": {
+      "properties": {
+        "detailedExplanation": {
+          "description": "A substantive localized explanation is required before offering continuation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorType": {
+          "description": "Open-ended classification; clients must accept categories added by Responses.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steer": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentSteer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Instruction to submit as the next turn's user input if continuation is confirmed."
+        }
+      },
+      "type": "object"
+    },
+    "MisalignmentSteer": {
+      "properties": {
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
     },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
@@ -3672,115 +3350,6 @@
       ],
       "type": "object"
     },
-    "ProjectValidationCompletedNotification": {
-      "description": "One completed project-validation command execution. An actionable first execution may be followed by one bounded correction cycle and a second completion notification.",
-      "properties": {
-        "changedFileCount": {
-          "format": "uint32",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "command": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "commandTruncated": {
-          "type": "boolean"
-        },
-        "cwd": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/AbsolutePathBuf"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "durationMs": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "exitCode": {
-          "format": "int32",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "itemId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "output": {
-          "type": "string"
-        },
-        "outputTruncated": {
-          "type": "boolean"
-        },
-        "skipReason": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/ProjectValidationSkipReason"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "status": {
-          "$ref": "#/definitions/ProjectValidationStatus"
-        },
-        "threadId": {
-          "type": "string"
-        },
-        "turnId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "command",
-        "commandTruncated",
-        "durationMs",
-        "output",
-        "outputTruncated",
-        "status",
-        "threadId",
-        "turnId"
-      ],
-      "type": "object"
-    },
-    "ProjectValidationSkipReason": {
-      "enum": [
-        "validationDisabled",
-        "noChangedFiles",
-        "noApplicableProvider",
-        "nonRootAgent",
-        "unchangedFingerprint",
-        "unsupportedEnvironment"
-      ],
-      "type": "string"
-    },
-    "ProjectValidationStatus": {
-      "enum": [
-        "passed",
-        "actionableFailure",
-        "configurationError",
-        "timedOut",
-        "infrastructureFailure",
-        "cancelled",
-        "skipped"
-      ],
-      "type": "string"
-    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",
@@ -4086,118 +3655,6 @@
       },
       "type": "object"
     },
-    "ReviewTarget": {
-      "oneOf": [
-        {
-          "description": "Review the working tree: staged, unstaged, and untracked files.",
-          "properties": {
-            "type": {
-              "enum": [
-                "uncommittedChanges"
-              ],
-              "title": "UncommittedChangesReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "UncommittedChangesReviewTarget",
-          "type": "object"
-        },
-        {
-          "description": "Review the changes made by a completed turn.",
-          "properties": {
-            "fingerprint": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "currentTurnDiff"
-              ],
-              "title": "CurrentTurnDiffReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "fingerprint",
-            "type"
-          ],
-          "title": "CurrentTurnDiffReviewTarget",
-          "type": "object"
-        },
-        {
-          "description": "Review changes between the current branch and the given base branch.",
-          "properties": {
-            "branch": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "baseBranch"
-              ],
-              "title": "BaseBranchReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "branch",
-            "type"
-          ],
-          "title": "BaseBranchReviewTarget",
-          "type": "object"
-        },
-        {
-          "description": "Review the changes introduced by a specific commit.",
-          "properties": {
-            "sha": {
-              "type": "string"
-            },
-            "title": {
-              "description": "Optional human-readable label (e.g., commit subject) for UIs.",
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "type": {
-              "enum": [
-                "commit"
-              ],
-              "title": "CommitReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "sha",
-            "type"
-          ],
-          "title": "CommitReviewTarget",
-          "type": "object"
-        },
-        {
-          "description": "Arbitrary instructions, equivalent to the old free-form prompt.",
-          "properties": {
-            "instructions": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "custom"
-              ],
-              "title": "CustomReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "instructions",
-            "type"
-          ],
-          "title": "CustomReviewTarget",
-          "type": "object"
-        }
-      ]
-    },
     "SandboxPolicy": {
       "oneOf": [
         {
@@ -4310,56 +3767,6 @@
         "requestId",
         "threadId"
       ],
-      "type": "object"
-    },
-    "SessionProvenance": {
-      "description": "Structured provenance for a thread started by an external orchestrator.\n\nThese fields are descriptive metadata only. Runtime authorization and product filtering must continue to use server-side policy and `source`.",
-      "properties": {
-        "issueNumber": {
-          "default": null,
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "issueUrl": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "origin": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "repository": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "requestId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "source": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
       "type": "object"
     },
     "SessionSource": {
@@ -4713,7 +4120,7 @@
             }
           ],
           "default": "legacy",
-          "description": "Persisted thread history contract selected when this thread was created.\n\nThis field is part of the published stable `Thread` surface; keep it non-experimental so existing clients continue to receive it."
+          "description": "Persisted thread history contract selected when this thread was created."
         },
         "id": {
           "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
@@ -4787,18 +4194,6 @@
         "sessionId": {
           "description": "Session id shared by threads that belong to the same session tree.",
           "type": "string"
-        },
-        "sessionProvenance": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SessionProvenance"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional structured launch provenance supplied by an external agent orchestrator."
         },
         "source": {
           "allOf": [
@@ -4899,13 +4294,6 @@
     },
     "ThreadExtra": {
       "description": "Extra app-server data for a thread.",
-      "properties": {
-        "automaticValidationEnabled": {
-          "default": false,
-          "description": "Effective functional Automatic Validation state for subsequent turns.",
-          "type": "boolean"
-        }
-      },
       "type": "object"
     },
     "ThreadGoal": {
@@ -5124,6 +4512,40 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "output": {
+              "$ref": "#/definitions/FunctionCallOutputBody"
+            },
+            "type": {
+              "enum": [
+                "functionCallOutput"
+              ],
+              "title": "FunctionCallOutputThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "output",
+            "type"
+          ],
+          "title": "FunctionCallOutputThreadItem",
           "type": "object"
         },
         {
@@ -5424,14 +4846,6 @@
               "format": "int64",
               "type": [
                 "integer",
-                "null"
-              ]
-            },
-            "error": {
-              "default": null,
-              "description": "Failure detail persisted with the call, when the tool reported one.",
-              "type": [
-                "string",
                 "null"
               ]
             },
@@ -5813,90 +5227,6 @@
             "type"
           ],
           "title": "ContextCompactionThreadItem",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "changedFileCount": {
-              "format": "uint32",
-              "minimum": 0.0,
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "command": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "commandTruncated": {
-              "type": "boolean"
-            },
-            "cwd": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/AbsolutePathBuf"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "durationMs": {
-              "format": "uint64",
-              "minimum": 0.0,
-              "type": "integer"
-            },
-            "exitCode": {
-              "format": "int32",
-              "type": [
-                "integer",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "output": {
-              "type": "string"
-            },
-            "outputTruncated": {
-              "type": "boolean"
-            },
-            "skipReason": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/ProjectValidationSkipReason"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "status": {
-              "$ref": "#/definitions/ProjectValidationStatus"
-            },
-            "type": {
-              "enum": [
-                "projectValidation"
-              ],
-              "title": "ProjectValidationThreadItemType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "command",
-            "commandTruncated",
-            "durationMs",
-            "id",
-            "output",
-            "outputTruncated",
-            "status",
-            "type"
-          ],
-          "title": "ProjectValidationThreadItem",
           "type": "object"
         }
       ]
@@ -6832,6 +6162,18 @@
         },
         "message": {
           "type": "string"
+        },
+        "misalignment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MisalignmentErrorDetails"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional public explanation and continuation instruction for a misalignment block."
         }
       },
       "required": [
@@ -7718,46 +7060,6 @@
       "properties": {
         "method": {
           "enum": [
-            "validation/completed"
-          ],
-          "title": "Validation/completedNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/ProjectValidationCompletedNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "Validation/completedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
-            "review/backgroundStatus/changed"
-          ],
-          "title": "Review/backgroundStatus/changedNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/BackgroundAutoReviewStatusChangedNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "Review/backgroundStatus/changedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
             "hook/started"
           ],
           "title": "Hook/startedNotificationMethod",
@@ -8363,26 +7665,6 @@
       "properties": {
         "method": {
           "enum": [
-            "externalAgentCapability/updated"
-          ],
-          "title": "ExternalAgentCapability/updatedNotificationMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/ExternalAgentCapabilitiesUpdatedNotification"
-        }
-      },
-      "required": [
-        "method",
-        "params"
-      ],
-      "title": "ExternalAgentCapability/updatedNotification",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "method": {
-          "enum": [
             "fs/changed"
           ],
           "title": "Fs/changedNotificationMethod",
@@ -8518,6 +7800,46 @@
         "params"
       ],
       "title": "Model/verificationNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "modelProvider/authRecoveryStarted"
+          ],
+          "title": "ModelProvider/authRecoveryStartedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuthRecoveryNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ModelProvider/authRecoveryStartedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "modelProvider/authRecoveryCompleted"
+          ],
+          "title": "ModelProvider/authRecoveryCompletedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/AuthRecoveryNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ModelProvider/authRecoveryCompletedNotification",
       "type": "object"
     },
     {

@@ -1,9 +1,5 @@
 // Aggregates all former standalone integration tests as modules.
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
-use codex_config::ConfigLayerEntry;
-use codex_config::ConfigLayerSource;
-use codex_config::ConfigLayerStack;
-use codex_core::config::Config;
 #[cfg(unix)]
 use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
 use codex_exec_server::CODEX_FS_HELPER_ARG1;
@@ -12,65 +8,6 @@ use codex_test_binary_support::TestBinaryDispatchGuard;
 use codex_test_binary_support::TestBinaryDispatchMode;
 use codex_test_binary_support::configure_test_binary_dispatch;
 use ctor::ctor;
-use std::num::NonZeroUsize;
-use walkdir::WalkDir;
-
-fn configure_hermetic_skill_catalog(config: &mut Config) {
-    config.include_skill_instructions = true;
-    config.skill_max_context_tokens = NonZeroUsize::new(10_000);
-
-    let requirements = config.config_layer_stack.requirements().clone();
-    let requirements_toml = config.config_layer_stack.requirements_toml().clone();
-    let mut layers = config
-        .config_layer_stack
-        .all_layers_low_to_high()
-        .filter(|layer| matches!(layer.name, ConfigLayerSource::User { .. }))
-        .cloned()
-        .collect::<Vec<_>>();
-    let disabled_skills = dirs::home_dir()
-        .into_iter()
-        .flat_map(|home_dir| {
-            WalkDir::new(home_dir.join(".agents/skills"))
-                .max_depth(6)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
-                .filter_map(|entry| entry.path().canonicalize().ok())
-        })
-        .map(|path| {
-            let mut entry = toml::map::Map::new();
-            entry.insert(
-                "path".to_string(),
-                toml::Value::String(path.to_string_lossy().into_owned()),
-            );
-            entry.insert("enabled".to_string(), toml::Value::Boolean(false));
-            toml::Value::Table(entry)
-        })
-        .collect::<Vec<_>>();
-    let mut skills = toml::map::Map::new();
-    skills.insert(
-        "bundled".to_string(),
-        toml::Value::Table(toml::map::Map::from_iter([(
-            "enabled".to_string(),
-            toml::Value::Boolean(false),
-        )])),
-    );
-    skills.insert(
-        "max_context_tokens".to_string(),
-        toml::Value::Integer(10_000),
-    );
-    skills.insert("config".to_string(), toml::Value::Array(disabled_skills));
-    layers.push(ConfigLayerEntry::new(
-        ConfigLayerSource::SessionFlags,
-        toml::Value::Table(toml::map::Map::from_iter([(
-            "skills".to_string(),
-            toml::Value::Table(skills),
-        )])),
-    ));
-    config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
-        .expect("hermetic skill catalog config should be valid");
-}
 
 // This code runs before any other tests are run.
 // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
@@ -108,7 +45,6 @@ mod apply_patch_serialization;
 mod approvals;
 mod audio_truncation;
 mod auto_review;
-mod background_review;
 mod catalog_permission_messages;
 mod cli_stream;
 mod client;
@@ -124,14 +60,14 @@ mod compact_remote_parity;
 mod compact_resume_fork;
 mod context_annotations;
 mod current_time_reminder;
+mod cyber_access_program;
 mod cyber_exec_policy;
+mod daybreak_access;
 mod deprecation_notice;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
-#[cfg(not(target_os = "windows"))]
-mod external_agent_preflight;
 mod external_auth;
 mod fork_thread;
 mod git_enrichment;
@@ -152,12 +88,12 @@ mod image_rollout;
 mod injected_models_cache;
 #[cfg(not(target_os = "windows"))]
 mod interrupt_hooks;
-mod invalid_image_recovery;
 mod items;
 mod json_result;
 mod live_cli;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
+mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
@@ -182,7 +118,6 @@ mod pending_input;
 mod permissions_messages;
 mod personality;
 mod plugins;
-mod project_validation;
 mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
@@ -213,13 +148,16 @@ mod safety_buffering;
 mod safety_check_downgrade;
 mod search_tool;
 mod send_user_message_async;
-mod session_provenance;
+mod settings_commits;
+mod settings_constraints;
 mod shell_snapshot;
 mod skill_approval;
 mod skills;
 mod skills_extension;
 mod spawn_agent_description;
 mod sqlite_state;
+mod step_settings;
+mod step_settings_snapshots;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
 mod subagent_notifications;
@@ -228,13 +166,12 @@ mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
 mod tools;
-mod tools_disabled;
 mod truncation;
-mod turn_context_environments;
 mod turn_input_submission;
 mod turn_state;
 mod unified_exec;
 mod unified_exec_process_events;
+mod unified_exec_stdin_review_size;
 #[cfg(unix)]
 mod unified_exec_zsh_fork_approvals;
 mod unstable_features_warning;

@@ -68,7 +68,7 @@ pub(super) fn usage_hint_text(
     }
 
     let catalog = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -158,7 +158,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     }
 
     let catalog_mode = turn_context
-        .model_info
+        .model_info()
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())

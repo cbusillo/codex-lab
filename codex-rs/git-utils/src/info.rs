@@ -7,13 +7,12 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
-use sha2::Sha256;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use ts_rs::TS;
 
 use crate::GitSha;
+use crate::SanitizedGitUrl;
 use crate::git_process::run_git_command_with_timeout_output;
 
 /// Return `true` if the project folder specified by the `Config` is inside a
@@ -51,7 +50,7 @@ pub struct GitInfo {
     pub branch: Option<String>,
     /// Repository URL (if available from remote)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub repository_url: Option<String>,
+    pub repository_url: Option<SanitizedGitUrl>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -112,14 +111,14 @@ pub async fn collect_git_info(cwd: &Path) -> Option<GitInfo> {
         && output.status.success()
         && let Ok(url) = String::from_utf8(output.stdout)
     {
-        git_info.repository_url = Some(url.trim().to_string());
+        git_info.repository_url = SanitizedGitUrl::try_from(url.trim()).ok();
     }
 
     Some(git_info)
 }
 
 /// Collect fetch remotes in a multi-root-friendly format: {"origin": "https://..."}.
-pub async fn get_git_remote_urls(cwd: &Path) -> Option<BTreeMap<String, String>> {
+pub async fn get_git_remote_urls(cwd: &Path) -> Option<BTreeMap<String, SanitizedGitUrl>> {
     let is_git_repo = run_git_command_with_timeout(&["rev-parse", "--git-dir"], cwd)
         .await?
         .status
@@ -132,7 +131,9 @@ pub async fn get_git_remote_urls(cwd: &Path) -> Option<BTreeMap<String, String>>
 }
 
 /// Collect fetch remotes without checking whether `cwd` is in a git repo.
-pub async fn get_git_remote_urls_assume_git_repo(cwd: &Path) -> Option<BTreeMap<String, String>> {
+pub async fn get_git_remote_urls_assume_git_repo(
+    cwd: &Path,
+) -> Option<BTreeMap<String, SanitizedGitUrl>> {
     let output = run_git_command_with_timeout(&["remote", "-v"], cwd).await?;
     if !output.status.success() {
         return None;
@@ -260,97 +261,7 @@ fn trim_git_suffix(value: &str) -> &str {
     value.strip_suffix(".git").unwrap_or(value)
 }
 
-pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
-    get_git_repo_root(cwd)?;
-    let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
-        return Some("unknown".to_string());
-    };
-    diff_fingerprint(&diff)
-}
-
-pub fn diff_fingerprint(diff: &str) -> Option<String> {
-    if diff.trim().is_empty() {
-        return None;
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(diff.as_bytes());
-    Some(format!("sha256:{:x}", hasher.finalize()))
-}
-
-pub async fn get_worktree_changed_files(cwd: &Path) -> Option<Vec<PathBuf>> {
-    get_worktree_changed_files_from(cwd, /*base_sha*/ None).await
-}
-
-pub async fn get_worktree_changed_files_since(
-    cwd: &Path,
-    base_sha: &GitSha,
-) -> Option<Vec<PathBuf>> {
-    get_worktree_changed_files_from(cwd, Some(base_sha)).await
-}
-
-async fn get_worktree_changed_files_from(
-    cwd: &Path,
-    base_sha: Option<&GitSha>,
-) -> Option<Vec<PathBuf>> {
-    let repo_root = get_git_repo_root(cwd)?;
-    let tracked_output = if let Some(base_sha) = base_sha {
-        run_git_command_with_timeout(
-            &[
-                "diff",
-                "--name-only",
-                "--diff-filter=ACMR",
-                "-z",
-                &base_sha.0,
-                "--",
-            ],
-            &repo_root,
-        )
-        .await?
-    } else if get_head_commit_hash(&repo_root).await.is_some() {
-        run_git_command_with_timeout(
-            &[
-                "diff",
-                "--name-only",
-                "--diff-filter=ACMR",
-                "-z",
-                "HEAD",
-                "--",
-            ],
-            &repo_root,
-        )
-        .await?
-    } else {
-        run_git_command_with_timeout(&["ls-files", "--cached", "-z"], &repo_root).await?
-    };
-    if !tracked_output.status.success() {
-        return None;
-    }
-    let mut files = parse_nul_separated_paths(&tracked_output.stdout)?;
-
-    let untracked_output = run_git_command_with_timeout(
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        &repo_root,
-    )
-    .await?;
-    if !untracked_output.status.success() {
-        return None;
-    }
-    files.extend(parse_nul_separated_paths(&untracked_output.stdout)?);
-    files.sort();
-    files.dedup();
-    Some(files)
-}
-
-fn parse_nul_separated_paths(output: &[u8]) -> Option<Vec<PathBuf>> {
-    output
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8(path.to_vec()).ok().map(PathBuf::from))
-        .collect()
-}
-
-fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
+fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, SanitizedGitUrl>> {
     let mut remotes = BTreeMap::new();
     for line in stdout.lines() {
         let Some(fetch_line) = line.strip_suffix(" (fetch)") else {
@@ -365,8 +276,10 @@ fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
         };
 
         let url = url_part.trim_start();
-        if !url.is_empty() {
-            remotes.insert(name.to_string(), url.to_string());
+        if !url.is_empty()
+            && let Ok(url) = SanitizedGitUrl::try_from(url)
+        {
+            remotes.insert(name.to_string(), url);
         }
     }
 
@@ -1011,6 +924,103 @@ mod tests {
         for remote in ["", "file:///tmp/repo", "github.com/openai", "/tmp/repo"] {
             assert_eq!(canonicalize_git_remote_url(remote), None);
         }
+    }
+
+    /// Fetch remotes must be sanitized before they enter workspace metadata.
+    #[test]
+    fn parse_git_remote_urls_sanitizes_fetch_credentials() {
+        let remotes = parse_git_remote_urls(
+            "origin\thttps://alice:secret@github.com/org/repo.git (fetch)\n\
+             origin\thttps://alice:secret@github.com/org/repo.git (push)\n\
+             upstream\tgit@github.com:org/upstream.git (fetch)\n",
+        );
+
+        assert_eq!(
+            remotes,
+            Some(BTreeMap::from([
+                (
+                    "origin".to_string(),
+                    SanitizedGitUrl::try_from("https://github.com/org/repo.git")
+                        .expect("parse expected remote URL"),
+                ),
+                (
+                    "upstream".to_string(),
+                    SanitizedGitUrl::try_from("git@github.com:org/upstream.git")
+                        .expect("parse expected remote URL"),
+                ),
+            ]))
+        );
+    }
+
+    /// Malformed remote entries are omitted instead of leaking their raw contents.
+    #[test]
+    fn parse_git_remote_urls_skips_malformed_entries() {
+        let remotes = parse_git_remote_urls(
+            "bad\thttps://alice:secret@[invalid (fetch)\n\
+             origin\thttps://github.com/org/repo.git (fetch)\n",
+        );
+
+        assert_eq!(
+            remotes,
+            Some(BTreeMap::from([(
+                "origin".to_string(),
+                SanitizedGitUrl::try_from("https://github.com/org/repo.git")
+                    .expect("parse expected remote URL"),
+            )]))
+        );
+    }
+
+    /// Both metadata collection paths must sanitize credentials introduced by `insteadOf`.
+    #[tokio::test]
+    async fn git_metadata_collection_sanitizes_rewritten_remote_credentials() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path();
+
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo)
+            .status()
+            .expect("initialize test repository");
+        assert!(status.success(), "initialize test repository");
+
+        let status = std::process::Command::new("git")
+            .args([
+                "config",
+                "url.https://alice:secret-token@example.invalid/.insteadOf",
+                "https://short.invalid/",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("configure credential-bearing remote rewrite");
+        assert!(
+            status.success(),
+            "configure credential-bearing remote rewrite"
+        );
+
+        let status = std::process::Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://short.invalid/org/repo.git",
+            ])
+            .current_dir(repo)
+            .status()
+            .expect("configure rewritten remote");
+        assert!(status.success(), "configure rewritten remote");
+
+        let git_info = collect_git_info(repo).await.expect("collect git info");
+        let remotes = get_git_remote_urls_assume_git_repo(repo).await;
+        let expected = SanitizedGitUrl::try_from("https://example.invalid/org/repo.git")
+            .expect("parse expected remote URL");
+
+        assert_eq!(
+            (git_info.repository_url, remotes),
+            (
+                Some(expected.clone()),
+                Some(BTreeMap::from([("origin".to_string(), expected)])),
+            )
+        );
     }
 
     #[tokio::test]

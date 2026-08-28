@@ -14,6 +14,7 @@ use codex_app_server_protocol::ActivePermissionProfile;
 use codex_app_server_protocol::ApprovalsReviewer;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
@@ -48,6 +49,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -57,12 +59,11 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem as ProtocolRolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::read_session_meta_line;
@@ -105,7 +106,6 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -803,7 +803,14 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .await??;
         turn_ids.push(completed.turn.id);
     }
-    mcp.clear_message_buffer();
+    // Stop the source before its active goal exists so a late idle hook cannot continue it.
+    timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
+    drop(mcp);
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
@@ -834,24 +841,6 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .get_thread_goal(source_thread_id)
         .await?
         .expect("source goal");
-
-    let ordinary_fork_id = mcp
-        .send_thread_fork_request(ThreadForkParams {
-            thread_id: source_thread.id.clone(),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadForkResponse {
-        thread: ordinary_fork,
-        ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(ordinary_fork_id)).await??;
-    assert_eq!(
-        state_db
-            .thread_goals()
-            .get_thread_goal(ThreadId::from_string(&ordinary_fork.id)?)
-            .await?,
-        None
-    );
 
     let mut forked_threads = Vec::new();
     for (last_turn_id, before_turn_id, expected_turn_count) in [
@@ -1433,7 +1422,7 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
-            thread_id: forked_thread_id,
+            thread_id: forked_thread_id.clone(),
             input: vec![UserInput::Text {
                 text: "Continue from the fork".to_string(),
                 text_elements: Vec::new(),
@@ -1453,6 +1442,19 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
         .find(|request| request.url.path().ends_with("/responses"))
         .expect("forked turn response request");
     let request_body = response_request.body_json::<Value>()?;
+    let turn_metadata: Value = serde_json::from_str(
+        request_body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("forked turn metadata"),
+    )?;
+    assert_eq!(
+        turn_metadata["forked_from_thread_id"].as_str(),
+        Some(conversation_id.as_str())
+    );
+    assert_eq!(
+        turn_metadata["forked_from_ordinal_exclusive"].as_u64(),
+        Some(history_base.end_ordinal_exclusive)
+    );
     let model_input = request_body["input"]
         .as_array()
         .expect("response input array");
@@ -1476,34 +1478,131 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
     let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
     assert_eq!(excluded_turns_meta.meta.history_base, Some(history_base));
+
+    let ThreadForkResponse {
+        thread: nested_thread,
+        ..
+    } = mcp
+        .request(|request_id| ClientRequest::ThreadFork {
+            request_id,
+            params: ThreadForkParams {
+                thread_id: forked_thread_id.clone(),
+                exclude_turns: true,
+                ..ThreadForkParams::default()
+            },
+        })
+        .await?;
+    assert_eq!(nested_thread.forked_from_id, Some(forked_thread_id.clone()));
+    assert_eq!(nested_thread.history_mode, ThreadHistoryMode::Paginated);
+    assert!(nested_thread.turns.is_empty());
+    let nested_path = nested_thread.path.expect("nested fork rollout path");
+    let nested_meta = read_session_meta_line(nested_path.as_path()).await?;
+    assert_eq!(
+        nested_meta
+            .meta
+            .history_base
+            .expect("nested fork history base")
+            .thread_id,
+        ThreadId::from_string(forked_thread_id.as_str())?
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn thread_fork_persists_developer_interruption_marker_for_root_thread_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ false)
-        .await
+async fn thread_fork_warns_for_paginated_full_history_hydration() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let conversation_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let _: DeprecationNoticeNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("deprecationNotice"),
+    )
+    .await??;
+    let _: ThreadForkResponse = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
+
+    mcp.clear_message_buffer();
+    let metadata_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadForkResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(metadata_fork_id)).await??;
+    assert!(
+        !mcp.pending_notification_methods()
+            .contains(&"deprecationNotice".to_string())
+    );
+
+    mcp.clear_message_buffer();
+    let invalid_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: conversation_id,
+            last_turn_id: Some("turn-1".to_string()),
+            before_turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let _: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid_fork_id)),
+    )
+    .await??;
+    assert!(
+        !mcp.pending_notification_methods()
+            .contains(&"deprecationNotice".to_string())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_fork_freezes_active_paginated_turn_as_interrupted() -> Result<()> {
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V1).await
 }
 
 #[tokio::test]
 async fn thread_fork_persists_developer_interruption_marker_for_multi_agent_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ true).await
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V2).await
 }
 
 async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
-    fork_as_subagent: bool,
+    multi_agent_version: MultiAgentVersion,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    // MultiAgentV2 is the mandatory default whenever agents are enabled. The source distinguishes
-    // the root-thread and subagent cases; it no longer selects between V1 and V2 implementations.
     let config = MockResponsesConfig::new(&server.uri());
-    let thread_source = if fork_as_subagent {
-        Some(ThreadSource::Subagent)
-    } else {
-        None
+    let (config, expected_marker_role, thread_source) = match multi_agent_version {
+        MultiAgentVersion::V2 => (
+            config.enable_feature(Feature::MultiAgentV2),
+            "developer",
+            Some(ThreadSource::Subagent),
+        ),
+        MultiAgentVersion::V1 => (config, "user", None),
+        MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
     };
-    const EXPECTED_MARKER_ROLE: &str = "developer";
     config.write(codex_home.path())?;
     let source_thread_id = create_fake_paginated_rollout(
         codex_home.path(),
@@ -1616,60 +1715,37 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .await?;
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
+    let history_base = read_session_meta_line(forked_path.as_path())
+        .await?
+        .meta
+        .history_base
+        .expect("fork history base");
     let child_rollout = std::fs::read_to_string(forked_path.as_path())?
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(child_rollout.len(), 4);
     assert!(matches!(
-        child_rollout.first(),
-        Some(RolloutLine {
-            item: ProtocolRolloutItem::SessionMeta(_),
-            ..
-        })
+        child_rollout.as_slice(),
+        [
+            RolloutLine { item: RolloutItem::SessionMeta(_), .. },
+            RolloutLine {
+                item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+                ..
+            },
+            RolloutLine {
+                item: RolloutItem::ResponseItem(response_item),
+                ..
+            },
+            RolloutLine {
+                item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
+                ..
+            },
+        ] if matches!(
+            &response_item.item,
+            codex_protocol::models::ResponseItem::Message { role, .. }
+                if role == expected_marker_role
+        ) && aborted.turn_id.as_deref() == Some("active-turn")
     ));
-    assert!(matches!(
-        child_rollout.get(1),
-        Some(RolloutLine {
-            item: ProtocolRolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
-            ..
-        })
-    ));
-    let interruption_marker_index = child_rollout
-        .iter()
-        .position(|line| {
-            matches!(
-                line,
-                RolloutLine {
-                    item: ProtocolRolloutItem::ResponseItem(
-                        codex_protocol::models::ResponseItem::Message {
-                            role,
-                            content,
-                            ..
-                        }
-                    ),
-                    ..
-                } if role == EXPECTED_MARKER_ROLE
-                    && content.iter().any(|item| matches!(
-                        item,
-                        ContentItem::InputText { text } if text.contains("<turn_aborted>")
-                    ))
-            )
-        })
-        .expect("forked rollout should persist the interruption marker");
-    let turn_aborted_index = child_rollout
-        .iter()
-        .position(|line| {
-            matches!(
-                line,
-                RolloutLine {
-                    item: ProtocolRolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
-                    ..
-                } if aborted.turn_id.as_deref() == Some("active-turn")
-            )
-        })
-        .expect("forked rollout should persist the active turn abort event");
-    assert!(interruption_marker_index < turn_aborted_index);
 
     append_rollout_item_to_path(source_path.as_path(), &user_response_item("after-fork")).await?;
     append_rollout_item_to_path(
@@ -1722,7 +1798,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(!serialized_input.contains("after-fork model input"));
     assert!(input.as_array().is_some_and(|items| {
         items.iter().any(|item| {
-            item["role"] == EXPECTED_MARKER_ROLE
+            item["role"] == expected_marker_role
                 && item["content"].as_array().is_some_and(|content| {
                     content.iter().any(|fragment| {
                         fragment["text"]
@@ -1875,9 +1951,22 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .find(|request| request.url.path().ends_with("/responses"))
         .expect("cold-resumed model request")
         .body_json::<Value>()?;
+    let turn_metadata: Value = serde_json::from_str(
+        request_body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("cold-resumed turn metadata"),
+    )?;
+    assert_eq!(
+        turn_metadata["forked_from_thread_id"].as_str(),
+        Some(source_thread_id.as_str())
+    );
+    assert_eq!(
+        turn_metadata["forked_from_ordinal_exclusive"].as_u64(),
+        Some(history_base.end_ordinal_exclusive)
+    );
     let model_input = request_body["input"].as_array().expect("model input");
     assert!(model_input.iter().any(|item| {
-        item["role"] == EXPECTED_MARKER_ROLE
+        item["role"] == expected_marker_role
             && item["content"].as_array().is_some_and(|content| {
                 content.iter().any(|fragment| {
                     fragment["text"]

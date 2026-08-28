@@ -188,6 +188,7 @@ pub(crate) fn command_actions_for_path_uri(
 ///
 /// Currently this only synthesizes [`ThreadItem::CommandExecution`] for
 /// [`GuardianAssessmentAction::Command`] and [`GuardianAssessmentAction::Execve`].
+/// Stdin reviews are child approvals and must not change the parent item lifecycle.
 pub fn build_item_from_guardian_event(
     assessment: &GuardianAssessmentEvent,
     status: CommandExecutionStatus,
@@ -252,7 +253,8 @@ pub fn build_item_from_guardian_event(
                 duration_ms: None,
             })
         }
-        GuardianAssessmentAction::ApplyPatch { .. }
+        GuardianAssessmentAction::WriteStdin { .. }
+        | GuardianAssessmentAction::ApplyPatch { .. }
         | GuardianAssessmentAction::NetworkAccess { .. }
         | GuardianAssessmentAction::McpToolCall { .. }
         | GuardianAssessmentAction::RequestPermissions { .. } => None,

@@ -1,7 +1,6 @@
-use super::external::ExternalAgentSpawn;
 use super::residency::is_v2_resident_session_source;
 use super::*;
-use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
+use crate::agent::role::apply_role_to_config;
 use crate::codex_thread::CodexThread;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
@@ -10,8 +9,7 @@ use crate::context::DeveloperInstructions;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
-use crate::environment_selection::EnvironmentConfigOrigin;
-use crate::environment_selection::TurnEnvironmentState;
+use crate::context::world_state::PersistentModeState;
 use crate::session::multi_agents::resolve_usage_hints;
 use crate::tools::handlers::multi_agents_common::build_agent_resume_config;
 use codex_context_fragments::set_annotated_content;
@@ -28,39 +26,16 @@ struct SpawnAgentThreadInheritance {
     exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
 }
 
-fn apply_resolved_environment_selections(
-    mut environments: TurnEnvironmentSnapshot,
-    selections: Option<&[TurnEnvironmentSelection]>,
-) -> TurnEnvironmentSnapshot {
-    let Some(selections) = selections else {
-        return environments;
-    };
-    for environment in &mut environments.environments {
-        let TurnEnvironmentState::Ready(environment) = environment else {
-            continue;
-        };
-        let Some(selection) = selections.iter().find(|selection| {
-            selection.environment_id == environment.selection.environment_id
-                && selection.cwd == environment.selection.cwd
-                && selection.workspace_roots == environment.selection.workspace_roots
-        }) else {
-            continue;
-        };
-        environment.selection = selection.clone();
-        environment.config_origin = EnvironmentConfigOrigin::Owner;
-    }
-    environments
-}
-
 /// Initial input delivered after a spawned agent acquires execution capacity.
 ///
 /// V2 communication spawns keep the communication and its context paired so centralized
 /// submission and lifecycle logging cannot receive one without the other. Other spawn sources
 /// provide user input directly, making an uncontextualized inter-agent communication
 /// unrepresentable.
-pub(super) enum SpawnInitialInput {
+#[allow(clippy::large_enum_variant)]
+enum SpawnInitialInput {
     UserInput(Vec<UserInput>),
-    InterAgentCommunication(Box<(InterAgentCommunication, AgentCommunicationContext)>),
+    InterAgentCommunication(InterAgentCommunication, AgentCommunicationContext),
 }
 
 fn default_agent_nickname_list() -> Vec<&'static str> {
@@ -129,6 +104,7 @@ fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[
     if !matches!(item, ResponseItem::Message { role, .. } if role == "developer") {
         return true;
     }
+
     let Some(mut content) = to_annotated_content(item) else {
         return false;
     };
@@ -291,7 +267,7 @@ impl AgentControl {
     ) -> CodexResult<LiveAgent> {
         Box::pin(self.spawn_agent_internal(
             config,
-            SpawnInitialInput::InterAgentCommunication(Box::new((communication, context))),
+            SpawnInitialInput::InterAgentCommunication(communication, context),
             session_source,
             options,
         ))
@@ -365,19 +341,14 @@ impl AgentControl {
                 include_history: false,
             })
             .await?;
+        let stored_model = stored_thread.model.clone();
+        let stored_model_provider = stored_thread.model_provider.clone();
+        let stored_reasoning_effort = stored_thread.reasoning_effort.clone();
         let stored_source = stored_thread.source.clone();
         let stored_parent_thread_id = stored_thread.parent_thread_id;
-        let stored_model = stored_thread.model.clone();
-        let stored_model_provider_id = stored_thread.model_provider.clone();
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
-        let stored_reasoning_effort = stored_thread.reasoning_effort.or_else(|| {
-            history.iter().rev().find_map(|item| match item {
-                RolloutItem::TurnContext(context) => context.effort.clone(),
-                _ => None,
-            })
-        });
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history: Arc::new(history),
@@ -407,12 +378,8 @@ impl AgentControl {
                 return Ok(());
             }
         }
-        let restore_persisted_model_settings = if let Some(role_name) =
-            session_source.get_agent_role()
-        {
-            let role_uses_config_file =
-                crate::agent::role::resolve_role_config_owned(&config, &role_name)
-                    .is_some_and(|role| role.config_file.is_some());
+        config.model_reasoning_effort = stored_reasoning_effort;
+        if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
             let runtime_cwd = config.cwd.clone();
@@ -429,7 +396,7 @@ impl AgentControl {
                 ),
             };
 
-            apply_role_to_config_for_multi_agent_v2(&mut config, Some(&role_name))
+            apply_role_to_config(&mut config, Some(&role_name))
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
             config
@@ -447,30 +414,21 @@ impl AgentControl {
                 .map_err(|err| {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
-            !role_uses_config_file
-        } else {
-            true
-        };
-        if restore_persisted_model_settings && stored_model_provider_id == config.model_provider_id
-        {
-            config.model = stored_model;
-            config.model_reasoning_effort = stored_reasoning_effort;
-        } else if restore_persisted_model_settings
-            && let Some(stored_model_provider) = config
+        }
+        if let Some(model) = stored_model {
+            config.model = Some(model);
+        }
+        if config.model_provider_id != stored_model_provider {
+            config.model_provider = config
                 .model_providers
-                .get(&stored_model_provider_id)
+                .get(&stored_model_provider)
                 .cloned()
-        {
-            config.model = stored_model;
-            config.model_provider = stored_model_provider;
-            config.model_provider_id = stored_model_provider_id;
-            config.model_reasoning_effort = stored_reasoning_effort;
-        } else {
-            tracing::warn!(
-                %thread_id,
-                model_provider_id = %stored_model_provider_id,
-                "persisted child model provider is unavailable; using the current resume configuration"
-            );
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "Model provider `{stored_model_provider}` not found"
+                    ))
+                })?;
+            config.model_provider_id = stored_model_provider;
         }
         let parent_thread_id = owner_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id())
@@ -498,10 +456,10 @@ impl AgentControl {
                     let owner_environment = parent_environments
                         .turn_environments()
                         .find(|environment| {
-                            environment.selection.environment_id == *environment_id
-                                && environment.cwd() == &selection.cwd
-                                && environment.workspace_roots()
-                                    == selection.workspace_roots.as_slice()
+                            let parent_selection = &environment.selection;
+                            parent_selection.environment_id == selection.environment_id
+                                && parent_selection.cwd == selection.cwd
+                                && parent_selection.workspace_roots == selection.workspace_roots
                         })
                         .ok_or_else(|| {
                             invalid_environment("no longer matches a ready parent environment")
@@ -536,8 +494,8 @@ impl AgentControl {
                     let cwd = selection.cwd.to_abs_path().map_err(|_| {
                         invalid_environment("working directory is not a local absolute path")
                     })?;
-                    let roots = selection
-                        .workspace_roots
+                    let roots = owner_environment
+                        .workspace_roots()
                         .iter()
                         .map(PathUri::to_abs_path)
                         .collect::<Result<Vec<_>, _>>()
@@ -565,27 +523,15 @@ impl AgentControl {
                     selection.config = EnvironmentConfigState::Ready(bounded_config);
                 }
             }
-            let child_environments = apply_resolved_environment_selections(
-                parent_environments.clone(),
-                environment_selections.as_deref(),
-            );
             (
-                Some(child_environments),
+                Some(parent_environments.clone()),
                 Some(Arc::clone(&parent.session.services.exec_policy)),
                 Some(parent.client_mcp_extensions()),
             )
         } else {
-            let inherited_environments = self
-                .inherited_environments_for_source(&state, Some(&session_source))
-                .await
-                .map(|environments| {
-                    apply_resolved_environment_selections(
-                        environments,
-                        environment_selections.as_deref(),
-                    )
-                });
             (
-                inherited_environments,
+                self.inherited_environments_for_source(&state, Some(&session_source))
+                    .await,
                 self.inherited_exec_policy_for_source(&state, Some(&session_source), &config)
                     .await,
                 None,
@@ -603,7 +549,7 @@ impl AgentControl {
                 agent_control: self.clone(),
                 session_source,
                 parent_thread_id,
-                environment_selections: None,
+                environment_selections,
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions,
@@ -704,27 +650,6 @@ impl AgentControl {
         };
         let notification_source = session_source.clone();
 
-        let role_name = agent_metadata.agent_role.as_deref();
-        let role_config =
-            role_name.and_then(|role| crate::agent::role::resolve_role_config_owned(&config, role));
-        let resolved_backend = role_config.and_then(|role| role.backend);
-
-        if let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
-            resolved_backend
-        {
-            return self
-                .spawn_external_agent(ExternalAgentSpawn {
-                    config,
-                    initial_input,
-                    notification_source,
-                    options,
-                    reservation,
-                    agent_metadata,
-                    backend,
-                })
-                .await;
-        }
-
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
             (Some(session_source), Some(_), inheritance) => {
@@ -818,25 +743,24 @@ impl AgentControl {
         )
         .await;
 
+        let start_options = TurnStartOptions {
+            parent_turn_id: options.parent_turn_id,
+            root_turn_id: options.root_turn_id,
+            cyber_access_program: options.cyber_access_program,
+            ..Default::default()
+        };
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
-                self.send_input(
-                    new_thread.thread_id,
-                    input,
-                    options.parent_turn_id,
-                    options.root_turn_id,
-                )
-                .await?;
+                self.send_input(new_thread.thread_id, input, start_options)
+                    .await?;
             }
-            SpawnInitialInput::InterAgentCommunication(communication) => {
-                let (communication, context) = *communication;
+            SpawnInitialInput::InterAgentCommunication(communication, context) => {
                 self.send_inter_agent_communication_after_capacity_check(
                     new_thread.thread_id,
                     &state,
                     communication,
                     context,
-                    options.parent_turn_id,
-                    options.root_turn_id,
+                    start_options,
                 )
                 .await?;
             }
@@ -896,30 +820,34 @@ impl AgentControl {
 
         let parent_thread_id = *parent_thread_id;
         let parent_thread = state.get_thread(parent_thread_id).await?;
-        let (subagent_developer_instructions, parent_developer_instructions) =
-            match multi_agent_version {
-                MultiAgentVersion::V2 => {
-                    let parent_developer_instructions = match parent_thread
-                        .session
-                        .new_default_turn()
-                        .await
-                        .developer_instructions
-                        .clone()
-                    {
-                        Some(instructions) if !instructions.is_empty() => Some(instructions),
-                        Some(_) | None => None,
-                    };
-                    let child_developer_instructions = config
-                        .developer_instructions
-                        .clone()
-                        .filter(|instructions| !instructions.is_empty());
-                    (
-                        Some(child_developer_instructions.unwrap_or_default()),
-                        parent_developer_instructions,
-                    )
-                }
-                MultiAgentVersion::Disabled | MultiAgentVersion::V1 => (None, None),
-            };
+        let (subagent_developer_instructions, parent_developer_instructions) = match (
+            multi_agent_version,
+            config
+                .multi_agent_v2
+                .subagent_developer_instructions
+                .as_ref(),
+        ) {
+            (MultiAgentVersion::V2, override_instructions)
+                if override_instructions.is_some() || session_source.get_agent_role().is_some() =>
+            {
+                let parent_developer_instructions = match parent_thread
+                    .session
+                    .new_default_turn()
+                    .await
+                    .developer_instructions
+                    .clone()
+                {
+                    Some(instructions) if !instructions.is_empty() => Some(instructions),
+                    Some(_) | None => None,
+                };
+                (
+                    Some(config.developer_instructions.clone().unwrap_or_default()),
+                    parent_developer_instructions,
+                )
+            }
+            (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
+            | (MultiAgentVersion::V2, _) => (None, None),
+        };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
         // Flush before snapshotting store history for a fork.
@@ -953,19 +881,13 @@ impl AgentControl {
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
-                [
-                    parent_config
-                        .multi_agent_v2
-                        .root_agent_usage_hint_text
-                        .clone(),
-                    parent_config
-                        .multi_agent_v2
-                        .subagent_usage_hint_text
-                        .clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect()
+                let parent_usage_hints =
+                    resolve_usage_hints(&parent_config.multi_agent_v2, /*catalog*/ None);
+                [parent_usage_hints.root, parent_usage_hints.subagent]
+                    .into_iter()
+                    .flatten()
+                    .map(|instructions| instructions.render())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -988,87 +910,63 @@ impl AgentControl {
         // Scrub inherited hints and replace only the parent's developer-instruction fragment.
         // Compaction stores response items separately, so sanitize both top-level messages and
         // compacted replacement histories with the same policy.
-        let retain_forked_item =
-            |response_item: &mut ResponseItem,
-             replaced: &mut bool,
-             allow_legacy_mixed_fragment: bool| {
-                if matches!(response_item, ResponseItem::AgentMessage { .. }) {
-                    return false;
-                }
-                if !retain_forked_developer_message(
-                    response_item,
-                    &multi_agent_v2_usage_hint_texts_to_filter,
-                ) {
-                    return false;
-                }
+        let retain_forked_item = |response_item: &mut ResponseItem, replaced: &mut bool| {
+            if matches!(response_item, ResponseItem::AgentMessage { .. }) {
+                return false;
+            }
+            if !retain_forked_developer_message(
+                response_item,
+                &multi_agent_v2_usage_hint_texts_to_filter,
+            ) {
+                return false;
+            }
 
-                if matches!(response_item, ResponseItem::Message { role, .. } if role == "developer")
-                {
-                    let Some(mut content) = to_annotated_content(response_item) else {
-                        return false;
+            if matches!(response_item, ResponseItem::Message { role, .. } if role == "developer") {
+                let Some(mut content) = to_annotated_content(response_item) else {
+                    return false;
+                };
+                content.retain_mut(|content_item| {
+                    let ContentItem::InputText { text } = content_item.content_mut() else {
+                        return true;
                     };
-                    content.retain_mut(|content_item| {
-                        let ContentItem::InputText { text } = content_item.content_mut() else {
-                            return true;
-                        };
-                        if ManagedDeveloperInstructions::matches_text(text) {
-                            return preserve_reference_context_item;
-                        }
-                        let (
-                            Some(parent_developer_instructions),
-                            Some(subagent_developer_instructions),
-                        ) = (
-                            parent_developer_instructions.as_ref(),
-                            subagent_developer_instructions.as_ref(),
-                        )
-                        else {
-                            return true;
-                        };
-                        if text == parent_developer_instructions {
-                            let replacement = if preserve_reference_context_item && !*replaced {
-                                subagent_developer_instructions.as_str()
-                            } else {
-                                ""
-                            };
-                            *replaced = true;
-                            *text = replacement.to_string();
-                            return !text.is_empty();
-                        }
-                        if !allow_legacy_mixed_fragment {
-                            return true;
-                        }
+                    if ManagedDeveloperInstructions::matches_text(text)
+                        || PersistentModeState::matches_text(text)
+                    {
+                        // If the child will rebuild its initial context, drop the inherited
+                        // instructions; startup will add the current requirements and effort
+                        // instructions once.
+                        return preserve_reference_context_item;
+                    }
+                    let (
+                        Some(parent_developer_instructions),
+                        Some(subagent_developer_instructions),
+                    ) = (
+                        parent_developer_instructions.as_ref(),
+                        subagent_developer_instructions.as_ref(),
+                    )
+                    else {
+                        return true;
+                    };
+                    // TODO(anp) track better message fragment provenance in rollouts.
+                    if !text.contains(parent_developer_instructions) {
+                        return true;
+                    }
 
-                        let matches = text
-                            .match_indices(parent_developer_instructions)
-                            .filter_map(|(start, _)| {
-                                let end = start + parent_developer_instructions.len();
-                                ((start == 0 || text[..start].ends_with('\n'))
-                                    && (end == text.len() || text[end..].starts_with('\n')))
-                                .then_some((start, end))
-                            })
-                            .collect::<Vec<_>>();
-                        if matches.is_empty() {
-                            return true;
-                        }
+                    *replaced = true;
+                    let replacement = if preserve_reference_context_item {
+                        subagent_developer_instructions.as_str()
+                    } else {
+                        ""
+                    };
+                    *text = text.replace(parent_developer_instructions, replacement);
+                    !text.is_empty()
+                });
+                return !content.is_empty()
+                    && set_annotated_content(response_item, content).is_some();
+            }
 
-                        let replace_first_match = preserve_reference_context_item && !*replaced;
-                        *replaced = true;
-                        for (index, (start, end)) in matches.into_iter().enumerate().rev() {
-                            let replacement = if replace_first_match && index == 0 {
-                                subagent_developer_instructions.as_str()
-                            } else {
-                                ""
-                            };
-                            text.replace_range(start..end, replacement);
-                        }
-                        !text.is_empty()
-                    });
-                    return !content.is_empty()
-                        && set_annotated_content(response_item, content).is_some();
-                }
-
-                true
-            };
+            true
+        };
         forked_rollout_items.retain_mut(|item| {
             if !keep_forked_rollout_item(item, preserve_reference_context_item)
                 || destination_history_mode == Some(ThreadHistoryMode::Paginated)
@@ -1086,11 +984,9 @@ impl AgentControl {
             }
 
             match item {
-                RolloutItem::ResponseItem(response_item) => retain_forked_item(
-                    response_item,
-                    &mut replaced_parent_developer_instructions,
-                    false,
-                ),
+                RolloutItem::ResponseItem(response_item) => {
+                    retain_forked_item(response_item, &mut replaced_parent_developer_instructions)
+                }
                 RolloutItem::Compacted(compacted) => {
                     if let Some(replacement_history) = compacted.replacement_history.as_mut() {
                         // Matches before this checkpoint cannot survive its replacement history.
@@ -1099,17 +995,14 @@ impl AgentControl {
                             retain_forked_item(
                                 response_item,
                                 &mut replaced_parent_developer_instructions,
-                                true,
                             )
                         });
                     }
                     true
                 }
                 RolloutItem::WorldState(world_state) => {
-                    if multi_agent_version == MultiAgentVersion::V2
-                        && let Some(state) = world_state.state.as_object_mut()
-                    {
-                        state.remove("multi_agent_usage_hint");
+                    if multi_agent_version == MultiAgentVersion::V2 {
+                        world_state.state.remove("multi_agent_usage_hint");
                     }
                     true
                 }
@@ -1142,8 +1035,13 @@ impl AgentControl {
         }
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
-            && let Some(subagent_usage_hint) =
-                resolve_usage_hints(&config.multi_agent_v2, /*catalog*/ None).subagent
+            && let Some(subagent_usage_hint) = options
+                .multi_agent_v2_usage_hints
+                .as_ref()
+                .map(|hints| hints.subagent.clone())
+                .unwrap_or_else(|| {
+                    resolve_usage_hints(&config.multi_agent_v2, /*catalog*/ None).subagent
+                })
         {
             let subagent_usage_hint_message = ContextualUserFragment::into(subagent_usage_hint);
             forked_rollout_items.push(RolloutItem::ResponseItem(

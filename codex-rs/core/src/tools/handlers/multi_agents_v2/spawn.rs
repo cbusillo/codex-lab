@@ -2,23 +2,19 @@ use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::provider_routing::AgentTaskKind;
-use crate::agent::provider_routing::AgentTaskSize;
-use crate::agent::provider_routing::ProviderRoutingSummary;
-use crate::agent::provider_routing::select_provider_route;
 use crate::agent::role::DEFAULT_ROLE_NAME;
-use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::session::multi_agents::resolve_usage_hints;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use crate::turn_timing::now_unix_timestamp_ms;
-use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -41,7 +37,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_spawn_agent_tool_v2(self.options.clone())
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let analytics = invocation.session.services.analytics_events_client.clone();
             let sender_thread_id = invocation.session.thread_id;
@@ -113,86 +112,37 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
-    enforce_explicit_user_agent_intent(turn, &selectors)?;
-    let requested_role_name = selectors.agent_type.as_deref();
-    if let Some(role_name) = requested_role_name
-        && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
-    {
-        if let Some(rejection) =
-            crate::agent::role::antigravity_selector_rejection(&turn.config, role_name)
-        {
-            return Err(FunctionCallError::RespondToModel(rejection));
-        }
-        return Err(FunctionCallError::RespondToModel(format!(
-            "agent_type `{role_name}` is disabled by configuration"
-        )));
-    }
+    let fork_mode = args.fork_mode()?;
+    let message = message_content(args.message)?;
+    let role_name = args
+        .agent_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty());
 
-    let message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-    crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
-        .map_err(FunctionCallError::RespondToModel)?;
-    let explicit_role_name = requested_role_name.map(|role_name| {
-        crate::agent::selector_defaults::resolve_effective_selector(&config, role_name)
-    });
-    let explicit_effort = args.reasoning_effort.as_ref().map(ToString::to_string);
-    if let Some(role_name) = explicit_role_name.as_deref() {
-        crate::agent::selector_defaults::install_selected_provider_defaults(
-            &mut config,
-            role_name,
-            explicit_effort.as_deref(),
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
-    }
-    let routing = select_provider_route(
-        &config,
-        explicit_role_name.as_deref(),
-        args.task_kind,
-        args.task_size,
-    )
-    .await
-    .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
-    enforce_routed_user_agent_intent(turn, routing.agent_type())?;
-    let role_name = routing.role_name();
-    let preflighted_external_role = if routing.is_external() {
-        role_name.and_then(|role_name| {
-            crate::agent::role::resolve_role_config_owned(&config, role_name)
-                .map(|role| (role_name.to_string(), role))
-        })
-    } else {
-        None
-    };
-    let fork_mode = args.fork_mode(routing.is_external())?;
-    if routing.is_external() && fork_mode.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "External agents do not support fork_turns; use `fork_turns = \"none\"` or omit it when an external agent is selected."
-                .to_string(),
-        ));
-    }
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    if !routing.is_external() {
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            selectors.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )
-        .await?;
-    }
-    if !is_full_history_fork || explicit_role_name.is_some() {
-        apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name).await?;
-    }
-    if let Some((role_name, role)) = preflighted_external_role {
-        config.agent_roles.insert(role_name, role);
+    apply_requested_spawn_agent_model_overrides(
+        &session,
+        turn.as_ref(),
+        &mut config,
+        args.model.as_deref(),
+        args.reasoning_effort.clone(),
+    )
+    .await?;
+    if !is_full_history_fork || role_name.is_some() {
+        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        if is_full_history_fork && config.developer_instructions.is_none() {
+            config
+                .developer_instructions
+                .clone_from(&turn.developer_instructions);
+        }
     }
     apply_spawn_agent_service_tier(
         &session,
@@ -236,6 +186,29 @@ async fn handle_spawn_agent(
         /*trigger_turn*/ true,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
+    let multi_agent_v2_usage_hints =
+        if is_full_history_fork && turn.multi_agent_version == MultiAgentVersion::V2 {
+            let child_model_info = match config.model.as_deref() {
+                Some(model) if model != turn.model_info().slug => Some(
+                    session
+                        .services
+                        .models_manager
+                        .get_model_info(model, &config.to_models_manager_config())
+                        .await,
+                ),
+                _ => None,
+            };
+            let child_catalog = child_model_info
+                .as_ref()
+                .unwrap_or(turn.model_info())
+                .model_messages
+                .as_ref()
+                .and_then(|messages| messages.multi_agent.as_ref())
+                .and_then(|messages| messages.role.as_ref());
+            Some(resolve_usage_hints(&config.multi_agent_v2, child_catalog))
+        } else {
+            None
+        };
     let spawned_agent = Box::pin(
         session
             .services
@@ -252,8 +225,8 @@ async fn handle_spawn_agent(
                     parent_turn_id: Some(turn.sub_id.clone()),
                     root_turn_id: turn.turn_metadata_state.root_turn_id(),
                     environments: Some(step_context.environments.to_selections()),
-                    external_agent_provider: routing.provider().cloned(),
-                    external_agent_routing: Some(routing.summary()),
+                    multi_agent_v2_usage_hints,
+                    cyber_access_program: turn.cyber_access_program,
                 },
             ),
     )
@@ -261,10 +234,6 @@ async fn handle_spawn_agent(
     .map_err(collab_spawn_error)?;
     let new_thread_id = spawned_agent.thread_id;
     let agent_status = spawned_agent.status;
-    let supports_followup_messages = session
-        .services
-        .agent_control
-        .supports_followup_messages(new_thread_id);
     let agent_snapshot = session
         .services
         .agent_control
@@ -285,241 +254,24 @@ async fn handle_spawn_agent(
         },
     )
     .await;
+    let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
         /*inc*/ 1,
-        &[
-            ("role", routing.agent_type()),
-            ("routing", routing.kind().as_str()),
-            ("task_kind", args.task_kind.as_str()),
-            ("task_size", args.task_size.as_str()),
-            ("version", "v2"),
-        ],
+        &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
-        SpawnAgentResult::HiddenMetadata {
-            task_name,
-            supports_followup_messages,
-            routing: routing.redacted_summary(),
-        }
+        SpawnAgentResult::HiddenMetadata { task_name }
     } else {
         SpawnAgentResult::WithNickname {
             task_name,
             nickname,
-            agent_type: routing.agent_type().to_string(),
-            supports_followup_messages,
-            routing: routing.summary(),
         }
     };
     Ok((output, new_thread_id, agent_status, agent_snapshot))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedSpawnSelectors {
-    agent_type: Option<String>,
-    model: Option<String>,
-}
-
-fn enforce_explicit_user_agent_intent(
-    turn: &crate::session::turn_context::TurnContext,
-    selectors: &ResolvedSpawnSelectors,
-) -> Result<(), FunctionCallError> {
-    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
-        return Ok(());
-    };
-    if intent.is_empty() {
-        return Ok(());
-    }
-    let required = intent
-        .required()
-        .iter()
-        .map(|slug| format!("`{slug}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let selected = selectors
-        .agent_type
-        .as_deref()
-        .or(selectors.model.as_deref());
-    if let Some(selected) = selected
-        && intent
-            .rejected()
-            .iter()
-            .any(|rejected| intent_selector_matches(rejected, selected))
-    {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "The current user turn explicitly rejects `{selected}`. Do not spawn that agent; choose an allowed alternative."
-        )));
-    }
-    if intent.required().is_empty() {
-        return Ok(());
-    }
-    let Some(selected) = selected else {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "The current user turn explicitly requests specific agents: {required}. Set `agent_type` to one of those canonical selectors before spawning. Do not use automatic routing for a named-agent request."
-        )));
-    };
-    if intent
-        .required()
-        .iter()
-        .any(|required| intent_selector_matches(required, selected))
-    {
-        return Ok(());
-    }
-    Err(FunctionCallError::RespondToModel(format!(
-        "The current user turn explicitly requests specific agents: {required}, but the spawn selected `{selected}`. Use one of the requested canonical selectors and do not substitute another agent."
-    )))
-}
-
-fn enforce_routed_user_agent_intent(
-    turn: &crate::session::turn_context::TurnContext,
-    selected: &str,
-) -> Result<(), FunctionCallError> {
-    let Some(intent) = turn.extension_data.get::<UserAgentIntent>() else {
-        return Ok(());
-    };
-    validate_routed_user_agent_intent(intent.as_ref(), selected)
-}
-
-fn validate_routed_user_agent_intent(
-    intent: &UserAgentIntent,
-    selected: &str,
-) -> Result<(), FunctionCallError> {
-    if intent
-        .rejected()
-        .iter()
-        .any(|rejected| intent_selector_matches(rejected, selected))
-    {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "Automatic routing selected `{selected}`, but the current user turn explicitly rejects that agent. Retry with an allowed explicit `agent_type`."
-        )));
-    }
-    if intent.required().is_empty()
-        || intent
-            .required()
-            .iter()
-            .any(|required| intent_selector_matches(required, selected))
-    {
-        return Ok(());
-    }
-    let required = intent
-        .required()
-        .iter()
-        .map(|slug| format!("`{slug}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(FunctionCallError::RespondToModel(format!(
-        "Routing selected `{selected}`, but the current user turn explicitly requests {required}. Retry with one of the requested canonical selectors."
-    )))
-}
-
-fn intent_selector_matches(intent_selector: &str, selected: &str) -> bool {
-    intent_selector == selected
-        || (intent_selector == "antigravity"
-            && crate::agent::external_capabilities::looks_like_antigravity_selector(selected))
-}
-
-#[cfg(test)]
-mod intent_tests {
-    use super::*;
-    use codex_protocol::user_input::UserInput;
-
-    fn intent(text: &str) -> UserAgentIntent {
-        UserAgentIntent::from_user_input(&[UserInput::Text {
-            text: text.to_string(),
-            text_elements: Vec::new(),
-        }])
-    }
-
-    #[test]
-    fn rejection_only_intent_blocks_automatic_route_result() {
-        let intent = intent("Do not use Opus.");
-
-        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_err());
-        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_ok());
-    }
-
-    #[test]
-    fn required_intent_blocks_a_different_automatic_route_result() {
-        let intent = intent("Ask Opus to review this.");
-
-        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
-        assert!(validate_routed_user_agent_intent(&intent, "claude-opus-5").is_ok());
-    }
-
-    #[test]
-    fn provider_intent_accepts_exact_antigravity_model_without_accepting_other_models() {
-        let intent = intent("Ask Antigravity to review this.");
-
-        assert!(
-            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.6-flash-high").is_ok()
-        );
-        assert!(
-            validate_routed_user_agent_intent(&intent, "antigravity-gemini-3.1-pro-low").is_ok()
-        );
-        assert!(validate_routed_user_agent_intent(&intent, "claude-sonnet-4.6").is_err());
-    }
-}
-
-fn resolve_spawn_selectors(
-    agent_type: Option<&str>,
-    model: Option<&str>,
-) -> Result<ResolvedSpawnSelectors, FunctionCallError> {
-    let agent_type = agent_type.map(str::trim).filter(|role| !role.is_empty());
-    let model = model.map(str::trim).filter(|model| !model.is_empty());
-    let agent_type_selector = agent_type.and_then(canonical_external_selector);
-    let model_selector = model.and_then(canonical_external_selector);
-    match (agent_type, agent_type_selector, model, model_selector) {
-        (None, _, Some(_), Some(model_selector)) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(model_selector),
-            model: None,
-        }),
-        (Some(_), Some(agent_type_selector), Some(_), Some(model_selector))
-            if agent_type_selector == model_selector =>
-        {
-            Ok(ResolvedSpawnSelectors {
-                agent_type: Some(agent_type_selector),
-                model: None,
-            })
-        }
-        (Some(agent_type), Some(agent_type_selector), Some(model), Some(model_selector)) => {
-            Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` resolves to `{agent_type_selector}`; use one explicit agent selector"
-            )))
-        }
-        (Some(agent_type), Some(_), Some(model), None) => {
-            Err(FunctionCallError::RespondToModel(format!(
-                "external agent type `{agent_type}` cannot be combined with native model override `{model}`; use one explicit agent selector"
-            )))
-        }
-        (Some(agent_type), None, Some(model), Some(model_selector)) => {
-            Err(FunctionCallError::RespondToModel(format!(
-                "external agent selector `{model}` resolves to `{model_selector}`, but agent type `{agent_type}` selects a different role; use one explicit agent selector"
-            )))
-        }
-        (Some(_), Some(agent_type_selector), None, _) => Ok(ResolvedSpawnSelectors {
-            agent_type: Some(agent_type_selector),
-            model: None,
-        }),
-        _ => Ok(ResolvedSpawnSelectors {
-            agent_type: agent_type.map(str::to_string),
-            model: model.map(str::to_string),
-        }),
-    }
-}
-
-fn canonical_external_selector(selector: &str) -> Option<String> {
-    // Keep unknown provider-qualified selectors on the external route so bounded
-    // preflight can reject them with the installed CLI's actionable capability
-    // diagnostics. Never fall back to a native or provider-default selector.
-    if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
-        return Some(selector.to_string());
-    }
-    agent_model_spec(selector)
-        .filter(|spec| spec.family != "code" && spec.is_enabled())
-        .map(|spec| spec.slug.to_string())
 }
 
 impl CoreToolRuntime for Handler {
@@ -537,19 +289,12 @@ struct SpawnAgentArgs {
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<String>,
-    #[serde(default)]
-    task_kind: AgentTaskKind,
-    #[serde(default)]
-    task_size: AgentTaskSize,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
 }
 
 impl SpawnAgentArgs {
-    fn fork_mode(
-        &self,
-        default_to_no_fork: bool,
-    ) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
+    fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
                 "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string(),
@@ -561,7 +306,7 @@ impl SpawnAgentArgs {
             .as_deref()
             .map(str::trim)
             .filter(|fork_turns| !fork_turns.is_empty())
-            .unwrap_or(if default_to_no_fork { "none" } else { "all" });
+            .unwrap_or("all");
 
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);
@@ -591,14 +336,9 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
-        agent_type: String,
-        supports_followup_messages: bool,
-        routing: ProviderRoutingSummary,
     },
     HiddenMetadata {
         task_name: String,
-        supports_followup_messages: bool,
-        routing: ProviderRoutingSummary,
     },
 }
 

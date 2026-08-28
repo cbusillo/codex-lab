@@ -7,7 +7,6 @@ use super::*;
 use crate::session_start::SessionStartAction;
 use crate::session_start::cancel_session_start;
 use crate::session_start::complete_session_start;
-use crate::startup_draft::StartupDraftPump;
 use crate::unarchive_prompt::run_unarchive_prompt;
 
 async fn resolve_runtime_model_provider_base_url(provider: &ModelProviderInfo) -> Option<String> {
@@ -68,6 +67,17 @@ impl App {
                     .any(|event| matches!(event, ThreadBufferedEvent::Request(_))))
     }
 
+    /// Wait until visible and queued startup decisions cannot consume a delayed OSC response.
+    #[cfg(any(windows, test))]
+    pub(super) fn ready_for_terminal_color_probe(&self, has_pending_app_events: bool) -> bool {
+        !has_pending_app_events
+            && !self.chat_widget.has_active_view()
+            && !self.windows_sandbox.startup_world_writable_scan_pending
+            && !self.startup_pending_protected_request
+            && !self.has_queued_startup_protected_request()
+            && !self.chat_widget.has_pending_protected_request()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
@@ -91,7 +101,6 @@ impl App {
         startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<HooksListEntry>,
         mut startup_draft: StartupDraftPump,
-        product_identity: codex_version::ProductIdentity,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
 
@@ -118,7 +127,6 @@ impl App {
         let startup_started_at = Instant::now();
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
-        emit_pinned_candidate_warning(&app_event_tx, &config);
         emit_project_config_warnings(&app_event_tx, &config);
         emit_system_bwrap_warning(&app_event_tx, &config);
         tui.set_notification_settings(
@@ -254,8 +262,6 @@ impl App {
                 &initial_prompt,
                 &initial_images,
             );
-        let should_fetch_auto_review_summary_after_startup =
-            Self::should_fetch_auto_review_summary_after_startup(&session_selection);
         let thread_and_widget_started_at = Instant::now();
         let pending_startup_thread_start = matches!(
             &session_selection,
@@ -315,7 +321,6 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
-                    product_identity,
                 };
                 let mut chat_widget = ChatWidget::new_with_app_event(init);
                 chat_widget.set_queue_submissions_until_session_configured(
@@ -387,7 +392,6 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
-                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(resumed))
             }
@@ -449,7 +453,6 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
-                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
@@ -472,7 +475,6 @@ See the Codex keymap documentation for supported actions and examples."
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
-            product_identity,
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -502,7 +504,7 @@ See the Codex keymap documentation for supported actions and examples."
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             scrollback_has_older_history: false,
-            commit_anim_running: Arc::new(AtomicBool::new(false)),
+            commit_animation: None,
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
             skill_load_warnings: SkillLoadWarningState::default(),
@@ -529,7 +531,6 @@ See the Codex keymap documentation for supported actions and examples."
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
-            pending_auto_review_summary_fetches: HashSet::new(),
             dynamic_tool_status_updates,
             dynamic_tool_tasks: HashMap::new(),
             pending_startup_thread_start,
@@ -538,12 +539,11 @@ See the Codex keymap documentation for supported actions and examples."
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
-            pending_direct_login_add_account: None,
-            direct_login_add_account_attempt_id: 0,
-            pending_login_add_account_id: None,
-            completed_login_add_account_id: None,
-            agent_settings: Default::default(),
+            recap: recap::RecapState::default(),
         };
+        if !tui.is_terminal_focused() {
+            app.recap.note_focus_lost(Instant::now());
+        }
         if start_in_agents_overview {
             app.open_agents_overview(&app_server);
         }
@@ -568,9 +568,6 @@ See the Codex keymap documentation for supported actions and examples."
             {
                 Ok(result) => result?,
                 Err(err) => return shutdown_on_startup_error(app_server, err).await,
-            }
-            if should_fetch_auto_review_summary_after_startup {
-                app.fetch_latest_auto_review_summary(&app_server, thread_id);
             }
             if should_prompt_for_paused_goal_after_startup_resume
                 && let Err(err) = startup_draft
@@ -602,6 +599,7 @@ See the Codex keymap documentation for supported actions and examples."
                     .hide_world_writable_warning
                     .unwrap_or(false);
             if should_check {
+                app.windows_sandbox.startup_world_writable_scan_pending = true;
                 let cwd = app.config.cwd.clone();
                 let workspace_roots = app.config.effective_workspace_roots();
                 let env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
@@ -613,7 +611,9 @@ See the Codex keymap documentation for supported actions and examples."
                     env_map,
                     logs_base_dir,
                     startup_permission_profile,
+                    app.session_telemetry.clone(),
                     tx,
+                    /*startup_scan*/ true,
                 );
             }
         }
@@ -641,6 +641,14 @@ See the Codex keymap documentation for supported actions and examples."
         if app_event_rx.is_empty() && !app.has_queued_startup_protected_request() {
             app.chat_widget
                 .restore_startup_draft_when_ready(&mut pending_startup_draft);
+        }
+
+        #[cfg(windows)]
+        let mut terminal_color_probe_pending = true;
+        #[cfg(windows)]
+        if app.ready_for_terminal_color_probe(!app_event_rx.is_empty()) {
+            tui.probe_default_colors_after_protected_startup();
+            terminal_color_probe_pending = false;
         }
 
         let event_stream_started_at = Instant::now();
@@ -797,6 +805,30 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                         AppRunControl::Continue
                     }
+                    () = async {
+                        match app.chat_widget.terminal_title_next_refresh {
+                            Some(deadline) => {
+                                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                            }
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        app.chat_widget.refresh_goal_status_indicator_for_time_tick();
+                        app.chat_widget.refresh_terminal_title();
+                        AppRunControl::Continue
+                    }
+                    () = async {
+                        match app.commit_animation.as_mut() {
+                            Some(interval) => {
+                                interval.tick().await;
+                            }
+                            None => std::future::pending().await,
+                        }
+                    }, if !has_pending_app_events => {
+                        crate::session_log::log_commit_tick();
+                        app.chat_widget.on_commit_tick();
+                        AppRunControl::Continue
+                    }
                 };
                 if App::should_stop_waiting_for_initial_session(
                     waiting_for_initial_session_configured,
@@ -820,14 +852,18 @@ See the Codex keymap documentation for supported actions and examples."
                             app.chat_widget
                                 .restore_startup_draft_when_ready(&mut pending_startup_draft);
                         }
+                        #[cfg(windows)]
+                        if terminal_color_probe_pending
+                            && app.ready_for_terminal_color_probe(!app_event_rx.is_empty())
+                        {
+                            tui.probe_default_colors_after_protected_startup();
+                            terminal_color_probe_pending = false;
+                        }
                     }
                     AppRunControl::Exit(reason) => break Ok(reason),
                 }
             }
         };
-        if let Err(err) = app.cancel_login_add_account_chatgpt(&mut app_server).await {
-            tracing::warn!("{err}");
-        }
         if let Err(err) = app_server.shutdown().await {
             tracing::warn!(error = %err, "failed to shut down embedded app server");
         }
@@ -849,18 +885,6 @@ See the Codex keymap documentation for supported actions and examples."
                 return Err(err);
             }
         };
-        let thread_id = app.chat_widget.thread_id().or(app.primary_thread_id);
-        let resume_hint = resume_hint_for_resumable_thread(
-            thread_id,
-            app.chat_widget.thread_name(),
-            app.chat_widget.rollout_path().as_deref(),
-        );
-        Ok(AppExitInfo {
-            token_usage: app.token_usage(),
-            thread_id,
-            resume_hint,
-            update_action: app.pending_update_action,
-            exit_reason,
-        })
+        Ok(app.exit_info(exit_reason))
     }
 }

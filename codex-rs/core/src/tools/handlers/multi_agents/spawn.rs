@@ -4,8 +4,6 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
-use crate::agent::provider_routing::ProviderRoutingKind;
-use crate::agent::provider_routing::ProviderRoutingSummary;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
@@ -38,7 +36,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         )
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move { handle_spawn_agent(invocation).await.map(boxed_tool_output) })
     }
 }
@@ -61,13 +62,6 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
-    if let Some(role_name) = role_name
-        && !crate::agent::role::agent_selector_enabled(&turn.config, role_name)
-    {
-        return Err(FunctionCallError::RespondToModel(format!(
-            "agent_type `{role_name}` is disabled by configuration"
-        )));
-    }
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = render_input_preview(&input_items);
     let session_source = turn.session_source.clone();
@@ -140,14 +134,8 @@ async fn handle_spawn_agent(
             parent_turn_id: Some(turn.sub_id.clone()),
             root_turn_id: turn.turn_metadata_state.root_turn_id(),
             environments: Some(step_context.environments.to_selections()),
-            external_agent_provider: None,
-            external_agent_routing: Some(ProviderRoutingSummary {
-                kind: ProviderRoutingKind::Explicit,
-                requested: role_name.map(str::to_string),
-                effective: role_name.unwrap_or(DEFAULT_ROLE_NAME).to_string(),
-                reason: "`agent_type` explicitly selected the v1 spawn role.".to_string(),
-                skipped_candidates: Vec::new(),
-            }),
+            multi_agent_v2_usage_hints: None,
+            cyber_access_program: turn.cyber_access_program,
         },
     ))
     .await
@@ -223,10 +211,6 @@ async fn handle_spawn_agent(
         )
         .await;
     let new_thread_id = result?.thread_id;
-    let supports_followup_messages = session
-        .services
-        .agent_control
-        .supports_followup_messages(new_thread_id);
     let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
@@ -237,7 +221,6 @@ async fn handle_spawn_agent(
     Ok(SpawnAgentResult {
         agent_id: new_thread_id.to_string(),
         nickname,
-        supports_followup_messages,
     })
 }
 
@@ -263,7 +246,6 @@ struct SpawnAgentArgs {
 pub(crate) struct SpawnAgentResult {
     agent_id: String,
     nickname: Option<String>,
-    supports_followup_messages: bool,
 }
 
 impl ToolOutput for SpawnAgentResult {

@@ -5,7 +5,8 @@ use super::TurnStatus;
 use crate::JsonSchema;
 use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
-use codex_protocol::protocol::SessionProvenance as CoreSessionProvenance;
+use codex_protocol::protocol::MisalignmentErrorDetails as CoreMisalignmentErrorDetails;
+use codex_protocol::protocol::MisalignmentSteer as CoreMisalignmentSteer;
 use codex_protocol::protocol::SessionSource as CoreSessionSource;
 use codex_protocol::protocol::SubAgentSource as CoreSubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode as CoreThreadHistoryMode;
@@ -17,6 +18,7 @@ use schemars::r#gen::SchemaGenerator;
 use schemars::schema::Schema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -95,130 +97,6 @@ impl From<ThreadHistoryMode> for CoreThreadHistoryMode {
     }
 }
 
-/// Structured provenance for a thread started by an external orchestrator.
-///
-/// These fields are descriptive metadata only. Runtime authorization and
-/// product filtering must continue to use server-side policy and `source`.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub struct SessionProvenance {
-    #[serde(default)]
-    pub request_id: Option<String>,
-    #[serde(default)]
-    pub repository: Option<String>,
-    #[serde(default)]
-    #[ts(type = "number | null")]
-    pub issue_number: Option<u64>,
-    #[serde(default)]
-    pub issue_url: Option<String>,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub origin: Option<String>,
-}
-
-/// Client-supplied provenance for a thread started by an external orchestrator.
-///
-/// This request shape intentionally keeps nested fields optional so clients can
-/// submit partial descriptive metadata without sending explicit nulls.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub struct SessionProvenanceParams {
-    #[ts(optional = nullable)]
-    pub request_id: Option<String>,
-    #[ts(optional = nullable)]
-    pub repository: Option<String>,
-    #[ts(optional = nullable)]
-    #[ts(type = "number | null")]
-    pub issue_number: Option<u64>,
-    #[ts(optional = nullable)]
-    pub issue_url: Option<String>,
-    #[ts(optional = nullable)]
-    pub source: Option<String>,
-    #[ts(optional = nullable)]
-    pub origin: Option<String>,
-}
-
-impl From<CoreSessionProvenance> for SessionProvenance {
-    fn from(value: CoreSessionProvenance) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
-impl From<SessionProvenance> for CoreSessionProvenance {
-    fn from(value: SessionProvenance) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
-impl From<CoreSessionProvenance> for SessionProvenanceParams {
-    fn from(value: CoreSessionProvenance) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
-impl From<SessionProvenanceParams> for CoreSessionProvenance {
-    fn from(value: SessionProvenanceParams) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
-impl From<SessionProvenance> for SessionProvenanceParams {
-    fn from(value: SessionProvenance) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
-impl From<SessionProvenanceParams> for SessionProvenance {
-    fn from(value: SessionProvenanceParams) -> Self {
-        Self {
-            request_id: value.request_id,
-            repository: value.repository,
-            issue_number: value.issue_number,
-            issue_url: value.issue_url,
-            source: value.source,
-            origin: value.origin,
-        }
-    }
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, TS)]
 #[serde(try_from = "String", into = "String")]
 #[ts(type = "string")]
@@ -284,11 +162,7 @@ impl From<ThreadSource> for CoreThreadSource {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase", export_to = "v2/")]
-pub struct ThreadExtra {
-    /// Effective functional Automatic Validation state for subsequent turns.
-    #[serde(default)]
-    pub automatic_validation_enabled: bool,
-}
+pub struct ThreadExtra {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -355,9 +229,6 @@ pub struct Thread {
     )]
     pub project_id: Option<String>,
     /// Persisted thread history contract selected when this thread was created.
-    ///
-    /// This field is part of the published stable `Thread` surface; keep it
-    /// non-experimental so existing clients continue to receive it.
     #[serde(default)]
     pub history_mode: ThreadHistoryMode,
     /// Model provider used for this thread (for example, 'openai').
@@ -387,10 +258,6 @@ pub struct Thread {
     pub can_accept_direct_input: Option<bool>,
     /// Optional analytics source classification for this thread.
     pub thread_source: Option<ThreadSource>,
-    /// Optional structured launch provenance supplied by an external agent
-    /// orchestrator.
-    #[serde(default)]
-    pub session_provenance: Option<SessionProvenance>,
     /// Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
     pub agent_nickname: Option<String>,
     /// Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
@@ -437,8 +304,6 @@ struct ThreadCompatibility {
     source: SessionSource,
     can_accept_direct_input: Option<bool>,
     thread_source: Option<ThreadSource>,
-    #[serde(default)]
-    session_provenance: Option<SessionProvenance>,
     agent_nickname: Option<String>,
     agent_role: Option<String>,
     git_info: Option<GitInfo>,
@@ -475,7 +340,6 @@ impl<'de> Deserialize<'de> for Thread {
             source: thread.source,
             can_accept_direct_input: thread.can_accept_direct_input,
             thread_source: thread.thread_source,
-            session_provenance: thread.session_provenance,
             agent_nickname: thread.agent_nickname,
             agent_role: thread.agent_role,
             git_info: thread.git_info,
@@ -532,4 +396,67 @@ pub struct TurnError {
     pub codex_error_info: Option<CodexErrorInfo>,
     #[serde(default)]
     pub additional_details: Option<String>,
+    /// Optional public explanation and continuation instruction for a misalignment block.
+    #[serde(default)]
+    pub misalignment: Option<MisalignmentErrorDetails>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MisalignmentErrorDetails {
+    /// Open-ended classification; clients must accept categories added by Responses.
+    pub error_type: Option<String>,
+    /// A substantive localized explanation is required before offering continuation.
+    pub detailed_explanation: Option<String>,
+    /// Instruction to submit as the next turn's user input if continuation is confirmed.
+    pub steer: Option<MisalignmentSteer>,
+}
+
+impl fmt::Debug for MisalignmentErrorDetails {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentErrorDetails")
+            .field("error_type", &self.error_type)
+            .field(
+                "has_detailed_explanation",
+                &self.detailed_explanation.is_some(),
+            )
+            .field("has_steer", &self.steer.is_some())
+            .finish()
+    }
+}
+
+impl From<CoreMisalignmentErrorDetails> for MisalignmentErrorDetails {
+    fn from(value: CoreMisalignmentErrorDetails) -> Self {
+        Self {
+            error_type: value.error_type,
+            detailed_explanation: value.detailed_explanation,
+            steer: value.steer.map(Into::into),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct MisalignmentSteer {
+    pub message: String,
+}
+
+impl fmt::Debug for MisalignmentSteer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MisalignmentSteer")
+            .field("message", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl From<CoreMisalignmentSteer> for MisalignmentSteer {
+    fn from(value: CoreMisalignmentSteer) -> Self {
+        Self {
+            message: value.message,
+        }
+    }
 }

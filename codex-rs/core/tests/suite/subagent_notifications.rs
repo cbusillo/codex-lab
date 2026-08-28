@@ -35,8 +35,8 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::ev_tool_search_call;
 use core_test_support::responses::mount_response_once_match;
-use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::namespace_child_tool;
@@ -48,7 +48,7 @@ use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
-use core_test_support::test_codex::test_codex_with_agents as test_codex;
+use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
@@ -68,14 +68,15 @@ use tracing_test::internal::MockWriter;
 use wiremock::MockServer;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const TURN_0_FORK_PROMPT: &str = "seed fork context";
 const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
 const INHERITED_MODEL: &str = "gpt-5.2";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
-const REQUESTED_MODEL: &str = "gpt-5.6-sol";
+const REQUESTED_MODEL: &str = "gpt-5.4";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 const V2_DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const V2_DEFAULT_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
@@ -344,7 +345,7 @@ async fn wait_for_hook_log(
 }
 
 async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let ids = test.thread_manager.list_thread_ids().await;
         if let Some(spawned_id) = ids
@@ -363,7 +364,7 @@ async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
 async fn wait_for_requests(
     mock: &core_test_support::responses::ResponseMock,
 ) -> Result<Vec<ResponsesRequest>> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let requests = mock.requests();
         if !requests.is_empty() {
@@ -380,7 +381,7 @@ async fn wait_for_request_with_model(
     mock: &core_test_support::responses::ResponseMock,
     model: &str,
 ) -> Result<ResponsesRequest> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(request) = mock
             .requests()
@@ -396,10 +397,30 @@ async fn wait_for_request_with_model(
     }
 }
 
+async fn setup_turn_one_with_spawned_child(
+    server: &MockServer,
+    child_response_delay: Option<Duration>,
+) -> Result<(TestCodex, String)> {
+    let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
+        server,
+        json!({
+            "message": CHILD_PROMPT,
+        }),
+        child_response_delay,
+        /*wait_for_parent_notification*/ true,
+        INHERITED_REASONING_EFFORT,
+        |builder| builder,
+    )
+    .await?;
+    Ok((test, spawned_id))
+}
+
 async fn setup_turn_one_with_custom_spawned_child(
     server: &MockServer,
     spawn_args: serde_json::Value,
     child_response_delay: Option<Duration>,
+    wait_for_parent_notification: bool,
+    turn_reasoning_effort: ReasoningEffort,
     configure_test: impl FnOnce(
         core_test_support::test_codex::TestCodexBuilder,
     ) -> core_test_support::test_codex::TestCodexBuilder,
@@ -408,17 +429,6 @@ async fn setup_turn_one_with_custom_spawned_child(
     String,
     core_test_support::responses::ResponseMock,
 )> {
-    let mut spawn_args = spawn_args;
-    spawn_args
-        .as_object_mut()
-        .expect("spawn arguments should be an object")
-        .entry("task_name")
-        .or_insert_with(|| json!("child"));
-    spawn_args
-        .as_object_mut()
-        .expect("spawn arguments should be an object")
-        .entry("fork_turns")
-        .or_insert_with(|| json!("none"));
     let spawn_args = serde_json::to_string(&spawn_args)?;
 
     mount_sse_once_match(
@@ -428,7 +438,7 @@ async fn setup_turn_one_with_custom_spawned_child(
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -473,16 +483,54 @@ async fn setup_turn_one_with_custom_spawned_child(
     )
     .await;
 
-    let mut builder = configure_test(test_codex().with_config(|config| {
+    let configured_reasoning_effort = turn_reasoning_effort.clone();
+    let mut builder = configure_test(test_codex().with_config(move |config| {
         config
             .features
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
         config.model = Some(INHERITED_MODEL.to_string());
-        config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
+        config.model_reasoning_effort = Some(configured_reasoning_effort);
     }));
     let test = builder.build_with_auto_env(server).await?;
-    test.submit_turn(TURN_1_PROMPT).await?;
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: TURN_1_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                effort: Some(Some(turn_reasoning_effort)),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    if child_response_delay.is_none() && wait_for_parent_notification {
+        let _ = wait_for_requests(&child_request_log).await?;
+        let rollout_path = test
+            .codex
+            .rollout_path()
+            .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            let has_notification = tokio::fs::read_to_string(&rollout_path)
+                .await
+                .is_ok_and(|rollout| rollout.contains("<subagent_notification>"));
+            if has_notification {
+                break;
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for parent rollout to include subagent notification"
+                );
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
     let spawned_id = wait_for_spawned_thread_id(&test).await?;
 
     Ok((test, spawned_id, child_request_log))
@@ -499,6 +547,8 @@ async fn spawn_child_and_capture_snapshot(
         server,
         spawn_args,
         /*child_response_delay*/ None,
+        /*wait_for_parent_notification*/ false,
+        INHERITED_REASONING_EFFORT,
         configure_test,
     )
     .await?;
@@ -511,6 +561,47 @@ async fn spawn_child_and_capture_snapshot(
         .await)
 }
 
+#[test_case(
+    ReasoningEffort::Ultra,
+    ReasoningEffort::XHigh;
+    "absent catalog override uses highest non-ultra"
+)]
+#[test_case(
+    ReasoningEffort::High,
+    ReasoningEffort::High;
+    "non-ultra selection is unchanged"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawned_agent_uses_multi_agent_reasoning_effort_for_requests(
+    selected_reasoning_effort: ReasoningEffort,
+    expected_request_reasoning_effort: ReasoningEffort,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let (_test, _spawned_id, child_request_log) = setup_turn_one_with_custom_spawned_child(
+        &server,
+        json!({ "message": CHILD_PROMPT }),
+        /*child_response_delay*/ None,
+        /*wait_for_parent_notification*/ false,
+        selected_reasoning_effort,
+        std::convert::identity,
+    )
+    .await?;
+
+    let child_request = wait_for_requests(&child_request_log)
+        .await?
+        .into_iter()
+        .next()
+        .expect("wait_for_requests should return a request");
+    assert_eq!(
+        child_request.body_json()["reasoning"]["effort"],
+        expected_request_reasoning_effort.to_string()
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subagent_start_replaces_session_start_and_injects_context() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -520,7 +611,6 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
         "message": CHILD_PROMPT,
         "task_name": "child",
         "agent_type": "worker",
-        "fork_turns": "none",
     }))?;
 
     mount_sse_once_match(
@@ -530,7 +620,7 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -601,7 +691,7 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
     let user_prompt_submit_inputs = wait_for_hook_log(
         test.codex_home_path(),
         "user_prompt_submit_hook_log.jsonl",
-        /*expected_len*/ 1,
+        /*expected_len*/ 2,
     )
     .await?;
     let parent_prompt_input = user_prompt_submit_inputs
@@ -610,6 +700,16 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
         .expect("parent prompt submit hook input should be logged");
     assert_eq!(parent_prompt_input.get("agent_id"), None);
     assert_eq!(parent_prompt_input.get("agent_type"), None);
+
+    let child_prompt_input = user_prompt_submit_inputs
+        .iter()
+        .find(|input| input["prompt"].as_str() == Some(CHILD_PROMPT))
+        .expect("child prompt submit hook input should be logged");
+    assert_eq!(
+        child_prompt_input["agent_id"].as_str(),
+        Some(spawned_id.as_str())
+    );
+    assert_eq!(child_prompt_input["agent_type"].as_str(), Some("worker"));
 
     let session_start_inputs = wait_for_hook_log(
         test.codex_home_path(),
@@ -636,7 +736,6 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         "message": CHILD_PROMPT,
         "task_name": "child",
         "agent_type": "worker",
-        "fork_turns": "none",
     }))?;
 
     mount_sse_once_match(
@@ -646,7 +745,7 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -824,6 +923,36 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subagent_notification_is_included_without_wait() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let (test, _spawned_id) =
+        setup_turn_one_with_spawned_child(&server, /*child_response_delay*/ None).await?;
+
+    let turn2 = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_2_NO_WAIT_PROMPT),
+        sse(vec![
+            ev_response_created("resp-turn2-1"),
+            ev_assistant_message("msg-turn2-1", "no wait path"),
+            ev_completed("resp-turn2-1"),
+        ]),
+    )
+    .await;
+    test.submit_turn(TURN_2_NO_WAIT_PROMPT).await?;
+
+    let turn2_requests = wait_for_requests(&turn2).await?;
+    assert!(
+        turn2_requests
+            .iter()
+            .any(|request| request.has_content_kinds(&["multi_agent.subagent_notification"]))
+    );
+
+    Ok(())
+}
+
 #[test_case(ThreadHistoryMode::Legacy; "legacy")]
 #[test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -847,8 +976,7 @@ async fn spawned_child_receives_forked_parent_context(
 
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
-        "task_name": "child",
-        "fork_turns": "all",
+        "fork_context": true,
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,
@@ -857,7 +985,7 @@ async fn spawned_child_receives_forked_parent_context(
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -959,8 +1087,8 @@ async fn spawned_child_receives_forked_parent_context(
             ev_response_created("resp-legacy-reuse"),
             ev_function_call_with_namespace(
                 "legacy-reuse-call",
-                MULTI_AGENT_V2_NAMESPACE,
-                "followup_task",
+                MULTI_AGENT_V1_NAMESPACE,
+                "send_input",
                 &args,
             ),
             ev_completed("resp-legacy-reuse"),
@@ -1444,6 +1572,14 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             ),
             (Some(0), Some(window_ids[1]), None, Some(window_ids[1]))
         );
+        assert!(
+            child_request.has_message_with_input_texts("developer", |message| {
+                matches!(
+                    message,
+                    [text] if text.starts_with("<context_window>\nAgent name: /root/worker\n")
+                )
+            })
+        );
     }
     assert_eq!(
         (
@@ -1518,7 +1654,7 @@ async fn spawn_agent_uses_configured_subagent_defaults() -> Result<()> {
     Some(REQUESTED_MODEL),
     None,
     REQUESTED_MODEL,
-    Some(REQUESTED_REASONING_EFFORT);
+    Some(ReasoningEffort::Medium);
     "model only"
 )]
 #[test_case(
@@ -1585,6 +1721,8 @@ async fn spawned_agent_uses_summary_support_for_final_model(
             "model": REQUESTED_MODEL,
         }),
         /*child_response_delay*/ Some(Duration::from_secs(1)),
+        /*wait_for_parent_notification*/ false,
+        INHERITED_REASONING_EFFORT,
         move |builder| {
             builder.with_config(move |config| {
                 config.model_catalog = Some(model_catalog);
@@ -1615,9 +1753,9 @@ async fn spawned_agent_uses_summary_support_for_final_model(
     };
     assert_eq!(child_body["model"], json!(REQUESTED_MODEL));
     let expected_reasoning = if child_supports_summary {
-        json!({"effort": "low", "summary": "detailed", "context": "all_turns"})
+        json!({"effort": "medium", "summary": "detailed"})
     } else {
-        json!({"effort": "low", "context": "all_turns"})
+        json!({"effort": "medium"})
     };
     assert_eq!(child_body["reasoning"], expected_reasoning);
     assert_eq!(
@@ -1644,7 +1782,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -1743,8 +1881,6 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
     );
     if plaintext {
         spawn_event["item"]["encrypted_function_args"] = json!([]);
-    } else {
-        spawn_event["item"]["encrypted_function_args"] = json!(["message"]);
     }
     mount_sse_once_match(
         &server,
@@ -2507,6 +2643,17 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> R
         )
     );
 
+    // Fresh turn input is sampled before queued mail is drained. Let that first
+    // request complete successfully so the next request can include the result.
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, READ_RESULT_PROMPT)
+                && !body_contains(request, "peer follow-up finished")
+        },
+        sse(vec![ev_completed("resp-routing-root-before-mail")]),
+    )
+    .await;
     let root_result_request = mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
@@ -2561,7 +2708,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -2654,7 +2801,6 @@ async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> 
                         description: Some("Custom role".to_string()),
                         config_file: Some(role_path.to_path_buf()),
                         nickname_candidates: None,
-                        backend: None,
                     },
                 );
             })
@@ -2690,7 +2836,6 @@ async fn spawn_agent_preserves_configured_defaults_through_unrelated_role() -> R
                         description: Some("Custom role".to_string()),
                         config_file: Some(role_path.to_path_buf()),
                         nickname_candidates: None,
-                        backend: None,
                     },
                 );
                 config.agent_default_subagent_model = Some(REQUESTED_MODEL.to_string());
@@ -2717,10 +2862,7 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
-        "task_name": "child",
         "agent_type": "custom",
-        "fork_turns": "none",
-        "reasoning_effort": "ultra",
     }))?;
     mount_sse_once_match(
         &server,
@@ -2729,7 +2871,7 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                MULTI_AGENT_V1_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -2762,7 +2904,6 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
                     description: Some("Custom role".to_string()),
                     config_file: Some(role_path.to_path_buf()),
                     nickname_candidates: None,
-                    backend: None,
                 },
             );
             config.agent_default_subagent_model = Some("gpt-5.6-sol".to_string());
@@ -2791,13 +2932,27 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let resp_mock = mount_sse_once(
+    let call_id = "tool-search-spawn-agent";
+    let resp_mock = mount_sse_sequence(
         &server,
-        sse(vec![
-            ev_response_created("resp-turn1"),
-            ev_assistant_message("msg-turn1", "done"),
-            ev_completed("resp-turn1"),
-        ]),
+        vec![
+            sse(vec![
+                ev_response_created("resp-turn1-1"),
+                ev_tool_search_call(
+                    call_id,
+                    &json!({
+                        "query": "spawn agent custom role",
+                        "limit": 1,
+                    }),
+                ),
+                ev_completed("resp-turn1-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-turn1-2"),
+                ev_assistant_message("msg-turn1-2", "done"),
+                ev_completed("resp-turn1-2"),
+            ]),
+        ],
     )
     .await;
 
@@ -2821,7 +2976,6 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
                 description: Some("Custom role".to_string()),
                 config_file: Some(role_path.to_path_buf()),
                 nickname_candidates: None,
-                backend: None,
             },
         );
     });
@@ -2829,9 +2983,11 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let output = resp_mock.single_request().body_json();
-    let spawn_agent = namespace_child_tool(&output, "agents", "spawn_agent")
-        .expect("request should expose agents.spawn_agent directly");
+    let requests = resp_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let output = requests[1].tool_search_output(call_id);
+    let spawn_agent = namespace_child_tool(&output, "multi_agent_v1", "spawn_agent")
+        .expect("tool_search should return multi_agent_v1.spawn_agent");
     let agent_type_description = tool_parameter_description(spawn_agent, "agent_type")
         .expect("spawn_agent agent_type description");
     let custom_role_description =

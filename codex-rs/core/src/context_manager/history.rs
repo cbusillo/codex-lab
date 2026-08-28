@@ -1,22 +1,20 @@
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
-use crate::context::ProjectValidationFailure;
-use crate::context::is_project_validation_correction_consumed;
+use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
-use crate::context::world_state::WorldStateFragmentIdentity;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
+use crate::utils::json::serialized_json_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_history::CodexHarnessMetadata;
-use codex_history::ContextFragmentKind;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
@@ -28,7 +26,6 @@ use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
@@ -46,34 +43,6 @@ use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
-
-/// Where the images removed by [`ContextManager::replace_all_images`] came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ImageSanitizationSource {
-    /// The user attached the image, so the turn cannot simply be retried without telling them.
-    User,
-    /// A tool produced the image, so the turn can be retried transparently.
-    Tool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ModelRequestHistoryMode {
-    #[default]
-    Normal,
-    ProjectValidationCorrection,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ProjectValidationCorrectionPair {
-    pub(crate) failure: ResponseItemEnvelope,
-    pub(crate) consumed: ResponseItemEnvelope,
-}
-
-impl ProjectValidationCorrectionPair {
-    pub(crate) fn into_items(self) -> Vec<ResponseItemEnvelope> {
-        vec![self.failure, self.consumed]
-    }
-}
 
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
@@ -166,11 +135,10 @@ impl ContextManager {
         world_state: &WorldState,
     ) -> (Vec<Box<dyn ContextualUserFragment>>, Option<WorldStateItem>) {
         let snapshot = world_state.snapshot();
-        let raw_items = self.raw_items().cloned().collect::<Vec<_>>();
         let fragments =
-            world_state.render_history_diff(self.world_state_baseline.as_ref(), &raw_items);
+            world_state.render_history_diff(self.world_state_baseline.as_ref(), self.raw_items());
         let rollout_item = self.world_state_baseline.as_ref().map_or_else(
-            || Some(WorldStateItem::full(snapshot.clone().into_value())),
+            || Some(WorldStateItem::full(snapshot.clone().into_object())),
             |previous| {
                 snapshot
                     .merge_patch_from(previous)
@@ -183,10 +151,6 @@ impl ContextManager {
 
     pub(crate) fn set_world_state_baseline(&mut self, snapshot: WorldStateSnapshot) {
         self.world_state_baseline = Some(snapshot);
-    }
-
-    pub(crate) fn world_state_baseline(&self) -> Option<&WorldStateSnapshot> {
-        self.world_state_baseline.as_ref()
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
@@ -271,29 +235,6 @@ impl ContextManager {
         &self.items
     }
 
-    pub(crate) fn apply_model_request_history_mode(
-        &mut self,
-        mode: ModelRequestHistoryMode,
-    ) -> Option<ProjectValidationCorrectionPair> {
-        if mode == ModelRequestHistoryMode::Normal {
-            return None;
-        }
-        let items = Arc::make_mut(&mut self.items);
-        let consumed_index = items
-            .iter()
-            .rposition(|item| is_project_validation_correction_consumed_item(&item.item))?;
-        let failure_index = consumed_index.checked_sub(1)?;
-        if !is_project_validation_failure_item(&items[failure_index].item) {
-            return None;
-        }
-        let pair = ProjectValidationCorrectionPair {
-            failure: items[failure_index].clone(),
-            consumed: items[consumed_index].clone(),
-        };
-        items.remove(consumed_index);
-        Some(pair)
-    }
-
     /// Returns raw items in the history and consumes the snapshot.
     pub(crate) fn into_raw_items(self) -> Vec<ResponseItem> {
         self.into_annotated_items()
@@ -314,8 +255,10 @@ impl ContextManager {
     // Estimate token usage using byte-based heuristics from the truncation helpers.
     // This is a coarse lower bound, not a tokenizer-accurate count.
     pub(crate) fn estimate_token_count(&self, turn_context: &TurnContext) -> Option<i64> {
-        let model_info = &turn_context.model_info;
-        let personality = turn_context.personality.or(turn_context.config.personality);
+        let model_info = &turn_context.model_info();
+        let personality = turn_context
+            .personality()
+            .or(turn_context.config.personality);
         let base_instructions = BaseInstructions {
             text: model_info.get_model_instructions(personality),
             provenance: None,
@@ -364,57 +307,6 @@ impl ContextManager {
         self.world_state_baseline = None;
     }
 
-    /// Replace every image anywhere in history with `placeholder` and report where those images
-    /// came from. Returns `None` when history holds no images.
-    ///
-    /// This is a deliberate, narrow exception to the "no history rewrite" rule. The Responses API
-    /// rejects the *entire* request when any image in the transcript is unreadable, so an image
-    /// the API refuses poisons every subsequent turn of the thread: without removing it, the
-    /// thread is permanently unusable. The rewrite is only reachable after the API has already
-    /// rejected the request (so the poisoned prefix was never cached), and replaces each image
-    /// with a shorter text placeholder, so it can never grow model-visible context.
-    ///
-    /// Recovery policy: the API does not say *which* image it could not read, so every image in
-    /// history is a candidate. Clearing one item per rejection would destroy the same images
-    /// anyway — just spread over one failed turn each, with the newest (most likely good) image
-    /// destroyed first. Clearing the whole candidate set in a single bounded pass removes exactly
-    /// the same images with exactly one failed turn, which is the least destructive deterministic
-    /// policy available without per-image attribution from the API.
-    ///
-    /// The reported source is the most user-visible one: [`ImageSanitizationSource::User`] if any
-    /// cleared image was user-attached (the user must be told), otherwise
-    /// [`ImageSanitizationSource::Tool`] (the turn can be retried transparently).
-    pub(crate) fn replace_all_images(
-        &mut self,
-        placeholder: &str,
-    ) -> Option<ImageSanitizationSource> {
-        let items = Arc::make_mut(&mut self.items);
-        let mut user_images_cleared = false;
-        let mut tool_images_cleared = false;
-        for item in items.iter_mut() {
-            match &mut **item {
-                ResponseItem::Message { role, content, .. } if role == "user" => {
-                    user_images_cleared |= replace_message_images(content, placeholder);
-                }
-                ResponseItem::FunctionCallOutput { output, .. }
-                | ResponseItem::CustomToolCallOutput { output, .. } => {
-                    tool_images_cleared |= replace_tool_output_images(output, placeholder);
-                }
-                _ => {}
-            }
-        }
-
-        let source = match (user_images_cleared, tool_images_cleared) {
-            (true, _) => Some(ImageSanitizationSource::User),
-            (false, true) => Some(ImageSanitizationSource::Tool),
-            (false, false) => None,
-        };
-        if source.is_some() {
-            self.history_version = self.history_version.saturating_add(1);
-        }
-        source
-    }
-
     /// Drop the last `num_turns` instruction turns from this history.
     ///
     /// Instruction turns are history messages that should behave like a new prompt boundary:
@@ -431,15 +323,7 @@ impl ContextManager {
     /// `reference_context_item`. The surviving history no longer contains the full bundle that
     /// established the prior baseline, so future turns must fall back to full reinjection instead
     /// of diffing against stale state.
-    ///
-    /// `multi_agent_usage_hint_identities` identifies persisted standalone V2 usage-hint messages,
-    /// which intentionally have no model-visible wrapper markers but still belong to the
-    /// rolled-back turn's startup context.
-    pub(crate) fn drop_last_n_user_turns(
-        &mut self,
-        num_turns: u32,
-        multi_agent_usage_hint_identities: &[WorldStateFragmentIdentity],
-    ) {
+    pub(crate) fn drop_last_n_user_turns(&mut self, num_turns: u32) {
         if num_turns == 0 {
             return;
         }
@@ -458,12 +342,8 @@ impl ContextManager {
             user_positions[user_positions.len() - n_from_end]
         };
 
-        cut_idx = self.trim_pre_turn_context_updates(
-            &snapshot,
-            first_instruction_turn_idx,
-            cut_idx,
-            multi_agent_usage_hint_identities,
-        );
+        cut_idx =
+            self.trim_pre_turn_context_updates(&snapshot, first_instruction_turn_idx, cut_idx);
 
         let mut retained_items = snapshot[..cut_idx].to_vec();
         if cut_idx == first_instruction_turn_idx
@@ -477,10 +357,12 @@ impl ContextManager {
                         return false;
                     };
                     content.retain(|content| {
+                        // Rebuild these from the next step's model and effort after rollback.
                         !matches!(
                             content.content(),
                             ContentItem::InputText { text }
                                 if ModelSwitchInstructions::matches_text(text)
+                                    || PersistentModeState::matches_text(text)
                         )
                     });
                     !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
@@ -662,26 +544,12 @@ impl ContextManager {
         snapshot: &[ResponseItemEnvelope],
         first_instruction_turn_idx: usize,
         mut cut_idx: usize,
-        multi_agent_usage_hint_identities: &[WorldStateFragmentIdentity],
     ) -> usize {
-        // New rollouts tag usage hints directly in harness metadata. For older rollouts, initial
-        // and diff context deliberately emit the unwrapped hint immediately before the marked
-        // multi-agent mode message; keep that strict adjacency requirement for the fingerprint
-        // fallback so unrelated plain developer text cannot match an older hint accidentally.
-        let mut expect_multi_agent_usage_hint = false;
         while cut_idx > first_instruction_turn_idx {
-            let envelope = &snapshot[cut_idx - 1];
-            match &envelope.item {
+            match &snapshot[cut_idx - 1].item {
                 ResponseItem::Message { role, content, .. }
                     if role == "developer" && is_contextual_dev_message_content(content) =>
                 {
-                    expect_multi_agent_usage_hint = content.iter().any(|item| {
-                        matches!(
-                            item,
-                            ContentItem::InputText { text }
-                                if text.contains(MULTI_AGENT_MODE_OPEN_TAG)
-                        )
-                    });
                     if has_non_contextual_dev_message_content(content) {
                         // Mixed `build_initial_context` bundles are not reconstructible from
                         // steady-state diffs once trimmed, so the next real turn must fully
@@ -691,36 +559,8 @@ impl ContextManager {
                     cut_idx -= 1;
                 }
                 ResponseItem::Message { role, content, .. }
-                    if role == "developer"
-                        && !envelope
-                            .metadata
-                            .as_ref()
-                            .is_some_and(|metadata| metadata.client_authored)
-                        && (envelope.metadata.as_ref().is_some_and(|metadata| {
-                            metadata.context_fragment.as_ref()
-                                == Some(&ContextFragmentKind::MultiAgentUsageHint)
-                        }) || (envelope
-                            .metadata
-                            .as_ref()
-                            .is_none_or(|metadata| metadata.context_fragment.is_none())
-                            && expect_multi_agent_usage_hint
-                            && multi_agent_usage_hint_identities.iter().any(|identity| {
-                                matches!(
-                                    content.as_slice(),
-                                    [ContentItem::InputText { text }]
-                                        if identity.matches(role, text)
-                                )
-                            }))) =>
+                    if role == "user" && is_contextual_user_message_content(content) =>
                 {
-                    expect_multi_agent_usage_hint = false;
-                    cut_idx -= 1;
-                }
-                ResponseItem::Message { role, content, .. }
-                    if role == "user"
-                        && is_contextual_user_message_content(content)
-                        && !is_project_validation_correction_consumed_content(content) =>
-                {
-                    expect_multi_agent_usage_hint = false;
                     cut_idx -= 1;
                 }
                 _ => break,
@@ -728,36 +568,6 @@ impl ContextManager {
         }
         cut_idx
     }
-}
-
-fn is_project_validation_correction_consumed_content(content: &[ContentItem]) -> bool {
-    content.iter().any(|item| {
-        let ContentItem::InputText { text } = item else {
-            return false;
-        };
-        is_project_validation_correction_consumed(text)
-    })
-}
-
-fn is_project_validation_correction_consumed_item(item: &ResponseItem) -> bool {
-    matches!(
-        item,
-        ResponseItem::Message { role, content, .. }
-            if role == "user" && is_project_validation_correction_consumed_content(content)
-    )
-}
-
-fn is_project_validation_failure_item(item: &ResponseItem) -> bool {
-    matches!(
-        item,
-        ResponseItem::Message { role, content, .. }
-            if role == "user"
-                && content.iter().any(|item| matches!(
-                    item,
-                    ContentItem::InputText { text }
-                        if ProjectValidationFailure::matches_text(text)
-                ))
-    )
 }
 
 pub(crate) fn truncate_function_output_payload(
@@ -862,8 +672,8 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
             ..
         } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
         item => {
-            let raw = serde_json::to_string(item)
-                .map(|serialized| i64::try_from(serialized.len()).unwrap_or(i64::MAX))
+            let raw = serialized_json_bytes(item)
+                .map(|len| i64::try_from(len).unwrap_or(i64::MAX))
                 .unwrap_or_default();
             let (image_payload_bytes, image_replacement_bytes) =
                 image_data_url_estimate_adjustment(item);
@@ -1099,36 +909,6 @@ fn encrypted_function_output_estimate_adjustment(item: &ResponseItem) -> (i64, i
     }
 
     (payload_bytes, replacement_bytes)
-}
-
-fn replace_message_images(content: &mut [ContentItem], placeholder: &str) -> bool {
-    let mut replaced = false;
-    for item in content.iter_mut() {
-        if matches!(item, ContentItem::InputImage { .. }) {
-            *item = ContentItem::InputText {
-                text: placeholder.to_string(),
-            };
-            replaced = true;
-        }
-    }
-    replaced
-}
-
-fn replace_tool_output_images(output: &mut FunctionCallOutputPayload, placeholder: &str) -> bool {
-    let Some(content_items) = output.content_items_mut() else {
-        return false;
-    };
-
-    let mut replaced = false;
-    for item in content_items.iter_mut() {
-        if matches!(item, FunctionCallOutputContentItem::InputImage { .. }) {
-            *item = FunctionCallOutputContentItem::InputText {
-                text: placeholder.to_string(),
-            };
-            replaced = true;
-        }
-    }
-    replaced
 }
 
 fn is_model_generated_item(item: &ResponseItem) -> bool {
