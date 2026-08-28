@@ -25,6 +25,7 @@ REPAIR_STATUSES = {"failed", "repaired"}
 REPAIR_AGENTS = {"human", "model", "script"}
 MODEL_TIERS = {"budget", "frontier", "none"}
 ACCOUNTING_CONFIDENCE = {"explicit_zero", "provider_reported"}
+LIVE_PROVENANCE = {"manual-operator", "workflow-executor"}
 FORBIDDEN_KEYS = {
     "command", "commands", "credential", "credentials", "exec", "execute",
     "function", "process", "pr", "push", "secret", "secrets", "shell",
@@ -173,10 +174,10 @@ def validate_ledger(
     if ledger.get("schemaVersion") != 1 or ledger.get("stage") != "3d":
         raise LedgerError("repair ledger is not schema 1 stage 3d")
     provenance = ledger.get("provenance")
-    if not isinstance(provenance, str) or provenance not in {"workflow-executor", "synthetic-fixture"}:
+    if not isinstance(provenance, str) or provenance not in LIVE_PROVENANCE | {"synthetic-fixture"}:
         raise LedgerError("repair ledger provenance is invalid")
-    if require_live and provenance != "workflow-executor":
-        raise LedgerError("live checkpoint requires workflow-executor provenance")
+    if require_live and provenance not in LIVE_PROVENANCE:
+        raise LedgerError("live checkpoint requires non-synthetic provenance")
     ledger_refs = ledger.get("refs")
     if not isinstance(ledger_refs, dict) or set(ledger_refs) != set(refs):
         raise LedgerError("repair ledger refs do not match candidate evidence")

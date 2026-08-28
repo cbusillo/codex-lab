@@ -179,6 +179,8 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertNotEqual(self.execute(require_live=True).returncode, 0)
         self.write_ledger([], provenance="workflow-executor")
         self.assertEqual(self.execute(require_live=True).returncode, 0)
+        self.write_ledger([], provenance="manual-operator")
+        self.assertEqual(self.execute(require_live=True).returncode, 0)
         self.ledger.write_bytes(b"{" + b"\"x\":\"" + b"a" * (256 * 1024) + b"\"}")
         self.assertNotEqual(self.execute().returncode, 0)
 

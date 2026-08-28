@@ -1,5 +1,9 @@
 use crate::shell::ShellType;
 
+use crate::context::world_state::environment_limits::MAX_ENVIRONMENT_CONTEXT_BODY_BYTES;
+use crate::context::world_state::environment_limits::MAX_RENDERED_NETWORK_DOMAINS;
+use crate::context::world_state::environment_limits::MAX_RENDERED_WORKSPACE_ROOTS;
+
 use super::*;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -57,7 +61,6 @@ fn environment_state(
         .collect();
     EnvironmentsState {
         environments,
-        shell_version: None,
         current_date,
         timezone,
         network,
@@ -355,43 +358,141 @@ fn serialize_environment_context_prefers_environment_shell_when_present() {
     assert_eq!(context.render(), expected);
 }
 
-fn powershell_environment() -> EnvironmentsState {
-    let cwd = PathUri::from_abs_path(&test_abs_path("/repo"));
-    EnvironmentsState {
-        environments: [environment("local", cwd, "powershell")].into(),
-        shell_version: Some("5.1".to_string()),
-        ..Default::default()
-    }
+#[test]
+fn environment_context_render_bounds_workspace_roots_network_and_subagents() {
+    let roots = (0..MAX_RENDERED_WORKSPACE_ROOTS * 3)
+        .map(|index| PathUri::from_abs_path(&test_abs_path(&format!("/root-{index}"))))
+        .collect::<Vec<_>>();
+    let domains = |prefix: &str| {
+        (0..MAX_RENDERED_NETWORK_DOMAINS * 3)
+            .map(|index| format!("{prefix}-{index}.example.com"))
+            .collect::<Vec<_>>()
+    };
+    let subagent_lines = (0..MAX_RENDERED_SUBAGENT_LINES * 3)
+        .map(|index| format!("- agent-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut context = environment_state(
+        [environment(
+            "local",
+            PathUri::from_abs_path(&test_abs_path("/repo")),
+            fake_shell_name(),
+        )],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        Some(NetworkContext::new(domains("allowed"), domains("denied"))),
+        /*subagents*/ None,
+    );
+    context = context.with_subagents(subagent_lines);
+    context.filesystem = Some(FileSystemContext::from_permission_profile(
+        &PermissionProfile::Disabled,
+        &roots,
+    ));
+
+    let rendered = context.render();
+
+    assert_eq!(
+        rendered.matches("<root>").count(),
+        MAX_RENDERED_WORKSPACE_ROOTS
+    );
+    assert_eq!(
+        rendered.matches("allowed-").count(),
+        MAX_RENDERED_NETWORK_DOMAINS
+    );
+    assert_eq!(
+        rendered.matches("denied-").count(),
+        MAX_RENDERED_NETWORK_DOMAINS
+    );
+    assert!(rendered.contains(&format!(
+        "<workspace_roots truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_WORKSPACE_ROOTS * 2
+    )));
+    assert!(rendered.contains(&format!(
+        "<allowed truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_NETWORK_DOMAINS * 2
+    )));
+    assert!(rendered.contains(&format!(
+        "<denied truncated=\"true\" omitted=\"{}\">",
+        MAX_RENDERED_NETWORK_DOMAINS * 2
+    )));
+    // The `- ...` elision marker occupies the last of the capped lines.
+    assert_eq!(
+        rendered.matches("- agent-").count(),
+        MAX_RENDERED_SUBAGENT_LINES - 1
+    );
+    assert!(rendered.contains("- ..."));
 }
 
 #[test]
-fn shell_version_diff_restates_shell_from_legacy_snapshot() {
-    let current = powershell_environment();
-    let mut previous = current.snapshot();
-    previous.shell_version = None;
-    previous.environments.get_mut("local").expect("local").shell = None;
-    let rendered = current
-        .render_diff(PreviousSectionState::Known(&previous))
-        .expect("shell version update")
-        .render();
-    assert!(
-        rendered.contains("<shell>powershell</shell>\n  <shell_version>5.1</shell_version>"),
-        "{rendered}"
+fn environment_context_render_is_byte_capped() {
+    let subagent_lines = (0..MAX_RENDERED_SUBAGENT_LINES)
+        .map(|index| format!("- {}-{index}", "a".repeat(4_096)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let context = environment_state(
+        [environment(
+            "local",
+            PathUri::from_abs_path(&test_abs_path("/repo")),
+            fake_shell_name(),
+        )],
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    )
+    .with_subagents(subagent_lines);
+
+    let body = context.body();
+
+    assert!(body.len() <= MAX_ENVIRONMENT_CONTEXT_BODY_BYTES);
+    assert!(body.contains("environment context exceeded its size limit"));
+}
+
+fn numbered_environments(count: usize) -> Vec<(String, EnvironmentState)> {
+    (0..count)
+        .map(|index| {
+            environment(
+                &format!("env-{index:02}"),
+                PathUri::from_abs_path(&test_abs_path(&format!("/repo-{index}"))),
+                fake_shell_name(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn environment_context_renders_every_environment_at_the_shipped_maximum() {
+    let context = environment_state(
+        numbered_environments(MAX_TURN_ENVIRONMENT_SELECTIONS),
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    let rendered = context.render();
+
+    assert_eq!(
+        rendered.matches("<environment id=").count(),
+        MAX_TURN_ENVIRONMENT_SELECTIONS
     );
 }
 
 #[test]
-fn shell_version_diff_clears_previously_visible_version() {
-    let previous = powershell_environment();
-    let current = EnvironmentsState {
-        shell_version: None,
-        ..previous.clone()
-    };
+fn environment_context_render_caps_the_rendered_environment_count() {
+    let context = environment_state(
+        numbered_environments(MAX_RENDERED_ENVIRONMENTS * 3),
+        /*current_date*/ None,
+        /*timezone*/ None,
+        /*network*/ None,
+        /*subagents*/ None,
+    );
+
+    let rendered = context.render();
+
     assert_eq!(
-        current
-            .render_diff(PreviousSectionState::Known(&previous.snapshot()))
-            .expect("removed shell version")
-            .render(),
-        "<environment_context>\n  <shell_version status=\"unavailable\" />\n</environment_context>"
+        rendered.matches("<environment id=").count(),
+        MAX_RENDERED_ENVIRONMENTS
     );
 }
