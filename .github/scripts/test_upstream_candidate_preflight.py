@@ -246,3 +246,185 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertIn(" ::warning::fake", bounded)
         self.assertEqual(preflight.classify_failure(137, bounded), "infrastructure")
         self.assertEqual(preflight.classify_failure(1, bounded), "regression")
+
+    def packet_inputs(self, root: Path, conflicts: list[str]) -> tuple[Path, Path, Path, Path]:
+        evidence = root / "candidate-evidence.json"
+        evidence.write_text(
+            json.dumps({"schemaVersion": 1, "classification": "conflict", "conflictPaths": conflicts}),
+            encoding="utf-8",
+        )
+        guard = root / "guard.json"
+        guard.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "guardedPaths": [
+                        {
+                            "path": conflicts[0],
+                            "contracts": ["RED-CONTRACT"],
+                            "lane": "red_manual_review",
+                            "reason": "manual boundary",
+                            "source": "current_tree",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        gates = root / "gates.json"
+        gates.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "contracts": [
+                        {
+                            "id": "RED-CONTRACT",
+                            "evidence": [
+                                {"kind": "symbol", "path": "trusted-anchor.rs", "ciTier": "blocking", "token": "safe"},
+                                {"kind": "narrative", "description": "not injected"},
+                                {"kind": "semantic_reachability", "description": "not injected"},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        conflict_file = root / "conflicts.txt"
+        conflict_file.write_text("\n".join(conflicts) + "\n", encoding="utf-8")
+        return evidence, guard, gates, conflict_file
+
+    def test_build_packets_is_deterministic_red_manual_and_zero_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            inputs = self.packet_inputs(root, ["codex-rs/core/src/lib.rs", "mechanical.txt"])
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": inputs[0], "guard": inputs[1], "gates": inputs[2], "conflicts": inputs[3],
+                    "root_failures": None, "output_dir": root / "packets", "cycle_id": "cycle-1",
+                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "17",
+                },
+            )()
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            first = (args.output_dir / "model-packets.json").read_bytes()
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            self.assertEqual(first, (args.output_dir / "model-packets.json").read_bytes())
+            result = json.loads(first)
+            telemetry = json.loads((args.output_dir / "model-telemetry.json").read_text(encoding="utf-8"))
+            evidence = json.loads(inputs[0].read_text(encoding="utf-8"))
+
+        self.assertEqual(result["plannedPacketTotal"], 1)
+        self.assertEqual(result["packets"][0]["modelTier"], "frontier")
+        self.assertEqual(result["packets"][0]["excludedAnchorTotal"], 2)
+        self.assertEqual(result["counts"]["mechanicalOrUnattributedPathTotal"], 1)
+        self.assertEqual(result["counts"]["attributedPathTotal"], 1)
+        self.assertEqual(telemetry["actualTotalTokens"], 0)
+        self.assertEqual(telemetry["invocation"], "not-invoked")
+        self.assertEqual(telemetry["accountingConfidence"], "explicit_zero")
+        self.assertEqual(evidence["classification"], "conflict")
+        self.assertEqual(evidence["modelPackets"]["plannedPacketTotal"], 1)
+
+    def test_build_packets_caps_and_defers_paths_and_aggregate_packets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            conflicts = [f"path-{index}" for index in range(40)]
+            evidence, guard, gates, conflict_file = self.packet_inputs(root, conflicts)
+            gate_data = json.loads(gates.read_text(encoding="utf-8"))
+            gate_data["contracts"][0]["id"] = "A-CONTRACT"
+            gate_data["contracts"][0]["evidence"] = [
+                {"kind": "file", "path": path, "ciTier": "blocking"} for path in conflicts
+            ]
+            gate_data["contracts"].extend(
+                {"id": f"CONTRACT-{index:02d}", "evidence": [{"kind": "file", "path": conflicts[index]}]}
+                for index in range(20)
+            )
+            gates.write_text(json.dumps(gate_data), encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflict_file,
+                    "root_failures": None, "output_dir": root / "packets", "cycle_id": "cycle-2",
+                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "1",
+                },
+            )()
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+
+        self.assertLessEqual(result["plannedPacketTotal"], 12)
+        self.assertLessEqual(result["aggregatePlannedPromptTokens"], 40_000)
+        self.assertTrue(all(len(preflight._canonical_json(packet)) <= 40_000 for packet in result["packets"]))
+        self.assertTrue(all(packet["estimatedPromptTokens"] <= 10_000 for packet in result["packets"]))
+        self.assertLessEqual(len(result["packets"][0]["paths"]), 25)
+        self.assertGreater(result["packets"][0]["deferredPathTotal"], 0)
+        self.assertGreater(result["deferredPacketTotal"], 0)
+        self.assertTrue(any(warning.startswith("packets_deferred:") for warning in result["warnings"]))
+        self.assertTrue(any(warning.startswith("packet_paths_truncated:") for warning in result["warnings"]))
+        self.assertEqual(result["packets"], sorted(result["packets"], key=lambda packet: packet["packetId"]))
+        for packet in result["packets"]:
+            self.assertLessEqual(len(preflight._canonical_json(packet)), 40_000)
+            self.assertLessEqual(packet["estimatedPromptTokens"], 10_000)
+            self.assertLessEqual(len(packet["paths"]), 25)
+            self.assertLessEqual(len(packet["anchors"]), 20)
+
+    def test_build_packets_adds_root_failure_packet_without_candidate_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            evidence, guard, gates, conflict_file = self.packet_inputs(root, ["unattributed.txt"])
+            root_failures = root / "roots.json"
+            root_failures.write_text(
+                json.dumps(
+                    {
+                        "status": "extracted",
+                        "report": {"failures": [{"root": "cargo-check", "sources": [{"id": 42, "name": "Cargo"}]}]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflict_file,
+                    "root_failures": root_failures, "output_dir": root / "packets", "cycle_id": "cycle-3",
+                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "2",
+                },
+            )()
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["packetTotal"], 2)
+        self.assertIn("root_failure", [packet["kind"] for packet in result["packets"]])
+        self.assertIn(42, [source.get("id") for packet in result["packets"] if packet["kind"] == "root_failure" for source in packet["rootFailure"]["sources"]])
+        self.assertEqual(result["counts"]["mechanicalOrUnattributedPathTotal"], 0)
+
+    def test_build_packets_missing_inputs_is_unavailable_but_green(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": root / "missing-evidence.json", "guard": root / "missing-guard.json",
+                    "gates": root / "missing-gates.json", "conflicts": None, "root_failures": None,
+                    "output_dir": root / "packets", "cycle_id": "cycle-4",
+                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "0",
+                },
+            )()
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["aggregatePlannedPromptTokens"], 0)
+
+    def test_build_packets_rejects_malformed_trusted_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for trusted_name, value in (("guard", {"guardedPaths": [{}]}), ("gates", {"contracts": [{}]})):
+                evidence, guard, gates, conflicts = self.packet_inputs(root, ["owned.rs"])
+                trusted_path = guard if trusted_name == "guard" else gates
+                trusted_path.write_text(json.dumps(value), encoding="utf-8")
+                args = type("Args", (), {"evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflicts, "root_failures": None, "output_dir": root / trusted_path.stem, "cycle_id": "cycle-5", "started_at": "2026-08-28T00:00:00Z", "duration_ms": "1"})()
+                self.assertEqual(preflight.build_model_packets(args), 1)
