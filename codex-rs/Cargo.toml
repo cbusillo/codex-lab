@@ -248,7 +248,6 @@ codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
 codex-owner-control-contract = { path = "owner-control-contract" }
-codex-owner-control-host = { path = "owner-control-host" }
 codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
