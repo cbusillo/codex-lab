@@ -50,35 +50,68 @@ DENIED_IPC_SOURCE_SYMBOLS = {
 }
 
 
-def dependency_package_names(dependencies: object) -> set[str]:
+def dependency_package_names(
+    dependencies: object,
+    workspace_dependencies: dict[str, str] | None = None,
+) -> set[str]:
     if not isinstance(dependencies, dict):
         return set()
     names = set()
     for alias, dependency in dependencies.items():
-        if isinstance(dependency, dict) and isinstance(dependency.get("package"), str):
+        if isinstance(dependency, dict) and dependency.get("workspace") is True:
+            names.add((workspace_dependencies or {}).get(alias, alias))
+        elif isinstance(dependency, dict) and isinstance(dependency.get("package"), str):
             names.add(dependency["package"])
         else:
             names.add(alias)
     return names
 
 
-def dependency_names(manifest: dict[str, object], section: str) -> set[str]:
-    names = dependency_package_names(manifest.get(section, {}))
+def dependency_names(
+    manifest: dict[str, object],
+    section: str,
+    workspace_dependencies: dict[str, str] | None = None,
+) -> set[str]:
+    names = dependency_package_names(
+        manifest.get(section, {}), workspace_dependencies
+    )
     targets = manifest.get("target", {})
     if not isinstance(targets, dict):
         return names
     for target in targets.values():
         if isinstance(target, dict):
-            names.update(dependency_package_names(target.get(section, {})))
+            names.update(
+                dependency_package_names(
+                    target.get(section, {}), workspace_dependencies
+                )
+            )
     return names
 
 
-def all_dependency_names(manifest: dict[str, object]) -> set[str]:
+def all_dependency_names(
+    manifest: dict[str, object],
+    workspace_dependencies: dict[str, str] | None = None,
+) -> set[str]:
     return set().union(
-        dependency_names(manifest, "dependencies"),
-        dependency_names(manifest, "dev-dependencies"),
-        dependency_names(manifest, "build-dependencies"),
+        dependency_names(manifest, "dependencies", workspace_dependencies),
+        dependency_names(manifest, "dev-dependencies", workspace_dependencies),
+        dependency_names(manifest, "build-dependencies", workspace_dependencies),
     )
+
+
+def workspace_dependency_names() -> dict[str, str]:
+    with (CARGO_ROOT / "Cargo.toml").open("rb") as file:
+        manifest = tomllib.load(file)
+    workspace = manifest.get("workspace", {})
+    if not isinstance(workspace, dict):
+        return {}
+    dependencies = workspace.get("dependencies", {})
+    if not isinstance(dependencies, dict):
+        return {}
+    return {
+        alias: next(iter(dependency_package_names({alias: dependency})))
+        for alias, dependency in dependencies.items()
+    }
 
 
 def manifests() -> list[tuple[Path, dict[str, object]]]:
@@ -94,11 +127,12 @@ def manifests() -> list[tuple[Path, dict[str, object]]]:
 def check_isolation() -> int:
     errors = []
     all_manifests = manifests()
+    workspace_dependencies = workspace_dependency_names()
     for path, manifest in all_manifests:
         package = manifest["package"]
         assert isinstance(package, dict)
         package_name = package.get("name")
-        dependencies = all_dependency_names(manifest)
+        dependencies = all_dependency_names(manifest, workspace_dependencies)
         if CONTRACT in dependencies and package_name not in {HOST, IPC}:
             errors.append(f"{path.relative_to(ROOT)} depends on {CONTRACT}")
         if HOST in dependencies and package_name != IPC:
@@ -108,7 +142,9 @@ def check_isolation() -> int:
 
     with HOST_MANIFEST.open("rb") as file:
         host_manifest = tomllib.load(file)
-    host_dependencies = dependency_names(host_manifest, "dependencies")
+    host_dependencies = dependency_names(
+        host_manifest, "dependencies", workspace_dependencies
+    )
     unexpected = host_dependencies - ALLOWED_HOST_DEPENDENCIES
     if unexpected:
         errors.append(
@@ -120,9 +156,12 @@ def check_isolation() -> int:
         errors.append(
             "host has denied runtime dependencies: " + ", ".join(sorted(denied))
         )
-    if dependency_names(host_manifest, "build-dependencies"):
+    if dependency_names(host_manifest, "build-dependencies", workspace_dependencies):
         errors.append("host must not have build dependencies")
-    unexpected_dev = dependency_names(host_manifest, "dev-dependencies") - ALLOWED_HOST_DEV_DEPENDENCIES
+    unexpected_dev = (
+        dependency_names(host_manifest, "dev-dependencies", workspace_dependencies)
+        - ALLOWED_HOST_DEV_DEPENDENCIES
+    )
     if unexpected_dev:
         errors.append(
             "host has unexpected dev dependencies: "
@@ -131,7 +170,9 @@ def check_isolation() -> int:
 
     with IPC_MANIFEST.open("rb") as file:
         ipc_manifest = tomllib.load(file)
-    ipc_dependencies = dependency_names(ipc_manifest, "dependencies")
+    ipc_dependencies = dependency_names(
+        ipc_manifest, "dependencies", workspace_dependencies
+    )
     unexpected = ipc_dependencies - ALLOWED_IPC_DEPENDENCIES
     if unexpected:
         errors.append(
@@ -143,10 +184,10 @@ def check_isolation() -> int:
         errors.append(
             "IPC has denied runtime dependencies: " + ", ".join(sorted(denied))
         )
-    if dependency_names(ipc_manifest, "build-dependencies"):
+    if dependency_names(ipc_manifest, "build-dependencies", workspace_dependencies):
         errors.append("IPC must not have build dependencies")
     unexpected_dev = (
-        dependency_names(ipc_manifest, "dev-dependencies")
+        dependency_names(ipc_manifest, "dev-dependencies", workspace_dependencies)
         - ALLOWED_IPC_DEV_DEPENDENCIES
     )
     if unexpected_dev:
@@ -206,6 +247,19 @@ class OwnerControlHostIsolationTest(unittest.TestCase):
         self.assertEqual(
             dependency_names(manifest, "dependencies"),
             {"direct-package", "target-package"},
+        )
+
+    def test_dependency_names_resolve_workspace_aliases(self) -> None:
+        manifest = {
+            "dependencies": {"stealth-ipc": {"workspace": True}},
+        }
+        self.assertEqual(
+            dependency_names(
+                manifest,
+                "dependencies",
+                {"stealth-ipc": IPC},
+            ),
+            {IPC},
         )
 
     def test_inert_boundary_is_preserved(self) -> None:
