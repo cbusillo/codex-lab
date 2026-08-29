@@ -8,7 +8,7 @@ use crate::decode::deserialize_value;
 
 pub const OWNER_CONTROL_SCHEMA_VERSION: u8 = 1;
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ErrorLocation {
     Field(String),

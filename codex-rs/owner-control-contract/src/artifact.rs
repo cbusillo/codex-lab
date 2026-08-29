@@ -1,6 +1,11 @@
+mod compatibility;
+mod state_vectors;
+
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde::Deserializer;
+use serde::Serialize;
 use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
@@ -23,10 +28,28 @@ use crate::model::ValidationError;
 use crate::signature_payload;
 use crate::verify_confirmation_signature_proof;
 
+pub use compatibility::CompatibilityDeclaration;
+pub use state_vectors::ChallengeLifecycleEvent;
+pub use state_vectors::ChallengeLifecycleVector;
+pub use state_vectors::OwnerControlAuthorityState;
+pub use state_vectors::OwnerControlChallengeRecord;
+pub use state_vectors::OwnerControlChallengeState;
+pub use state_vectors::OwnerControlChannelSessionRecord;
+pub use state_vectors::OwnerControlChannelSessionStatus;
+pub use state_vectors::OwnerControlRejectionReason;
+pub use state_vectors::OwnerControlTransitionReason;
+pub use state_vectors::OwnerControlVerificationStatus;
+pub use state_vectors::OwnerControlVerifierMode;
+pub use state_vectors::VerificationStateExpectation;
+pub use state_vectors::VerificationStateVector;
+
 pub const EMBEDDED_CONTRACT_JSON: &str = include_str!("../contracts/owner-control-contract.json");
 pub const EMBEDDED_CONTRACT_SHA256: &str =
-    "342a07917bdfc1a0f4ee43e6ec2b55adebf301b2abfcdab3aa979ce38cf92cc5";
-pub const OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 2;
+    "e3e40e511f3246380291edd7bf3872847039c49c94121885e12fa6116a0b1fae";
+pub const OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 3;
+const PREVIOUS_OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 2;
+const OWNER_CONTROL_STATE_SCHEMA_VERSION: u8 = 1;
+const OWNER_CONTROL_MAX_ATTEMPTS: u8 = 8;
 
 #[derive(Debug, Error)]
 pub enum ArtifactError {
@@ -40,7 +63,7 @@ pub enum ArtifactError {
     Invalid(String),
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalJsonSpec {
     pub encoding: String,
@@ -55,7 +78,7 @@ pub struct CanonicalJsonSpec {
     pub trailing_newline: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalizationVector {
     pub canonical_json: String,
@@ -64,7 +87,7 @@ pub struct CanonicalizationVector {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GoldenPayload<T> {
     pub canonical_json: String,
@@ -72,7 +95,7 @@ pub struct GoldenPayload<T> {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GoldenVector {
     pub approval_request: GoldenPayload<ApprovalRequest>,
@@ -81,7 +104,7 @@ pub struct GoldenVector {
     pub descriptor_version: u8,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureDeclaration {
     pub algorithm: String,
@@ -96,14 +119,14 @@ pub struct SignatureDeclaration {
     pub signature_encoding: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationOutcome {
     Valid,
     Invalid,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfirmationGoldenVector {
     pub channel_binding: GoldenPayload<ChannelBindingRecord>,
@@ -115,7 +138,7 @@ pub struct ConfirmationGoldenVector {
     pub verification: VerificationOutcome,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NegativeModel {
     ApprovalRequest,
@@ -123,7 +146,7 @@ pub enum NegativeModel {
     ServerReviewPayload,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NegativeVector {
     pub error_location: Vec<ErrorLocation>,
@@ -132,28 +155,50 @@ pub struct NegativeVector {
     pub rule: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NegativeConfirmationModel {
     OwnerControlConfirmationEnvelope,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NegativeConfirmationVector {
     pub error_location: Vec<ErrorLocation>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub error_message_contains: Option<String>,
     pub model: NegativeConfirmationModel,
     pub payload: Value,
     pub rule: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub verification: Option<VerificationOutcome>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+fn deserialize_optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| serde::de::Error::custom("field must be omitted instead of null"))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ContractArtifact {
     pub canonical_json: CanonicalJsonSpec,
     pub canonicalization_vectors: Vec<CanonicalizationVector>,
+    pub challenge_lifecycle_vectors: Vec<ChallengeLifecycleVector>,
+    pub compatibility: CompatibilityDeclaration,
     pub confirmation_golden_vectors: Vec<ConfirmationGoldenVector>,
     pub golden_vectors: Vec<GoldenVector>,
     pub negative_confirmation_vectors: Vec<NegativeConfirmationVector>,
@@ -161,15 +206,17 @@ pub struct ContractArtifact {
     pub schema_version: u8,
     pub schemas: BTreeMap<String, Value>,
     pub signature_declaration: SignatureDeclaration,
+    pub verification_state_vectors: Vec<VerificationStateVector>,
 }
 
 impl ContractArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         if self.schema_version != OWNER_CONTROL_CONTRACT_SCHEMA_VERSION {
             return Err(ArtifactError::Invalid(
-                "contract schema_version must be exactly 2".to_owned(),
+                "contract schema_version must be exactly 3".to_owned(),
             ));
         }
+        self.compatibility.validate(self)?;
         self.canonical_json.validate()?;
         self.signature_declaration.validate()?;
         for vector in &self.canonicalization_vectors {
@@ -230,6 +277,8 @@ impl ContractArtifact {
                 "schemas must contain the six published model schemas".to_owned(),
             ));
         }
+        state_vectors::validate_verification_state_vectors(&self.verification_state_vectors)?;
+        state_vectors::validate_challenge_lifecycle_vectors(&self.challenge_lifecycle_vectors)?;
         Ok(())
     }
 }
@@ -237,7 +286,7 @@ impl ContractArtifact {
 impl SignatureDeclaration {
     fn validate(&self) -> Result<(), ArtifactError> {
         if self.algorithm != "ed25519"
-            || self.contract_schema_version != OWNER_CONTROL_CONTRACT_SCHEMA_VERSION
+            || self.contract_schema_version != PREVIOUS_OWNER_CONTROL_CONTRACT_SCHEMA_VERSION
             || self.domain != "launchplane-owner-control-confirmation-v1"
             || self.legacy_golden_channel_binding
                 != "synthetic-placeholder-not-channel-binding-record"
@@ -249,7 +298,7 @@ impl SignatureDeclaration {
             || self.signature_encoding != "base64url-unpadded"
         {
             return Err(ArtifactError::Invalid(
-                "signature_declaration does not match the published v2 contract".to_owned(),
+                "signature_declaration does not match the preserved v2 section".to_owned(),
             ));
         }
         Ok(())
@@ -429,7 +478,13 @@ pub fn load_embedded_artifact() -> Result<ContractArtifact, ArtifactError> {
             "embedded artifact SHA-256 is {actual_sha256}, expected {EMBEDDED_CONTRACT_SHA256}"
         )));
     }
-    let artifact: ContractArtifact = serde_json::from_str(EMBEDDED_CONTRACT_JSON)?;
+    let raw: Value = serde_json::from_str(EMBEDDED_CONTRACT_JSON)?;
+    let artifact: ContractArtifact = serde_json::from_value(raw.clone())?;
+    if serde_json::to_value(&artifact)? != raw {
+        return Err(ArtifactError::Invalid(
+            "typed artifact does not preserve every published field".to_owned(),
+        ));
+    }
     artifact.validate()?;
     Ok(artifact)
 }

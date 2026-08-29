@@ -1,5 +1,9 @@
+use std::collections::BTreeSet;
+
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha2::Digest;
+use sha2::Sha256;
 
 use super::*;
 
@@ -283,4 +287,189 @@ fn field_validation_order_matches_launchplane_models() {
             .location(),
         vec![ErrorLocation::Field("channel_binding_sha256".to_owned())]
     );
+}
+
+#[test]
+fn embedded_v3_artifact_is_exactly_pinned() {
+    let artifact = load_embedded_artifact().expect("embedded artifact should load");
+
+    assert_eq!(artifact.schema_version, 3);
+    assert_eq!(artifact.compatibility.container_schema_version, 3);
+    assert_eq!(artifact.compatibility.previous_container_schema_version, 2);
+    assert_eq!(artifact.signature_declaration.contract_schema_version, 2);
+    assert_eq!(
+        format!("{:x}", Sha256::digest(EMBEDDED_CONTRACT_JSON.as_bytes())),
+        EMBEDDED_CONTRACT_SHA256
+    );
+}
+
+#[test]
+fn compatibility_digests_recompute_from_the_published_v2_sections() {
+    let artifact = load_embedded_artifact().expect("embedded artifact should load");
+    let raw: serde_json::Value = serde_json::from_str(EMBEDDED_CONTRACT_JSON).unwrap();
+    let expected_sections = [
+        "canonical_json",
+        "canonicalization_vectors",
+        "confirmation_golden_vectors",
+        "golden_vectors",
+        "negative_confirmation_vectors",
+        "negative_vectors",
+        "schemas",
+        "signature_declaration",
+    ];
+
+    assert_eq!(
+        artifact
+            .compatibility
+            .preserved_v2_section_sha256
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        expected_sections.into_iter().collect::<BTreeSet<_>>()
+    );
+    for section in expected_sections {
+        assert_eq!(
+            canonical_json_sha256(&raw[section]).unwrap(),
+            artifact.compatibility.preserved_v2_section_sha256[section],
+            "{section}"
+        );
+    }
+}
+
+#[test]
+fn verification_state_vectors_are_complete_inert_and_proof_checked() {
+    let artifact = load_embedded_artifact().expect("embedded artifact should load");
+    let expected_reasons = [
+        OwnerControlRejectionReason::UnknownChannelSession,
+        OwnerControlRejectionReason::UnknownChallenge,
+        OwnerControlRejectionReason::ChannelSessionRevoked,
+        OwnerControlRejectionReason::ChannelSessionExpired,
+        OwnerControlRejectionReason::ChallengeChannelSessionMismatch,
+        OwnerControlRejectionReason::ChallengeExpired,
+        OwnerControlRejectionReason::ChallengeReplayed,
+        OwnerControlRejectionReason::StoredBindingMismatch,
+        OwnerControlRejectionReason::StoredApprovalRequestMismatch,
+        OwnerControlRejectionReason::SignatureInvalid,
+        OwnerControlRejectionReason::AttemptBudgetExhausted,
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let actual_reasons = artifact
+        .verification_state_vectors
+        .iter()
+        .filter_map(|vector| vector.expected.rejection_reason)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(actual_reasons, expected_reasons);
+    assert_eq!(
+        artifact
+            .verification_state_vectors
+            .iter()
+            .filter(|vector| {
+                vector.expected.verification_status == OwnerControlVerificationStatus::Verified
+            })
+            .count(),
+        1
+    );
+    for vector in &artifact.verification_state_vectors {
+        assert_eq!(
+            vector.expected.authority_state,
+            OwnerControlAuthorityState::Inert,
+            "{}",
+            vector.name
+        );
+        assert_eq!(
+            vector.expected.verifier_mode,
+            OwnerControlVerifierMode::Shadow,
+            "{}",
+            vector.name
+        );
+        assert!(!vector.expected.authorizes_execution, "{}", vector.name);
+        let envelope =
+            OwnerControlConfirmationEnvelope::from_value(vector.confirmation_envelope.clone())
+                .unwrap();
+        assert_eq!(
+            verify_confirmation_signature_proof(&envelope),
+            vector.expected.rejection_reason != Some(OwnerControlRejectionReason::SignatureInvalid),
+            "{}",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn lifecycle_vector_pins_only_the_published_boundary_transition() {
+    let artifact = load_embedded_artifact().expect("embedded artifact should load");
+    let [vector] = artifact.challenge_lifecycle_vectors.as_slice() else {
+        panic!("expected one lifecycle vector");
+    };
+    let mut expected_terminalized = vector.issued_challenge.clone();
+    expected_terminalized.state = OwnerControlChallengeState::Expired;
+    expected_terminalized.terminal_event_id =
+        Some(vector.expected_lifecycle_event.event_id.clone());
+
+    assert_eq!(vector.name, "issued-to-expired-at-boundary");
+    assert_eq!(
+        vector.expected_terminalized_challenge,
+        expected_terminalized
+    );
+    assert_eq!(vector.observed_at, vector.issued_challenge.expires_at);
+    assert_eq!(
+        vector.expected_lifecycle_event.occurred_at,
+        vector.observed_at
+    );
+    assert_eq!(
+        vector.expected_lifecycle_event.challenge_expires_at,
+        vector.observed_at
+    );
+    assert_eq!(
+        vector.expected_lifecycle_event.authority_state,
+        OwnerControlAuthorityState::Inert
+    );
+    assert!(!vector.expected_lifecycle_event.authorizes_execution);
+}
+
+#[test]
+fn v3_artifact_drift_and_unknown_fields_fail_closed() {
+    let raw: serde_json::Value = serde_json::from_str(EMBEDDED_CONTRACT_JSON).unwrap();
+
+    let mut unknown_root = raw.clone();
+    unknown_root["unknown"] = json!(true);
+    assert!(serde_json::from_value::<ContractArtifact>(unknown_root).is_err());
+
+    let mut unknown_lifecycle_field = raw.clone();
+    unknown_lifecycle_field["challenge_lifecycle_vectors"][0]["expected_lifecycle_event"]["envelope_sha256"] =
+        json!("0".repeat(64));
+    assert!(serde_json::from_value::<ContractArtifact>(unknown_lifecycle_field).is_err());
+
+    let mut normalized_optional_field = raw.clone();
+    normalized_optional_field["negative_confirmation_vectors"][0]["error_message_contains"] =
+        serde_json::Value::Null;
+    assert!(serde_json::from_value::<ContractArtifact>(normalized_optional_field).is_err());
+
+    let mut wrong_version: ContractArtifact = serde_json::from_value(raw.clone()).unwrap();
+    wrong_version.schema_version = 4;
+    assert!(wrong_version.validate().is_err());
+
+    let mut preserved_section_drift: ContractArtifact =
+        serde_json::from_value(raw.clone()).unwrap();
+    preserved_section_drift
+        .schemas
+        .get_mut("approval_request")
+        .unwrap()["title"] = json!("drifted");
+    assert!(preserved_section_drift.validate().is_err());
+
+    let mut authorizing_vector: ContractArtifact = serde_json::from_value(raw).unwrap();
+    authorizing_vector.verification_state_vectors[0]
+        .expected
+        .authorizes_execution = true;
+    assert!(authorizing_vector.validate().is_err());
+
+    let mut cross_record_drift: ContractArtifact =
+        serde_json::from_str(EMBEDDED_CONTRACT_JSON).unwrap();
+    let mismatched_session = cross_record_drift.verification_state_vectors[5]
+        .channel_session
+        .clone();
+    cross_record_drift.verification_state_vectors[0].channel_session = mismatched_session;
+    assert!(cross_record_drift.validate().is_err());
 }
