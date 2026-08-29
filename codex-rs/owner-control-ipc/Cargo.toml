@@ -1,0 +1,24 @@
+[package]
+name = "codex-owner-control-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_owner_control_ipc"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-owner-control-contract = { workspace = true }
+codex-owner-control-host = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

@@ -4174,6 +4174,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-owner-control-ipc"
+version = "0.0.0"
+dependencies = [
+ "codex-owner-control-contract",
+ "codex-owner-control-host",
+ "libc",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "codex-plugin"
 version = "0.0.0"
 dependencies = [
