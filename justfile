@@ -84,6 +84,11 @@ install:
     cargo fetch
     exit $LASTEXITCODE
 
+[doc('Measure a named local feedback lane and emit bounded JSON evidence')]
+[no-cd]
+feedback-latency *args:
+    {{ python }} {{ justfile_directory() }}/scripts/local/feedback_latency.py {args}
+
 # Run nextest with --no-fail-fast so all tests are run.
 #
 # Run `cargo install --locked cargo-nextest` if you don't have it installed.

@@ -101,7 +101,9 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         workflow = RUST_BLOCKING_CI_WORKFLOW.read_text()
 
         self.assertIn("  workspace_check:\n", workflow)
-        self.assertIn("run: cargo check --workspace --tests --locked", workflow)
+        self.assertIn("python3 ../scripts/local/feedback_latency.py", workflow)
+        self.assertIn("-- cargo check --workspace --tests --locked", workflow)
+        self.assertIn("name: rust-feedback-workspace-check", workflow)
         self.assertIn("workspace_check,", workflow)
 
     def test_opt_in_rust_full_ci_cancels_superseded_runs(self) -> None:
