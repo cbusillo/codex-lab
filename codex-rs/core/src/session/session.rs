@@ -1,5 +1,6 @@
 use super::input_queue::InputQueue;
 use super::mcp_refresh::McpRefresh;
+use super::project_validation_coordinator::ProjectValidationSuccessCache;
 use super::step_settings::ModelInfoOverrides;
 use super::step_settings::StepSettings;
 use super::step_settings::StepSettingsConstraints;
@@ -9,9 +10,15 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::execution_account::ExecutionAccountLease;
+use crate::execution_account::ExecutionAccountLeasePersistence;
+use crate::execution_account::ExecutionAccountOptions;
+use crate::execution_account::ExecutionAccountPooling;
+use crate::execution_account::ExecutionAccountStart;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
+use crate::session_models_manager::models_manager_for_execution_account;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
@@ -21,6 +28,8 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
@@ -28,6 +37,7 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
@@ -77,28 +87,31 @@ pub(crate) struct SessionConfiguration {
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
 
-    /// Desired configured inputs inherited by future turns.
+    pub(super) collaboration_mode: CollaborationMode,
+    pub(super) model_reasoning_summary: Option<ReasoningSummaryConfig>,
+    pub(super) service_tier: Option<String>,
     pub(super) step_settings: Arc<StepSettings>,
-    /// Explicit startup overrides used when resolving effective model metadata.
     pub(super) model_info_overrides: ModelInfoOverrides,
 
     /// Developer instructions that supplement the base instructions.
     pub(super) developer_instructions: Option<String>,
 
+    /// Personality preference for the model.
+    pub(super) personality: Option<Personality>,
+
     /// Base instructions for the session.
     pub(super) base_instructions: String,
 
+    /// When to escalate for approval for execution
+    pub(super) approval_policy: Constrained<AskForApproval>,
+    pub(super) approvals_reviewer: ApprovalsReviewer,
     /// Permission profile state for the session. Keep the constrained profile,
     /// active profile id, and profile-defined workspace roots in sync by using
     /// the methods below instead of mutating the fields independently.
     pub(super) permission_profile_state: PermissionProfileState,
     pub(super) allow_login_shell: bool,
     pub(super) shell_environment_policy: ShellEnvironmentPolicy,
-    // TODO(anp): Reconcile these legacy thread defaults with TurnEnvironment::sandbox_context;
-    // internal sandbox decisions should use the selected environment's configuration.
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
-    pub(super) windows_sandbox_private_desktop: bool,
-    pub(super) use_legacy_landlock: bool,
 
     /// Legacy thread cwd used when a turn does not select an environment.
     pub(super) legacy_fallback_cwd: AbsolutePathBuf,
@@ -117,6 +130,7 @@ pub(crate) struct SessionConfiguration {
     pub(super) trusted_guardian_reviewer: bool,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
+    pub(super) session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub(super) history_mode: ThreadHistoryMode,
     /// Immediate history source copied into this thread, when this thread was forked.
@@ -140,20 +154,38 @@ impl SessionConfiguration {
         &self.codex_home
     }
 
+    pub(super) fn primary_workspace_roots(&self) -> Vec<AbsolutePathBuf> {
+        self.original_config_do_not_use.effective_workspace_roots()
+    }
+
     pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
             allow_login_shell: self.allow_login_shell,
-            workspace_roots: Vec::new(),
+            workspace_roots: self
+                .primary_workspace_roots()
+                .iter()
+                .map(codex_utils_path_uri::PathUri::from_abs_path)
+                .collect(),
             permission_profile: self.permission_profile_state.snapshot(),
             shell_environment_policy: self.shell_environment_policy.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
-            windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,
-            use_legacy_landlock: self.use_legacy_landlock,
+            windows_sandbox_private_desktop: self
+                .original_config_do_not_use
+                .permissions
+                .windows_sandbox_private_desktop,
+            use_legacy_landlock: self
+                .original_config_do_not_use
+                .features
+                .use_legacy_landlock(),
             exec_policy: None,
             mcp_policy: None,
             network_policy: None,
             selected_capability_roots: Vec::new(),
         }
+    }
+
+    pub(super) fn turn_environment_config(&self) -> EnvironmentConfig {
+        self.inferred_environment_config()
     }
 
     pub(super) fn permission_profile(&self) -> PermissionProfile {
@@ -167,21 +199,6 @@ impl SessionConfiguration {
         let workspace_roots = ThreadEnvironments::primary_workspace_roots_for(environments);
         self.permission_profile()
             .materialize_project_roots_with_workspace_roots(&workspace_roots)
-    }
-
-    fn effective_permission_profile(
-        &self,
-        environments: &[TurnEnvironmentSelection],
-    ) -> PermissionProfile {
-        ThreadEnvironments::primary_config_for(environments)
-            .map(|config| {
-                config
-                    .permission_profile
-                    .permission_profile()
-                    .clone()
-                    .materialize_project_roots_with_path_uris(&config.workspace_roots)
-            })
-            .unwrap_or_else(|| self.materialized_permission_profile(environments))
     }
 
     pub(super) fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
@@ -239,12 +256,15 @@ impl SessionConfiguration {
             .map(|config| config.permission_profile.clone())
             .unwrap_or_else(|| self.permission_profile_state.snapshot());
         ThreadConfigSnapshot {
-            model: self.step_settings.collaboration_mode.model().to_string(),
+            model: self.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
-            service_tier: self.step_settings.service_tier.clone(),
-            approval_policy: self.step_settings.approval_policy.value(),
-            approvals_reviewer: self.step_settings.approvals_reviewer,
-            permission_profile: self.effective_permission_profile(&environment_selections),
+            service_tier: self.service_tier.clone(),
+            approval_policy: self.approval_policy.value(),
+            approvals_reviewer: self.approvals_reviewer,
+            permission_profile: permission_profile
+                .permission_profile()
+                .clone()
+                .materialize_project_roots_with_workspace_roots(&workspace_roots),
             active_permission_profile: permission_profile.active_permission_profile(),
             environments: TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
@@ -253,11 +273,17 @@ impl SessionConfiguration {
             workspace_roots,
             profile_workspace_roots: permission_profile.profile_workspace_roots().to_vec(),
             ephemeral: self.original_config_do_not_use.ephemeral,
-            reasoning_effort: self.step_settings.collaboration_mode.reasoning_effort(),
-            reasoning_summary: self.step_settings.reasoning_summary,
-            personality: self.step_settings.personality,
-            collaboration_mode: self.step_settings.collaboration_mode.clone(),
+            reasoning_effort: self.collaboration_mode.reasoning_effort(),
+            reasoning_summary: self.model_reasoning_summary,
+            personality: self.personality,
+            collaboration_mode: self.collaboration_mode.clone(),
+            automatic_validation_enabled: self
+                .original_config_do_not_use
+                .validation
+                .groups
+                .functional,
             session_source: self.session_source.clone(),
+            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             forked_from_thread_id: self.forked_from_thread_id,
             parent_thread_id: self.parent_thread_id,
@@ -272,18 +298,18 @@ impl SessionConfiguration {
         environment_selections: &[TurnEnvironmentSelection],
     ) -> ThreadSettingsSnapshot {
         ThreadSettingsSnapshot {
-            model: self.step_settings.collaboration_mode.model().to_string(),
+            model: self.collaboration_mode.model().to_string(),
             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
-            service_tier: self.step_settings.service_tier.clone(),
-            approval_policy: self.step_settings.approval_policy.value(),
-            approvals_reviewer: self.step_settings.approvals_reviewer,
+            service_tier: self.service_tier.clone(),
+            approval_policy: self.approval_policy.value(),
+            approvals_reviewer: self.approvals_reviewer,
             permission_profile: self.materialized_permission_profile(environment_selections),
             active_permission_profile: self.active_permission_profile(),
             cwd: self.legacy_fallback_cwd.clone(),
-            reasoning_effort: self.step_settings.collaboration_mode.reasoning_effort(),
-            reasoning_summary: self.step_settings.reasoning_summary,
-            personality: self.step_settings.personality,
-            collaboration_mode: self.step_settings.collaboration_mode.clone(),
+            reasoning_effort: self.collaboration_mode.reasoning_effort(),
+            reasoning_summary: self.model_reasoning_summary,
+            personality: self.personality,
+            collaboration_mode: self.collaboration_mode.clone(),
         }
     }
 
@@ -302,15 +328,15 @@ impl SessionConfiguration {
                     .profile_workspace_roots()
                     .to_vec(),
             ),
-            approval_policy: Some(self.step_settings.approval_policy.value()),
-            approvals_reviewer: Some(self.step_settings.approvals_reviewer),
+            approval_policy: Some(self.approval_policy.value()),
+            approvals_reviewer: Some(self.approvals_reviewer),
             permission_profile: Some(self.permission_profile()),
             active_permission_profile: self.active_permission_profile(),
             windows_sandbox_level: Some(self.windows_sandbox_level),
-            summary: self.step_settings.reasoning_summary,
-            service_tier: Some(self.step_settings.service_tier.clone()),
-            collaboration_mode: Some(self.step_settings.collaboration_mode.clone()),
-            personality: self.step_settings.personality,
+            summary: self.model_reasoning_summary,
+            service_tier: Some(self.service_tier.clone()),
+            collaboration_mode: Some(self.collaboration_mode.clone()),
+            personality: self.personality,
             ..Default::default()
         }
     }
@@ -321,14 +347,21 @@ impl SessionConfiguration {
     ) -> ConstraintResult<()> {
         self.step_settings
             .validate(&self.step_settings_constraints(environments))?;
-        super::environment::validate_environment_selections(environments)
+        self.validate_auto_review_requirement(environments)?;
+        super::environment::validate_environment_selections(environments).map_err(|error| {
+            ConstraintError::InvalidValue {
+                field_name: "environments",
+                candidate: "environment configuration".to_string(),
+                allowed: format!("valid environment configuration ({error})"),
+                requirement_source: codex_config::RequirementSource::Unknown,
+            }
+        })
     }
 
     pub(super) fn step_settings_constraints(
         &self,
         environments: &[TurnEnvironmentSelection],
     ) -> StepSettingsConstraints<'_> {
-        let permission_profile = self.effective_permission_profile(environments);
         StepSettingsConstraints {
             requirements: self
                 .original_config_do_not_use
@@ -339,10 +372,51 @@ impl SessionConfiguration {
                 .features
                 .enabled(Feature::GuardianApproval),
             trusted_guardian_reviewer: self.trusted_guardian_reviewer,
-            has_full_disk_write_access: permission_profile
-                .file_system_sandbox_policy()
+            has_full_disk_write_access: self
+                .file_system_sandbox_policy(environments)
                 .has_full_disk_write_access(),
         }
+    }
+
+    fn validate_auto_review_requirement(
+        &self,
+        environments: &[TurnEnvironmentSelection],
+    ) -> ConstraintResult<()> {
+        if self.trusted_guardian_reviewer {
+            return Ok(());
+        }
+
+        let requirements = self
+            .original_config_do_not_use
+            .config_layer_stack
+            .requirements();
+        let model = self.collaboration_mode.model();
+        if !requirements.auto_review_required_for_model(model) {
+            return Ok(());
+        }
+
+        let permission_profile = ThreadEnvironments::primary_config_for(environments)
+            .map(|config| config.permission_profile.permission_profile())
+            .unwrap_or_else(|| self.permission_profile_state.permission_profile())
+            .clone()
+            .materialize_project_roots_with_workspace_roots(
+                &ThreadEnvironments::primary_workspace_roots_for(environments),
+            );
+        if self.approvals_reviewer == ApprovalsReviewer::AutoReview
+            && !permission_profile
+                .file_system_sandbox_policy()
+                .has_full_disk_write_access()
+            && self
+                .original_config_do_not_use
+                .features
+                .enabled(Feature::GuardianApproval)
+        {
+            return Ok(());
+        }
+
+        Err(ConstraintError::AutoReviewRequired {
+            model: model.to_string(),
+        })
     }
 
     pub(super) fn apply(
@@ -368,6 +442,57 @@ impl SessionConfiguration {
                             }
                         )
                 });
+        if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
+            next_configuration.collaboration_mode = collaboration_mode;
+        }
+        if let Some(summary) = updates.reasoning_summary {
+            next_configuration.model_reasoning_summary = Some(summary);
+        }
+        if let Some(service_tier) = updates.service_tier.clone() {
+            // TODO(aibrahim): Remove once v2 clients no longer send the legacy
+            // "fast" service tier value.
+            next_configuration.service_tier = match service_tier {
+                Some(service_tier) => Some(
+                    ServiceTier::from_request_value(&service_tier)
+                        .map_or(service_tier, |service_tier| {
+                            service_tier.request_value().to_string()
+                        }),
+                ),
+                None => Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()),
+            };
+        }
+        if let Some(personality) = updates.personality {
+            next_configuration.personality = Some(personality);
+        }
+        if let Some(approval_policy) = updates.approval_policy {
+            next_configuration.approval_policy.set(approval_policy)?;
+        }
+        if let Some(approvals_reviewer) = updates.approvals_reviewer {
+            next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&approvals_reviewer)?;
+            next_configuration.approvals_reviewer = approvals_reviewer;
+        }
+        if !next_configuration.trusted_guardian_reviewer
+            && self.collaboration_mode.model() != next_configuration.collaboration_mode.model()
+            && next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .auto_review_required_for_model(next_configuration.collaboration_mode.model())
+            && updates.approvals_reviewer.is_none()
+        {
+            next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&ApprovalsReviewer::AutoReview)?;
+            next_configuration.approvals_reviewer = ApprovalsReviewer::AutoReview;
+        }
         if let Some(windows_sandbox_level) = updates.windows_sandbox_level {
             next_configuration.windows_sandbox_level = windows_sandbox_level;
         }
@@ -479,13 +604,39 @@ impl SessionConfiguration {
             .map_or(current_environments, |environments| {
                 environments.environments.as_slice()
             });
-        super::environment::validate_environment_selections(next_environments)?;
-        // Apply step settings last: the proposed permissions and environment
-        // selections must be complete before deriving their validation constraints.
+        let mut step_settings_update = updates.step_settings.clone();
+        if step_settings_update.collaboration_mode.is_none() {
+            step_settings_update.collaboration_mode = updates.collaboration_mode.clone();
+        }
+        if step_settings_update.reasoning_summary.is_none() {
+            step_settings_update.reasoning_summary = updates.reasoning_summary;
+        }
+        if step_settings_update.service_tier.is_none() {
+            step_settings_update.service_tier = updates.service_tier.clone();
+        }
+        if step_settings_update.personality.is_none() {
+            step_settings_update.personality = updates.personality;
+        }
+        if step_settings_update.approval_policy.is_none() {
+            step_settings_update.approval_policy = updates.approval_policy;
+        }
+        if step_settings_update.approvals_reviewer.is_none() {
+            step_settings_update.approvals_reviewer = updates.approvals_reviewer;
+        }
         next_configuration.step_settings = Arc::new(self.step_settings.apply(
-            &updates.step_settings,
+            &step_settings_update,
             &next_configuration.step_settings_constraints(next_environments),
         )?);
+        next_configuration.collaboration_mode =
+            next_configuration.step_settings.collaboration_mode.clone();
+        next_configuration.model_reasoning_summary =
+            next_configuration.step_settings.reasoning_summary;
+        next_configuration.service_tier = next_configuration.step_settings.service_tier.clone();
+        next_configuration.personality = next_configuration.step_settings.personality;
+        next_configuration.approval_policy =
+            next_configuration.step_settings.approval_policy.clone();
+        next_configuration.approvals_reviewer = next_configuration.step_settings.approvals_reviewer;
+        next_configuration.validate(next_environments)?;
         Ok(next_configuration)
     }
 
@@ -526,22 +677,23 @@ impl SessionConfiguration {
     }
 }
 
-/// The configuration and public snapshot published by one settings commit.
-pub(crate) struct SessionSettingsCommit {
-    pub(crate) configuration: SessionConfiguration,
-    pub(crate) snapshot: ThreadSettingsSnapshot,
-}
-
 #[derive(Default, Clone)]
 pub(crate) struct SessionSettingsUpdate {
     pub(crate) step_settings: StepSettingsUpdate,
     pub(crate) environments: Option<TurnEnvironmentSelections>,
     pub(crate) profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub(crate) approval_policy: Option<AskForApproval>,
+    pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
     pub(crate) permission_profile: Option<PermissionProfile>,
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
+    pub(crate) collaboration_mode: Option<CollaborationMode>,
+    pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
+    pub(crate) service_tier: Option<Option<String>>,
     pub(crate) service_tier_for_turn: Option<String>,
+    pub(crate) final_output_json_schema: Option<Option<Value>>,
+    pub(crate) personality: Option<Personality>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
 }
@@ -622,7 +774,7 @@ impl Session {
         mut session_configuration: SessionConfiguration,
         environment_selections: &[TurnEnvironmentSelection],
         config: Arc<Config>,
-        user_instructions: Option<codex_extension_api::Instructions>,
+        user_instructions: Option<codex_extension_api::UserInstructions>,
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
@@ -643,6 +795,7 @@ impl Session {
         agent_control: AgentControl,
         reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
+        project_validation_coordinator: Arc<ProjectValidationCoordinator>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
@@ -655,10 +808,7 @@ impl Session {
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
-            session_configuration
-                .step_settings
-                .collaboration_mode
-                .model(),
+            session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
         let base_instructions_provenance = if config.base_instructions.is_some() {
@@ -692,9 +842,6 @@ impl Session {
             }
             ForkPersistence::Copied => match &initial_history {
                 InitialHistory::Resumed(resumed) => {
-                    // Both local and CCA thread stores place the resumed thread's
-                    // canonical SessionMeta first. Never inspect inherited metadata:
-                    // an ancestor's history_base describes a different fork boundary.
                     resumed.history.first().and_then(|item| match item {
                         RolloutItem::SessionMeta(meta)
                             if meta.meta.id == resumed.conversation_id =>
@@ -743,6 +890,47 @@ impl Session {
                 ));
             }
         };
+        let execution_account = ExecutionAccountLease::resolve(
+            thread_id,
+            Arc::clone(&auth_manager),
+            ExecutionAccountOptions {
+                codex_home: config.codex_home.to_path_buf(),
+                auth_home: config.codex_home.to_path_buf(),
+                auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
+                keyring_backend_kind: config.auth_keyring_backend_kind(),
+                forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),
+                auth_route_config: config.auth_route_config(),
+                chatgpt_base_url: config.chatgpt_base_url.clone(),
+                allow_api_key_fallback: config.api_key_fallback_on_all_accounts_limited,
+                pooling: if config.auto_switch_accounts_on_rate_limit
+                    && codex_login::auth::read_codex_api_key_from_env().is_none()
+                    && config.model_provider.requires_openai_auth
+                {
+                    ExecutionAccountPooling::Enabled
+                } else {
+                    ExecutionAccountPooling::Disabled
+                },
+                persistence: if config.ephemeral {
+                    ExecutionAccountLeasePersistence::Ephemeral
+                } else {
+                    ExecutionAccountLeasePersistence::Durable
+                },
+                start: match &initial_history {
+                    InitialHistory::New => ExecutionAccountStart::New,
+                    InitialHistory::Cleared => ExecutionAccountStart::Cleared,
+                    InitialHistory::Resumed(_) => ExecutionAccountStart::Resumed,
+                    InitialHistory::Forked(_) => ExecutionAccountStart::Forked {
+                        source_thread_id: session_configuration.forked_from_thread_id,
+                    },
+                },
+            },
+        )
+        .await;
+        let models_manager = models_manager_for_execution_account(
+            &config,
+            execution_account.clone(),
+            models_manager,
+        );
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
                 resumed.history.iter().find_map(|item| match item {
@@ -826,6 +1014,7 @@ impl Session {
                             forked_from_id,
                             parent_thread_id,
                             source: session_source,
+                            session_provenance: session_configuration.session_provenance.clone(),
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
@@ -983,9 +1172,9 @@ impl Session {
                 session_source: session_configuration.session_source.clone(),
                 cwd: session_configuration.cwd().to_path_buf(),
                 rollout_path: rollout_path.clone(),
-                model: session_configuration.step_settings.collaboration_mode.model().to_string(),
+                model: session_configuration.collaboration_mode.model().to_string(),
                 provider_name: config.model_provider_id.clone(),
-                approval_policy: session_configuration.step_settings.approval_policy.value().to_string(),
+                approval_policy: session_configuration.approval_policy.value().to_string(),
                 sandbox_policy: format!(
                     "{:?}",
                     session_configuration.sandbox_policy(environment_selections)
@@ -1043,7 +1232,7 @@ impl Session {
             let account_email = telemetry_auth.and_then(CodexAuth::get_account_email);
             let originator = session_configuration.originator.clone();
             let terminal_type = user_agent();
-            let session_model = session_configuration.step_settings.collaboration_mode.model().to_string();
+            let session_model = session_configuration.collaboration_mode.model().to_string();
             let auth_env_telemetry = collect_auth_env_telemetry(
                 session_configuration.provider.info(),
                 auth_manager.codex_api_key_env_enabled(),
@@ -1100,7 +1289,7 @@ impl Session {
                     .collect::<Vec<_>>();
             session_telemetry.conversation_starts(
                 config.model_provider.name.as_str(),
-                session_configuration.step_settings.collaboration_mode.reasoning_effort(),
+                session_configuration.collaboration_mode.reasoning_effort(),
                 config
                     .model_reasoning_summary
                     .unwrap_or(ReasoningSummaryConfig::Auto),
@@ -1196,7 +1385,11 @@ impl Session {
                         otel.name = "session_init.thread_name_lookup",
                     ));
             let (agents_md_result, plugin_skill_errors, thread_name) = tokio::join!(
-                agents_md_manager.refresh(config.as_ref(), &resolved_environments),
+                agents_md_manager.refresh(
+                    config.as_ref(),
+                    &resolved_environments,
+                    session_configuration.windows_sandbox_level,
+                ),
                 plugin_skill_warmup,
                 thread_name_lookup,
             );
@@ -1350,6 +1543,37 @@ impl Session {
                 .features
                 .enabled(Feature::ExecutedToolCallMetadata)
                 .then(|| Arc::new(crate::state::ExecutedToolCallRecorder::default()));
+            let model_client = ModelClient::new(
+                Some(Arc::clone(&auth_manager)),
+                if config.features.enabled(Feature::UseAgentIdentity) {
+                    AgentIdentityAuthPolicy::ChatGptAuth
+                } else {
+                    AgentIdentityAuthPolicy::JwtOnly
+                },
+                thread_id,
+                session_configuration.provider.info().clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.originator.clone(),
+                config.model_verbosity,
+                config.features.enabled(Feature::ContentItemKinds),
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Self::build_model_client_beta_features_header(config.as_ref()),
+                /*concurrent_reasoning_summaries_enabled*/ config
+                    .features
+                    .enabled(Feature::ConcurrentReasoningSummaries),
+                attestation_provider.clone(),
+                config.http_client_factory(),
+            )
+            .with_free_guardian_enabled(config.free_guardian_enabled())
+            .with_prompt_cache_key_override(
+                crate::guardian::prompt_cache_key_override_for_review_session(
+                    &session_configuration.session_source,
+                    session_configuration.parent_thread_id,
+                ),
+            )
+            .with_event_sender(tx_event.clone());
+            model_client.set_execution_account_lease(execution_account.clone());
             let services = SessionServices {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
@@ -1368,6 +1592,7 @@ impl Session {
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
+                execution_account,
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1399,36 +1624,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
-                    if config.features.enabled(Feature::UseAgentIdentity) {
-                        AgentIdentityAuthPolicy::ChatGptAuth
-                    } else {
-                        AgentIdentityAuthPolicy::JwtOnly
-                    },
-                    thread_id,
-                    session_configuration.provider.info().clone(),
-                    session_configuration.session_source.clone(),
-                    session_configuration.originator.clone(),
-                    config.model_verbosity,
-                    config.features.enabled(Feature::ContentItemKinds),
-                    config.features.enabled(Feature::EnableRequestCompression),
-                    config.features.enabled(Feature::RuntimeMetrics),
-                    Self::build_model_client_beta_features_header(config.as_ref()),
-                    /*concurrent_reasoning_summaries_enabled*/ config
-                        .features
-                        .enabled(Feature::ConcurrentReasoningSummaries),
-                    attestation_provider,
-                    config.http_client_factory(),
-                )
-                .with_free_guardian_enabled(config.free_guardian_enabled())
-                .with_session_context(
-                    crate::guardian::prompt_cache_key_override_for_review_session(
-                        &session_configuration.session_source,
-                        session_configuration.parent_thread_id,
-                    ),
-                    tx_event.clone(),
-                ),
+                model_client,
                 executed_tool_calls: executed_tool_calls.clone(),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
@@ -1437,6 +1633,8 @@ impl Session {
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
+                project_validation_coordinator,
+                project_validation_success_cache: ProjectValidationSuccessCache::default(),
             };
             let (mcp_prewarm_tx, mcp_prewarm_rx) = async_channel::bounded(1);
             let sess = Arc::new(Session {
@@ -1470,6 +1668,7 @@ impl Session {
                 let mut guard = network_policy_decider_session.write().await;
                 *guard = Arc::downgrade(&sess);
             }
+            let auto_review_recovery_events = sess.recover_auto_review_after_restart().await;
             // Dispatch the SessionConfiguredEvent first and then report any errors.
             // If resuming, include converted initial messages in the payload so UIs can render them immediately.
             let initial_messages = initial_history.get_event_msgs();
@@ -1498,11 +1697,13 @@ impl Session {
                     permission_profile: thread_config.permission_profile,
                     active_permission_profile: thread_config.active_permission_profile,
                     reasoning_effort: thread_config.reasoning_effort,
+                    history_mode: thread_config.history_mode,
                     initial_messages,
                     rollout_path,
                 }),
             })
-            .chain(post_session_configured_events.into_iter());
+            .chain(post_session_configured_events.into_iter())
+            .chain(auto_review_recovery_events);
             for event in events {
                 sess.send_event_raw(event).await;
             }

@@ -2903,7 +2903,7 @@ async fn load_plugins_returns_empty_when_feature_disabled() {
 }
 
 #[tokio::test]
-async fn plugin_cache_reuses_effective_configurations() {
+async fn plugin_cache_reuses_latest_effective_configuration() {
     let codex_home = TempDir::new().unwrap();
     let plugin_root = codex_home
         .path()
@@ -2967,8 +2967,8 @@ async fn plugin_cache_reuses_effective_configurations() {
         r#"[plugins."sample@test".mcp_servers.sample]
 enabled = false"#,
     );
-    let first = manager.plugins_for_config(&first_config).await;
-    let first_snapshots = manager
+    manager.plugins_for_config(&first_config).await;
+    manager
         .plugin_skill_snapshots_for_config(&first_config)
         .expect("first configuration snapshots");
     let second = manager.plugins_for_config(&second_config).await;
@@ -2979,13 +2979,7 @@ enabled = false"#,
 
     assert_eq!(
         manager.plugin_skill_snapshots_for_config(&first_config),
-        Some(first_snapshots),
-    );
-    assert_eq!(
-        manager
-            .plugins_for_config(&config(r#"model = "second""#))
-            .await,
-        first,
+        None,
     );
     assert_eq!(
         manager.plugin_skill_snapshots_for_config(&second_config),
@@ -3085,10 +3079,10 @@ enabled = true
 }
 
 #[test]
-fn loaded_plugins_cache_evicts_least_recently_used_configuration() {
+fn loaded_plugins_cache_replaces_previous_configuration() {
     let codex_home = TempDir::new().unwrap();
     let manager = test_plugins_manager(codex_home.path().to_path_buf());
-    let keys = (0..=LOADED_PLUGINS_CACHE_CAPACITY)
+    let keys = (0..2)
         .map(|index| PluginLoadCacheKey {
             configured_plugins: HashMap::from([(
                 format!("plugin-{index}@test"),
@@ -3103,24 +3097,16 @@ fn loaded_plugins_cache_evicts_least_recently_used_configuration() {
         })
         .collect::<Vec<_>>();
     let generation = manager.loaded_plugins_cache_generation();
-    for key in keys.iter().take(LOADED_PLUGINS_CACHE_CAPACITY) {
-        manager.cache_loaded_plugins_if_current(
-            generation,
-            key.clone(),
-            Vec::new(),
-            crate::skill_snapshots::new_plugin_skill_snapshots(),
-        );
-    }
     manager.cache_loaded_plugins_if_current(
         generation,
-        keys[LOADED_PLUGINS_CACHE_CAPACITY - 1].clone(),
+        keys[0].clone(),
         Vec::new(),
         crate::skill_snapshots::new_plugin_skill_snapshots(),
     );
     assert_eq!(manager.cached_loaded_plugins(&keys[0]), Some(Vec::new()));
     manager.cache_loaded_plugins_if_current(
         generation,
-        keys[LOADED_PLUGINS_CACHE_CAPACITY].clone(),
+        keys[1].clone(),
         Vec::new(),
         crate::skill_snapshots::new_plugin_skill_snapshots(),
     );
@@ -3129,9 +3115,7 @@ fn loaded_plugins_cache_evicts_least_recently_used_configuration() {
         keys.iter()
             .map(|key| manager.cached_loaded_plugins(key).is_some())
             .collect::<Vec<_>>(),
-        (0..=LOADED_PLUGINS_CACHE_CAPACITY)
-            .map(|index| index != 1)
-            .collect::<Vec<_>>(),
+        vec![false, true],
     );
 }
 
@@ -4140,7 +4124,10 @@ plugins = true
         no_auth_outcome.plugin.mcp_server_names,
         vec!["other-mcp".to_string(), "sample-mcp".to_string()]
     );
-    assert!(no_auth_outcome.plugin.apps.is_empty());
+    assert_eq!(
+        no_auth_outcome.plugin.apps,
+        vec![AppConnectorId("connector_sample".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -6418,7 +6405,7 @@ enabled = true
                 git_mode,
             )
             .expect("refresh request");
-        manager.schedule_non_curated_plugin_cache_refresh(request);
+        manager.schedule_non_curated_plugin_cache_refresh_request(request);
     }
 
     {

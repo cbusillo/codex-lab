@@ -1106,10 +1106,8 @@ impl AgentControl {
                     true
                 }
                 RolloutItem::WorldState(world_state) => {
-                    if multi_agent_version == MultiAgentVersion::V2
-                        && let Some(state) = world_state.state.as_object_mut()
-                    {
-                        state.remove("multi_agent_usage_hint");
+                    if multi_agent_version == MultiAgentVersion::V2 {
+                        world_state.state.remove("multi_agent_usage_hint");
                     }
                     true
                 }

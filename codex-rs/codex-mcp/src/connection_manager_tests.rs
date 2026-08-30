@@ -15,6 +15,8 @@ use crate::rmcp_client::ManagedClientFuture;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::list_tools_for_client_uncached;
 use crate::runtime::McpRuntimeContext;
+use crate::runtime::McpStartupReconnectPolicy;
+use crate::server::CodexAppsCacheIdentity;
 use crate::server::EffectiveMcpServer;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
@@ -1969,6 +1971,7 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -1985,10 +1988,10 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
             ),
             codex_apps_tools_cache,
             tool_catalog_cache: McpToolCatalogCache::default(),
-            codex_apps_tools_cache_key: cache_key,
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             auth_manager: None,
+            codex_apps_auth: CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -3958,6 +3961,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 /*runtime_auth_provider*/ None,
                 Some(&hosted_auth),
                 /*codex_apps_cache_identity*/ None,
+                /*codex_apps_execution_discriminator*/ None,
                 ElicitationCapability::default(),
                 ClientMcpExtensions::default(),
                 /*previous_identity*/ None,
@@ -3999,6 +4003,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
             McpPublicationGate::already_published(),
             McpRuntimeInput {
                 startup_policy: McpStartupPolicy::Eager,
+                startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
                 config: Arc::new(runtime_config.clone()),
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
@@ -4009,12 +4014,10 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 runtime_context: runtime_context.clone(),
                 codex_apps_tools_cache: ConnectorRuntimeManager::default(),
                 tool_catalog_cache: McpToolCatalogCache::default(),
-                codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                    /*account_id*/ None, /*chatgpt_user_id*/ None,
-                ),
                 client_mcp_extensions: ClientMcpExtensions::default(),
                 auth: Some(hosted_auth.clone()),
                 auth_manager: None,
+                codex_apps_auth: CodexAppsAuth::ControlPlane,
                 elicitation_reviewer: None,
                 elicitation_lifecycle: None,
             },
@@ -4113,6 +4116,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(crate::mcp::tests::test_mcp_config(
                 codex_home.path().to_path_buf(),
             )),
@@ -4128,12 +4132,10 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             ),
             codex_apps_tools_cache: ConnectorRuntimeManager::<ToolInfo>::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
-            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None, /*chatgpt_user_id*/ None,
-            ),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             auth_manager: None,
+            codex_apps_auth: CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -4459,6 +4461,7 @@ fn reusable_server_identity(
         /*runtime_auth_provider*/ None,
         /*auth*/ None,
         /*codex_apps_cache_identity*/ None,
+        /*codex_apps_execution_discriminator*/ None,
         ElicitationCapability::default(),
         ClientMcpExtensions::default(),
         /*previous_identity*/ None,
@@ -4526,6 +4529,7 @@ async fn reconcile_reusable_server_with_mcp_config(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -4539,12 +4543,10 @@ async fn reconcile_reusable_server_with_mcp_config(
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
-            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None, /*chatgpt_user_id*/ None,
-            ),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             auth_manager: None,
+            codex_apps_auth: CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -4857,6 +4859,7 @@ fn connection_identity_uses_effective_authorization_headers() {
                 /*runtime_auth_provider*/ None,
                 /*auth*/ None,
                 /*codex_apps_cache_identity*/ None,
+                /*codex_apps_execution_discriminator*/ None,
                 ElicitationCapability::default(),
                 ClientMcpExtensions::default(),
                 /*previous_identity*/ None,
@@ -4981,6 +4984,7 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -4994,12 +4998,10 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
-            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None, /*chatgpt_user_id*/ None,
-            ),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             auth_manager: None,
+            codex_apps_auth: CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -5039,6 +5041,7 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(mcp_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -5052,12 +5055,10 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
-            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None, /*chatgpt_user_id*/ None,
-            ),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             auth_manager: None,
+            codex_apps_auth: CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -5256,6 +5257,7 @@ async fn reconciliation_reconnects_when_host_plugin_root_changes() {
         /*runtime_auth_provider*/ None,
         /*auth*/ None,
         /*codex_apps_cache_identity*/ None,
+        /*codex_apps_execution_discriminator*/ None,
         ElicitationCapability::default(),
         ClientMcpExtensions::default(),
         /*previous_identity*/ None,
@@ -5334,6 +5336,7 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
             Some(&provider),
             Some(auth),
             /*codex_apps_cache_identity*/ None,
+            /*codex_apps_execution_discriminator*/ None,
             ElicitationCapability::default(),
             ClientMcpExtensions::default(),
             /*previous_identity*/ None,
@@ -5345,6 +5348,47 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
     assert!(
         !connection_identity(&previous_auth)
             .has_same_connection_config(&connection_identity(&changed_auth))
+    );
+    Ok(())
+}
+
+#[test]
+fn connection_identity_distinguishes_execution_discriminator() -> anyhow::Result<()> {
+    let runtime_context = reusable_server_runtime_context();
+    let config = reusable_server_config("http://127.0.0.1:1");
+    let server = EffectiveMcpServer::configured(config);
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.same",
+        "account-a",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let provider = codex_model_provider::auth_provider_from_auth(&auth);
+    let cache_key = codex_connectors::connector_runtime_context_key(Some(&auth));
+    let connection_identity = |execution_discriminator: &str| {
+        McpServerConnectionIdentity::new(
+            CODEX_APPS_MCP_SERVER_NAME,
+            &server,
+            /*host_plugin_root*/ None,
+            OAuthCredentialsStoreMode::default(),
+            AuthKeyringBackendKind::default(),
+            &Ok(None),
+            &runtime_context,
+            Some(&provider),
+            Some(&auth),
+            Some(CodexAppsCacheIdentity::new(
+                PathBuf::from("/tmp"),
+                cache_key.clone(),
+            )),
+            Some(execution_discriminator.to_string()),
+            ElicitationCapability::default(),
+            ClientMcpExtensions::default(),
+            /*previous_identity*/ None,
+        )
+    };
+
+    assert!(
+        !connection_identity("execution-a")
+            .has_same_connection_config(&connection_identity("execution-b"))
     );
     Ok(())
 }
@@ -5387,6 +5431,7 @@ async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> a
             Some(&provider),
             Some(auth),
             /*codex_apps_cache_identity*/ None,
+            /*codex_apps_execution_discriminator*/ None,
             ElicitationCapability::default(),
             ClientMcpExtensions::default(),
             /*previous_identity*/ None,

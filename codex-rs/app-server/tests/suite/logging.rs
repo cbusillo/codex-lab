@@ -13,6 +13,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -27,6 +28,11 @@ use tokio::net::TcpStream;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::timeout;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 

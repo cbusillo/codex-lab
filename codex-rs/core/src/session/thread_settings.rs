@@ -3,7 +3,6 @@
 
 use super::session::Session;
 use super::session::SessionSettingsUpdate;
-use super::step_settings::StepSettingsUpdate;
 use crate::config::ConstraintResult;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
@@ -11,7 +10,6 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::protocol::ThreadSettingsSnapshot;
 use std::sync::Arc;
 
 /// Applies standalone thread settings and reports invalid overrides through the
@@ -21,7 +19,7 @@ pub(super) async fn update(
     submission_id: String,
     overrides: ThreadSettingsOverrides,
 ) {
-    let updates = prepare_update(overrides);
+    let updates = prepare_update(session, overrides).await;
     if let Err(error) = apply_update(session, submission_id.clone(), updates).await {
         session
             .send_event_raw(Event {
@@ -37,7 +35,10 @@ pub(super) async fn update(
 }
 
 /// Converts protocol overrides into the internal settings update shape.
-pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSettingsUpdate {
+pub(super) async fn prepare_update(
+    session: &Session,
+    overrides: ThreadSettingsOverrides,
+) -> SessionSettingsUpdate {
     let ThreadSettingsOverrides {
         environments,
         profile_workspace_roots,
@@ -54,23 +55,31 @@ pub(super) fn prepare_update(overrides: ThreadSettingsOverrides) -> SessionSetti
         collaboration_mode,
         personality,
     } = overrides;
+    let collaboration_mode = match collaboration_mode {
+        Some(collaboration_mode) => collaboration_mode,
+        None => {
+            let state = session.state.lock().await;
+            // Model and reasoning effort live in CollaborationMode settings today, so
+            // partial thread-settings updates refresh those fields on the active mode.
+            state
+                .session_configuration
+                .collaboration_mode
+                .with_updates(model, effort, /*developer_instructions*/ None)
+        }
+    };
     SessionSettingsUpdate {
-        step_settings: StepSettingsUpdate {
-            model,
-            effort,
-            collaboration_mode,
-            reasoning_summary: summary,
-            service_tier,
-            personality,
-            approval_policy,
-            approvals_reviewer,
-        },
         environments,
         profile_workspace_roots,
+        approval_policy,
+        approvals_reviewer,
         sandbox_policy,
         permission_profile,
         active_permission_profile,
         windows_sandbox_level,
+        collaboration_mode: Some(collaboration_mode),
+        reasoning_summary: summary,
+        service_tier,
+        personality,
         ..Default::default()
     }
 }
@@ -81,20 +90,14 @@ pub(super) async fn apply_update(
     submission_id: String,
     updates: SessionSettingsUpdate,
 ) -> ConstraintResult<()> {
-    let commit = session.update_settings(updates).await?;
-    emit_applied(session, submission_id, commit.snapshot).await;
+    session.update_settings(updates).await?;
+    emit_applied(session, submission_id).await;
     Ok(())
 }
 
-/// Emits the snapshot published by one successful settings update.
-pub(super) async fn emit_applied(
-    session: &Session,
-    submission_id: String,
-    snapshot: ThreadSettingsSnapshot,
-) {
-    let msg = EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
-        thread_settings: snapshot,
-    });
+/// Emits the thread-owned settings after a successful update.
+pub(super) async fn emit_applied(session: &Session, submission_id: String) {
+    let msg = applied_event(session).await;
     session
         .send_event_raw_without_materializing_rollout(Event {
             id: submission_id,
@@ -103,7 +106,8 @@ pub(super) async fn emit_applied(
         .await;
 }
 
-/// Builds the current thread-settings event for synthesized fork history.
+/// Builds the thread-owned settings event used by live updates and
+/// synthesized fork history.
 pub(super) async fn applied_event(session: &Session) -> EventMsg {
     EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
         thread_settings: session.thread_settings_snapshot().await,

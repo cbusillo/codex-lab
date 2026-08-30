@@ -42,7 +42,6 @@ fn guidance_transitions_render_once(
             .collect::<Vec<_>>()
     );
 
-    // Empty guidance must survive persistence as a known state, not a deleted section.
     let snapshot: WorldStateSnapshot =
         serde_json::from_value(serde_json::to_value(refreshed.snapshot()).unwrap()).unwrap();
     assert!(refreshed.render_diff(&snapshot).is_empty());

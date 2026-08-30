@@ -197,8 +197,12 @@ async fn record_initial_history_restores_world_state_baseline() {
         .map(ResponseItemEnvelope::new)
         .map(RolloutItem::ResponseItem)
         .collect::<Vec<_>>();
+    let serde_json::Value::Object(world_state_snapshot) = world_state.snapshot().into_value()
+    else {
+        panic!("world state snapshot should serialize as an object");
+    };
     world_state_items.push(RolloutItem::WorldState(WorldStateItem::full(
-        world_state.snapshot().into_value(),
+        world_state_snapshot,
     )));
     let rollout_items =
         completed_user_turn_rollout(turn_context.to_turn_context_item(), world_state_items);

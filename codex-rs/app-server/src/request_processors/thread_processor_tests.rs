@@ -621,6 +621,7 @@ mod thread_processor_behavior_tests {
         };
         let config_manager = ConfigManager::new(ConfigManagerArgs {
             codex_home: temp_dir.path().to_path_buf(),
+            auth_home: temp_dir.path().to_path_buf(),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),
             strict_config: false,

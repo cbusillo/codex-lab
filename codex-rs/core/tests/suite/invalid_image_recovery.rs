@@ -6,12 +6,13 @@
 //! window identity or its world-state baseline, and every candidate image is cleared in one pass.
 
 use anyhow::Result;
-use codex_protocol::protocol::CompactedItem;
+use codex_history::CompactedItem;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
@@ -36,23 +37,17 @@ const INVALID_IMAGE_SANITIZED_MESSAGE: &str = concat!(
     "history. Later turns will work; retry with a different image if you still need it."
 );
 
-fn user_image_turn(text: &str) -> Op {
-    Op::UserInput {
-        items: vec![
-            UserInput::Image {
-                image_url: TINY_PNG.to_string(),
-                detail: None,
-            },
-            UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            },
-        ],
-        final_output_json_schema: None,
-        responsesapi_client_metadata: None,
-        additional_context: Default::default(),
-        thread_settings: Default::default(),
-    }
+fn user_image_turn(text: &str) -> TurnInputRequest {
+    TurnInputRequest::user_input(vec![
+        UserInput::Image {
+            image_url: TINY_PNG.to_string(),
+            detail: None,
+        },
+        UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        },
+    ])
 }
 
 fn input_image_count(request: &ResponsesRequest) -> usize {
@@ -106,7 +101,9 @@ async fn invalid_user_image_sanitization_survives_resume_coherently() -> Result<
 
     let mut builder = test_codex().with_home(Arc::clone(&home));
     let test = Box::pin(builder.build(&server)).await?;
-    test.codex.submit(user_image_turn("look at this")).await?;
+    test.codex
+        .start_or_steer_turn(user_image_turn("look at this"))
+        .await?;
 
     let error = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
     let EventMsg::Error(error) = error else {
@@ -227,13 +224,17 @@ async fn invalid_image_recovery_clears_all_candidate_images_in_one_pass() -> Res
     let mut builder = test_codex();
     let test = Box::pin(builder.build(&server)).await?;
 
-    test.codex.submit(user_image_turn("first image")).await?;
+    test.codex
+        .start_or_steer_turn(user_image_turn("first image"))
+        .await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
 
-    test.codex.submit(user_image_turn("second image")).await?;
+    test.codex
+        .start_or_steer_turn(user_image_turn("second image"))
+        .await?;
     wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))

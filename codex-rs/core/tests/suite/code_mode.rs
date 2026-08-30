@@ -1086,6 +1086,9 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
                 && (!supports_search_tool
                     || omit_tools_from.contains(&"deferred")
                     || direct_only_namespace);
+            let tool_search_visible = supports_search_tool
+                && !omit_tools_from.contains(&"deferred")
+                && !direct_only_namespace;
             let server = responses::start_mock_server().await;
             let response = responses::mount_sse_once(
                 &server,
@@ -1175,7 +1178,7 @@ async fn mcp_code_mode_exclusion_does_not_change_direct_mode_tool_exposure() -> 
             );
             assert_eq!(
                 tool_names(&body).iter().any(|name| name == "tool_search"),
-                supports_search_tool,
+                tool_search_visible,
                 "MCP omissions must not disable tool search for other tools; \
              omit_tools_from={omit_tools_from:?}, \
              supports_search_tool={supports_search_tool}, \

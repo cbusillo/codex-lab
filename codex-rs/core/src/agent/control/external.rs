@@ -13,6 +13,7 @@ use crate::config::ExternalCommandAgentBackendConfig;
 use crate::config::ExternalCommandProtocol;
 use codex_agent_graph_store::ExternalAgentRunOutcome;
 use codex_agent_graph_store::ExternalAgentRunStart;
+use codex_protocol::turn_input::TurnInputMode;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -95,7 +96,11 @@ impl AgentControl {
             .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
             .unwrap_or_else(AgentPath::root);
         let initial_operation = match initial_input {
-            SpawnInitialInput::UserInput(input) => input.into(),
+            SpawnInitialInput::UserInput(input) => Op::TurnInput {
+                request: Box::new(TurnInputRequest::user_input(input)),
+                mode: TurnInputMode::StartOrSteer,
+                reply: tokio::sync::oneshot::channel().0,
+            },
             SpawnInitialInput::InterAgentCommunication(communication) => {
                 let (communication, _) = *communication;
                 if communication
@@ -107,7 +112,10 @@ impl AgentControl {
                         "external_command agents require plaintext task content".to_string(),
                     ));
                 }
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication {
+                    communication,
+                    start_options: Default::default(),
+                }
             }
         };
         let thread_id = ThreadId::new();

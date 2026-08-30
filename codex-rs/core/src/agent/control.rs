@@ -355,6 +355,11 @@ impl AgentControl {
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
         let root_turn_id = root_turn_id.filter(|_| communication.trigger_turn);
+        let start_options = TurnStartOptions {
+            parent_turn_id: parent_turn_id.clone(),
+            root_turn_id: root_turn_id.clone(),
+            ..Default::default()
+        };
         let result = self
             .handle_thread_request_result(
                 agent_id,
@@ -362,7 +367,10 @@ impl AgentControl {
                 state
                     .send_op(
                         agent_id,
-                        Op::InterAgentCommunication { communication },
+                        Op::InterAgentCommunication {
+                            communication,
+                            start_options,
+                        },
                         parent_turn_id,
                         root_turn_id,
                     )

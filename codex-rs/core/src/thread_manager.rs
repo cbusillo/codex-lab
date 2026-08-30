@@ -1680,8 +1680,8 @@ impl ThreadManagerState {
         if matches!(session_source, Some(SessionSource::Internal(_))) {
             return MultiAgentVersion::Disabled;
         }
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
-            return multi_agent_version;
+        if config.multi_agent_version_override() == Some(MultiAgentVersion::Disabled) {
+            return MultiAgentVersion::Disabled;
         }
         self.initial_multi_agent_version_for_spawn(
             initial_history,

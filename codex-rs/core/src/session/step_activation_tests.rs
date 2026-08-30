@@ -767,6 +767,8 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
         model_info.model_specialty = None;
         model_info.used_fallback_model_metadata = false;
     });
+    turn.model_info.model_specialty = None;
+    turn.model_info.used_fallback_model_metadata = false;
     assert!(
         !turn
             .file_system_sandbox_policy()

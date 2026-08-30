@@ -400,11 +400,8 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    let turn = TurnContext {
-        config: Arc::new(config),
-        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
-        ..turn
-    };
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
     let session = Arc::new(session);
     let output = SpawnAgentHandlerV2::default()
@@ -571,11 +568,8 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    let turn = TurnContext {
-        config: Arc::new(config),
-        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
-        ..turn
-    };
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -793,7 +787,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         *id == child_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
@@ -820,7 +814,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         *id == child_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
@@ -1138,7 +1132,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         *id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == child_path
                         && communication.recipient == AgentPath::root()
                         && communication.other_recipients.is_empty()
@@ -1653,7 +1647,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     assert!(!ops_for_agent.iter().any(|op| matches!(op, Op::Interrupt)));
     assert!(!ops_for_agent.iter().any(|op| matches!(
         op,
-        Op::InterAgentCommunication { communication }
+        Op::InterAgentCommunication { communication, .. }
             if communication.author == AgentPath::root()
                 && communication.recipient.as_str() == "/root/worker"
                 && communication.other_recipients.is_empty()
@@ -1740,7 +1734,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         *id == agent_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient == worker_path
                         && communication.encrypted_content.as_deref() == Some("continue")
@@ -1787,7 +1781,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
                     (id == root.thread_id)
                         .then_some(op)
                         .and_then(|op| match op {
-                            Op::InterAgentCommunication { communication }
+                            Op::InterAgentCommunication { communication, .. }
                                 if communication.author == worker_path
                                     && communication.recipient == AgentPath::root()
                                     && communication.other_recipients.is_empty()
@@ -1933,7 +1927,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
             (id == root.thread_id)
                 .then_some(op)
                 .and_then(|op| match op {
-                    Op::InterAgentCommunication { communication }
+                    Op::InterAgentCommunication { communication, .. }
                         if communication.author.as_str() == "/root/worker"
                             && communication.recipient == AgentPath::root()
                             && communication.other_recipients.is_empty()

@@ -15,6 +15,7 @@ use crate::unified_exec::WriteStdinRequest;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
+use std::sync::Arc;
 
 use super::super::shell_spec::create_write_stdin_tool;
 use super::post_unified_exec_tool_use_payload;
@@ -79,8 +80,12 @@ impl WriteStdinHandler {
         };
 
         let args: WriteStdinArgs = parse_arguments(&arguments)?;
-        let context =
-            UnifiedExecContext::new(session.clone(), step_context, cancellation_token, call_id);
+        let context = UnifiedExecContext::new(
+            session.clone(),
+            Arc::clone(&step_context),
+            cancellation_token,
+            call_id,
+        );
         let response = session
             .services
             .unified_exec_manager
@@ -91,7 +96,7 @@ impl WriteStdinHandler {
                     input: &args.chars,
                     yield_time_ms: args.yield_time_ms,
                     max_output_tokens: args.max_output_tokens,
-                    truncation_policy: turn.model_info().truncation_policy.into(),
+                    truncation_policy: step_context.model_info.truncation_policy.into(),
                     interaction_event: Some(WriteStdinInteractionEvent {
                         session: &session,
                         turn: &turn,

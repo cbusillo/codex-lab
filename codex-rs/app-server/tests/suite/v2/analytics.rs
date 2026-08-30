@@ -658,7 +658,7 @@ pub(crate) fn assert_basic_thread_initialized_event(
     assert!(event["event_params"]["created_at"].as_u64().is_some());
 }
 
-const METRICS_PLUGIN_ID: &str = "sample@openai-curated";
+const METRICS_PLUGIN_ID: &str = "sample@openai-api-curated";
 const TEST_CURATED_PLUGIN_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
 fn write_curated_metrics_plugin(codex_home: &Path) -> Result<PathBuf> {
@@ -698,9 +698,9 @@ printf '%s' '{"version":1,"measurements":[{"name":"findings","value":3,"dimensio
     let curated_repo = codex_home.join(".tmp/plugins");
     std::fs::create_dir_all(curated_repo.join(".agents/plugins"))?;
     std::fs::write(
-        curated_repo.join(".agents/plugins/marketplace.json"),
+        curated_repo.join(".agents/plugins/api_marketplace.json"),
         r#"{
-  "name": "openai-curated",
+  "name": "openai-api-curated",
   "plugins": [
     {"name": "sample", "source": {"source": "local", "path": "./plugins/sample"}}
   ]
@@ -710,6 +710,7 @@ printf '%s' '{"version":1,"measurements":[{"name":"findings","value":3,"dimensio
         codex_home.join(".tmp/plugins.sha"),
         format!("{TEST_CURATED_PLUGIN_SHA}\n"),
     )?;
+
     Ok(script_path.into_path_buf())
 }
 

@@ -1,6 +1,6 @@
 use crate::config::MultiAgentV2Config;
 use crate::context::MultiAgentRoleInstructions;
-use crate::session::turn_context::TurnContext;
+use crate::session::step_context::StepContext;
 use codex_features::Feature;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
@@ -58,17 +58,18 @@ pub(crate) struct ResolvedMultiAgentV2UsageHints {
 }
 
 pub(super) fn usage_hint_text(
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     session_source: &SessionSource,
 ) -> Option<MultiAgentRoleInstructions> {
+    let turn_context = step_context.turn.as_ref();
     if !turn_context.config.features.enabled(Feature::MultiAgentV2)
         || turn_context.multi_agent_version != MultiAgentVersion::V2
     {
         return None;
     }
 
-    let catalog = turn_context
-        .model_info()
+    let catalog = step_context
+        .model_info
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -150,15 +151,16 @@ All agents share the same directory. In detail:
     }
 }
 
-pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<MultiAgentMode> {
+pub(crate) fn effective_multi_agent_mode(step_context: &StepContext) -> Option<MultiAgentMode> {
+    let turn_context = step_context.turn.as_ref();
     if !turn_context.config.features.enabled(Feature::MultiAgentV2)
         || turn_context.multi_agent_version != MultiAgentVersion::V2
     {
         return None;
     }
 
-    let catalog_mode = turn_context
-        .model_info()
+    let catalog_mode = step_context
+        .model_info
         .model_messages
         .as_ref()
         .and_then(|messages| messages.multi_agent.as_ref())
@@ -174,7 +176,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
     // of an effort-derived built-in policy.
     let multi_agent_mode = match mode_hint_text {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
-        None => match turn_context.effective_reasoning_effort() {
+        None => match step_context.settings.effective_reasoning_effort() {
             Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
             _ => catalog_mode
                 .and_then(|messages| messages.explicit.clone())

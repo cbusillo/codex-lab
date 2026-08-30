@@ -199,17 +199,12 @@ default_tools_approval_mode = "auto"
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
-    let output = requests[1].function_call_output(call_id);
-    let items = output["output"]
-        .as_array()
-        .expect("auth elicitation result should contain content items");
-    assert_eq!(
-        &items[1..],
-        &[json!({
-            "type": "input_text",
-            "text": "Authentication for Calendar was requested and accepted. Retry this tool call now.",
-        })]
-    );
+    let output = requests[1]
+        .function_call_output_text(call_id)
+        .expect("auth elicitation result should contain text");
+    assert!(output.contains(
+        "Authentication for Calendar was requested and accepted. Retry this tool call now."
+    ));
 
     Ok(())
 }

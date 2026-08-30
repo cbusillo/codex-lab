@@ -314,12 +314,10 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
                 push_text("Retry reason:\n".to_string());
                 push_text(format!("{reason}\n\n"));
             }
-            let action_scope = if matches!(&request, GuardianApprovalRequest::WriteStdin { .. }) {
-                "Assess input to the existing terminal, not a fresh command. The `cwd` field is its launch directory; the terminal's current directory and state may have changed. Use the retained transcript and read-only checks when that state matters.\n"
-            } else {
+            push_text(
                 "Assess the exact planned action below. Use read-only tool checks when local state matters.\n"
-            };
-            push_text(action_scope.to_string());
+                    .to_string(),
+            );
             push_text("Planned action JSON:\n".to_string());
         }
     }

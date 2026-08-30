@@ -329,6 +329,7 @@ impl InProcessClientHandle {
     /// if graceful drain does not complete in time.
     pub async fn shutdown(self) -> IoResult<()> {
         let mut runtime_handle = self.runtime_handle;
+        drop(self.event_rx);
         let (done_tx, done_rx) = oneshot::channel();
 
         if self
@@ -455,6 +456,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let config_manager = ConfigManager::new(ConfigManagerArgs {
             codex_home: args.config.codex_home.to_path_buf(),
+            auth_home: args.config.auth_home.to_path_buf(),
             cli_overrides: args.cli_overrides,
             loader_overrides: args.loader_overrides,
             strict_config: args.strict_config,
@@ -992,6 +994,54 @@ mod tests {
             .await
             .expect("in-process runtime should shutdown cleanly");
         assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn in_process_shutdown_unblocks_a_full_event_queue() {
+        let (client_tx, mut client_rx) = mpsc::channel(/*buffer*/ 1);
+        let (event_tx, event_rx) = mpsc::channel(/*buffer*/ 1);
+        event_tx
+            .send(InProcessServerEvent::ServerNotification(Box::new(
+                ServerNotification::ExternalAgentConfigImportCompleted(
+                    ExternalAgentConfigImportCompletedNotification {
+                        import_id: "queued".to_string(),
+                        item_type_results: Vec::new(),
+                    },
+                ),
+            )))
+            .await
+            .expect("first event should fill the queue");
+        let runtime_handle = tokio::spawn(async move {
+            assert!(
+                event_tx
+                    .send(InProcessServerEvent::ServerNotification(Box::new(
+                        ServerNotification::ExternalAgentConfigImportCompleted(
+                            ExternalAgentConfigImportCompletedNotification {
+                                import_id: "blocked".to_string(),
+                                item_type_results: Vec::new(),
+                            },
+                        ),
+                    )))
+                    .await
+                    .is_err()
+            );
+            let done_tx = match client_rx.recv().await {
+                Some(InProcessClientMessage::Shutdown { done_tx }) => done_tx,
+                _ => panic!("expected in-process shutdown request"),
+            };
+            let _ = done_tx.send(());
+        });
+        let client = InProcessClientHandle {
+            client: InProcessClientSender { client_tx },
+            event_rx,
+            runtime_handle,
+            _test_codex_home: None,
+        };
+
+        timeout(Duration::from_secs(/*secs*/ 1), client.shutdown())
+            .await
+            .expect("shutdown should drop the unread event queue")
+            .expect("in-process runtime should shutdown cleanly");
     }
 
     #[test]

@@ -3147,6 +3147,7 @@ mod tests {
     use std::sync::Mutex;
 
     use clap::Parser;
+    use codex_http_client::cache_direct_system_proxy_route_for_test;
     use codex_protocol::config_types::SandboxMode;
     use pretty_assertions::assert_eq;
 
@@ -3870,7 +3871,7 @@ mod tests {
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             );
         });
-        let plan = provider_reachability_plan_from_parts(
+        let mut plan = provider_reachability_plan_from_parts(
             ProviderAuthReachabilityMode::ApiKey,
             "openai",
             "OpenAI",
@@ -3879,6 +3880,13 @@ mod tests {
             /*is_amazon_bedrock*/ false,
             "https://chatgpt.com/backend-api/",
         );
+        for endpoint in &plan.endpoints {
+            cache_direct_system_proxy_route_for_test(&endpoint.url);
+            if let Some(route_probe_url) = endpoint.route_probe_url.as_deref() {
+                cache_direct_system_proxy_route_for_test(route_probe_url);
+            }
+        }
+        plan.http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy);
 
         let check = provider_reachability_check(plan).await;
         server.join().expect("probe server thread should finish");
@@ -3911,7 +3919,7 @@ mod tests {
                 b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             );
         });
-        let plan = provider_reachability_plan_from_parts(
+        let mut plan = provider_reachability_plan_from_parts(
             ProviderAuthReachabilityMode::ApiKey,
             "openai",
             "OpenAI",
@@ -3920,6 +3928,13 @@ mod tests {
             /*is_amazon_bedrock*/ false,
             "https://chatgpt.com/backend-api/",
         );
+        for endpoint in &plan.endpoints {
+            cache_direct_system_proxy_route_for_test(&endpoint.url);
+            if let Some(route_probe_url) = endpoint.route_probe_url.as_deref() {
+                cache_direct_system_proxy_route_for_test(route_probe_url);
+            }
+        }
+        plan.http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy);
 
         let check = provider_reachability_check(plan).await;
         server.join().expect("probe server thread should finish");

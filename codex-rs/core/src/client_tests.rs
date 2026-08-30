@@ -165,7 +165,7 @@ fn invalidated_model_client_session_is_not_recached() {
 }
 
 #[test]
-fn responses_lite_omits_empty_additional_tools() {
+fn responses_lite_includes_stable_empty_additional_tools_prefix() {
     let client = test_model_client(SessionSource::Cli);
     let prompt = Prompt {
         input: vec![ResponseItem::Message {
@@ -204,7 +204,21 @@ fn responses_lite_omits_empty_additional_tools() {
         )
         .expect("build Responses Lite request");
 
-    assert_eq!(request.input, prompt.input);
+    let [
+        ResponseItem::AdditionalTools {
+            id: Some(id),
+            role,
+            tools,
+        },
+        user_message,
+    ] = request.input.as_slice()
+    else {
+        panic!("expected stable additional-tools prefix followed by the user message");
+    };
+    assert!(id.as_str().starts_with("at_"));
+    assert_eq!(role, "developer");
+    assert!(tools.is_empty());
+    assert_eq!(user_message, &prompt.input[0]);
 }
 
 #[tokio::test]
@@ -1236,15 +1250,14 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
         let mut auth_recovery = None;
         let mut provider_auth_recovery_attempted = false;
         let telemetry = test_session_telemetry();
-        let (event_sender, event_receiver) = async_channel::unbounded();
         let result = super::handle_unauthorized(
             unauthorized(),
             &mut auth_recovery,
             &mut provider_auth_recovery_attempted,
             &telemetry,
             &provider,
-            Some(&event_sender),
-            Some("turn-1"),
+            /*event_sender*/ None,
+            /*turn_id*/ None,
         )
         .await;
 
@@ -1262,8 +1275,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
                 &mut provider_auth_recovery_attempted,
                 &telemetry,
                 &provider,
-                Some(&event_sender),
-                Some("turn-1"),
+                /*event_sender*/ None,
+                /*turn_id*/ None,
             )
             .await
             .expect_err("provider recovery should not run more than once")
@@ -1277,29 +1290,6 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
             other => panic!("unexpected error after provider recovery: {other}"),
         }
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
-
-        let events = std::iter::from_fn(|| event_receiver.try_recv().ok())
-            .map(|event| serde_json::to_value(event).expect("recovery event should serialize"))
-            .collect::<Vec<_>>();
-        let mut expected = vec![json!({
-            "id": "turn-1",
-            "msg": {
-                "type": "auth_recovery_started",
-                "provider": provider.info().name,
-                "message": "Refreshing provider authentication.",
-            }
-        })];
-        if !should_fail {
-            expected.push(json!({
-                "id": "turn-1",
-                "msg": {
-                    "type": "auth_recovery_completed",
-                    "provider": provider.info().name,
-                    "message": "Provider authentication recovered.",
-                }
-            }));
-        }
-        assert_eq!(events, expected);
     }
 }
 

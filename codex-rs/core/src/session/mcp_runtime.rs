@@ -10,11 +10,14 @@ use crate::mcp::McpRuntimeProjection;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_mcp::CodexAppsAuth;
+use codex_mcp::CodexAppsExecutionAuth;
 use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::McpEnvironmentAuthority;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::McpServerSource;
 use codex_mcp::McpStartupPolicy;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::PreparedMcpCall;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -38,9 +41,8 @@ impl Session {
         updates: &SessionSettingsUpdate,
     ) -> bool {
         current.cwd() != next.cwd()
-            || current.step_settings.approval_policy.value()
-                != next.step_settings.approval_policy.value()
-            || current.step_settings.approvals_reviewer != next.step_settings.approvals_reviewer
+            || current.approval_policy.value() != next.approval_policy.value()
+            || current.approvals_reviewer != next.approvals_reviewer
             || current.permission_profile() != next.permission_profile()
             || current.windows_sandbox_level != next.windows_sandbox_level
             || updates.environments.as_ref().is_some_and(|environments| {
@@ -84,7 +86,7 @@ impl Session {
             .primary()
             .and_then(|environment| environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
-        let config = self.build_per_turn_config(&session_configuration, cwd);
+        let config = Session::build_per_turn_config(&session_configuration, cwd);
         let local_process_cwd = environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
@@ -111,7 +113,7 @@ impl Session {
     ) -> anyhow::Result<()> {
         let cwd = AbsolutePathBuf::from_absolute_path(mcp_runtime_cwd)
             .unwrap_or_else(|_| session_configuration.cwd().clone());
-        let config = self.build_per_turn_config(session_configuration, cwd);
+        let config = Session::build_per_turn_config(session_configuration, cwd);
         let local_process_cwd = resolved_environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
@@ -313,17 +315,19 @@ impl Session {
             )
             .await;
         let selected_plugins = mcp_projection.selected_plugins.clone();
-        let input = self.build_mcp_runtime_input(
-            desired,
-            mcp_projection,
-            ready_selected_capability_roots,
-            elicitation_reviewer,
-        );
+        let input = self
+            .build_mcp_runtime_input(
+                desired,
+                mcp_projection,
+                ready_selected_capability_roots,
+                elicitation_reviewer,
+            )
+            .await;
         self.services.mcp_runtime.replace(input).await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
 
-    pub(super) fn build_mcp_runtime_input(
+    pub(super) async fn build_mcp_runtime_input(
         &self,
         desired: &McpDesiredState,
         mcp_projection: McpRuntimeProjection,
@@ -380,12 +384,26 @@ impl Session {
                 })
                 .collect(),
         );
+        let codex_apps_auth =
+            if codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()) {
+                let snapshot = self.services.execution_account.snapshot().await;
+                CodexAppsAuth::ExecutionAccount(Box::new(CodexAppsExecutionAuth {
+                    auth: snapshot.auth.clone(),
+                    auth_provider: Some(snapshot.auth_provider),
+                    tools_cache_key: Some(connector_runtime_context_key(snapshot.auth.as_ref())),
+                    connection_discriminator: snapshot.cache_identity.connection_discriminator(),
+                    revision: snapshot.revision,
+                }))
+            } else {
+                CodexAppsAuth::ControlPlane
+            };
         McpRuntimeInput {
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {
                 McpStartupPolicy::LazyWhenCached
             } else {
                 McpStartupPolicy::Eager
             },
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: mcp_config,
             plugins_available,
             ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),
@@ -396,10 +414,10 @@ impl Session {
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
             tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
             auth,
             auth_manager: Some(Arc::clone(&self.services.auth_manager)),
+            codex_apps_auth,
             elicitation_reviewer,
             elicitation_lifecycle: Some(self.mcp_elicitation_lifecycle()),
         }

@@ -95,12 +95,8 @@ impl Handler {
             .send_input(
                 receiver_thread_id,
                 input_items,
-                crate::TurnStartOptions {
-                    parent_turn_id: Some(turn.sub_id.clone()),
-                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                    cyber_access_program: turn.cyber_access_program,
-                    ..Default::default()
-                },
+                Some(turn.sub_id.clone()),
+                turn.turn_metadata_state.root_turn_id(),
             )
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err));

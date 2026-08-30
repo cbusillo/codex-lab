@@ -30,7 +30,6 @@ use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
-use codex_connectors::connector_runtime_context_key;
 use codex_login::CodexAuth;
 use codex_model_provider::CHATGPT_CODEX_BASE_URL;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -56,6 +55,7 @@ use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;
 use crate::runtime::McpRuntimeInput;
 use crate::runtime::McpStartupPolicy;
+use crate::runtime::McpStartupReconnectPolicy;
 use crate::server::EffectiveMcpServer;
 use crate::tools::ToolInfo;
 
@@ -426,6 +426,7 @@ pub async fn read_mcp_resource(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -436,10 +437,10 @@ pub async fn read_mcp_resource(
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
             auth_manager: None,
+            codex_apps_auth: crate::CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },
@@ -501,6 +502,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             startup_policy: McpStartupPolicy::Eager,
+            startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
             config: Arc::new(runtime_config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
@@ -511,10 +513,10 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth),
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
             auth_manager: None,
+            codex_apps_auth: crate::CodexAppsAuth::ControlPlane,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
         },

@@ -60,6 +60,8 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -111,9 +113,11 @@ fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bo
         (
             Op::InterAgentCommunication {
                 communication: actual,
+                ..
             },
             Op::InterAgentCommunication {
                 communication: expected,
+                ..
             },
         ) => actual == expected,
         _ => false,
@@ -425,12 +429,10 @@ async fn production_cancel_path_finishes_run_before_releasing_runtime_state() {
             recipient: AgentPath::try_from("/root/reviewer").expect("agent path"),
             role: Some("claude-sonnet-4.6".to_string()),
             task_name: Some("review".to_string()),
-            initial_operation: Op::UserInput {
-                items: text_input("review this"),
-                final_output_json_schema: None,
-                responsesapi_client_metadata: None,
-                additional_context: Default::default(),
-                thread_settings: Default::default(),
+            initial_operation: Op::TurnInput {
+                request: Box::new(TurnInputRequest::user_input(text_input("review this"))),
+                mode: TurnInputMode::StartOrSteer,
+                reply: tokio::sync::oneshot::channel().0,
             },
             backend,
             cwd: harness.config.cwd.to_path_buf(),
@@ -968,6 +970,7 @@ async fn on_event_updates_status_from_error() {
     let status = agent_status_from_event(&EventMsg::Error(ErrorEvent {
         message: "boom".to_string(),
         codex_error_info: None,
+        misalignment: None,
     }));
 
     let expected = AgentStatus::Errored("boom".to_string());
@@ -1146,6 +1149,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         thread_id,
         Op::InterAgentCommunication {
             communication: communication.clone(),
+            start_options: Default::default(),
         },
     );
     let captured = harness
@@ -1431,7 +1435,10 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .expect("send_inter_agent_communication should succeed after reload");
     let expected = (
         spawned_agent.thread_id,
-        Op::InterAgentCommunication { communication },
+        Op::InterAgentCommunication {
+            communication,
+            start_options: Default::default(),
+        },
     );
     let captured = harness
         .manager
@@ -3771,7 +3778,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
                 thread_id == worker_thread_id
                     && matches!(
                         op,
-                        Op::InterAgentCommunication { communication }
+                        Op::InterAgentCommunication { communication, .. }
                             if communication.author == tester_path
                                 && communication.recipient == worker_path
                                 && communication.content == "done"
@@ -3858,6 +3865,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
                 expected_message.clone(),
                 /*trigger_turn*/ false,
             ),
+            start_options: Default::default(),
         },
     );
 

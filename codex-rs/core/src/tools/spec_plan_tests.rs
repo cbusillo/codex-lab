@@ -1,4 +1,3 @@
-use crate::session::tests::update_turn_settings_for_test;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -20,7 +19,6 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::openai_models::ApplyPatchToolType;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::InputModality;
-use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -47,7 +45,6 @@ use crate::config::CurrentTimeReminderConfig;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::TurnToolFunctionInfo;
-use crate::responses_metadata::TurnToolNamespacesInfo;
 use crate::responses_metadata::TurnToolSource;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
@@ -56,7 +53,6 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::WaitForEnvironmentHandler;
-use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::RegisteredTool;
 use crate::tools::router::ToolRouter;
@@ -65,7 +61,7 @@ use crate::tools::router::ToolSuggestPresentation;
 use crate::tools::spec_plan::append_source_tools;
 use crate::tools::spec_plan::build_core_tool_registry;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -76,19 +72,12 @@ struct ToolPlanInputs {
     dynamic_tools: Vec<DynamicToolSpec>,
 }
 
-#[derive(Debug, PartialEq)]
 struct ToolPlanProbe {
     visible_specs: Vec<ToolSpec>,
     visible_names: Vec<String>,
     namespace_functions: BTreeMap<String, Vec<String>>,
     registered_names: Vec<String>,
     exposures: BTreeMap<String, ToolExposure>,
-    tool_namespaces_info: Option<TurnToolNamespacesInfo>,
-    code_mode_tool_names: BTreeMap<String, ToolName>,
-    tool_mode: ToolMode,
-    requires_code_mode_worker: bool,
-    has_terminal_controls: bool,
-    can_manage_children: bool,
 }
 
 impl ToolPlanProbe {
@@ -138,12 +127,6 @@ impl ToolPlanProbe {
             namespace_functions,
             registered_names,
             exposures,
-            tool_namespaces_info: router.tool_namespaces_info().cloned(),
-            code_mode_tool_names: router.code_mode_tool_names().clone(),
-            tool_mode: router.tool_mode(),
-            requires_code_mode_worker: router.requires_code_mode_worker(),
-            has_terminal_controls: router.has_terminal_controls(),
-            can_manage_children: router.can_manage_children(),
         }
     }
 
@@ -219,38 +202,29 @@ async fn probe_with(
 ) -> ToolPlanProbe {
     let (_session, mut turn) = make_session_and_context().await;
     configure_turn(&mut turn);
-    ToolPlanProbe::from_router(plan_with_model(&turn, turn.model_info(), inputs))
-}
-
-fn plan_with_model(
-    turn: &TurnContext,
-    model_info: &ModelInfo,
-    inputs: ToolPlanInputs,
-) -> ToolRouter {
-    let mcp = codex_mcp::McpBinding::empty(mcp_config_for_test(&turn.config));
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
     let mut registry = build_core_tool_registry(
-        turn,
-        model_info,
-        &turn.environments,
-        &mcp,
+        step_context.turn.as_ref(),
+        &step_context.environments,
+        step_context.mcp.as_ref(),
         inputs.tool_suggest_candidates.as_ref(),
         inputs.wait_for_environment_tool_config.as_ref(),
     );
     let hosted_specs = append_source_tools(
-        turn,
-        model_info,
+        step_context.turn.as_ref(),
         &mut registry,
         inputs.tool_runtimes,
         inputs.extension_tool_executors,
         &inputs.dynamic_tools,
     );
-    ToolRouter::from_registry(
-        turn,
-        model_info,
+    let router = ToolRouter::from_registry(
+        step_context.turn.as_ref(),
         registry,
         hosted_specs,
         &Default::default(),
-    )
+    );
+    ToolPlanProbe::from_router(router)
 }
 
 async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
@@ -521,7 +495,6 @@ async fn internal_guardian_sessions_exclude_optional_core_tools() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
-        step_context.turn.model_info(),
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -564,16 +537,13 @@ async fn internal_guardian_sessions_respect_managed_shell_restrictions() {
             )
             .expect("managed shell restriction should be valid");
         }
-        update_turn_settings_for_test(&mut turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = shell_type;
-        });
+        turn.model_info.shell_type = shell_type;
         let turn = Arc::new(turn);
         let step_context = StepContext::for_test(Arc::clone(&turn));
 
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -609,7 +579,6 @@ async fn internal_guardian_sessions_preserve_code_mode() {
     let router = super::build_tool_router(
         &session,
         step_context.turn.as_ref(),
-        step_context.turn.model_info(),
         &step_context.environments,
         &step_context.mcp,
         /*apps_enabled*/ false,
@@ -670,7 +639,7 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         else {
             panic!("secondary environment should be ready");
         };
-        secondary.config_mut().workspace_roots = vec![secondary_workspace_root];
+        secondary.selection.workspace_roots = vec![secondary_workspace_root];
         secondary.config_mut().permission_profile =
             codex_protocol::models::PermissionProfileSnapshot::legacy(secondary_profile);
         let turn = Arc::new(turn);
@@ -679,7 +648,6 @@ async fn internal_guardian_sessions_require_managed_secondary_environments() {
         let router = super::build_tool_router(
             &session,
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &step_context.environments,
             &step_context.mcp,
             /*apps_enabled*/ false,
@@ -887,15 +855,12 @@ async fn shell_family_registers_only_unified_exec_tools() {
     let plan = probe(|turn| {
         set_features(turn, &[Feature::ShellTool]);
         set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
-        });
+        turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
     })
     .await;
 
     plan.assert_visible_contains(&["exec_command", "write_stdin"]);
     plan.assert_registered_contains(&["exec_command", "write_stdin"]);
-    assert!(plan.has_terminal_controls);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
 }
 
@@ -906,10 +871,7 @@ async fn login_shell_parameter_follows_selected_environment() {
             let plan = probe(|turn| {
                 set_feature(turn, Feature::ShellTool, /*enabled*/ true);
                 set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-                update_turn_settings_for_test(turn, |settings| {
-                    Arc::make_mut(&mut settings.model_info).shell_type =
-                        ConfigShellToolType::UnifiedExec;
-                });
+                turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
                 update_config(turn, |config| {
                     config.permissions.allow_login_shell = !allow_login_shell;
                 });
@@ -936,7 +898,6 @@ async fn login_shell_parameter_follows_selected_environment() {
                 has_parameter(plan.visible_spec("exec_command"), "login"),
                 allow_login_shell
             );
-            assert!(plan.has_terminal_controls);
         }
     }
 }
@@ -966,9 +927,7 @@ async fn login_shell_parameter_is_available_when_any_environment_allows_it() {
 async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
     let remote_environment = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
-        });
+        turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
 
         let TurnEnvironmentState::Ready(environment) = turn
             .environments
@@ -989,13 +948,10 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
     .await;
     remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
     remote_environment.assert_registered_lacks(&["exec_command", "write_stdin"]);
-    assert!(!remote_environment.has_terminal_controls);
 
     let multiple_local_environments = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
-        });
+        turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
         duplicate_primary_environment(turn);
     })
     .await;
@@ -1037,9 +993,7 @@ async fn shell_zsh_fork_keeps_unified_exec_available() {
         set_features(turn, &[Feature::ShellTool]);
         set_feature(turn, Feature::ShellZshFork, /*enabled*/ true);
         set_feature(turn, Feature::UnifiedExecZshFork, /*enabled*/ false);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
-        });
+        turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
     })
     .await;
 
@@ -1055,9 +1009,7 @@ async fn shell_zsh_fork_keeps_unified_exec_available() {
                 Feature::UnifiedExecZshFork,
             ],
         );
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
-        });
+        turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
     })
     .await;
 
@@ -1124,18 +1076,16 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
                             codex_protocol::protocol::EnvironmentConfig {
                                 allow_login_shell: true,
                                 workspace_roots: Vec::new(),
-                                windows_sandbox_level: turn.windows_sandbox_level,
-                                windows_sandbox_private_desktop: turn
-                                    .config
-                                    .permissions
-                                    .windows_sandbox_private_desktop,
-                                use_legacy_landlock: turn.config.features.use_legacy_landlock(),
                                 permission_profile: turn
                                     .config
                                     .permissions
                                     .permission_profile_state()
                                     .snapshot(),
                                 shell_environment_policy: Default::default(),
+                                windows_sandbox_level:
+                                    codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+                                windows_sandbox_private_desktop: false,
+                                use_legacy_landlock: false,
                                 exec_policy: None,
                                 mcp_policy: None,
                                 network_policy: None,
@@ -1170,10 +1120,7 @@ async fn environment_count_controls_environment_backed_tools() {
         turn.environments.environments.clear();
         set_feature(turn, Feature::ShellTool, /*enabled*/ true);
         set_feature(turn, Feature::RequestPermissionsTool, /*enabled*/ true);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
-                Some(ApplyPatchToolType::Freeform);
-        });
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
     })
     .await;
     no_environment.assert_visible_lacks(&[
@@ -1190,16 +1137,12 @@ async fn environment_count_controls_environment_backed_tools() {
         "view_image",
         "request_permissions",
     ]);
-    assert!(!no_environment.has_terminal_controls);
 
     let multiple_environments = probe(|turn| {
         duplicate_primary_environment(turn);
         set_feature(turn, Feature::ShellTool, /*enabled*/ true);
         set_feature(turn, Feature::RequestPermissionsTool, /*enabled*/ true);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
-                Some(ApplyPatchToolType::Freeform);
-        });
+        turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
     })
     .await;
     multiple_environments.assert_visible_contains(&[
@@ -1208,7 +1151,6 @@ async fn environment_count_controls_environment_backed_tools() {
         "view_image",
         "request_permissions",
     ]);
-    assert!(multiple_environments.has_terminal_controls);
     assert!(has_parameter(
         multiple_environments.visible_spec("exec_command"),
         "environment_id"
@@ -1225,10 +1167,7 @@ async fn environment_count_controls_environment_backed_tools() {
 #[tokio::test]
 async fn environment_tools_follow_the_step_context() {
     let (_session, mut turn) = make_session_and_context().await;
-    update_turn_settings_for_test(&mut turn, |settings| {
-        Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
-            Some(ApplyPatchToolType::Freeform);
-    });
+    turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
 
     let environments = turn.environments.clone();
     turn.environments.environments.clear();
@@ -1239,16 +1178,14 @@ async fn environment_tools_follow_the_step_context() {
 
     let plan = ToolPlanProbe::from_router(ToolRouter::from_registry(
         turn.as_ref(),
-        turn.model_info(),
         build_core_tool_registry(
             turn.as_ref(),
-            turn.model_info(),
             &environments,
             mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
             /*wait_for_environment_tool_config*/ None,
         ),
-        super::hosted_model_tool_specs(turn.as_ref(), turn.model_info(), &[]),
+        super::hosted_model_tool_specs(turn.as_ref(), &[]),
         &Default::default(),
     ));
 
@@ -1360,9 +1297,7 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
     let missing_model_capability = probe_with(
         |turn| {
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = false;
-            });
+            turn.model_info.supports_search_tool = false;
         },
         searchable_mcp(),
     )
@@ -1371,9 +1306,7 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
     let missing_deferred_tools = probe(|turn| {
         set_feature(turn, Feature::Collab, /*enabled*/ false);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-        });
+        turn.model_info.supports_search_tool = true;
     })
     .await;
     missing_deferred_tools.assert_visible_lacks(&["tool_search"]);
@@ -1385,9 +1318,7 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
     let bedrock_namespace_capability = probe_with(
         |turn| {
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
             use_bedrock_provider(turn);
         },
         searchable_mcp(),
@@ -1397,9 +1328,7 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
     let enabled = probe_with(
         |turn| {
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
         },
         searchable_mcp(),
     )
@@ -1413,9 +1342,7 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
     let reserved_namespace = probe_with(
         |turn| {
             set_feature(turn, Feature::CodeMode, /*enabled*/ true);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
         },
         ToolPlanInputs {
             tool_runtimes: vec![
@@ -1459,17 +1386,17 @@ async fn mcp_and_tool_search_follow_direct_and_deferred_tool_exposure() {
 
 #[tokio::test]
 async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
-    for (enabled, use_responses_lite) in [(false, true), (true, false), (true, true)] {
-        let plan = probe_with(
+    for enabled in [false, true] {
+        let mut metadata_state = None;
+        probe_with(
             |turn| {
                 update_config(turn, |config| {
                     config.tool_registry.turn_metadata_includes_tool_info = enabled;
                 });
                 set_feature(turn, Feature::CodeMode, /*enabled*/ true);
-                update_turn_settings_for_test(turn, |settings| {
-                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-                    Arc::make_mut(&mut settings.model_info).use_responses_lite = use_responses_lite;
-                });
+                turn.model_info.supports_search_tool = true;
+                turn.model_info.use_responses_lite = true;
+                metadata_state = Some(Arc::clone(&turn.turn_metadata_state));
             },
             ToolPlanInputs {
                 tool_runtimes: vec![
@@ -1486,14 +1413,18 @@ async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
         )
         .await;
 
-        let Some(namespaces) = plan.tool_namespaces_info else {
-            assert!(
-                !enabled || !use_responses_lite,
-                "opted-in Responses Lite planning should return namespaces"
+        let metadata = metadata_state
+            .expect("tool planning should capture the turn metadata")
+            .to_responses_metadata(
+                "installation".to_string(),
+                "window".to_string(),
+                CodexResponsesRequestKind::Turn,
             );
+        let Some(namespaces) = metadata.tool_namespaces_info else {
+            assert!(!enabled, "opted-in tool planning should publish namespaces");
             continue;
         };
-        assert!(enabled && use_responses_lite);
+        assert!(enabled, "tool namespaces require opt-in");
 
         let namespace = namespaces
             .get("mcp__registry")
@@ -1527,80 +1458,6 @@ async fn tool_namespaces_info_is_opt_in_and_tracks_mcp_exposure() {
 }
 
 #[tokio::test]
-async fn candidate_model_plan_leaves_selected_model_and_inventory_unchanged() {
-    let (_session, mut turn) = make_session_and_context().await;
-    set_features(&mut turn, &[Feature::ShellTool, Feature::UnifiedExec]);
-    update_config(&mut turn, |config| {
-        config.tool_registry.turn_metadata_includes_tool_info = true;
-    });
-    update_turn_settings_for_test(&mut turn, |settings| {
-        let model = Arc::make_mut(&mut settings.model_info);
-        model.tool_mode = Some(ToolMode::Direct);
-        model.use_responses_lite = true;
-        model.shell_type = ConfigShellToolType::Disabled;
-        model.apply_patch_tool_type = None;
-    });
-    let selected_model = Arc::clone(turn.model_info());
-    let selected = ToolPlanProbe::from_router(plan_with_model(
-        &turn,
-        turn.model_info(),
-        ToolPlanInputs::default(),
-    ));
-    let selected_inventory = selected
-        .tool_namespaces_info
-        .clone()
-        .expect("selected plan inventory");
-    turn.turn_metadata_state
-        .set_tool_namespaces_info(selected_inventory.clone());
-
-    let mut candidate_model = selected_model.as_ref().clone();
-    candidate_model.tool_mode = Some(ToolMode::CodeModeOnly);
-    candidate_model.shell_type = ConfigShellToolType::UnifiedExec;
-    candidate_model.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
-    let candidate = ToolPlanProbe::from_router(plan_with_model(
-        &turn,
-        &candidate_model,
-        ToolPlanInputs::default(),
-    ));
-
-    candidate.assert_visible_contains(&["exec", "wait"]);
-    candidate.assert_visible_lacks(&["exec_command", "write_stdin", "apply_patch"]);
-    candidate.assert_registered_contains(&["exec_command", "write_stdin", "apply_patch"]);
-    assert_eq!(candidate.tool_mode, ToolMode::CodeModeOnly);
-    assert!(candidate.requires_code_mode_worker);
-    assert!(candidate.has_terminal_controls);
-    assert_eq!(
-        candidate
-            .tool_namespaces_info
-            .as_ref()
-            .expect("candidate inventory")["functions"]
-            .functions["apply_patch"],
-        TurnToolFunctionInfo {
-            name: "apply_patch".to_string(),
-            direct: false,
-            code_mode_name: Some("apply_patch".to_string()),
-            deferred: false,
-            source: TurnToolSource::Harness,
-        }
-    );
-    let metadata = turn.turn_metadata_state.to_responses_metadata(
-        "installation".to_string(),
-        "window".to_string(),
-        CodexResponsesRequestKind::Turn,
-    );
-    assert_eq!(metadata.tool_namespaces_info, Some(selected_inventory));
-    assert_eq!(turn.model_info(), &selected_model);
-    assert_eq!(
-        ToolPlanProbe::from_router(plan_with_model(
-            &turn,
-            turn.model_info(),
-            ToolPlanInputs::default(),
-        )),
-        selected,
-    );
-}
-
-#[tokio::test]
 async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
     for (enabled, second_exposure) in [
         (false, ToolExposure::Direct),
@@ -1612,13 +1469,10 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
             config.tool_registry.error_on_tool_collisions = true;
             config.tool_registry.turn_metadata_includes_tool_info = enabled;
         });
-        update_turn_settings_for_test(&mut turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
-        });
+        turn.model_info.use_responses_lite = true;
         let step_context = StepContext::for_test(Arc::new(turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
@@ -1640,7 +1494,6 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
         .collect();
         let hosted_specs = append_source_tools(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &mut registry,
             runtimes,
             Vec::new(),
@@ -1648,7 +1501,6 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
         );
         let result = super::finalize_tool_router(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             registry,
             hosted_specs,
             &Default::default(),
@@ -1672,10 +1524,7 @@ async fn unified_tool_runtimes_preserve_source_order_and_collision_priority() {
         |turn| {
             set_features(turn, &[Feature::ShellTool]);
             set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).shell_type =
-                    ConfigShellToolType::UnifiedExec;
-            });
+            turn.model_info.shell_type = ConfigShellToolType::UnifiedExec;
         },
         ToolPlanInputs {
             tool_runtimes: vec![mcp_runtime(
@@ -1871,14 +1720,11 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
         if code_mode_enabled {
             set_feature(&mut turn, Feature::CodeMode, /*enabled*/ true);
         }
-        update_turn_settings_for_test(&mut turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).supports_search_tool = search_enabled;
-        });
+        turn.model_info.supports_search_tool = search_enabled;
         let turn = Arc::new(turn);
         let step_context = StepContext::for_test(Arc::clone(&turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             inputs.tool_suggest_candidates.as_ref(),
@@ -1886,7 +1732,6 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
         );
         let hosted_specs = append_source_tools(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &mut registry,
             inputs.tool_runtimes,
             inputs.extension_tool_executors,
@@ -1895,7 +1740,6 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
 
         let error = super::finalize_tool_router(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             registry,
             hosted_specs,
             &Default::default(),
@@ -2024,6 +1868,7 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
         (true, ToolExposure::Direct, true),
         (true, ToolExposure::Deferred, false),
     ] {
+        let mut metadata_state = None;
         let plan = probe_with(
             |turn| {
                 update_config(turn, |config| {
@@ -2033,10 +1878,9 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
                 if code_mode_only {
                     set_feature(turn, Feature::CodeModeOnly, /*enabled*/ true);
                 }
-                update_turn_settings_for_test(turn, |settings| {
-                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-                    Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
-                });
+                turn.model_info.supports_search_tool = true;
+                turn.model_info.use_responses_lite = true;
+                metadata_state = Some(Arc::clone(&turn.turn_metadata_state));
             },
             ToolPlanInputs {
                 tool_runtimes: vec![mcp_runtime(
@@ -2068,14 +1912,17 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
             },
         );
 
-        let tool_namespaces = plan
+        let metadata = metadata_state
+            .expect("tool planning should capture the turn metadata")
+            .to_responses_metadata(
+                "installation".to_string(),
+                "window".to_string(),
+                CodexResponsesRequestKind::Turn,
+            );
+        let tool_namespaces = metadata
             .tool_namespaces_info
             .as_ref()
-            .expect("opted-in Responses Lite plan should contain the supported tools");
-        assert_eq!(
-            plan.code_mode_tool_names.get("normalized_alias__lookup"),
-            Some(&winner_name),
-        );
+            .expect("opted-in Responses Lite should receive the supported tools");
         assert_eq!(
             tool_namespaces["normalized-alias"].functions["lookup"]
                 .code_mode_name
@@ -2115,9 +1962,7 @@ async fn code_mode_uses_the_first_normalized_tool_identity() {
 async fn deferred_extension_tools_are_discoverable_with_tool_search() {
     let plan = probe_with(
         |turn| {
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
         },
         ToolPlanInputs {
             extension_tool_executors: vec![Arc::new(DeferredExtensionTool)],
@@ -2137,14 +1982,11 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     let cache = ToolSearchHandlerCache::default();
 
     let (_session, mut first_turn) = make_session_and_context().await;
-    update_turn_settings_for_test(&mut first_turn, |settings| {
-        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-    });
+    first_turn.model_info.supports_search_tool = true;
     let first_turn = Arc::new(first_turn);
     let first_step_context = StepContext::for_test(Arc::clone(&first_turn));
     let mut first_registry = build_core_tool_registry(
         first_step_context.turn.as_ref(),
-        first_step_context.turn.model_info(),
         &first_step_context.environments,
         first_step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -2154,26 +1996,18 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     first_registry.register_external_with_exposure(first_tool.runtime, first_tool.exposure);
     let first_router = ToolRouter::from_registry(
         first_step_context.turn.as_ref(),
-        first_step_context.turn.model_info(),
         first_registry,
-        super::hosted_model_tool_specs(
-            first_step_context.turn.as_ref(),
-            first_step_context.turn.model_info(),
-            &[],
-        ),
+        super::hosted_model_tool_specs(first_step_context.turn.as_ref(), &[]),
         &cache,
     );
     let first_plan = ToolPlanProbe::from_router(first_router);
 
     let (_session, mut second_turn) = make_session_and_context().await;
-    update_turn_settings_for_test(&mut second_turn, |settings| {
-        Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-    });
+    second_turn.model_info.supports_search_tool = true;
     let second_turn = Arc::new(second_turn);
     let second_step_context = StepContext::for_test(Arc::clone(&second_turn));
     let mut second_registry = build_core_tool_registry(
         second_step_context.turn.as_ref(),
-        second_step_context.turn.model_info(),
         &second_step_context.environments,
         second_step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -2183,13 +2017,8 @@ async fn tool_search_cache_rebuilds_when_deferred_sources_change() {
     second_registry.register_external_with_exposure(second_tool.runtime, second_tool.exposure);
     let second_router = ToolRouter::from_registry(
         second_step_context.turn.as_ref(),
-        second_step_context.turn.model_info(),
         second_registry,
-        super::hosted_model_tool_specs(
-            second_step_context.turn.as_ref(),
-            second_step_context.turn.model_info(),
-            &[],
-        ),
+        super::hosted_model_tool_specs(second_step_context.turn.as_ref(), &[]),
         &cache,
     );
     let second_plan = ToolPlanProbe::from_router(second_router);
@@ -2221,9 +2050,7 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
 
     for world_state_enabled in [false, true, false] {
         let (_session, mut turn) = make_session_and_context().await;
-        update_turn_settings_for_test(&mut turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-        });
+        turn.model_info.supports_search_tool = true;
         set_feature(
             &mut turn,
             Feature::DeferredToolWorldState,
@@ -2233,7 +2060,6 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
         let step_context = StepContext::for_test(Arc::clone(&turn));
         let mut registry = build_core_tool_registry(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             &step_context.environments,
             step_context.mcp.as_ref(),
             /*tool_suggest_candidates*/ None,
@@ -2248,13 +2074,8 @@ async fn tool_search_cache_rebuilds_when_deferred_world_state_changes() {
         registry.register_external_with_exposure(tool.runtime, tool.exposure);
         let router = ToolRouter::from_registry(
             step_context.turn.as_ref(),
-            step_context.turn.model_info(),
             registry,
-            super::hosted_model_tool_specs(
-                step_context.turn.as_ref(),
-                step_context.turn.model_info(),
-                &[],
-            ),
+            super::hosted_model_tool_specs(step_context.turn.as_ref(), &[]),
             &cache,
         );
         let plan = ToolPlanProbe::from_router(router);
@@ -2342,9 +2163,7 @@ async fn request_plugin_install_requires_all_discovery_features() {
 async fn request_plugin_install_stays_visible_without_tool_search() {
     let plan = probe_with(
         |turn| {
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = false;
-            });
+            turn.model_info.supports_search_tool = false;
             set_features(
                 turn,
                 &[Feature::ToolSuggest, Feature::Apps, Feature::Plugins],
@@ -2425,10 +2244,6 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
-    assert_eq!(
-        (plain.tool_mode, plain.requires_code_mode_worker),
-        (ToolMode::Direct, false)
-    );
 
     let code_mode_only = probe_with(
         |turn| {
@@ -2448,13 +2263,6 @@ async fn code_mode_only_exposes_code_executor_and_hides_nested_tools() {
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
-    assert_eq!(
-        (
-            code_mode_only.tool_mode,
-            code_mode_only.requires_code_mode_worker
-        ),
-        (ToolMode::CodeModeOnly, true),
-    );
     assert_eq!(
         code_mode_only.namespace_function_names("codex_app"),
         Vec::<String>::new().as_slice()
@@ -2491,9 +2299,7 @@ async fn code_mode_only_exposes_configured_dynamic_namespace_directly() {
     let plan = probe_with(
         |turn| {
             set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
             update_config(turn, |config| {
                 config.code_mode.direct_only_tool_namespaces = vec!["direct_only".to_string()];
             });
@@ -2557,9 +2363,7 @@ async fn excluded_deferred_namespaces_do_not_enable_nested_tool_guidance() {
         |turn| {
             set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
             set_feature(turn, Feature::Collab, /*enabled*/ false);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-            });
+            turn.model_info.supports_search_tool = true;
             update_config(turn, |config| {
                 config.code_mode.excluded_tool_namespaces = vec!["excluded".to_string()];
             });
@@ -2610,71 +2414,16 @@ async fn code_mode_excludes_default_namespace_tools() {
 }
 
 #[tokio::test]
-async fn multi_agent_feature_selects_one_agent_tool_family() {
-    let v1 = probe(|turn| {
-        set_feature(turn, Feature::Collab, /*enabled*/ true);
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-    })
-    .await;
-    v1.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
-    assert!(v1.can_manage_children);
-    v1.assert_visible_lacks(&[
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-        "interrupt_agent",
-        "send_message",
-        "followup_task",
-        "assign_task",
-        "list_agents",
-    ]);
-    assert_eq!(
-        v1.namespace_function_names(MULTI_AGENT_V1_NAMESPACE),
-        &[
-            "close_agent".to_string(),
-            "resume_agent".to_string(),
-            "send_input".to_string(),
-            "spawn_agent".to_string(),
-            "wait_agent".to_string(),
-        ]
-    );
-    let ToolSpec::Namespace(namespace) = v1.visible_spec(MULTI_AGENT_V1_NAMESPACE) else {
-        panic!("expected v1 multi-agent namespace");
-    };
-    let Some(ResponsesApiNamespaceTool::Function(spawn_agent)) =
-        namespace.tools.iter().find(|tool| {
-            matches!(
-                tool,
-                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
-            )
-        })
-    else {
-        panic!("expected v1 spawn_agent function");
-    };
-    let properties = spawn_agent
-        .parameters
-        .properties
-        .as_ref()
-        .expect("spawn_agent should use object params");
-    for property in ["model", "reasoning_effort", "service_tier"] {
-        assert!(
-            properties.contains_key(property),
-            "expected v1 spawn_agent to expose `{property}`"
-        );
-    }
-    assert!(!properties.contains_key("agent_type"));
-
+async fn mandatory_multi_agent_v2_selects_the_v2_tool_family() {
     let v2 = probe(|turn| {
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
         update_config(turn, |config| {
             config.multi_agent_v2.max_concurrent_threads_per_session = 17;
+            config.multi_agent_v2.non_code_mode_only = true;
         });
     })
     .await;
     v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    assert!(v2.can_manage_children);
     v2.assert_visible_lacks(&[
         "spawn_agent",
         "send_message",
@@ -2702,6 +2451,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             "expected {tool_name} in {MULTI_AGENT_V2_NAMESPACE} namespace"
         );
     }
+    assert_eq!(
+        v2.exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
     let ToolSpec::Namespace(namespace) = v2.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
         panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
     };
@@ -2732,7 +2485,35 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "Note that passing `fork_turns=\"none\"` will not pass any surrounding context to the spawned subagent"
     ));
 
-    let direct_model_only = probe(|turn| {
+    let code_mode = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = true;
+        });
+    })
+    .await;
+    code_mode.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
+
+    let code_mode_nested = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_nested.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
+    );
+
+    let code_mode_only = probe(|turn| {
         set_features(
             turn,
             &[
@@ -2746,17 +2527,42 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         });
     })
     .await;
-    direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
+    code_mode_only.assert_visible_lacks(&[
+        MULTI_AGENT_V2_NAMESPACE,
+        "spawn_agent",
+        "send_message",
+        "wait_agent",
+    ]);
     assert_eq!(
-        direct_model_only
+        code_mode_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
-        ToolExposure::DirectModelOnly
+        ToolExposure::Hidden
+    );
+
+    let code_mode_only_nested = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::CodeMode,
+                Feature::CodeModeOnly,
+                Feature::MultiAgentV2,
+            ],
+        );
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_only_nested.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_only_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
     );
 }
 
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_message_schemas_are_plaintext() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -2782,7 +2588,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(true)
+            None
         );
     }
 }
@@ -2808,70 +2614,20 @@ async fn multi_agent_v2_can_disable_wait_agent() {
         ]
     );
     plan.assert_visible_lacks(&["clock"]);
-    plan.assert_registered_lacks(&["collaboration.wait_agent", "clock.sleep"]);
-    assert!(plan.can_manage_children);
+    plan.assert_registered_lacks(&["agents.wait_agent", "clock.sleep"]);
 }
 
 #[tokio::test]
 async fn tool_mode_selector_overrides_feature_flags() {
     let direct = probe(|turn| {
         set_features(turn, &[Feature::CodeMode, Feature::CodeModeOnly]);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).tool_mode = Some(ToolMode::Direct);
-        });
+        turn.model_info.tool_mode = Some(ToolMode::Direct);
     })
     .await;
     direct.assert_visible_lacks(&[
         codex_code_mode::PUBLIC_TOOL_NAME,
         codex_code_mode::WAIT_TOOL_NAME,
     ]);
-}
-
-#[tokio::test]
-async fn v1_multi_agent_tools_defer_when_tool_search_available() {
-    let plan = probe(|turn| {
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
-        });
-        set_feature(turn, Feature::Collab, /*enabled*/ true);
-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
-    })
-    .await;
-
-    plan.assert_visible_contains(&["tool_search"]);
-    plan.assert_visible_lacks(&[
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-        "interrupt_agent",
-    ]);
-    for tool_name in [
-        "spawn_agent",
-        "send_input",
-        "resume_agent",
-        "wait_agent",
-        "close_agent",
-    ] {
-        let namespaced_tool_name = ToolName::namespaced(MULTI_AGENT_V1_NAMESPACE, tool_name);
-        let namespaced_tool_name = namespaced_tool_name.to_string();
-        assert!(
-            plan.registered_names.contains(&namespaced_tool_name),
-            "expected namespaced runtime for {tool_name}"
-        );
-        assert!(
-            !plan
-                .registered_names
-                .contains(&ToolName::plain(tool_name).to_string()),
-            "expected no plain runtime for deferred {tool_name}"
-        );
-        assert_eq!(plan.exposure(&namespaced_tool_name), ToolExposure::Deferred);
-    }
-    let ToolSpec::ToolSearch { description, .. } = plan.visible_spec("tool_search") else {
-        panic!("expected visible tool_search spec");
-    };
-    assert!(description.contains("- Multi-agent tools: Spawn and manage sub-agents."));
 }
 
 #[tokio::test]
@@ -2975,11 +2731,8 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
                 config.multi_agent_v2.tool_namespace = Some("agents".to_string());
             });
             use_bedrock_provider(turn);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).slug = model.to_string();
-                Arc::make_mut(&mut settings.model_info).multi_agent_version =
-                    model_multi_agent_version;
-            });
+            turn.model_info.slug = model.to_string();
+            turn.model_info.multi_agent_version = model_multi_agent_version;
             turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: ThreadId::new(),
                 depth: 1,
@@ -2992,7 +2745,6 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 
         let spawn_agent_name = ToolName::namespaced("agents", "spawn_agent").to_string();
         let followup_task_name = ToolName::namespaced("agents", "followup_task").to_string();
-        assert_eq!(plan.can_manage_children, supports_delegation);
         if supports_delegation {
             plan.assert_visible_contains(&["agents"]);
             plan.assert_registered_contains(&[&spawn_agent_name, &followup_task_name]);
@@ -3004,7 +2756,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
-async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
+async fn code_mode_only_hides_namespaced_multi_agent_v2_when_non_code_mode_only() {
     let plan = probe(|turn| {
         set_features(
             turn,
@@ -3027,18 +2779,11 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
             "exec",
             "wait",
             "request_user_input",
-            "agents",
             // Hosted Responses tool.
             "web_search",
         ]
     );
-    assert!(
-        !plan
-            .namespace_function_names("agents")
-            .iter()
-            .any(|name| name == "assign_task"),
-        "expected assign_task to be absent from agents namespace"
-    );
+    assert!(plan.namespace_function_names("agents").is_empty());
     for tool_name in [
         "spawn_agent",
         "send_message",
@@ -3047,11 +2792,12 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "interrupt_agent",
         "list_agents",
     ] {
-        assert!(
-            plan.namespace_function_names("agents")
-                .iter()
-                .any(|name| name == tool_name),
-            "expected {tool_name} in agents namespace"
+        let tool_name = ToolName::namespaced("agents", tool_name).to_string();
+        plan.assert_registered_contains(&[&tool_name]);
+        assert_eq!(
+            plan.exposure(&tool_name),
+            ToolExposure::Hidden,
+            "expected {tool_name} to be hidden in code-mode-only"
         );
     }
 }
@@ -3095,10 +2841,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     let image_generation = probe_with(
         |turn| {
             use_chatgpt_auth(turn);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).input_modalities =
-                    vec![InputModality::Image];
-            });
+            turn.model_info.input_modalities = vec![InputModality::Image];
         },
         ToolPlanInputs {
             extension_tool_executors: vec![image_generation_tool.clone()],
@@ -3112,10 +2855,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         |turn| {
             use_chatgpt_auth(turn);
             set_feature(turn, Feature::ImageGeneration, /*enabled*/ false);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).input_modalities =
-                    vec![InputModality::Image];
-            });
+            turn.model_info.input_modalities = vec![InputModality::Image];
         },
         ToolPlanInputs {
             extension_tool_executors: vec![image_generation_tool.clone()],
@@ -3128,9 +2868,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     let text_only_model = probe_with(
         |turn| {
             use_chatgpt_auth(turn);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).input_modalities = vec![];
-            });
+            turn.model_info.input_modalities = vec![];
         },
         ToolPlanInputs {
             extension_tool_executors: vec![image_generation_tool.clone()],
@@ -3143,10 +2881,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     let unsupported_provider = probe_with(
         |turn| {
             use_bedrock_provider(turn);
-            update_turn_settings_for_test(turn, |settings| {
-                Arc::make_mut(&mut settings.model_info).input_modalities =
-                    vec![InputModality::Image];
-            });
+            turn.model_info.input_modalities = vec![InputModality::Image];
         },
         ToolPlanInputs {
             extension_tool_executors: vec![image_generation_tool],
@@ -3158,10 +2893,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let live_web_search = probe(|turn| {
         set_web_search_mode(turn, WebSearchMode::Live);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).web_search_tool_type =
-                WebSearchToolType::TextAndImage;
-        });
+        turn.model_info.web_search_tool_type = WebSearchToolType::TextAndImage;
     })
     .await;
     assert_eq!(
@@ -3180,9 +2912,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         use_chatgpt_auth(turn);
         set_features(turn, &[Feature::CodeModeOnly, Feature::MultiAgentV2]);
         set_web_search_mode(turn, WebSearchMode::Live);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).input_modalities = vec![InputModality::Image];
-        });
+        turn.model_info.input_modalities = vec![InputModality::Image];
     })
     .await;
     assert_eq!(
@@ -3192,8 +2922,6 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             codex_code_mode::PUBLIC_TOOL_NAME,
             codex_code_mode::WAIT_TOOL_NAME,
             "request_user_input",
-            // Multi-agent v2 tools.
-            MULTI_AGENT_V2_NAMESPACE,
             // Hosted Responses tools.
             "web_search",
         ]
@@ -3259,9 +2987,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let bedrock_cached_web_search = probe(|turn| {
         use_bedrock_provider(turn);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).web_search_tool_type = WebSearchToolType::Text;
-        });
+        turn.model_info.web_search_tool_type = WebSearchToolType::Text;
     })
     .await;
     assert_eq!(
@@ -3280,9 +3006,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         set_feature(turn, Feature::StandaloneWebSearch, /*enabled*/ true);
         set_web_search_mode(turn, WebSearchMode::Cached);
         use_bedrock_provider(turn);
-        update_turn_settings_for_test(turn, |settings| {
-            Arc::make_mut(&mut settings.model_info).web_search_tool_type = WebSearchToolType::Text;
-        });
+        turn.model_info.web_search_tool_type = WebSearchToolType::Text;
     })
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);

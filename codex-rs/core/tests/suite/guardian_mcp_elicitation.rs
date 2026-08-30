@@ -303,11 +303,20 @@ async fn server_initiated_mcp_elicitation_can_require_synchronous_auto_review(
 
     let output = parent
         .single_request()
-        .function_call_output("eliciting-tool");
+        .function_call_output_text("eliciting-tool")
+        .expect("MCP fixture should echo the wire response");
+    let (_, output) = output
+        .split_once('\n')
+        .context("MCP output should include wall-time metadata")?;
+    let content: Value = serde_json::from_str(
+        output
+            .strip_prefix("Output:\n")
+            .context("MCP output should include the output marker")?,
+    )?;
     let response: Value = serde_json::from_str(
-        output["output"][1]["text"]
+        content[0]["text"]
             .as_str()
-            .expect("MCP fixture should echo the wire response"),
+            .context("MCP fixture should return a text content item")?,
     )?;
     let requires_sync = sensitive_action == Some(true);
     let expected_response = if requires_sync {

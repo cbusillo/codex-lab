@@ -110,8 +110,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
-                && state.remove("agents_md").is_some()
+                && world_state.state.remove("agents_md").is_some()
             {
                 removed_section = true;
             }
@@ -1548,17 +1547,20 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         .map_err(|_| anyhow!("timed out waiting for the subagent thread"))??;
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
     let spawn_request = spawn_mock.single_request();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let child_request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if !child_mock.requests().is_empty() {
-                break;
+            if let Some(request) = child_mock
+                .requests()
+                .into_iter()
+                .find(|request| !request.inputs_of_type("agent_message").is_empty())
+            {
+                break request;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .map_err(|_| anyhow!("timed out waiting for the subagent request"))?;
-    let child_request = child_mock.single_request();
 
     // Assert parent and child report and render the parent's creation-time snapshot exactly once.
     let expected_fragment = expected_provider_only_instruction_fragment(OLD_GLOBAL_INSTRUCTIONS);

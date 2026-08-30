@@ -108,6 +108,7 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
             search_term: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
+            descendant_of_thread_id: None,
         })
         .await?;
     let list_resp: JSONRPCResponse = timeout(
@@ -1613,6 +1614,19 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         /*git_info*/ None,
     )?;
     let source_path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &source_thread_id);
+    if multi_agent_version == MultiAgentVersion::V2 {
+        let mut lines = std::fs::read_to_string(source_path.as_path())?
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        lines[0]["payload"]["multi_agent_version"] = serde_json::to_value(MultiAgentVersion::V2)?;
+        let contents = lines
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(source_path.as_path(), format!("{contents}\n"))?;
+    }
     let source_id = ThreadId::from_string(source_thread_id.as_str())?;
     let user_response_item = |id: &str| {
         RolloutItem::ResponseItem(

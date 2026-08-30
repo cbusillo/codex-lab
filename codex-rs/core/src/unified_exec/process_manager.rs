@@ -748,7 +748,7 @@ impl UnifiedExecProcessManager {
             truncation_policy: context
                 .step_context
                 .turn
-                .model_info()
+                .model_info
                 .truncation_policy
                 .into(),
             max_output_tokens: request.max_output_tokens,
@@ -805,8 +805,6 @@ impl UnifiedExecProcessManager {
                 })?,
             )
             .map_err(|err| UnifiedExecError::StdinApproval(ToolError::Rejected(err.to_string())))?;
-            // Bound the entire serialized action plus its reason, including JSON
-            // escaping. Reject, never execute an unreviewed tail.
             let oversized = reviewed.text.len().saturating_add(approval_reason.len()) > 8_000;
             let size_check_result = if reviewed.truncated {
                 "formatter_truncated"
@@ -834,7 +832,7 @@ impl UnifiedExecProcessManager {
                 .session
                 .active_turn_context_and_strict_auto_review()
                 .await
-                .is_some_and(|(_, _, strict)| strict);
+                .is_some_and(|(_, strict)| strict);
             let approval_context = ApprovalContext {
                 review_context: GuardianReviewContext::from(&context.step_context),
                 cancellation_token: Some(context.cancellation_token.clone()),
@@ -1349,10 +1347,10 @@ impl UnifiedExecProcessManager {
             .create_exec_approval_requirement_for_shell(
                 ExecApprovalRequest {
                     command: &request.command,
-                    approval_policy: context.step_context.settings.approval_policy(),
+                    approval_policy: turn.approval_policy(),
                     permission_profile: request.turn_environment.permission_profile().clone(),
                     environment_policy: request.turn_environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
+                    windows_sandbox_level: turn.windows_sandbox_level,
                     sandbox_permissions: if request.additional_permissions_preapproved {
                         crate::sandboxing::SandboxPermissions::UseDefault
                     } else {
@@ -1394,7 +1392,7 @@ impl UnifiedExecProcessManager {
             tool_name: ToolName::plain("exec_command"),
         };
         orchestrator
-            .run(&mut runtime, &req, &tool_ctx)
+            .run(&mut runtime, &req, &tool_ctx, turn, turn.approval_policy())
             .await
             .map(|result| (result.output, result.deferred_network_approval))
             .map_err(|err| match err {

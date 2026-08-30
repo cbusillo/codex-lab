@@ -14,11 +14,10 @@ use serde_json::Value as JsonValue;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
 
 use super::ExecContext;
 use super::PUBLIC_TOOL_NAME;
-use super::submit_nested_tool;
+use super::call_nested_tool;
 use crate::session::step_context::StepContext;
 use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::context::SharedTurnDiffTracker;
@@ -33,7 +32,6 @@ pub(super) struct CodeModeDispatchBroker {
 
 struct CellDispatchGate {
     ready: watch::Sender<bool>,
-    // Keep the original exec item when later waits resume this cell.
     originating_item_id: Option<ResponseItemId>,
 }
 
@@ -79,11 +77,7 @@ impl CodeModeDispatchBroker {
     }
 
     pub(super) fn close_cell(&self, cell_id: &CellId) {
-        let mut dispatch_gates = self
-            .dispatch_gates
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        dispatch_gates.remove(cell_id);
+        remove_dispatch_gate(&self.dispatch_gates, cell_id);
         if let Some(recorder) = &self.executed_tool_calls {
             recorder.finish_cell_recording(cell_id);
         }
@@ -104,11 +98,6 @@ impl CodeModeDispatchBroker {
         step_context: Arc<StepContext>,
         tracker: SharedTurnDiffTracker,
     ) -> CodeModeDispatchWorker {
-        let track_completeness = exec
-            .turn
-            .config
-            .features
-            .enabled(codex_features::Feature::ExecutedToolCallMetadata);
         let tool_runtime = ToolCallRuntime::new(Arc::clone(&exec.session), step_context, tracker);
         let host = Arc::new(CoreTurnHost { exec, tool_runtime });
         let dispatch_rx = self.dispatch_rx.clone();
@@ -149,7 +138,6 @@ impl CodeModeDispatchBroker {
                         invocation,
                         cancellation_token,
                         response_tx,
-                        span,
                     } => {
                         let cell_id = invocation.cell_id.clone();
                         if !wait_until_cell_ready_for_dispatch(
@@ -163,26 +151,9 @@ impl CodeModeDispatchBroker {
                             continue;
                         }
                         let host = Arc::clone(&host);
-                        let dispatch_gates = Arc::clone(&dispatch_gates);
                         tokio::spawn(async move {
-                            let invocation = {
-                                let dispatch_gate = track_completeness.then(|| {
-                                    dispatch_gates
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                });
-                                if dispatch_gate.as_ref().is_some_and(|gates| {
-                                    cancellation_token.is_cancelled()
-                                        || !gates.contains_key(&cell_id)
-                                }) {
-                                    return;
-                                }
-                                // Submission and cell closure share this gate.
-                                span.in_scope(|| {
-                                    host.submit_tool(invocation, cancellation_token.clone())
-                                })
-                                .instrument(span)
-                            };
+                            let invocation =
+                                host.invoke_tool(invocation, cancellation_token.clone());
                             tokio::pin!(invocation);
                             let response = tokio::select! {
                                 biased;
@@ -270,7 +241,6 @@ impl CodeModeSessionDelegate for CodeModeDispatchBroker {
                     invocation,
                     cancellation_token: cancellation_token.clone(),
                     response_tx,
-                    span: tracing::Span::current(),
                 })
                 .await
                 .map_err(|_| "code mode nested tool dispatcher is unavailable".to_string())?;
@@ -326,7 +296,6 @@ enum DispatchMessage {
         invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
         response_tx: oneshot::Sender<Result<JsonValue, String>>,
-        span: tracing::Span,
     },
     Notify {
         call_id: String,
@@ -355,19 +324,19 @@ struct CoreTurnHost {
 }
 
 impl CoreTurnHost {
-    fn submit_tool(
+    async fn invoke_tool(
         &self,
         invocation: CodeModeNestedToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<JsonValue, String>> + Send + 'static {
-        let invocation = submit_nested_tool(
+    ) -> Result<JsonValue, String> {
+        call_nested_tool(
             self.exec.clone(),
             self.tool_runtime.clone(),
             invocation,
             cancellation_token,
         )
-        .map_err(|error| error.to_string());
-        async move { invocation?.await.map_err(|error| error.to_string()) }
+        .await
+        .map_err(|error| error.to_string())
     }
 
     async fn notify(&self, call_id: String, cell_id: CellId, text: String) -> Result<(), String> {

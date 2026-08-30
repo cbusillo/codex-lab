@@ -241,7 +241,7 @@ pub(crate) async fn handle_mcp_tool_call(
     } else {
         McpToolApprovalPolicy::for_server(approval_mode)
     };
-    if let Some(decision) = maybe_request_mcp_tool_approval(
+    if let Some(decision) = maybe_request_mcp_tool_approval_with_permission_profile(
         &sess,
         step_context,
         cancellation_token,
@@ -297,7 +297,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     &call_id,
                     invocation,
                     item_metadata.clone(),
-                    crate::guardian::guardian_timeout_message(turn_context.model_info()),
+                    crate::guardian::guardian_timeout_message(&turn_context.model_info),
                     /*already_started*/ true,
                 )
                 .await
@@ -461,7 +461,7 @@ async fn handle_approved_mcp_tool_call(
                         .map(|(connector_id, action_name)| HostedFileUploadContext {
                             connector_id: connector_id.clone(),
                             action_name: action_name.clone(),
-                            model: turn_context.model_info().slug.clone(),
+                            model: turn_context.model_info.slug.clone(),
                         });
                     let rewritten_arguments = rewrite_mcp_tool_arguments_for_openai_files(
                         sess,
@@ -517,7 +517,7 @@ async fn handle_approved_mcp_tool_call(
             )
             .await;
             let result = sanitize_mcp_tool_result_for_model(
-                &turn_context.model_info().input_modalities,
+                &turn_context.model_info.input_modalities,
                 Ok(result),
             )?;
             Ok(maybe_request_codex_apps_auth_elicitation(
@@ -1048,7 +1048,7 @@ async fn maybe_track_codex_app_used(
     };
 
     let tracking = build_track_events_context(
-        turn_context.model_info().slug.clone(),
+        turn_context.model_info.slug.clone(),
         sess.thread_id.to_string(),
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
@@ -1258,12 +1258,6 @@ fn build_mcp_tool_call_request_meta(
     (!request_meta.is_empty()).then_some(serde_json::Value::Object(request_meta))
 }
 
-/// Builds confirmation-policy metadata for eligible actor MCP calls.
-///
-/// Policies follow the issuing step's model snapshot, including across approval
-/// waits. Only `node_repl`/`cua_repl` receive them; Guardian sessions are excluded.
-/// Eligible calls get an empty object when no policies are configured, clearing
-/// startup defaults. Text stays verbatim so runtimes own blank-value fallback.
 fn build_confirmation_policies_request_meta(
     step_context: &StepContext,
     server: &str,
@@ -1358,7 +1352,38 @@ fn mcp_tool_approval_prompt_options(
 }
 
 #[expect(clippy::too_many_arguments)]
+#[cfg(test)]
+#[expect(clippy::too_many_arguments)]
 async fn maybe_request_mcp_tool_approval(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    cancellation_token: &CancellationToken,
+    call_id: &str,
+    invocation: &McpInvocation,
+    invocation_tool_name: &ToolName,
+    hook_tool_name: &HookToolName,
+    metadata: &McpToolApprovalMetadata,
+    config: &codex_mcp::McpConfig,
+    policy: McpToolApprovalPolicy,
+) -> Option<ReviewDecision> {
+    maybe_request_mcp_tool_approval_with_permission_profile(
+        sess,
+        step_context,
+        cancellation_token,
+        call_id,
+        invocation,
+        invocation_tool_name,
+        hook_tool_name,
+        metadata,
+        config,
+        &config.permission_profile,
+        policy,
+    )
+    .await
+}
+
+#[expect(clippy::too_many_arguments)]
+async fn maybe_request_mcp_tool_approval_with_permission_profile(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     cancellation_token: &CancellationToken,
@@ -1385,7 +1410,7 @@ async fn maybe_request_mcp_tool_approval(
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
         &config.config_layer_stack,
         config.approvals_reviewer,
-        Some(turn_context.model_info().slug.as_str()),
+        Some(turn_context.model_info.slug.as_str()),
         &invocation.server,
         metadata.connector_id.as_deref(),
     );

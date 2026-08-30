@@ -61,7 +61,7 @@ pub(crate) async fn run_codex_thread_interactive(
     cancel_token: CancellationToken,
     subagent_source: SubAgentSource,
     initial_history: Option<InitialHistory>,
-    thread_extension_init: codex_extension_api::ExtensionDataInit,
+    mut thread_extension_init: codex_extension_api::ExtensionDataInit,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
@@ -86,7 +86,6 @@ pub(crate) async fn run_codex_thread_interactive(
     };
     let session_source = SessionSource::SubAgent(subagent_source.clone());
     let is_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source);
-    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     if is_guardian_reviewer {
         let history_tools = crate::tools::spec_plan::extension_tool_executors(
             parent_session.as_ref(),
@@ -281,7 +280,6 @@ pub(crate) async fn run_codex_thread_one_shot(
                     .send(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
-                        client_user_message_id: None,
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,

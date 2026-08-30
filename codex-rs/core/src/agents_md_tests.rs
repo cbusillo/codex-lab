@@ -25,7 +25,7 @@ use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
 use codex_exec_server::WriteFileOptions;
-use codex_extension_api::Instructions;
+use codex_extension_api::UserInstructions;
 use codex_features::Feature;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
@@ -311,7 +311,7 @@ impl ExecutorFileSystem for FailingFileSystem {
 
 struct TestConfig {
     config: Config,
-    user_instructions: Option<Instructions>,
+    user_instructions: Option<UserInstructions>,
 }
 
 impl Deref for TestConfig {
@@ -339,6 +339,7 @@ async fn load_agents_md(config: &TestConfig) -> Option<LoadedAgentsMd> {
         &config.config,
         config.user_instructions.clone(),
         &environments,
+        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -369,13 +370,14 @@ fn resolved_local_environments<const N: usize>(
                         config: EnvironmentConfigState::Ready(EnvironmentConfig {
                             allow_login_shell: true,
                             workspace_roots: Vec::new(),
-                            windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                            windows_sandbox_private_desktop: true,
-                            use_legacy_landlock: false,
                             permission_profile: PermissionProfileSnapshot::legacy(
                                 PermissionProfile::read_only(),
                             ),
                             shell_environment_policy: Default::default(),
+                            windows_sandbox_level:
+                                codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+                            windows_sandbox_private_desktop: true,
+                            use_legacy_landlock: false,
                             exec_policy: None,
                             mcp_policy: None,
                             network_policy: None,
@@ -507,7 +509,7 @@ async fn make_config(root: &TempDir, limit: usize, instructions: Option<&str>) -
     config.cwd = root.abs();
     config.project_doc_max_bytes = limit;
 
-    let user_instructions = instructions.map(|text| Instructions {
+    let user_instructions = instructions.map(|text| UserInstructions {
         text: text.to_owned(),
         source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
     });
@@ -556,7 +558,7 @@ async fn make_config_with_project_root_markers(
 
     config.cwd = root.abs();
     config.project_doc_max_bytes = limit;
-    let user_instructions = instructions.map(|text| Instructions {
+    let user_instructions = instructions.map(|text| UserInstructions {
         text: text.to_owned(),
         source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
     });
@@ -1136,10 +1138,15 @@ async fn multiple_environment_docs_use_labeled_layout_and_preserve_source_order(
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
-        .await
-        .expect("project instructions should load")
-        .expect("instructions expected");
+    let loaded = load_project_instructions(
+        &config.config,
+        user_instructions,
+        &environments,
+        WindowsSandboxLevel::Disabled,
+    )
+    .await
+    .expect("project instructions should load")
+    .expect("instructions expected");
     let inner = format!(
         r#"global instructions
 
@@ -1198,10 +1205,15 @@ async fn secondary_only_project_doc_uses_single_contributor_layout() {
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
-        .await
-        .expect("project instructions should load")
-        .expect("instructions expected");
+    let loaded = load_project_instructions(
+        &config.config,
+        user_instructions,
+        &environments,
+        WindowsSandboxLevel::Disabled,
+    )
+    .await
+    .expect("project instructions should load")
+    .expect("instructions expected");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}secondary doc");
 
     assert_eq!(loaded.legacy_text(), inner);
@@ -1228,10 +1240,15 @@ async fn primary_only_project_doc_preserves_legacy_layout_with_multiple_bound_en
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
-        .await
-        .expect("project instructions should load")
-        .expect("instructions expected");
+    let loaded = load_project_instructions(
+        &config.config,
+        user_instructions,
+        &environments,
+        WindowsSandboxLevel::Disabled,
+    )
+    .await
+    .expect("project instructions should load")
+    .expect("instructions expected");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}primary doc");
 
     assert_eq!(loaded.legacy_text(), inner);
@@ -1259,10 +1276,15 @@ async fn project_doc_byte_limit_is_shared_across_environments() {
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
-        .await
-        .expect("project instructions should load")
-        .expect("instructions expected");
+    let loaded = load_project_instructions(
+        &config.config,
+        user_instructions,
+        &environments,
+        WindowsSandboxLevel::Disabled,
+    )
+    .await
+    .expect("project instructions should load")
+    .expect("instructions expected");
 
     assert_eq!(
         loaded.text(),
@@ -1293,6 +1315,7 @@ async fn full_primary_environment_budget_excludes_later_environment_docs() {
         &config.config,
         /*user_instructions*/ None,
         &environments,
+        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -1325,6 +1348,7 @@ async fn secondary_environment_invalid_utf8_does_not_suppress_other_docs() {
         &config.config,
         /*user_instructions*/ None,
         &environments,
+        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -1511,7 +1535,7 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
     let project_agents = cfg.cwd.join("AGENTS.md");
 
     let expected = LoadedAgentsMd {
-        user_instructions: Some(Instructions {
+        user_instructions: Some(UserInstructions {
             text: "global doc".to_string(),
             source: global_agents.clone(),
         }),

@@ -101,6 +101,7 @@ impl App {
         startup_bootstrap: Option<AppServerBootstrap>,
         startup_hooks_browser: Option<HooksListEntry>,
         mut startup_draft: StartupDraftPump,
+        product_identity: codex_version::ProductIdentity,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
 
@@ -321,6 +322,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 let mut chat_widget = ChatWidget::new_with_app_event(init);
                 chat_widget.set_queue_submissions_until_session_configured(
@@ -392,6 +394,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(resumed))
             }
@@ -453,6 +456,7 @@ impl App {
                     terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
                         .clone(),
                     session_telemetry: session_telemetry.clone(),
+                    product_identity,
                 };
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
@@ -475,6 +479,7 @@ See the Codex keymap documentation for supported actions and examples."
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
         let mut app = Self {
+            product_identity,
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -504,7 +509,7 @@ See the Codex keymap documentation for supported actions and examples."
             transcript_reflow: TranscriptReflowState::default(),
             initial_history_replay_buffer: None,
             scrollback_has_older_history: false,
-            commit_animation: None,
+            commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
             skill_load_warnings: SkillLoadWarningState::default(),
@@ -531,6 +536,7 @@ See the Codex keymap documentation for supported actions and examples."
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            pending_auto_review_summary_fetches: HashSet::new(),
             dynamic_tool_status_updates,
             dynamic_tool_tasks: HashMap::new(),
             pending_startup_thread_start,
@@ -539,6 +545,11 @@ See the Codex keymap documentation for supported actions and examples."
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
+            agent_settings: agents_settings::AgentSettingsState::default(),
             recap: recap::RecapState::default(),
         };
         if !tui.is_terminal_focused() {
@@ -815,18 +826,6 @@ See the Codex keymap documentation for supported actions and examples."
                     } => {
                         app.chat_widget.refresh_goal_status_indicator_for_time_tick();
                         app.chat_widget.refresh_terminal_title();
-                        AppRunControl::Continue
-                    }
-                    () = async {
-                        match app.commit_animation.as_mut() {
-                            Some(interval) => {
-                                interval.tick().await;
-                            }
-                            None => std::future::pending().await,
-                        }
-                    }, if !has_pending_app_events => {
-                        crate::session_log::log_commit_tick();
-                        app.chat_widget.on_commit_tick();
                         AppRunControl::Continue
                     }
                 };

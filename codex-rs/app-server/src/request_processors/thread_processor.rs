@@ -7,6 +7,7 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ThreadExtra;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
@@ -890,6 +891,15 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn thread_turns_items_list(
+        &self,
+        params: ThreadTurnsItemsListParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.thread_items_list_response_inner(params.into())
+            .await
+            .map(|response| Some(ThreadTurnsItemsListResponse::from(response).into()))
+    }
+
     pub(crate) async fn thread_timeline_list(
         &self,
         params: ThreadTimelineListParams,
@@ -1138,6 +1148,7 @@ impl ThreadRequestProcessor {
             history_mode,
             session_start_source,
             thread_source,
+            session_provenance,
             project_id,
             environments,
         } = params;
@@ -1225,6 +1236,7 @@ impl ThreadRequestProcessor {
                 history_mode.map(Into::into),
                 session_start_source,
                 thread_source.map(Into::into),
+                session_provenance.map(Into::into),
                 project_id,
                 environments,
                 service_name,
@@ -1304,6 +1316,7 @@ impl ThreadRequestProcessor {
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
+        session_provenance: Option<codex_protocol::protocol::SessionProvenance>,
         project_id: Option<String>,
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
         service_name: Option<String>,
@@ -1450,6 +1463,7 @@ impl ThreadRequestProcessor {
                 },
                 history_mode,
                 thread_source,
+                session_provenance,
                 dynamic_tools,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
@@ -2494,6 +2508,7 @@ impl ThreadRequestProcessor {
             cwd,
             use_state_db_only,
             search_term,
+            descendant_of_thread_id,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
@@ -2518,21 +2533,48 @@ impl ThreadRequestProcessor {
             }
         }
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
-        let relation_filter = match (parent_thread_id, ancestor_thread_id) {
-            (Some(_), Some(_)) => {
+        let relation_filter = match (
+            descendant_of_thread_id,
+            parent_thread_id,
+            ancestor_thread_id,
+        ) {
+            (Some(_), Some(_), _) => {
+                return Err(invalid_request(
+                    "descendantOfThreadId and parentThreadId are mutually exclusive",
+                ));
+            }
+            (Some(_), _, Some(_)) => {
+                return Err(invalid_request(
+                    "descendantOfThreadId and ancestorThreadId are mutually exclusive",
+                ));
+            }
+            (None, Some(_), Some(_)) => {
                 return Err(invalid_request(
                     "parentThreadId and ancestorThreadId are mutually exclusive",
                 ));
             }
-            (Some(parent_thread_id), None) => Some(StoreThreadRelationFilter::DirectChildrenOf(
-                ThreadId::from_string(&parent_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?,
-            )),
-            (None, Some(ancestor_thread_id)) => Some(StoreThreadRelationFilter::DescendantsOf(
-                ThreadId::from_string(&ancestor_thread_id)
-                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?,
-            )),
-            (None, None) => None,
+            (Some(descendant_of_thread_id), None, None) => {
+                Some(StoreThreadRelationFilter::DescendantsOf(
+                    ThreadId::from_string(&descendant_of_thread_id).map_err(|err| {
+                        invalid_request(format!("invalid descendantOfThreadId: {err}"))
+                    })?,
+                ))
+            }
+            (None, Some(parent_thread_id), None) => {
+                Some(StoreThreadRelationFilter::DirectChildrenOf(
+                    ThreadId::from_string(&parent_thread_id).map_err(|err| {
+                        invalid_request(format!("invalid parent thread id: {err}"))
+                    })?,
+                ))
+            }
+            (None, None, Some(ancestor_thread_id)) => {
+                Some(StoreThreadRelationFilter::DescendantsOf(
+                    ThreadId::from_string(&ancestor_thread_id).map_err(|err| {
+                        invalid_request(format!("invalid ancestor thread id: {err}"))
+                    })?,
+                ))
+            }
+            (None, None, None) => None,
         };
 
         let requested_page_size = limit
@@ -5907,6 +5949,7 @@ pub(crate) fn thread_from_stored_thread(
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
+        session_provenance: thread.session_provenance.map(Into::into),
         git_info,
         name: thread.name,
         turns: Vec::new(),
@@ -6055,7 +6098,7 @@ fn build_thread_from_snapshot(
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Thread {
         id: thread_id.to_string(),
-        extra: None,
+        extra: Some(thread_extra_from_snapshot(config_snapshot)),
         session_id,
         forked_from_id: None,
         parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
@@ -6081,9 +6124,16 @@ fn build_thread_from_snapshot(
             &config_snapshot.session_source,
         )),
         thread_source: config_snapshot.thread_source.clone().map(Into::into),
+        session_provenance: config_snapshot.session_provenance.clone().map(Into::into),
         git_info: None,
         name: None,
         turns: Vec::new(),
+    }
+}
+
+pub(super) fn thread_extra_from_snapshot(config_snapshot: &ThreadConfigSnapshot) -> ThreadExtra {
+    ThreadExtra {
+        automatic_validation_enabled: config_snapshot.automatic_validation_enabled,
     }
 }
 

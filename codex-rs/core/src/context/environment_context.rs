@@ -38,13 +38,9 @@ impl FileSystemContext {
         permission_profile: &PermissionProfile,
         workspace_roots: &[PathUri],
     ) -> Self {
-        let materialized_workspace_roots = workspace_roots
-            .iter()
-            .filter_map(|workspace_root| workspace_root.to_abs_path().ok())
-            .collect::<Vec<_>>();
         let permission_profile = permission_profile
             .clone()
-            .materialize_project_roots_with_workspace_roots(&materialized_workspace_roots);
+            .materialize_project_roots_with_path_uris(workspace_roots);
         let omitted_workspace_roots = workspace_roots
             .len()
             .saturating_sub(MAX_RENDERED_WORKSPACE_ROOTS);

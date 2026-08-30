@@ -381,11 +381,15 @@ impl Session {
                 }
                 RolloutItem::WorldState(world_state) => {
                     let world_state_updated = if world_state.full {
-                        replay_world_state_baseline =
-                            serde_json::from_value(world_state.state.clone()).ok();
+                        replay_world_state_baseline = serde_json::from_value(
+                            serde_json::Value::Object(world_state.state.clone()),
+                        )
+                        .ok();
                         replay_world_state_baseline.is_some()
                     } else if let Some(baseline) = replay_world_state_baseline.as_mut() {
-                        match baseline.apply_merge_patch(&world_state.state) {
+                        match baseline.apply_merge_patch(&serde_json::Value::Object(
+                            world_state.state.clone(),
+                        )) {
                             Ok(()) => true,
                             Err(err) => {
                                 warn!("failed to apply persisted world state patch: {err}");
@@ -435,14 +439,19 @@ impl Session {
             match item {
                 RolloutItem::Compacted(_) => world_state_baseline = None,
                 RolloutItem::WorldState(world_state) if world_state.full => {
-                    world_state_baseline = serde_json::from_value(world_state.state.clone()).ok();
+                    world_state_baseline = serde_json::from_value(serde_json::Value::Object(
+                        world_state.state.clone(),
+                    ))
+                    .ok();
                 }
                 RolloutItem::WorldState(world_state) => {
                     let Some(baseline) = world_state_baseline.as_mut() else {
                         tracing::warn!("ignored world-state patch without a full snapshot");
                         continue;
                     };
-                    if let Err(err) = baseline.apply_merge_patch(&world_state.state) {
+                    if let Err(err) = baseline
+                        .apply_merge_patch(&serde_json::Value::Object(world_state.state.clone()))
+                    {
                         warn!("failed to apply persisted world state patch: {err}");
                     }
                 }

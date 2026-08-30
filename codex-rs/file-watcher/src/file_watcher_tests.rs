@@ -20,6 +20,27 @@ fn notify_event(kind: EventKind, paths: Vec<PathBuf>) -> Event {
     event
 }
 
+fn wait_for_backend_mode(watcher: &FileWatcher, path: &Path, expected_mode: Option<RecursiveMode>) {
+    let started_at = std::time::Instant::now();
+    loop {
+        let inner = watcher.inner.as_ref().expect("watcher inner");
+        let actual_mode = inner
+            .lock()
+            .expect("inner lock")
+            .watched_paths
+            .get(path)
+            .copied();
+        if actual_mode == expected_mode {
+            return;
+        }
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "watcher backend did not reach {expected_mode:?}; actual mode was {actual_mode:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[tokio::test]
 async fn throttled_receiver_coalesces_within_interval() {
     let (tx, rx) = watch_channel();
@@ -273,80 +294,37 @@ fn recursive_registration_downgrades_to_non_recursive_after_drop() {
     let non_recursive = subscriber.register_path(root.clone(), /*recursive*/ false);
     let recursive = subscriber.register_path(root.clone(), /*recursive*/ true);
 
-    {
-        let inner = watcher.inner.as_ref().expect("watcher inner");
-        let inner = inner.lock().expect("inner lock");
-        assert_eq!(
-            inner.watched_paths.get(&root),
-            Some(&RecursiveMode::Recursive)
-        );
-    }
+    wait_for_backend_mode(&watcher, &root, Some(RecursiveMode::Recursive));
 
     drop(recursive);
 
-    {
-        let inner = watcher.inner.as_ref().expect("watcher inner");
-        let inner = inner.lock().expect("inner lock");
-        assert_eq!(
-            inner.watched_paths.get(&root),
-            Some(&RecursiveMode::NonRecursive)
-        );
-    }
+    wait_for_backend_mode(&watcher, &root, Some(RecursiveMode::NonRecursive));
 
     drop(non_recursive);
 }
 
 #[test]
-fn unregister_holds_state_lock_until_unwatch_finishes() {
+fn registration_does_not_wait_for_backend_reconfiguration() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let root = temp_dir.path().join("watched-dir");
     std::fs::create_dir(&root).expect("create root");
 
     let watcher = Arc::new(FileWatcher::new().expect("watcher"));
-    let (unregister_subscriber, _unregister_rx) = watcher.add_subscriber();
-    let (register_subscriber, _register_rx) = watcher.add_subscriber();
-    let registration = unregister_subscriber.register_path(root.clone(), /*recursive*/ true);
+    let inner = watcher.inner.as_ref().expect("watcher inner");
+    let inner_guard = inner.lock().expect("inner lock");
+    let (subscriber, _rx) = watcher.add_subscriber();
+    let registration = subscriber.register_path(root.clone(), /*recursive*/ true);
+    assert_eq!(watcher.watch_counts_for_test(&root), Some((0, 1)));
+    drop(inner_guard);
+    wait_for_backend_mode(&watcher, &root, Some(RecursiveMode::Recursive));
 
     let inner = watcher.inner.as_ref().expect("watcher inner");
     let inner_guard = inner.lock().expect("inner lock");
-
-    let unregister_thread = std::thread::spawn(move || {
-        drop(registration);
-    });
-
-    let state_lock_observed = (0..100).any(|_| {
-        let locked = watcher.state.try_write().is_err();
-        if !locked {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        locked
-    });
-    assert_eq!(state_lock_observed, true);
-
-    let register_root = root.clone();
-    let register_thread = std::thread::spawn(move || {
-        let registration =
-            register_subscriber.register_path(register_root, /*recursive*/ false);
-        (register_subscriber, registration)
-    });
-
+    drop(registration);
+    assert_eq!(watcher.watch_counts_for_test(&root), None);
     drop(inner_guard);
-
-    unregister_thread.join().expect("unregister join");
-    let (register_subscriber, non_recursive) = register_thread.join().expect("register join");
-
-    assert_eq!(watcher.watch_counts_for_test(&root), Some((1, 0)));
-
-    let inner = watcher.inner.as_ref().expect("watcher inner");
-    let inner = inner.lock().expect("inner lock");
-    assert_eq!(
-        inner.watched_paths.get(&root),
-        Some(&RecursiveMode::NonRecursive)
-    );
-    drop(inner);
-
-    drop(non_recursive);
-    drop(register_subscriber);
+    wait_for_backend_mode(&watcher, &root, None);
+    drop(subscriber);
 }
 
 #[tokio::test]
@@ -589,5 +567,9 @@ async fn dropping_live_watcher_releases_inner_watcher() {
 
     drop(watcher);
 
-    assert_eq!(weak_inner.upgrade().is_none(), true);
+    let started_at = std::time::Instant::now();
+    while weak_inner.upgrade().is_some() && started_at.elapsed() < Duration::from_secs(2) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(weak_inner.upgrade().is_none());
 }

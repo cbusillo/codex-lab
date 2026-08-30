@@ -240,6 +240,7 @@ async fn build_test_processor(
             .expect("test auth manager");
     let config_manager = ConfigManager::new(ConfigManagerArgs {
         codex_home: config.codex_home.to_path_buf(),
+        auth_home: config.auth_home.to_path_buf(),
         cli_overrides: Vec::new(),
         loader_overrides: LoaderOverrides::default(),
         strict_config: false,

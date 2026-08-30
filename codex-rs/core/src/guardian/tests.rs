@@ -649,7 +649,7 @@ async fn build_guardian_prompt_includes_parent_turn_denied_reads() -> anyhow::Re
     };
     environment.config_mut().permission_profile =
         PermissionProfileSnapshot::legacy(environment_permission_profile);
-    environment.config_mut().workspace_roots = vec![
+    environment.selection.workspace_roots = vec![
         PathUri::from_abs_path(&workspace_root),
         PathUri::from_abs_path(&second_workspace_root),
     ];
@@ -1812,7 +1812,7 @@ async fn guardian_request_model_for_auto_review(
     match catalog {
         GuardianTestCatalog::Bundled => {}
         GuardianTestCatalog::ParentOnly => {
-            let parent_model = turn.model_info().as_ref().clone();
+            let parent_model = turn.model_info().clone();
             let auth_manager = Arc::clone(&session.services.auth_manager);
             let models_manager = StaticModelsManager::new(
                 Some(auth_manager),
@@ -1826,13 +1826,10 @@ async fn guardian_request_model_for_auto_review(
                 .models_manager = Arc::new(models_manager);
         }
     }
-    update_turn_settings_for_test(
-        Arc::get_mut(&mut turn).expect("turn should be unique"),
-        |settings| {
-            Arc::make_mut(&mut settings.model_info).auto_review_model_override =
-                auto_review_model_override
-        },
-    );
+    Arc::get_mut(&mut turn)
+        .expect("turn should be unique")
+        .model_info
+        .auto_review_model_override = auto_review_model_override;
     let parent_model = turn.model_info().slug.clone();
     let preferred_model = turn.provider.approval_review_preferred_model().to_string();
     let parent_turn_id = turn.sub_id.clone();
@@ -3209,7 +3206,8 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    // Match the supported production stack budget for the full Guardian retry/fork path.
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let handle =
         std::thread::Builder::new()
@@ -3549,7 +3547,7 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
 async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
     let server = start_mock_server().await;
     let (mut session, mut turn) = guardian_test_session_and_turn(&server).await;
-    let parent_model = turn.model_info().as_ref().clone();
+    let parent_model = turn.model_info().clone();
     let auth_manager = Arc::clone(&session.services.auth_manager);
     Arc::get_mut(&mut session)
         .expect("session should be unique")

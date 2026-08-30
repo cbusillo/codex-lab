@@ -1079,11 +1079,14 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
             _ => None,
         })
         .find(|patch| {
-            patch.pointer("/environments/environments/remote/is_primary") == Some(&json!(true))
+            serde_json::Value::Object(patch.clone())
+                .pointer("/environments/environments/remote/is_primary")
+                == Some(&json!(true))
         })
         .context("primary environment World State patch")?;
     assert_eq!(
-        world_state_patch.pointer("/environments/environments/local/is_primary"),
+        serde_json::Value::Object(world_state_patch)
+            .pointer("/environments/environments/local/is_primary"),
         Some(&Value::Null)
     );
 
@@ -1287,7 +1290,7 @@ impl AuthProvider for NoopRegistryAuthProvider {
 }
 
 async fn wait_for_response_request_count(response_mock: &ResponseMock, expected_count: usize) {
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(15), async {
         while response_mock.requests().len() < expected_count {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

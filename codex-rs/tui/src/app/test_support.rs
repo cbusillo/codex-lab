@@ -95,6 +95,7 @@ pub(super) async fn make_test_app_with_event_rx()
         pending_login_add_account_id: None,
         completed_login_add_account_id: None,
         agent_settings: Default::default(),
+        recap: recap::RecapState::default(),
     };
     (app, rx)
 }

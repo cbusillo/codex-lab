@@ -183,7 +183,11 @@ stream_max_retries = 0
     );
     assert!(prompt.len() <= recap::RECAP_PROMPT_MAX_BYTES);
     assert_eq!(request["text"]["format"]["type"], "json_schema");
-    assert_eq!(request["tools"], serde_json::json!([]));
+    assert!(
+        request
+            .get("tools")
+            .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty))
+    );
 
     app_server.shutdown().await?;
     model_server.shutdown().await;

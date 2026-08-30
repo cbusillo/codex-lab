@@ -195,7 +195,7 @@ async fn exec_command_with_tty(
         chunk_id: generate_chunk_id(),
         wall_time,
         raw_output: collected,
-        truncation_policy: turn.model_info().truncation_policy.into(),
+        truncation_policy: turn.model_info.truncation_policy.into(),
         max_output_tokens: None,
         process_id: response_process_id,
         exit_code,
@@ -694,7 +694,6 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
 
     let poll_task = tokio::spawn({
         let session = Arc::clone(&session);
-        let turn = Arc::clone(&turn);
         async move {
             write_stdin(
                 &session, &turn, process_id, "", /*yield_time_ms*/ 60_000,
@@ -861,123 +860,5 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
         err.to_string(),
         "Failed to create unified exec process: remote exec-server does not support inherited file descriptors"
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn stdin_approval_preserves_the_reviewed_terminal() -> anyhow::Result<()> {
-    use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
-    use crate::state::ActiveTurn;
-    use crate::tools::sandboxing::ToolError;
-    use codex_features::Feature;
-    use codex_protocol::config_types::ApprovalsReviewer;
-    use codex_protocol::protocol::AskForApproval;
-    use codex_protocol::protocol::EventMsg;
-    use codex_protocol::protocol::ReviewDecision;
-
-    skip_if_sandbox!(Ok(()));
-    let (session, mut turn, events) = make_session_and_context_with_auth_and_config_and_rx(
-        codex_login::CodexAuth::from_api_key("Test API Key"),
-        Vec::new(),
-        |config| {
-            config.features.enable(Feature::WriteStdinApproval).unwrap();
-            config.permissions.approval_policy =
-                crate::config::Constrained::allow_any(AskForApproval::OnRequest);
-            config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-        },
-    )
-    .await;
-    *session.active_turn.lock().await = Some(ActiveTurn::default());
-    let manager = &session.services.unified_exec_manager;
-    let command = "while IFS= read -r line; do printf 'received:%s\\n' \"$line\"; done";
-    let opened = exec_command(
-        &session, &turn, command, /*yield_time_ms*/ 250, /*workdir*/ None,
-    )
-    .await?;
-    let process_id = opened.process_id.expect("running terminal");
-    let cwd = PathUri::parse("file:///C:/workspace")?;
-    let original = {
-        let mut store = manager.process_store.lock().await;
-        let entry = store.processes.get_mut(&process_id).unwrap();
-        entry.escalated = true;
-        entry.environment_id = "unselected-executor".to_string();
-        entry.cwd = cwd.clone();
-        Arc::clone(&entry.process)
-    };
-    // Empty polling must complete without an approval response.
-    tokio::time::timeout(
-        Duration::from_secs(/*secs*/ 5),
-        write_stdin(&session, &turn, process_id, "", /*yield_time_ms*/ 250),
-    )
-    .await??;
-    let input = "rejected\n";
-    let denied = write_stdin(
-        &session, &turn, process_id, input, /*yield_time_ms*/ 250,
-    )
-    .await;
-    assert!(
-        matches!(denied, Err(UnifiedExecError::StdinApproval(ToolError::Rejected(reason)))
-        if reason.contains("select it before retrying"))
-    );
-    Arc::make_mut(&mut Arc::get_mut(&mut turn).unwrap().config).approvals_reviewer =
-        ApprovalsReviewer::User;
-    for (input, decision) in [
-        ("rejected\n", ReviewDecision::denied("test denial")),
-        ("accepted\n", ReviewDecision::Approved),
-        ("replace\n", ReviewDecision::Approved),
-    ] {
-        let review = async {
-            loop {
-                let EventMsg::ExecApprovalRequest(approval) = events.recv().await?.msg else {
-                    continue;
-                };
-                assert_eq!(
-                    (
-                        approval.call_id.as_str(),
-                        approval.approval_id.as_deref(),
-                        approval.cwd
-                    ),
-                    ("call", Some("write"), cwd.clone().into())
-                );
-                assert!(original.interaction_lock().try_lock_owned().is_err());
-                if input == "replace\n" {
-                    let replacement = super::process_tests::remote_process(
-                        WriteStatus::Accepted,
-                        /*terminate_error*/ None,
-                        SandboxType::None,
-                    )
-                    .await;
-                    let mut store = manager.process_store.lock().await;
-                    store.processes.get_mut(&process_id).unwrap().process = Arc::new(replacement);
-                }
-                session.notify_approval("write", decision).await;
-                return anyhow::Ok(());
-            }
-        };
-        let (result, reviewed) = tokio::time::timeout(Duration::from_secs(/*secs*/ 5), async {
-            tokio::join!(
-                write_stdin(
-                    &session, &turn, process_id, input, /*yield_time_ms*/ 250
-                ),
-                review
-            )
-        })
-        .await?;
-        reviewed?;
-        match input {
-            "rejected\n" => assert!(matches!(result, Err(UnifiedExecError::StdinApproval(_)))),
-            "accepted\n" => {
-                let output = result?.truncated_output(DEFAULT_MAX_OUTPUT_TOKENS);
-                assert!(output.contains("received:accepted"), "{output}");
-                assert!(!output.contains("received:rejected"), "{output}");
-            }
-            _ => assert!(
-                matches!(result, Err(UnifiedExecError::UnknownProcessId { process_id: id }) if id == process_id)
-            ),
-        }
-        assert!(original.interaction_lock().try_lock_owned().is_ok());
-    }
-    original.terminate();
-    assert!(session.terminate_background_terminal(process_id).await);
     Ok(())
 }

@@ -60,52 +60,6 @@ fn agents_accept_interactive_configuration_overrides() -> Result<()> {
 }
 
 #[test]
-fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
-    let codex_home = TempDir::new()?;
-
-    for (args, expected_error) in [
-        (
-            ["--image=image.png", "agents"].as_slice(),
-            "does not accept an initial prompt or images",
-        ),
-        (
-            ["--oss", "agents", "--remote", "ws://127.0.0.1:4512"].as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-        (
-            [
-                "--add-dir",
-                ".",
-                "agents",
-                "--remote",
-                "ws://127.0.0.1:4512",
-            ]
-            .as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-        (
-            [
-                "-c",
-                "sandbox_workspace_write.writable_roots=[\"../shared\"]",
-                "agents",
-                "--remote",
-                "ws://127.0.0.1:4512",
-            ]
-            .as_slice(),
-            "cannot apply local provider or additional-directory overrides",
-        ),
-    ] {
-        let mut cmd = codex_command(codex_home.path())?;
-        cmd.args(args)
-            .assert()
-            .failure()
-            .stderr(contains(expected_error));
-    }
-
-    Ok(())
-}
-
-#[test]
 fn app_server_emits_json_info_events() -> Result<()> {
     let codex_home = TempDir::new()?;
     let event =

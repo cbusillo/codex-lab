@@ -135,6 +135,7 @@ use codex_utils_stream_parser::strip_citations;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::error;
@@ -673,6 +674,7 @@ pub(crate) async fn run_turn(
                     Some(ImageSanitizationSource::Tool) | None => INVALID_IMAGE_MESSAGE,
                 };
                 let event = EventMsg::Error(ErrorEvent {
+                    misalignment: None,
                     message: message.to_string(),
                     codex_error_info: Some(error),
                 });
@@ -764,10 +766,11 @@ async fn sanitize_invalid_image_history(sess: &Session) -> Option<ImageSanitizat
     // image content: the live baseline is still correct. Re-persist it as a full snapshot so a
     // resumed thread diffs against the same baseline instead of re-rendering all of world state.
     if let Some(world_state_baseline) = world_state_baseline {
-        sess.persist_rollout_items(&[RolloutItem::WorldState(WorldStateItem::full(
-            world_state_baseline.into_value(),
-        ))])
-        .await;
+        let Value::Object(state) = world_state_baseline.into_value() else {
+            unreachable!("world-state snapshots serialize as JSON objects");
+        };
+        sess.persist_rollout_items(&[RolloutItem::WorldState(WorldStateItem::full(state))])
+            .await;
     }
     if let Err(err) = sess.flush_rollout().await {
         warn!("failed to persist invalid-image history sanitization: {err}");
@@ -834,7 +837,9 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
         .iter()
         .filter_map(|item| match item {
             TurnInput::UserInput { content, .. } => Some(content.as_slice()),
-            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
+            TurnInput::ResponseItem(_)
+            | TurnInput::FunctionCallOutput(_)
+            | TurnInput::InterAgentCommunication(_) => None,
         })
         .flatten()
         .cloned()
@@ -1021,7 +1026,8 @@ async fn build_skills_and_plugins(
         &mentioned_skills,
         &injected_host_skills,
         tracking.clone(),
-    );
+    )
+    .await;
 
     for message in skill_warnings {
         sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
@@ -1115,6 +1121,7 @@ async fn build_extension_turn_input_items(
                 environment_id: environment.selection.environment_id.clone(),
                 cwd: environment.cwd().clone(),
                 is_primary: index == 0,
+                _lifetime: std::marker::PhantomData,
             }
         })
         .collect::<Vec<_>>();
@@ -1203,7 +1210,9 @@ async fn track_turn_resolved_config_analytics(
                 .iter()
                 .filter_map(|item| match item {
                     TurnInput::UserInput { content, .. } => Some(content.as_slice()),
-                    TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
+                    TurnInput::ResponseItem(_)
+                    | TurnInput::FunctionCallOutput(_)
+                    | TurnInput::InterAgentCommunication(_) => None,
                 })
                 .flatten()
                 .filter(|item| {
@@ -1576,6 +1585,7 @@ pub(crate) fn build_prompt(
             &turn_context.session_source,
         ),
         max_output_tokens: None,
+        cyber_access_program: turn_context.cyber_access_program,
     }
 }
 
@@ -1629,7 +1639,7 @@ async fn run_sampling_request(
                 .prepare_model_visible_history(turn_context.as_ref())
                 .await;
             history.apply_model_request_history_mode(model_request_history_mode);
-            history.for_prompt(&turn_context.model_info.input_modalities)
+            history.for_prompt(&step_context.model_info.input_modalities)
         };
         let original_prompt_input = prompt_input.clone();
         if let Some(request_only_input_item) = &request_only_input_item {
@@ -1667,7 +1677,7 @@ async fn run_sampling_request(
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            Arc::clone(&step_context),
             Arc::clone(&turn_store),
             client_session,
             responses_metadata,
@@ -2185,6 +2195,8 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
             _ => None,
         },
         EventMsg::Error(_)
+        | EventMsg::AuthRecoveryStarted(_)
+        | EventMsg::AuthRecoveryCompleted(_)
         | EventMsg::Warning(_)
         | EventMsg::GuardianWarning(_)
         | EventMsg::RealtimeConversationStarted(_)
@@ -2592,14 +2604,14 @@ fn assign_missing_streamed_response_item_id(
 #[instrument(level = "trace",
     skip_all,
     fields(
-        turn_id = %turn_context.sub_id,
-        model = %turn_context.model_info.slug
+        turn_id = %step_context.turn.sub_id,
+        model = %step_context.model_info.slug
     )
 )]
 async fn try_run_sampling_request(
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
@@ -2607,17 +2619,18 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
-        model = turn_context.model_info.slug.clone(),
-        approval_policy = turn_context.approval_policy(),
+        model = step_context.model_info.slug.clone(),
+        approval_policy = step_context.approval_policy,
         sandbox_policy = &turn_context.sandbox_policy(),
-        effort = turn_context.reasoning_effort,
+        effort = step_context.reasoning_effort,
         auth_mode = sess.services.execution_account.auth_manager().auth_mode(),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
         turn_context.sub_id.as_str(),
-        turn_context.model_info.slug.as_str(),
+        step_context.model_info.slug.as_str(),
         turn_context.provider.info().name.as_str(),
     );
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
@@ -2629,11 +2642,11 @@ async fn try_run_sampling_request(
     let mut stream = client_session
         .stream(
             prompt,
-            &turn_context.model_info,
-            &turn_context.session_telemetry,
-            turn_context.reasoning_effort.clone(),
-            turn_context.reasoning_summary,
-            turn_context.config.service_tier.clone(),
+            &step_context.model_info,
+            &step_context.session_telemetry,
+            step_context.reasoning_effort.clone(),
+            step_context.reasoning_summary,
+            step_context.service_tier.clone(),
             responses_metadata,
             &inference_trace,
         )
@@ -2956,6 +2969,7 @@ async fn try_run_sampling_request(
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             } => {
                 sess.services
@@ -2980,6 +2994,7 @@ async fn try_run_sampling_request(
                     EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
                         response_id,
                         token_usage: token_usage.clone(),
+                        usage_metadata,
                     }),
                 )
                 .await;

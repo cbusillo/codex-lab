@@ -1,11 +1,11 @@
 use crate::function_tool::FunctionCallError;
 use crate::safety::SafetyCheck;
 use crate::safety::assess_patch_safety;
-use crate::session::step_context::StepContext;
-use crate::session::turn_context::TurnEnvironment;
+use crate::session::turn_context::TurnContext;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::ApplyPatchFileChange;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_utils_path_uri::PathUri;
@@ -20,18 +20,18 @@ pub(crate) struct ApplyPatchRuntimeInvocation {
 }
 
 pub(crate) fn prepare_apply_patch(
-    step_context: &StepContext,
-    turn_environment: &TurnEnvironment,
+    turn_context: &TurnContext,
+    permission_profile: &PermissionProfile,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     action: ApplyPatchAction,
 ) -> Result<ApplyPatchRuntimeInvocation, FunctionCallError> {
     match assess_patch_safety(
         &action,
-        step_context.settings.approval_policy(),
-        turn_environment.permission_profile(),
+        turn_context.approval_policy(),
+        permission_profile,
         file_system_sandbox_policy,
         &action.cwd,
-        turn_environment.config().windows_sandbox_level,
+        turn_context.windows_sandbox_level,
     ) {
         SafetyCheck::AutoApprove => Ok(ApplyPatchRuntimeInvocation {
             action,

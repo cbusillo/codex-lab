@@ -5,6 +5,8 @@ use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::context_manager::ModelRequestHistoryMode;
+use crate::context_manager::ProjectValidationCorrectionPair;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -18,18 +20,21 @@ use tracing::info;
 pub(super) struct RemoteCompactAttempt {
     pub(super) new_history: Vec<ResponseItem>,
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
+    pub(super) correction_pair: Option<ProjectValidationCorrectionPair>,
 }
 
 pub(super) async fn run_remote_compact_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     turn_state: Option<Arc<OnceLock<String>>>,
+    model_request_history_mode: ModelRequestHistoryMode,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
+    let correction_pair = history.apply_model_request_history_mode(model_request_history_mode);
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
@@ -58,7 +63,7 @@ pub(super) async fn run_remote_compact_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().cloned().collect());
-    let prompt_input = history.for_prompt(&turn_context.model_info().input_modalities);
+    let prompt_input = history.for_prompt(&step_context.model_info.input_modalities);
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,
@@ -67,6 +72,7 @@ pub(super) async fn run_remote_compact_attempt(
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
+        max_output_tokens: None,
         cyber_access_program: turn_context.cyber_access_program,
     };
     let responses_metadata = sess
@@ -80,18 +86,18 @@ pub(super) async fn run_remote_compact_attempt(
         .model_client
         .compact_conversation_history(
             &prompt,
-            turn_context.model_info(),
+            &step_context.model_info,
             turn_state,
             CompactConversationRequestSettings {
-                effort: turn_context.reasoning_effort().cloned(),
-                summary: turn_context.reasoning_summary(),
+                effort: step_context.reasoning_effort.clone(),
+                summary: step_context.reasoning_summary,
                 service_tier: if sess.services.auth_manager.auth_mode() == Some(AuthMode::ApiKey) {
                     None
                 } else {
-                    turn_context.config.service_tier.clone()
+                    step_context.service_tier.clone()
                 },
             },
-            &turn_context.session_telemetry,
+            &step_context.session_telemetry,
             compaction_trace,
             &responses_metadata,
         )
@@ -99,5 +105,6 @@ pub(super) async fn run_remote_compact_attempt(
     Ok(RemoteCompactAttempt {
         new_history,
         trace_input_history,
+        correction_pair,
     })
 }

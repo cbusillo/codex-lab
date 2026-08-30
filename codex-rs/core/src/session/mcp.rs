@@ -840,14 +840,9 @@ async fn review_guardian_mcp_elicitation(
     let approval_policy = mcp_config.approval_policy.value();
     match approval_policy {
         AskForApproval::Never => {
-            let Some(permission_profile) =
-                mcp_config.permission_profile_for_server(&request.server_name)
-            else {
-                return Ok(Some(mcp_elicitation_decline_without_message()));
-            };
             if codex_mcp::mcp_permission_prompt_is_auto_approved(
                 approval_policy,
-                permission_profile,
+                &mcp_config.permission_profile,
                 codex_mcp::McpPermissionPromptAutoApproveContext::default(),
             ) && matches!(
                 &request.elicitation,

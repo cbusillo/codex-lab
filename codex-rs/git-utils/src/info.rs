@@ -7,6 +7,8 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
 use ts_rs::TS;
@@ -259,6 +261,96 @@ fn normalize_remote_host(host: &str, default_port: Option<&str>) -> String {
 
 fn trim_git_suffix(value: &str) -> &str {
     value.strip_suffix(".git").unwrap_or(value)
+}
+
+pub async fn get_worktree_diff_fingerprint(cwd: &Path) -> Option<String> {
+    get_git_repo_root(cwd)?;
+    let Some(diff) = diff_against_sha(cwd, &GitSha::new("HEAD")).await else {
+        return Some("unknown".to_string());
+    };
+    diff_fingerprint(&diff)
+}
+
+pub fn diff_fingerprint(diff: &str) -> Option<String> {
+    if diff.trim().is_empty() {
+        return None;
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    Some(format!("sha256:{:x}", hasher.finalize()))
+}
+
+pub async fn get_worktree_changed_files(cwd: &Path) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, /*base_sha*/ None).await
+}
+
+pub async fn get_worktree_changed_files_since(
+    cwd: &Path,
+    base_sha: &GitSha,
+) -> Option<Vec<PathBuf>> {
+    get_worktree_changed_files_from(cwd, Some(base_sha)).await
+}
+
+async fn get_worktree_changed_files_from(
+    cwd: &Path,
+    base_sha: Option<&GitSha>,
+) -> Option<Vec<PathBuf>> {
+    let repo_root = get_git_repo_root(cwd)?;
+    let tracked_output = if let Some(base_sha) = base_sha {
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                &base_sha.0,
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else if get_head_commit_hash(&repo_root).await.is_some() {
+        run_git_command_with_timeout(
+            &[
+                "diff",
+                "--name-only",
+                "--diff-filter=ACMR",
+                "-z",
+                "HEAD",
+                "--",
+            ],
+            &repo_root,
+        )
+        .await?
+    } else {
+        run_git_command_with_timeout(&["ls-files", "--cached", "-z"], &repo_root).await?
+    };
+    if !tracked_output.status.success() {
+        return None;
+    }
+    let mut files = parse_nul_separated_paths(&tracked_output.stdout)?;
+
+    let untracked_output = run_git_command_with_timeout(
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        &repo_root,
+    )
+    .await?;
+    if !untracked_output.status.success() {
+        return None;
+    }
+    files.extend(parse_nul_separated_paths(&untracked_output.stdout)?);
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+fn parse_nul_separated_paths(output: &[u8]) -> Option<Vec<PathBuf>> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8(path.to_vec()).ok().map(PathBuf::from))
+        .collect()
 }
 
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, SanitizedGitUrl>> {

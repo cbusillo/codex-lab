@@ -90,8 +90,7 @@ fn remove_multi_agent_usage_hint_world_state_section(rollout_path: &Path) -> Res
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
-                && state.remove("multi_agent_usage_hint").is_some()
+                && world_state.state.remove("multi_agent_usage_hint").is_some()
             {
                 removed_section = true;
             }

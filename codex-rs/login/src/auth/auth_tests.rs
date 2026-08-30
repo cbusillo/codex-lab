@@ -35,6 +35,36 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 
+#[test]
+fn agent_identity_bootstrap_cooldown_keeps_other_account_failure() {
+    let now = Instant::now();
+    let error = AgentIdentityAuthError::BootstrapUnavailable {
+        operation: "registration",
+        attempts: 3,
+        message: "temporary failure".to_string(),
+    };
+    let mut cooldown = AgentIdentityBootstrapCooldown::default();
+    cooldown.record_failure(
+        "account-a".to_string(),
+        "https://auth.example.com".to_string(),
+        error.clone(),
+        now,
+    );
+
+    assert!(
+        cooldown
+            .error_for("account-b", "https://auth.example.com", now)
+            .is_none()
+    );
+    assert_eq!(
+        cooldown
+            .error_for("account-a", "https://auth.example.com", now)
+            .expect("account-a cooldown should remain")
+            .to_string(),
+        error.to_string()
+    );
+}
+
 #[tokio::test]
 async fn refresh_without_id_token() {
     let codex_home = tempdir().unwrap();

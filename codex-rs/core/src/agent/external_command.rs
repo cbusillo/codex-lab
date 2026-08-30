@@ -24,6 +24,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
+use codex_protocol::turn_input::TurnInput;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
@@ -1087,23 +1088,33 @@ async fn send_completion_to_parent(
 
 fn render_external_agent_message(initial_operation: &Op) -> Result<String, ExternalAgentRunError> {
     match initial_operation {
-        Op::UserInput { items, .. } => Ok(items
-            .iter()
-            .filter_map(|item| match item {
-                UserInput::Text { text, .. } => Some(text.clone()),
-                UserInput::Image { .. } => Some("[image]".to_string()),
-                UserInput::LocalImage { path, .. } => {
-                    Some(format!("[local_image:{}]", path.display()))
-                }
-                UserInput::Skill { name, path, .. } => {
-                    Some(format!("[skill:${name}]({})", path.display()))
-                }
-                UserInput::Mention { name, path, .. } => Some(format!("[mention:${name}]({path})")),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")),
-        Op::InterAgentCommunication { communication } => {
+        Op::TurnInput { request, .. } => {
+            let TurnInput::UserInput { content, .. } = &request.input else {
+                return Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::UnsupportedMode,
+                    anyhow::anyhow!("external agents require user input"),
+                ));
+            };
+            Ok(content
+                .iter()
+                .filter_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text.clone()),
+                    UserInput::Image { .. } => Some("[image]".to_string()),
+                    UserInput::LocalImage { path, .. } => {
+                        Some(format!("[local_image:{}]", path.display()))
+                    }
+                    UserInput::Skill { name, path, .. } => {
+                        Some(format!("[skill:${name}]({})", path.display()))
+                    }
+                    UserInput::Mention { name, path, .. } => {
+                        Some(format!("[mention:${name}]({path})"))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        Op::InterAgentCommunication { communication, .. } => {
             if communication
                 .encrypted_content
                 .as_ref()

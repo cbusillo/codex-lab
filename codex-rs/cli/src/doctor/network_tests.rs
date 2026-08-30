@@ -5,9 +5,12 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 
 use super::super::CheckStatus;
+use super::super::HttpClientFactory;
+use super::super::OutboundProxyPolicy;
 use super::super::ProviderAuthReachabilityMode;
 use super::super::provider_reachability_check;
 use super::super::provider_reachability_plan_from_parts;
+use codex_http_client::cache_direct_system_proxy_route_for_test;
 
 #[tokio::test]
 async fn provider_reachability_rejects_proxy_authentication_challenges() {
@@ -16,7 +19,7 @@ async fn provider_reachability_rejects_proxy_authentication_challenges() {
         .respond_with(ResponseTemplate::new(407))
         .mount(&proxy)
         .await;
-    let plan = provider_reachability_plan_from_parts(
+    let mut plan = provider_reachability_plan_from_parts(
         ProviderAuthReachabilityMode::Chatgpt,
         "openai",
         "OpenAI",
@@ -25,6 +28,10 @@ async fn provider_reachability_rejects_proxy_authentication_challenges() {
         /*is_amazon_bedrock*/ false,
         &format!("{}/backend-api/", proxy.uri()),
     );
+    for endpoint in &plan.endpoints {
+        cache_direct_system_proxy_route_for_test(&endpoint.url);
+    }
+    plan.http_client_factory = HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy);
 
     let check = provider_reachability_check(plan).await;
     assert_eq!(check.status, CheckStatus::Fail);

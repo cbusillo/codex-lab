@@ -1,6 +1,8 @@
 use super::*;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::Op;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
@@ -17,15 +19,13 @@ fn test_launch(
         recipient: AgentPath::try_from("/root/external").expect("agent path"),
         role: Some("external".to_string()),
         task_name: Some("external".to_string()),
-        initial_operation: Op::UserInput {
-            items: vec![UserInput::Text {
+        initial_operation: Op::TurnInput {
+            request: Box::new(TurnInputRequest::user_input(vec![UserInput::Text {
                 text: "inspect this repo".to_string(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
+            }])),
+            mode: TurnInputMode::StartOrSteer,
+            reply: tokio::sync::oneshot::channel().0,
         },
         backend,
         cwd: temp_dir.path().to_path_buf(),
@@ -134,12 +134,10 @@ async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
         recipient: AgentPath::try_from("/root/external").expect("agent path"),
         role: Some("external".to_string()),
         task_name: Some("external".to_string()),
-        initial_operation: Op::UserInput {
-            items: Vec::new(),
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
+        initial_operation: Op::TurnInput {
+            request: Box::new(TurnInputRequest::user_input(Vec::new())),
+            mode: TurnInputMode::StartOrSteer,
+            reply: tokio::sync::oneshot::channel().0,
         },
         backend: ExternalCommandAgentBackendConfig {
             command: "/bin/sh".to_string(),

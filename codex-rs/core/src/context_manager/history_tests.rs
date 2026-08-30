@@ -864,7 +864,7 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
                     text: "hi".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
+                internal_chat_message_metadata_passthrough: None,
             }
         ]
     );
@@ -901,7 +901,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
                     text: "generate a lobster".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::ImageGenerationCall {
                 id: Some(ResponseItemId::with_suffix("ig", "123")),
@@ -1380,6 +1380,10 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
                     text: "persistent developer instructions".to_string(),
                 },
                 ContentItem::InputText {
+                    text: "<persistent_mode>\nFollow up on the completed task.\n</persistent_mode>"
+                        .to_string(),
+                },
+                ContentItem::InputText {
                     text: "persistent environment instructions".to_string(),
                 },
             ],
@@ -1389,6 +1393,7 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
                     turn_id: Some(turn_id.to_string()),
                     content_item_kinds: Some(vec![
                         ContentItemKind("generic.developer_instructions".to_string()),
+                        ContentItemKind("persistent_mode.instructions".to_string()),
                         ContentItemKind("environments.instructions".to_string()),
                     ]),
                     ..Default::default()

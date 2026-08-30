@@ -28,13 +28,13 @@ fn test_turn_environment(environment_id: &str) -> crate::session::turn_context::
             config: EnvironmentConfigState::Ready(EnvironmentConfig {
                 allow_login_shell: true,
                 workspace_roots: Vec::new(),
-                windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                windows_sandbox_private_desktop: true,
-                use_legacy_landlock: false,
                 permission_profile: PermissionProfileSnapshot::legacy(
                     PermissionProfile::read_only(),
                 ),
                 shell_environment_policy: Default::default(),
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                windows_sandbox_private_desktop: false,
+                use_legacy_landlock: false,
                 exec_policy: None,
                 mcp_policy: None,
                 network_policy: None,
@@ -288,7 +288,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
     let path = std::env::temp_dir()
         .join("apply-patch-runtime-none.txt")
         .abs();
-    let mut req = ApplyPatchRequest {
+    let req = ApplyPatchRequest {
         turn_environment: test_turn_environment(codex_exec_server::LOCAL_ENVIRONMENT_ID),
         action: ApplyPatchAction::new_add_for_test(
             &PathUri::from_abs_path(&path),
@@ -329,8 +329,6 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
     );
 
     let cwd = PathUri::parse("file:///C:/workspace").expect("Windows workspace URI");
-    let user_home_dir = PathUri::parse("file:///C:/Users/remote").expect("Windows home URI");
-    req.turn_environment.user_home_dir = Some(user_home_dir.clone());
     let permissions = PermissionProfile::workspace_write();
     let attempt = SandboxAttempt {
         sandbox_requested: true,
@@ -347,7 +345,7 @@ async fn file_system_sandbox_context_respects_sandbox_request() {
             permissions: permissions.into(),
             cwd: Some(cwd.clone()),
             workspace_roots: vec![cwd],
-            user_home_dir: Some(user_home_dir),
+            user_home_dir: None,
             temporary_directories: None,
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
             windows_sandbox_private_desktop: false,

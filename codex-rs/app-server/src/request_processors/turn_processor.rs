@@ -3,6 +3,17 @@ use super::*;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
+use codex_app_server_protocol::BackgroundAutoReviewControlReason as ApiBackgroundAutoReviewControlReason;
+use codex_auto_review::AutoReviewBudget as CoreAutoReviewBudget;
+use codex_auto_review::AutoReviewBuildProvenance;
+use codex_auto_review::AutoReviewDiagnostics;
+use codex_auto_review::AutoReviewDispositionActor as CoreAutoReviewDispositionActor;
+use codex_auto_review::AutoReviewFindingDisposition as CoreAutoReviewFindingDisposition;
+use codex_auto_review::AutoReviewFindingDispositionRecord as CoreAutoReviewFindingDispositionRecord;
+use codex_auto_review::AutoReviewRunState;
+use codex_auto_review::AutoReviewTerminalReason as CoreAutoReviewTerminalReason;
+use codex_auto_review::AutoReviewUsage as CoreAutoReviewUsage;
+use codex_auto_review::ReviewCoordination;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -334,6 +345,43 @@ impl TurnRequestProcessor {
             .map(|()| None)
     }
 
+    pub(crate) async fn background_auto_review_control(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: BackgroundAutoReviewControlParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.background_auto_review_control_inner(request_id, params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn auto_review_summary_read(
+        &self,
+        params: AutoReviewSummaryReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_summary_read_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn auto_review_finding_detail_read(
+        &self,
+        params: AutoReviewFindingDetailReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_finding_detail_read_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn auto_review_disposition_write(
+        &self,
+        params: AutoReviewDispositionWriteParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.auto_review_disposition_write_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     fn track_error_response(
         &self,
         request_id: &ConnectionRequestId,
@@ -399,6 +447,11 @@ impl TurnRequestProcessor {
     ) -> Result<(ReviewRequest, String, String), JSONRPCErrorError> {
         let cleaned_target = match target {
             ApiReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
+            ApiReviewTarget::CurrentTurnDiff { .. } => {
+                return Err(invalid_request(
+                    "currentTurnDiff is reserved for background review status".to_string(),
+                ));
+            }
             ApiReviewTarget::BaseBranch { branch } => {
                 let branch = branch.trim().to_string();
                 if branch.is_empty() {
@@ -434,6 +487,7 @@ impl TurnRequestProcessor {
             ApiReviewTarget::BaseBranch { branch } => CoreReviewTarget::BaseBranch { branch },
             ApiReviewTarget::Commit { sha, title } => CoreReviewTarget::Commit { sha, title },
             ApiReviewTarget::Custom { instructions } => CoreReviewTarget::Custom { instructions },
+            ApiReviewTarget::CurrentTurnDiff { .. } => unreachable!(),
         };
         let target_prompt = match &core_target {
             CoreReviewTarget::UncommittedChanges => {
@@ -447,6 +501,7 @@ impl TurnRequestProcessor {
                 format!("Review the changes introduced by commit {sha:?}.")
             }
             CoreReviewTarget::Custom { instructions } => instructions.clone(),
+            CoreReviewTarget::CurrentTurnDiff { .. } => unreachable!(),
         };
 
         let hint = codex_core::review_prompts::user_facing_hint(&core_target);
@@ -456,6 +511,289 @@ impl TurnRequestProcessor {
         };
 
         Ok((review_request, hint, target_prompt))
+    }
+
+    async fn auto_review_target_for_thread(&self, thread: &CodexThread) -> AutoReviewRunTarget {
+        let snapshot = thread.config_snapshot().await;
+        let environments = thread.environment_selections().await;
+        let cwd = match environments.as_slice() {
+            [environment] if environment.environment_id == LOCAL_ENVIRONMENT_ID => environment
+                .cwd
+                .to_abs_path()
+                .unwrap_or_else(|_| snapshot.cwd().clone()),
+            _ => snapshot.cwd().clone(),
+        };
+        let git_info = collect_git_info(cwd.as_path()).await;
+        let repo_root = get_git_repo_root(cwd.as_path());
+        // Background Review matches its stored target by path equality. A canonicalized cwd is a
+        // Windows verbatim path (`\\?\C:\...`) while the recorded target is not, so normalize here
+        // to keep both spellings of the same directory comparable.
+        let worktree_path = repo_root
+            .or_else(|| Some(cwd.as_path().to_path_buf()))
+            .map(path_utils::normalize_for_native_workdir);
+        let snapshot_epoch = worktree_path.as_ref().and_then(|scope| {
+            match ReviewCoordination::for_scope(self.config.codex_home.as_ref(), scope)
+                .current_snapshot_epoch()
+            {
+                Ok(0) => None,
+                Ok(epoch) => Some(epoch),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to collect app-server auto review snapshot epoch");
+                    None
+                }
+            }
+        });
+        let worktree_diff_fingerprint = get_worktree_diff_fingerprint(cwd.as_path()).await;
+
+        AutoReviewRunTarget {
+            branch: git_info.as_ref().and_then(|git| git.branch.clone()),
+            head_sha: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+            base_sha: None,
+            worktree_path,
+            snapshot_epoch,
+            snapshot_commit: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+            head_at_launch: git_info
+                .as_ref()
+                .and_then(|git| git.commit_hash.as_ref().map(|sha| sha.0.clone())),
+            worktree_diff_fingerprint,
+            current_turn: None,
+            build_provenance: Some(current_auto_review_build_provenance()),
+        }
+    }
+
+    fn auto_review_detail_error_message(error: &str) -> &'static str {
+        if error.contains("not completed") {
+            "auto review run is not completed"
+        } else {
+            "auto review finding detail is unavailable"
+        }
+    }
+
+    fn api_auto_review_status(status: AutoReviewRunStatus) -> ApiBackgroundAutoReviewStatus {
+        match status {
+            AutoReviewRunStatus::Pending => ApiBackgroundAutoReviewStatus::Pending,
+            AutoReviewRunStatus::Snapshotting
+            | AutoReviewRunStatus::Running
+            | AutoReviewRunStatus::Reviewing
+            | AutoReviewRunStatus::Resolving => ApiBackgroundAutoReviewStatus::Running,
+            AutoReviewRunStatus::Completed => ApiBackgroundAutoReviewStatus::Completed,
+            AutoReviewRunStatus::Failed => ApiBackgroundAutoReviewStatus::Failed,
+            AutoReviewRunStatus::Cancelled => ApiBackgroundAutoReviewStatus::Cancelled,
+            AutoReviewRunStatus::Superseded => ApiBackgroundAutoReviewStatus::Superseded,
+            AutoReviewRunStatus::Skipped => ApiBackgroundAutoReviewStatus::Skipped,
+            AutoReviewRunStatus::Lost => ApiBackgroundAutoReviewStatus::Cancelled,
+        }
+    }
+
+    fn api_auto_review_source(source: AutoReviewRunSource) -> ApiAutoReviewRunSource {
+        match source {
+            AutoReviewRunSource::Manual => ApiAutoReviewRunSource::Manual,
+            AutoReviewRunSource::Background => ApiAutoReviewRunSource::Background,
+        }
+    }
+
+    fn api_auto_review_freshness(freshness: AutoReviewFreshness) -> ApiAutoReviewFreshness {
+        match freshness {
+            AutoReviewFreshness::Current => ApiAutoReviewFreshness::Current,
+            AutoReviewFreshness::Stale => ApiAutoReviewFreshness::Stale,
+            AutoReviewFreshness::Detached => ApiAutoReviewFreshness::Detached,
+        }
+    }
+
+    fn auto_review_run_summary(
+        store: &AutoReviewStore,
+        run: &AutoReviewRunProjection,
+    ) -> AutoReviewRunSummary {
+        let summary = &run.summary;
+        let state = match store.load_run_state(&run.run_id) {
+            Ok(state) => state,
+            Err(err) => {
+                warn!(
+                    run_id = %run.run_id,
+                    error = %err,
+                    "failed to load auto review run state for summary"
+                );
+                None
+            }
+        };
+        let usage = Self::api_auto_review_usage(run, state.as_ref());
+        AutoReviewRunSummary {
+            run_id: run.run_id.clone(),
+            status: Self::api_auto_review_status(run.status.clone()),
+            source: Self::api_auto_review_source(run.source.clone()),
+            freshness: Self::api_auto_review_freshness(run.freshness),
+            started_at: run.started_at_unix_secs,
+            completed_at: run.completed_at_unix_secs,
+            model: run.model.clone(),
+            error_summary: run.error_summary.clone(),
+            rendered_findings: summary.rendered_findings,
+            omitted_findings: summary.omitted_findings,
+            truncated: summary.truncated,
+            content: summary.content.clone(),
+            budget: state
+                .as_ref()
+                .and_then(|state| state.budget.as_ref())
+                .map(Self::api_auto_review_budget),
+            usage,
+            terminal_reason: state
+                .as_ref()
+                .and_then(|state| state.terminal_reason)
+                .map(Self::api_auto_review_terminal_reason),
+            finding_disposition: state
+                .as_ref()
+                .and_then(|state| state.finding_disposition.as_ref())
+                .map(Self::api_auto_review_finding_disposition_record),
+        }
+    }
+
+    fn api_auto_review_budget(budget: &CoreAutoReviewBudget) -> ApiAutoReviewBudget {
+        ApiAutoReviewBudget {
+            max_scope_bytes: budget.max_scope_bytes,
+            max_elapsed_ms: budget.max_elapsed_ms,
+            max_total_tokens: budget.max_total_tokens,
+            max_output_bytes: budget.max_output_bytes,
+            max_findings: budget.max_findings,
+        }
+    }
+
+    fn api_auto_review_usage(
+        run: &AutoReviewRunProjection,
+        state: Option<&AutoReviewRunState>,
+    ) -> ApiAutoReviewUsage {
+        let CoreAutoReviewUsage {
+            scope_bytes,
+            mut elapsed_ms,
+            total_tokens,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            effective_total_token_limit,
+            accounting_tolerance_tokens,
+            projected_total_tokens,
+            request_count,
+            retry_count,
+            tool_registry_tokens,
+            tool_registry_pruned_count,
+            tool_output_tokens,
+            tool_output_limit_tokens,
+            response_output_limit_tokens,
+            response_output_reservation_tokens,
+            orchestration_skills_suppressed,
+            output_bytes,
+            finding_count,
+        } = state.map(|state| state.usage.clone()).unwrap_or_default();
+        if run.status.is_in_flight() {
+            let started_at_ms = run.started_at_unix_secs.saturating_mul(1_000);
+            let current_elapsed_ms = chrono::Utc::now()
+                .timestamp_millis()
+                .saturating_sub(started_at_ms);
+            if let Ok(current_elapsed_ms) = u64::try_from(current_elapsed_ms) {
+                elapsed_ms = Some(elapsed_ms.unwrap_or_default().max(current_elapsed_ms));
+            }
+        }
+        ApiAutoReviewUsage {
+            scope_bytes,
+            elapsed_ms,
+            total_tokens,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            effective_total_token_limit,
+            accounting_tolerance_tokens,
+            projected_total_tokens,
+            request_count,
+            retry_count,
+            tool_registry_tokens,
+            tool_registry_pruned_count,
+            tool_output_tokens,
+            tool_output_limit_tokens,
+            response_output_limit_tokens,
+            response_output_reservation_tokens,
+            orchestration_skills_suppressed,
+            output_bytes,
+            finding_count,
+        }
+    }
+
+    fn api_auto_review_terminal_reason(
+        reason: CoreAutoReviewTerminalReason,
+    ) -> ApiAutoReviewTerminalReason {
+        match reason {
+            CoreAutoReviewTerminalReason::BudgetScope => ApiAutoReviewTerminalReason::BudgetScope,
+            CoreAutoReviewTerminalReason::BudgetElapsed => {
+                ApiAutoReviewTerminalReason::BudgetElapsed
+            }
+            CoreAutoReviewTerminalReason::BudgetTotalTokens => {
+                ApiAutoReviewTerminalReason::BudgetTotalTokens
+            }
+            CoreAutoReviewTerminalReason::BudgetOutput => ApiAutoReviewTerminalReason::BudgetOutput,
+            CoreAutoReviewTerminalReason::BudgetFindingCount => {
+                ApiAutoReviewTerminalReason::BudgetFindingCount
+            }
+            CoreAutoReviewTerminalReason::EmptyOutput => ApiAutoReviewTerminalReason::EmptyOutput,
+            CoreAutoReviewTerminalReason::StaleTarget => ApiAutoReviewTerminalReason::StaleTarget,
+        }
+    }
+
+    fn api_auto_review_finding_disposition_record(
+        record: &CoreAutoReviewFindingDispositionRecord,
+    ) -> ApiAutoReviewFindingDispositionRecord {
+        ApiAutoReviewFindingDispositionRecord {
+            disposition: match record.disposition {
+                CoreAutoReviewFindingDisposition::NeedsAttention => {
+                    ApiAutoReviewFindingDisposition::NeedsAttention
+                }
+                CoreAutoReviewFindingDisposition::Repairing => {
+                    ApiAutoReviewFindingDisposition::Repairing
+                }
+                CoreAutoReviewFindingDisposition::Deferred => {
+                    ApiAutoReviewFindingDisposition::Deferred
+                }
+                CoreAutoReviewFindingDisposition::Obsolete => {
+                    ApiAutoReviewFindingDisposition::Obsolete
+                }
+            },
+            actor: match record.actor {
+                CoreAutoReviewDispositionActor::User => ApiAutoReviewDispositionActor::User,
+                CoreAutoReviewDispositionActor::Agent => ApiAutoReviewDispositionActor::Agent,
+                CoreAutoReviewDispositionActor::System => ApiAutoReviewDispositionActor::System,
+            },
+            reason: record.reason.clone(),
+            updated_at: record.updated_at_unix_secs,
+        }
+    }
+
+    fn api_auto_review_status_count(count: &CoreAutoReviewStatusCount) -> AutoReviewStatusCount {
+        AutoReviewStatusCount {
+            status: Self::api_auto_review_status(count.status.clone()),
+            source: Self::api_auto_review_source(count.source.clone()),
+            freshness: Self::api_auto_review_freshness(count.freshness),
+            target_matches: count.target_matches,
+            count: count.count,
+        }
+    }
+
+    fn auto_review_diagnostics_summary(
+        diagnostics: AutoReviewDiagnostics,
+    ) -> AutoReviewDiagnosticsSummary {
+        let compact = diagnostics.compact_line();
+        AutoReviewDiagnosticsSummary {
+            recent_runs: diagnostics.recent_runs,
+            in_flight_runs: diagnostics.in_flight_runs,
+            terminal_runs: diagnostics.terminal_runs,
+            skipped_runs: diagnostics.skipped_runs,
+            duplicate_skipped_runs: diagnostics.duplicate_skipped_runs,
+            superseded_runs: diagnostics.superseded_runs,
+            failed_runs: diagnostics.failed_runs,
+            cancelled_runs: diagnostics.cancelled_runs,
+            lost_runs: diagnostics.lost_runs,
+            suppressed_stale_runs: diagnostics.suppressed_stale_runs,
+            compact,
+        }
     }
 
     async fn request_trace_context(
@@ -1437,7 +1775,10 @@ impl TurnRequestProcessor {
             .submit_core_op(
                 request_id,
                 parent_thread.as_ref(),
-                Op::Review { review_request },
+                Op::Review {
+                    review_request,
+                    persistence: Some(ReviewPersistence::ManualAutoReview),
+                },
             )
             .await
             .map_err(|err| internal_error(format!("failed to start review: {err}")))?;
@@ -1587,6 +1928,255 @@ impl TurnRequestProcessor {
         Ok(())
     }
 
+    async fn background_auto_review_control_inner(
+        &self,
+        request_id: &ConnectionRequestId,
+        params: BackgroundAutoReviewControlParams,
+    ) -> Result<BackgroundAutoReviewControlResponse, JSONRPCErrorError> {
+        let BackgroundAutoReviewControlParams {
+            thread_id,
+            run_id,
+            action,
+            reason,
+        } = params;
+        let run_id = run_id.trim().to_string();
+        if run_id.is_empty() {
+            return Err(invalid_request("runId must not be empty"));
+        }
+        let reason = match reason {
+            ApiBackgroundAutoReviewControlReason::SupersededByRun {
+                run_id: superseding_run_id,
+            } => {
+                let superseding_run_id = superseding_run_id.trim().to_string();
+                if superseding_run_id.is_empty() {
+                    return Err(invalid_request("superseded runId must not be empty"));
+                }
+                ApiBackgroundAutoReviewControlReason::SupersededByRun {
+                    run_id: superseding_run_id,
+                }
+            }
+            reason => reason,
+        };
+
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        self.submit_core_op(
+            request_id,
+            thread.as_ref(),
+            Op::BackgroundAutoReviewControl {
+                run_id,
+                action: action.to_core(),
+                reason: reason.to_core(),
+            },
+        )
+        .await
+        .map_err(|err| {
+            internal_error(format!("failed to control background auto-review: {err}"))
+        })?;
+
+        Ok(BackgroundAutoReviewControlResponse {})
+    }
+
+    async fn auto_review_summary_read_inner(
+        &self,
+        params: AutoReviewSummaryReadParams,
+    ) -> Result<AutoReviewSummaryReadResponse, JSONRPCErrorError> {
+        let AutoReviewSummaryReadParams { thread_id } = params;
+        let (canonical_thread_id, thread) = self.load_thread(&thread_id).await?;
+        let canonical_thread_id = canonical_thread_id.to_string();
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
+        let store_for_read = store.clone();
+        let runs = tokio::task::spawn_blocking(move || {
+            let runs = store_for_read.list_runs()?;
+            Ok::<_, anyhow::Error>(
+                runs.into_iter()
+                    .filter(|run| match store_for_read.load_run_state(&run.run_id) {
+                        Ok(Some(state)) => state
+                            .owner_thread_id
+                            .is_none_or(|owner_thread_id| owner_thread_id == canonical_thread_id),
+                        // Legacy records predate thread ownership and remain visible.
+                        Ok(None) => true,
+                        Err(err) => {
+                            tracing::warn!(
+                                run_id = %run.run_id,
+                                error = %err,
+                                "excluding auto review summary with unreadable thread ownership"
+                            );
+                            false
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .await
+        .map_err(|err| internal_error(format!("auto review summary read task failed: {err}")))?
+        .map_err(|err| internal_error(format!("failed to list auto review runs: {err}")))?;
+
+        let projection =
+            AutoReviewLedgerProjection::from_runs(&runs, &active_target, &active_review_target);
+
+        Ok(AutoReviewSummaryReadResponse {
+            latest: projection
+                .latest
+                .as_ref()
+                .map(|run| Self::auto_review_run_summary(&store, run)),
+            current: projection
+                .current
+                .as_ref()
+                .map(|run| Self::auto_review_run_summary(&store, run)),
+            status_counts: projection
+                .status_counts
+                .iter()
+                .map(Self::api_auto_review_status_count)
+                .collect(),
+            diagnostics: projection
+                .diagnostics
+                .map(Self::auto_review_diagnostics_summary),
+        })
+    }
+
+    async fn auto_review_disposition_write_inner(
+        &self,
+        params: AutoReviewDispositionWriteParams,
+    ) -> Result<AutoReviewDispositionWriteResponse, JSONRPCErrorError> {
+        let AutoReviewDispositionWriteParams {
+            thread_id,
+            run_id,
+            action,
+            reason,
+        } = params;
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
+        let run = store
+            .load_run(&run_id)
+            .map_err(|err| invalid_params(format!("invalid auto review run: {err}")))?;
+        if !matches!(action, AutoReviewDispositionAction::Obsolete)
+            && !run.can_read_detail(&active_target, &active_review_target)
+        {
+            return Err(invalid_params(
+                "auto review repair/defer disposition requires current findings".to_string(),
+            ));
+        }
+        let disposition = match action {
+            AutoReviewDispositionAction::Repair => CoreAutoReviewFindingDisposition::Repairing,
+            AutoReviewDispositionAction::Defer => CoreAutoReviewFindingDisposition::Deferred,
+            AutoReviewDispositionAction::Obsolete => CoreAutoReviewFindingDisposition::Obsolete,
+        };
+        if matches!(action, AutoReviewDispositionAction::Repair) {
+            store
+                .detail(&run_id, /*finding_id*/ None, /*max_bytes*/ 1)
+                .map_err(|err| {
+                    invalid_params(format!("auto review repair detail is unavailable: {err}"))
+                })?;
+        }
+        let record = CoreAutoReviewFindingDispositionRecord {
+            disposition,
+            actor: CoreAutoReviewDispositionActor::User,
+            reason: reason
+                .map(|reason| reason.trim().to_string())
+                .filter(|reason| !reason.is_empty()),
+            updated_at_unix_secs: chrono::Utc::now().timestamp(),
+        };
+        let state = store
+            .set_finding_disposition(&run_id, record)
+            .map_err(|err| invalid_params(format!("invalid auto review disposition: {err}")))?;
+        let finding_disposition = state.finding_disposition.as_ref().ok_or_else(|| {
+            internal_error("auto review disposition was not persisted".to_string())
+        })?;
+        Ok(AutoReviewDispositionWriteResponse {
+            run_id,
+            finding_disposition: Self::api_auto_review_finding_disposition_record(
+                finding_disposition,
+            ),
+        })
+    }
+
+    async fn auto_review_finding_detail_read_inner(
+        &self,
+        params: AutoReviewFindingDetailReadParams,
+    ) -> Result<AutoReviewFindingDetailReadResponse, JSONRPCErrorError> {
+        let AutoReviewFindingDetailReadParams {
+            thread_id,
+            run_id,
+            finding_id,
+            max_bytes,
+        } = params;
+        let run_id = run_id.trim().to_string();
+        if run_id.is_empty() {
+            return Err(invalid_request("runId must not be empty"));
+        }
+        let finding_id = match finding_id {
+            Some(finding_id) => {
+                let finding_id = finding_id.trim().to_string();
+                if finding_id.is_empty() {
+                    return Err(invalid_request("findingId must not be empty when provided"));
+                }
+                Some(finding_id)
+            }
+            None => None,
+        };
+        let max_bytes = max_bytes.unwrap_or(AUTO_REVIEW_DETAIL_MAX_BYTES);
+        if max_bytes == 0 {
+            return Err(invalid_request("maxBytes must be positive"));
+        }
+
+        let (_, thread) = self.load_thread(&thread_id).await?;
+        let active_review_target = CoreReviewTarget::UncommittedChanges;
+        let active_target = self.auto_review_target_for_thread(thread.as_ref()).await;
+        let store_scope = active_target
+            .worktree_path
+            .as_deref()
+            .unwrap_or(self.config.cwd.as_path());
+        let store = AutoReviewStore::for_scope(&self.config.codex_home, store_scope);
+        let run = store
+            .load_run(&run_id)
+            .map_err(|_| invalid_request("auto review run not found"))?;
+        let can_read = match finding_id.as_deref() {
+            Some(finding_id) => {
+                run.can_read_finding_detail(finding_id, &active_target, &active_review_target)
+            }
+            None => run.can_read_detail(&active_target, &active_review_target),
+        };
+        if !can_read {
+            return Err(invalid_request("auto review detail not found"));
+        }
+        let detail = store
+            .detail(&run_id, finding_id.as_deref(), max_bytes)
+            .map_err(|err| {
+                invalid_request(format!(
+                    "failed to read auto review detail: {}",
+                    Self::auto_review_detail_error_message(&err.to_string())
+                ))
+            })?;
+
+        Ok(AutoReviewFindingDetailReadResponse {
+            run_id,
+            detail_kind: match detail.kind {
+                codex_auto_review::AutoReviewDetailKind::Run => AutoReviewDetailKind::Run,
+                codex_auto_review::AutoReviewDetailKind::Finding => AutoReviewDetailKind::Finding,
+            },
+            finding_id: detail.finding_id,
+            finding_count: detail.finding_count,
+            omitted_findings: detail.omitted_findings,
+            bytes: detail.bytes,
+            original_bytes: detail.original_bytes,
+            max_bytes: detail.max_bytes,
+            truncated: detail.truncated,
+            content: detail.content,
+        })
+    }
+
     async fn turn_interrupt_inner(
         &self,
         request_id: &ConnectionRequestId,
@@ -1680,6 +2270,19 @@ impl TurnRequestProcessor {
             raw_events_enabled,
         )
         .await
+    }
+}
+
+fn current_auto_review_build_provenance() -> AutoReviewBuildProvenance {
+    let provenance = codex_version::build_provenance();
+    AutoReviewBuildProvenance {
+        schema_version: AutoReviewBuildProvenance::SCHEMA_VERSION,
+        version: provenance.version,
+        source_commit: provenance.source_commit,
+        dirty_state: provenance.dirty_state.as_str().to_string(),
+        build_profile: provenance.build_profile,
+        build_channel: provenance.build_channel,
+        executable_path: provenance.executable_path,
     }
 }
 

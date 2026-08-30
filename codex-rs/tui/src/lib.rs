@@ -48,6 +48,7 @@ use codex_config::format_config_error_with_source;
 use codex_config::types::ResumeCwdMode;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
+use codex_features::Feature;
 use codex_login::AuthConfig;
 use codex_login::default_client::originator;
 use codex_login::default_client::set_default_client_residency_requirement;
@@ -57,6 +58,7 @@ use codex_login::profile_home;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::AltScreenMode;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::SandboxMode;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -980,6 +982,7 @@ pub async fn run_main(
             token_usage: TokenUsage::default(),
             thread_id: None,
             resume_hint: None,
+            disconnect_info: None,
             update_action: None,
             exit_reason: ExitReason::UserRequested,
         }),
@@ -1040,6 +1043,7 @@ async fn run_ratatui_app(
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
                         resume_hint: None,
+                        disconnect_info: None,
                         update_action: Some(action),
                         exit_reason: ExitReason::UserRequested,
                     });
@@ -1179,9 +1183,12 @@ async fn run_ratatui_app(
         // Authentication can change while any interactive onboarding screen is open.
         startup_account = None;
         let show_login_screen = should_show_login_screen(login_status, &initial_config);
+        let bedrock_setup_enabled =
+            should_show_bedrock_setup_wizard(login_status, &initial_config, &app_server_target);
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
+                bedrock_setup_enabled,
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust,
                 login_status,
@@ -1212,6 +1219,7 @@ async fn run_ratatui_app(
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::UserRequested,
             });
@@ -1245,6 +1253,7 @@ async fn run_ratatui_app(
                             loader_overrides.clone(),
                             cloud_config_bundle.clone(),
                             strict_config,
+                            Some(initial_config.auth_home.to_path_buf()),
                         )
                         .await
                     } else {
@@ -1284,6 +1293,7 @@ async fn run_ratatui_app(
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::Fatal(format!(
                     "No saved session found with ID {id_str}. Run `codex {action}` without an ID to choose from existing sessions."
@@ -1379,6 +1389,7 @@ async fn run_ratatui_app(
                         token_usage: crate::token_usage::TokenUsage::default(),
                         thread_id: None,
                         resume_hint: None,
+                        disconnect_info: None,
                         update_action: None,
                         exit_reason: ExitReason::UserRequested,
                     });
@@ -1473,6 +1484,7 @@ async fn run_ratatui_app(
                     token_usage: crate::token_usage::TokenUsage::default(),
                     thread_id: None,
                     resume_hint: None,
+                    disconnect_info: None,
                     update_action: None,
                     exit_reason: ExitReason::UserRequested,
                 });
@@ -1522,6 +1534,7 @@ async fn run_ratatui_app(
                 token_usage: crate::token_usage::TokenUsage::default(),
                 thread_id: None,
                 resume_hint: None,
+                disconnect_info: None,
                 update_action: None,
                 exit_reason: ExitReason::UserRequested,
             });
@@ -1544,6 +1557,7 @@ async fn run_ratatui_app(
         session_selection,
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
+    let session_auth_home = config.auth_home.to_path_buf();
 
     let reloaded_config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
@@ -1556,6 +1570,7 @@ async fn run_ratatui_app(
                         loader_overrides.clone(),
                         cloud_config_bundle.clone(),
                         strict_config,
+                        Some(session_auth_home.clone()),
                         fallback_cwd,
                     ),
                 )
@@ -1571,6 +1586,7 @@ async fn run_ratatui_app(
                         loader_overrides.clone(),
                         cloud_config_bundle.clone(),
                         strict_config,
+                        Some(session_auth_home),
                     ),
                 )
                 .await
@@ -1888,6 +1904,7 @@ async fn load_config_or_exit(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
         cli_kv_overrides,
@@ -1895,6 +1912,7 @@ async fn load_config_or_exit(
         loader_overrides,
         cloud_config_bundle,
         strict_config,
+        auth_home,
         /*fallback_cwd*/ None,
     )
     .await
@@ -1906,15 +1924,19 @@ async fn load_config_or_exit_with_fallback_cwd(
     loader_overrides: LoaderOverrides,
     cloud_config_bundle: CloudConfigBundleLoader,
     strict_config: bool,
+    auth_home: Option<PathBuf>,
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
-    let builder = ConfigBuilder::default()
+    let mut builder = ConfigBuilder::default()
         .cli_overrides(cli_kv_overrides)
         .harness_overrides(overrides)
         .loader_overrides(loader_overrides)
         .strict_config(strict_config)
         .cloud_config_bundle(cloud_config_bundle)
         .fallback_cwd(fallback_cwd);
+    if let Some(auth_home) = auth_home {
+        builder = builder.auth_home(auth_home);
+    }
     #[allow(clippy::print_stderr)]
     match builder.build().await {
         Ok(config) => config,
@@ -1992,6 +2014,25 @@ fn should_show_login_screen(login_status: LoginStatus, config: &Config) -> bool 
     }
 
     login_status == LoginStatus::NotAuthenticated
+}
+
+fn should_show_bedrock_setup_wizard(
+    login_status: LoginStatus,
+    config: &Config,
+    app_server_target: &AppServerTarget,
+) -> bool {
+    matches!(app_server_target, AppServerTarget::Embedded)
+        && should_show_login_screen(login_status, config)
+        && config.features.enabled(Feature::BedrockSetupWizard)
+        && config.model_provider_id == "openai"
+        && config
+            .config_layer_stack
+            .effective_config()
+            .get("model_provider")
+            .is_none()
+        && config
+            .auth_config()
+            .is_login_method_allowed(ForcedLoginMethod::Api)
 }
 
 #[cfg(test)]

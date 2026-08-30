@@ -42,6 +42,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 use codex_utils_output_truncation::truncate_text;
+use serde_json::Value;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -170,10 +171,16 @@ impl ContextManager {
         let fragments =
             world_state.render_history_diff(self.world_state_baseline.as_ref(), &raw_items);
         let rollout_item = self.world_state_baseline.as_ref().map_or_else(
-            || Some(WorldStateItem::full(snapshot.clone().into_value())),
+            || {
+                let Value::Object(state) = snapshot.clone().into_value() else {
+                    unreachable!("world-state snapshots serialize as JSON objects");
+                };
+                Some(WorldStateItem::full(state))
+            },
             |previous| {
                 snapshot
                     .merge_patch_from(previous)
+                    .and_then(|patch| patch.as_object().cloned())
                     .map(WorldStateItem::patch)
             },
         );

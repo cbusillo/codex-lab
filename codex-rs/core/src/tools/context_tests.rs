@@ -113,14 +113,10 @@ fn mcp_tool_output_response_item_includes_wall_time() {
         ResponseInputItem::FunctionCallOutput {
             call_id: "mcp-call-1".to_string(),
             output: FunctionCallOutputPayload {
-                body: FunctionCallOutputBody::ContentItems(vec![
-                    FunctionCallOutputContentItem::InputText {
-                        text: "Wall time: 1.2500 seconds\nOutput:".to_string(),
-                    },
-                    FunctionCallOutputContentItem::InputText {
-                        text: "done".to_string(),
-                    },
-                ]),
+                body: FunctionCallOutputBody::Text(
+                    "Wall time: 1.2500 seconds\nOutput:\n[{\"text\":\"done\",\"type\":\"text\"}]"
+                        .to_string(),
+                ),
                 success: Some(true),
             },
         }

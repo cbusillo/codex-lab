@@ -2242,6 +2242,14 @@ impl CallToolResult {
 
     pub fn as_function_call_output_payload(&self) -> FunctionCallOutputPayload {
         let content_items = convert_mcp_content_to_items(&self.content);
+        let use_content_items = content_items.iter().any(|item| {
+            matches!(
+                item,
+                FunctionCallOutputContentItem::EncryptedContent { .. }
+                    | FunctionCallOutputContentItem::InputImage { .. }
+                    | FunctionCallOutputContentItem::InputAudio { .. }
+            )
+        });
         if content_items
             .iter()
             .any(|item| matches!(item, FunctionCallOutputContentItem::EncryptedContent { .. }))
@@ -2271,8 +2279,22 @@ impl CallToolResult {
             }
         }
 
+        let serialized_content = match serde_json::to_string(&self.content) {
+            Ok(serialized_content) => serialized_content,
+            Err(err) => {
+                return FunctionCallOutputPayload {
+                    body: FunctionCallOutputBody::Text(err.to_string()),
+                    success: Some(false),
+                };
+            }
+        };
+
         FunctionCallOutputPayload {
-            body: FunctionCallOutputBody::ContentItems(content_items),
+            body: if use_content_items {
+                FunctionCallOutputBody::ContentItems(content_items)
+            } else {
+                FunctionCallOutputBody::Text(serialized_content)
+            },
             success: Some(self.success()),
         }
     }
@@ -3300,7 +3322,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_unstructured_mcp_content_to_items() {
+    fn serializes_unstructured_mcp_content_as_text() {
         let content = vec![
             serde_json::json!({"type":"text","text":"caption"}),
             serde_json::json!({
@@ -3320,23 +3342,12 @@ mod tests {
             meta: None,
         };
 
-        let resource_link = serde_json::to_string(&content[1]).expect("serialize resource link");
-        let malformed_audio =
-            serde_json::to_string(&content[2]).expect("serialize malformed audio");
         assert_eq!(
             call_tool_result.as_function_call_output_payload(),
             FunctionCallOutputPayload {
-                body: FunctionCallOutputBody::ContentItems(vec![
-                    FunctionCallOutputContentItem::InputText {
-                        text: "caption".to_string(),
-                    },
-                    FunctionCallOutputContentItem::InputText {
-                        text: resource_link,
-                    },
-                    FunctionCallOutputContentItem::InputText {
-                        text: malformed_audio,
-                    },
-                ]),
+                body: FunctionCallOutputBody::Text(
+                    serde_json::to_string(&content).expect("serialize content")
+                ),
                 success: Some(true),
             }
         );

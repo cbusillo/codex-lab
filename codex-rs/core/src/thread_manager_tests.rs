@@ -1591,17 +1591,12 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         )
         .await
         .expect("resume source thread");
-    let (prepared_turn, _) = resumed
+    let resumed_turn = resumed
         .thread
         .session
-        .new_turn_with_sub_id(
-            "resume-turn".to_string(),
-            SessionSettingsUpdate::default(),
-            Default::default(),
-        )
+        .new_turn_with_sub_id("resume-turn".to_string(), SessionSettingsUpdate::default())
         .await
         .expect("build resumed turn context");
-    let resumed_turn = prepared_turn;
     assert_eq!(resumed_turn.environments.turn_environments().count(), 1);
     assert_eq!(
         resumed_turn
@@ -1630,17 +1625,12 @@ async fn resume_and_fork_do_not_restore_thread_environments_from_rollout() {
         )
         .await
         .expect("fork source thread");
-    let (prepared_turn, _) = forked
+    let forked_turn = forked
         .thread
         .session
-        .new_turn_with_sub_id(
-            "fork-turn".to_string(),
-            SessionSettingsUpdate::default(),
-            Default::default(),
-        )
+        .new_turn_with_sub_id("fork-turn".to_string(), SessionSettingsUpdate::default())
         .await
         .expect("build forked turn context");
-    let forked_turn = prepared_turn;
     assert_eq!(forked_turn.environments.turn_environments().count(), 1);
     assert_eq!(
         forked_turn

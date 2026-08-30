@@ -34,6 +34,7 @@ use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::context::ToolPayload;
+use crate::tools::effective_tool_mode;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
@@ -204,7 +205,8 @@ impl CodeModeService {
         tracker: SharedTurnDiffTracker,
     ) -> Option<CodeModeDispatchWorker> {
         let turn = &step_context.turn;
-        if !step_context.tool_router.requires_code_mode_worker() {
+        let tool_mode = effective_tool_mode(turn);
+        if !matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
             return None;
         }
 
@@ -294,7 +296,7 @@ pub(super) async fn handle_runtime_response(
 }
 
 fn sanitize_runtime_image_detail(turn: &TurnContext, items: &mut [FunctionCallOutputContentItem]) {
-    sanitize_image_detail_items(can_request_original_image_detail(turn.model_info()), items);
+    sanitize_image_detail_items(can_request_original_image_detail(&turn.model_info), items);
 }
 
 fn format_script_status(response: &RuntimeResponse) -> String {
@@ -341,16 +343,12 @@ fn truncate_code_mode_result(
     truncate_function_output_items_with_policy(&items, policy, estimate_audio_token_count)
 }
 
-// Submit synchronously so the recorder sees the call before the cell's dispatch gate closes.
-fn submit_nested_tool(
+async fn call_nested_tool(
     exec: ExecContext,
     tool_runtime: ToolCallRuntime,
     invocation: CodeModeNestedToolCall,
     cancellation_token: CancellationToken,
-) -> Result<
-    impl std::future::Future<Output = Result<JsonValue, FunctionCallError>> + Send + 'static,
-    FunctionCallError,
-> {
+) -> Result<JsonValue, FunctionCallError> {
     let CodeModeNestedToolCall {
         cell_id,
         runtime_tool_call_id,
@@ -384,15 +382,17 @@ fn submit_nested_tool(
             call_id: call.call_id.clone(),
             cell_id: cell_id.to_string(),
         });
-    let result = tool_runtime.handle_tool_call_with_source(
-        call,
-        ToolCallSource::CodeMode {
-            cell_id: cell_id.to_string(),
-            runtime_tool_call_id,
-        },
-        cancellation_token,
-    );
-    Ok(async move { Ok(result.await?.code_mode_result()) })
+    let result = tool_runtime
+        .handle_tool_call_with_source(
+            call,
+            ToolCallSource::CodeMode {
+                cell_id: cell_id.to_string(),
+                runtime_tool_call_id,
+            },
+            cancellation_token,
+        )
+        .await?;
+    Ok(result.code_mode_result())
 }
 
 fn build_nested_tool_payload(
@@ -440,51 +440,13 @@ fn build_freeform_tool_payload(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
-
     use super::build_nested_tool_payload;
     use super::truncate_code_mode_result;
-    use crate::session::step_context::StepContext;
-    use crate::session::tests::make_session_and_context;
     use crate::tools::context::ToolPayload;
-    use crate::tools::registry::ToolRegistry;
-    use crate::tools::router::ToolRouter;
-    use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_code_mode::CodeModeToolKind;
     use codex_protocol::models::FunctionCallOutputContentItem;
-    use codex_protocol::openai_models::ToolMode;
     use codex_tools::ToolName;
     use serde_json::json;
-
-    #[tokio::test]
-    async fn turn_worker_uses_step_router_mode_instead_of_admitted_turn() {
-        let (session, turn) = make_session_and_context().await;
-        assert_eq!(
-            crate::tools::effective_tool_mode(&turn, turn.model_info()),
-            ToolMode::Direct
-        );
-        let session = Arc::new(session);
-        let step_context = StepContext::for_test(Arc::new(turn));
-        let router = Arc::new(ToolRouter::from_parts(
-            ToolRegistry::empty_for_test(),
-            Vec::new(),
-            ToolMode::CodeModeOnly,
-            BTreeMap::new(),
-            /*tool_namespaces_info*/ None,
-            &[],
-        ));
-        let step_context = step_context.with_tool_router_for_test(router);
-        let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-
-        let worker =
-            session
-                .services
-                .code_mode_service
-                .start_turn_worker(&session, step_context, tracker);
-
-        assert!(worker.is_some());
-    }
 
     #[test]
     fn build_nested_tool_payload_uses_function_kind() {

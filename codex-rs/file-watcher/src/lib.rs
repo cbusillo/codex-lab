@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use notify::Event;
@@ -221,6 +222,11 @@ struct FileWatcherInner {
     watched_paths: HashMap<PathBuf, RecursiveMode>,
 }
 
+struct WatchReconfiguration {
+    path: PathBuf,
+    next_mode: Option<RecursiveMode>,
+}
+
 /// Coalesces bursts of watch notifications and emits at most once per interval.
 pub struct ThrottledWatchReceiver {
     rx: Receiver,
@@ -306,6 +312,14 @@ impl FileWatcherSubscriber {
     /// Registers the provided paths for this subscriber and returns an RAII
     /// guard that unregisters them on drop.
     pub fn register_paths(&self, watched_paths: Vec<WatchPath>) -> WatchRegistration {
+        Self::register_paths_inner(Arc::clone(&self.file_watcher), self.id, watched_paths)
+    }
+
+    fn register_paths_inner(
+        file_watcher: Arc<FileWatcher>,
+        subscriber_id: SubscriberId,
+        watched_paths: Vec<WatchPath>,
+    ) -> WatchRegistration {
         let watched_paths = dedupe_watched_paths(watched_paths)
             .into_iter()
             .map(|requested| {
@@ -318,11 +332,11 @@ impl FileWatcherSubscriber {
                 }
             })
             .collect::<Vec<_>>();
-        self.file_watcher.register_paths(self.id, &watched_paths);
+        file_watcher.register_paths(subscriber_id, &watched_paths);
 
         WatchRegistration {
-            file_watcher: Arc::downgrade(&self.file_watcher),
-            subscriber_id: self.id,
+            file_watcher: Arc::downgrade(&file_watcher),
+            subscriber_id,
             watched_paths: watched_paths
                 .iter()
                 .map(|watch| watch.key.clone())
@@ -369,8 +383,10 @@ impl Drop for WatchRegistration {
 
 /// Multi-subscriber file watcher built on top of `notify`.
 pub struct FileWatcher {
-    inner: Option<Arc<Mutex<FileWatcherInner>>>,
+    reconfigure_tx: Option<Arc<std_mpsc::Sender<WatchReconfiguration>>>,
     state: Arc<RwLock<WatchState>>,
+    #[cfg(test)]
+    inner: Option<Arc<Mutex<FileWatcherInner>>>,
 }
 
 impl FileWatcher {
@@ -382,14 +398,30 @@ impl FileWatcher {
         let watcher = notify::recommended_watcher(move |res| {
             let _ = raw_tx_clone.send(res);
         })?;
-        let inner = FileWatcherInner {
+        let inner = Arc::new(Mutex::new(FileWatcherInner {
             watcher,
             watched_paths: HashMap::new(),
-        };
+        }));
+        let (reconfigure_tx, reconfigure_rx) = std_mpsc::channel::<WatchReconfiguration>();
+        let reconfigure_inner = Arc::clone(&inner);
+        std::thread::Builder::new()
+            .name("codex-file-watcher-config".to_string())
+            .spawn(move || {
+                while let Ok(reconfiguration) = reconfigure_rx.recv() {
+                    Self::reconfigure_watch_inner(
+                        &reconfigure_inner,
+                        &reconfiguration.path,
+                        reconfiguration.next_mode,
+                    );
+                }
+            })
+            .map_err(notify::Error::io)?;
         let state = Arc::new(RwLock::new(WatchState::default()));
         let file_watcher = Self {
-            inner: Some(Arc::new(Mutex::new(inner))),
+            reconfigure_tx: Some(Arc::new(reconfigure_tx)),
             state,
+            #[cfg(test)]
+            inner: Some(inner),
         };
         file_watcher.spawn_event_loop(raw_rx);
         Ok(file_watcher)
@@ -399,8 +431,10 @@ impl FileWatcher {
     /// notifications.
     pub fn noop() -> Self {
         Self {
-            inner: None,
+            reconfigure_tx: None,
             state: Arc::new(RwLock::new(WatchState::default())),
+            #[cfg(test)]
+            inner: None,
         }
     }
 
@@ -438,7 +472,6 @@ impl FileWatcher {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
 
         for registration in watched_paths {
             let actual = {
@@ -470,7 +503,7 @@ impl FileWatcher {
             counts.increment(actual.recursive, /*amount*/ 1);
             let next_mode = counts.effective_mode();
             if previous_mode != next_mode {
-                self.reconfigure_watch(&actual.path, next_mode, &mut inner_guard);
+                self.reconfigure_watch(&actual.path, next_mode);
             }
         }
     }
@@ -480,7 +513,6 @@ impl FileWatcher {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
 
         for subscriber_watch in watched_paths {
             let actual = {
@@ -510,7 +542,7 @@ impl FileWatcher {
                 state.path_ref_counts.remove(&actual.path);
             }
             if previous_mode != next_mode {
-                self.reconfigure_watch(&actual.path, next_mode, &mut inner_guard);
+                self.reconfigure_watch(&actual.path, next_mode);
             }
         }
     }
@@ -524,7 +556,6 @@ impl FileWatcher {
             return;
         };
 
-        let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
         for (_subscriber_watch, subscriber_watch_state) in subscriber.watched_paths {
             let Some(path_counts) = state
                 .path_ref_counts
@@ -544,42 +575,42 @@ impl FileWatcher {
                     .remove(&subscriber_watch_state.actual.path);
             }
             if previous_mode != next_mode {
-                self.reconfigure_watch(
-                    &subscriber_watch_state.actual.path,
-                    next_mode,
-                    &mut inner_guard,
-                );
+                self.reconfigure_watch(&subscriber_watch_state.actual.path, next_mode);
             }
         }
     }
 
-    fn reconfigure_watch<'a>(
-        &'a self,
-        path: &Path,
-        next_mode: Option<RecursiveMode>,
-        inner_guard: &mut Option<std::sync::MutexGuard<'a, FileWatcherInner>>,
-    ) {
-        Self::reconfigure_watch_inner(self.inner.as_ref(), path, next_mode, inner_guard);
+    fn reconfigure_watch(&self, path: &Path, next_mode: Option<RecursiveMode>) {
+        Self::queue_watch_reconfiguration(self.reconfigure_tx.as_deref(), path, next_mode);
     }
 
-    fn reconfigure_watch_inner<'a>(
-        inner: Option<&'a Arc<Mutex<FileWatcherInner>>>,
+    fn queue_watch_reconfiguration(
+        reconfigure_tx: Option<&std_mpsc::Sender<WatchReconfiguration>>,
         path: &Path,
         next_mode: Option<RecursiveMode>,
-        inner_guard: &mut Option<std::sync::MutexGuard<'a, FileWatcherInner>>,
     ) {
-        let Some(inner) = inner else {
+        let Some(reconfigure_tx) = reconfigure_tx else {
             return;
         };
-        if inner_guard.is_none() {
-            let guard = inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *inner_guard = Some(guard);
+        if reconfigure_tx
+            .send(WatchReconfiguration {
+                path: path.to_path_buf(),
+                next_mode,
+            })
+            .is_err()
+        {
+            warn!("file watcher reconfiguration worker stopped");
         }
-        let Some(guard) = inner_guard.as_mut() else {
-            return;
-        };
+    }
+
+    fn reconfigure_watch_inner(
+        inner: &Arc<Mutex<FileWatcherInner>>,
+        path: &Path,
+        next_mode: Option<RecursiveMode>,
+    ) {
+        let mut guard = inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let existing_mode = guard.watched_paths.get(path).copied();
         if existing_mode == next_mode {
@@ -607,13 +638,12 @@ impl FileWatcher {
         guard.watched_paths.insert(path.to_path_buf(), next_mode);
     }
 
-    fn apply_actual_watch_move<'a>(
+    fn apply_actual_watch_move(
         path_ref_counts: &mut HashMap<PathBuf, PathWatchCounts>,
         old_actual: WatchPath,
         new_actual: WatchPath,
         count: usize,
-        inner: Option<&'a Arc<Mutex<FileWatcherInner>>>,
-        inner_guard: &mut Option<std::sync::MutexGuard<'a, FileWatcherInner>>,
+        reconfigure_tx: Option<&std_mpsc::Sender<WatchReconfiguration>>,
     ) {
         if old_actual == new_actual {
             return;
@@ -627,7 +657,7 @@ impl FileWatcher {
                 path_ref_counts.remove(&old_actual.path);
             }
             if previous_mode != next_mode {
-                Self::reconfigure_watch_inner(inner, &old_actual.path, next_mode, inner_guard);
+                Self::queue_watch_reconfiguration(reconfigure_tx, &old_actual.path, next_mode);
             }
         }
 
@@ -636,7 +666,7 @@ impl FileWatcher {
         counts.increment(new_actual.recursive, count);
         let next_mode = counts.effective_mode();
         if previous_mode != next_mode {
-            Self::reconfigure_watch_inner(inner, &new_actual.path, next_mode, inner_guard);
+            Self::queue_watch_reconfiguration(reconfigure_tx, &new_actual.path, next_mode);
         }
     }
 
@@ -645,7 +675,7 @@ impl FileWatcher {
     fn spawn_event_loop(&self, mut raw_rx: mpsc::UnboundedReceiver<notify::Result<Event>>) {
         if let Ok(handle) = Handle::try_current() {
             let state = Arc::clone(&self.state);
-            let inner = self.inner.as_ref().map(Arc::downgrade);
+            let reconfigure_tx = self.reconfigure_tx.as_ref().map(Arc::downgrade);
             handle.spawn(async move {
                 loop {
                     match raw_rx.recv().await {
@@ -656,8 +686,14 @@ impl FileWatcher {
                             if event.paths.is_empty() {
                                 continue;
                             }
-                            let inner = inner.as_ref().and_then(std::sync::Weak::upgrade);
-                            Self::notify_subscribers(&state, inner.as_ref(), &event.paths).await;
+                            let reconfigure_tx =
+                                reconfigure_tx.as_ref().and_then(std::sync::Weak::upgrade);
+                            Self::notify_subscribers(
+                                &state,
+                                reconfigure_tx.as_deref(),
+                                &event.paths,
+                            )
+                            .await;
                         }
                         Some(Err(err)) => {
                             warn!("file watcher error: {err}");
@@ -673,7 +709,7 @@ impl FileWatcher {
 
     async fn notify_subscribers(
         state: &RwLock<WatchState>,
-        inner: Option<&Arc<Mutex<FileWatcherInner>>>,
+        reconfigure_tx: Option<&std_mpsc::Sender<WatchReconfiguration>>,
         event_paths: &[PathBuf],
     ) {
         let subscribers_to_notify: Vec<(WatchSender, Vec<PathBuf>)> = {
@@ -712,15 +748,13 @@ impl FileWatcher {
                 }
             }
 
-            let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
             for (old_actual, new_actual, count) in actual_watch_moves {
                 Self::apply_actual_watch_move(
                     &mut state.path_ref_counts,
                     old_actual,
                     new_actual,
                     count,
-                    inner,
-                    &mut inner_guard,
+                    reconfigure_tx,
                 );
             }
 
@@ -734,7 +768,7 @@ impl FileWatcher {
 
     #[cfg(test)]
     pub(crate) async fn send_paths_for_test(&self, paths: Vec<PathBuf>) {
-        Self::notify_subscribers(&self.state, self.inner.as_ref(), &paths).await;
+        Self::notify_subscribers(&self.state, self.reconfigure_tx.as_deref(), &paths).await;
     }
 
     #[cfg(test)]

@@ -92,6 +92,7 @@ impl AgentStatusThreadPreview {
                 },
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
+                | ThreadBufferedEvent::AutoReviewSummaryLoaded { .. }
                 | ThreadBufferedEvent::FeedbackSubmission(_) => continue,
             };
             if !seen_item_ids.insert(item.id().to_string()) {
@@ -195,7 +196,8 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
         ThreadItem::UserMessage { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::FunctionCallOutput { .. }
-        | ThreadItem::Sleep(_) => {
+        | ThreadItem::Sleep(_)
+        | ThreadItem::ProjectValidation { .. } => {
             return None;
         }
     };

@@ -41,9 +41,9 @@ impl Session {
             selected_capability_root_count = step_context.selected_capability_roots.len(),
             "building step world state"
         );
-        let model_instructions = turn_context
-            .model_info()
-            .get_model_instructions(turn_context.personality());
+        let model_instructions = step_context
+            .model_info
+            .get_model_instructions(step_context.settings.personality());
         let (previous_model, previous_context, base_instructions) = {
             let state = self.state.lock().await;
             let base_instructions = state.session_configuration.base_instructions.clone();
@@ -66,7 +66,7 @@ impl Session {
                 base_instructions,
             )
         };
-        let personality_is_baked = turn_context.model_info().supports_personality()
+        let personality_is_baked = step_context.model_info.supports_personality()
             && base_instructions == model_instructions;
         let environment_subagents = if turn_context.config.include_environment_context {
             self.services
@@ -78,22 +78,23 @@ impl Session {
         };
         let mut world_state = WorldState::default();
         world_state.add_section(ModelInstructionsState::new(
-            &turn_context.model_info().slug,
+            &step_context.model_info.slug,
             previous_model.as_deref(),
             model_instructions,
         ));
         if self.features.enabled(Feature::Personality) {
-            let personality_instructions = turn_context.personality().and_then(|personality| {
-                turn_context
-                    .model_info()
+            let personality = step_context.settings.personality();
+            let personality_instructions = personality.and_then(|personality| {
+                step_context
+                    .model_info
                     .model_messages
                     .as_ref()
                     .and_then(|messages| messages.get_personality_message(Some(personality)))
                     .filter(|message| !message.is_empty())
             });
             world_state.add_section(PersonalityState::new(
-                &turn_context.model_info().slug,
-                turn_context.personality(),
+                &step_context.model_info.slug,
+                personality,
                 previous_context
                     .as_ref()
                     .map(|previous| previous.model.as_str())
@@ -158,12 +159,12 @@ impl Session {
             let cwd = environment
                 .and_then(|environment| environment.cwd().to_abs_path().ok())
                 .unwrap_or_else(|| turn_context.cwd.clone());
-            let model_messages = turn_context.model_info().model_messages.as_ref();
+            let model_messages = step_context.model_info.model_messages.as_ref();
             world_state.add_section(PermissionsState::new(
                 &permission_profile,
-                step_context.settings.approval_policy(),
+                step_context.approval_policy,
                 ApprovalPromptContext::new(
-                    step_context.settings.approvals_reviewer(),
+                    step_context.approvals_reviewer,
                     model_messages.and_then(|messages| messages.approvals.as_ref()),
                     model_messages.and_then(|messages| messages.permissions.as_ref()),
                 ),
@@ -183,9 +184,9 @@ impl Session {
         }
         if turn_context.config.include_collaboration_mode_instructions {
             world_state.add_section(CollaborationModeState::from_collaboration_mode(
-                &turn_context.collaboration_mode(),
-                turn_context
-                    .model_info()
+                step_context.settings.selected_collaboration_mode(),
+                step_context
+                    .model_info
                     .model_messages
                     .as_ref()
                     .and_then(|messages| messages.collaboration_modes.as_ref()),
@@ -227,7 +228,6 @@ impl Session {
                     &step_context.environments,
                     Some(current_date),
                 )
-                .await
                 .with_subagents(environment_subagents),
             );
         }
@@ -250,12 +250,12 @@ impl Session {
                 false
             };
         let apps_usage_instructions_available =
-            apps_available && turn_context.model_info().include_apps_usage_instructions;
+            apps_available && step_context.model_info.include_apps_usage_instructions;
         world_state.add_section(AppsInstructionsState::new(
             apps_usage_instructions_available,
         ));
         let plugins_usage_instructions_available = step_context.mcp.plugins_available()
-            && turn_context.model_info().include_plugin_usage_instructions;
+            && step_context.model_info.include_plugin_usage_instructions;
         world_state.add_section(PluginsInstructionsState::new(
             plugins_usage_instructions_available,
         ));
@@ -275,7 +275,7 @@ impl Session {
             .map(|root| root.selected_root().clone())
             .collect::<Vec<_>>();
         let extension_metrics = super::extension_metrics::from_session_telemetry(
-            turn_context.session_telemetry.clone(),
+            step_context.session_telemetry.clone(),
         );
         for contributor in self.services.extensions.context_contributors() {
             for section in contributor
@@ -298,10 +298,10 @@ impl Session {
             }
         }
         let mut multi_agent_mode = MultiAgentModeState::new(
-            super::multi_agents::effective_multi_agent_mode(turn_context),
+            super::multi_agents::effective_multi_agent_mode(step_context),
         );
         if let Some(usage_hint_text) =
-            super::multi_agents::usage_hint_text(turn_context, &turn_context.session_source)
+            super::multi_agents::usage_hint_text(step_context, &turn_context.session_source)
         {
             let usage_hint = MultiAgentUsageHintState::new(usage_hint_text);
             multi_agent_mode = multi_agent_mode.with_usage_hint(&usage_hint);

@@ -113,6 +113,7 @@ async fn projects_list_by_recency_and_preserve_metadata_timestamps() -> Result<(
                         use_state_db_only: true,
                         search_term: None,
                         parent_thread_id: None,
+                        descendant_of_thread_id: None,
                         ancestor_thread_id: None,
                     },
                 })

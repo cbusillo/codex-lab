@@ -243,9 +243,9 @@ default_tools_approval_mode = "prompt"
         panic!("expected the model request and MCP-denial continuation");
     };
     let output = completion_request.function_call_output(call_id);
-    let response = output["output"][1]["text"]
+    let response = output["output"]
         .as_str()
-        .expect("MCP tool output should contain an input_text item");
+        .expect("MCP tool output should be a string");
     assert!(
         response.contains("approval policy is never"),
         "MCP tool should be rejected by the delegate's approval policy: {response}"

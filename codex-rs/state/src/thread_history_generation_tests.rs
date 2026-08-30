@@ -157,7 +157,7 @@ VALUES ('thread-1', 'turn-1', 'item-1', 1, '{}')
     );
 
     let preserved_pool = sqlite
-        .open_read_only_pool(&shipped_path)
+        .open_read_only_pool(&shipped_path, /*busy_timeout*/ None)
         .await
         .expect("shipped thread history database should still be readable");
     let preserved_ledger = sqlx::query_as::<_, (i64, String)>(

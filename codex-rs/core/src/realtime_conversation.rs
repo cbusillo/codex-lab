@@ -1604,10 +1604,11 @@ async fn handle_start_inner(
                 )))
                 .await;
         }
+        let was_realtime_active = fanout_realtime_active.swap(false, Ordering::Relaxed);
         if let Ok(text) = transcript_tail_rx.recv().await {
             sess_clone.route_realtime_text_input(text).await;
         }
-        if fanout_realtime_active.swap(false, Ordering::Relaxed) {
+        if was_realtime_active {
             match end {
                 RealtimeConversationEnd::TransportClosed => {
                     info!("realtime conversation transport closed");

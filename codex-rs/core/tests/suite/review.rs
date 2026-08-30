@@ -846,6 +846,7 @@ async fn review_omits_retained_tier_when_fast_mode_disabled() -> anyhow::Result<
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await?;
     wait_for_event(&test.codex, |event| {
@@ -909,6 +910,7 @@ async fn review_resolves_inherited_summary_preferences() -> anyhow::Result<()> {
                     },
                     user_facing_hint: None,
                 },
+                persistence: None,
             })
             .await?;
         wait_for_event(&test.codex, |event| {

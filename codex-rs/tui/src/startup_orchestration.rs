@@ -111,7 +111,7 @@ pub(super) async fn run_main_inner(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     #[allow(clippy::print_stderr)]
-    let _auth_home = match cli.auth_profile.as_deref() {
+    let auth_home = match cli.auth_profile.as_deref() {
         Some(profile) => match profile_home(&codex_home, profile) {
             Ok(auth_home) => auth_home,
             Err(err) => {
@@ -194,6 +194,7 @@ pub(super) async fn run_main_inner(
             validation_loader_overrides,
             validation_cloud_config_bundle,
             strict_config,
+            Some(auth_home.clone()),
         )
         .await;
     }
@@ -416,6 +417,7 @@ pub(super) async fn run_main_inner(
             loader_overrides.clone(),
             cloud_config_bundle.clone(),
             strict_config,
+            Some(auth_home.clone()),
         ))
         .await?;
     startup_draft.apply_config(&config);

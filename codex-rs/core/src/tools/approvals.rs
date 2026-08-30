@@ -15,6 +15,7 @@ use crate::hook_runtime::run_permission_request_hooks;
 use crate::mcp_tool_call::request_mcp_tool_user_approval;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
+use crate::session::turn_context::TurnContext;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::runtimes::apply_patch::ApplyPatchApprovalKey;
 use crate::tools::runtimes::unified_exec::UnifiedExecApprovalKey;
@@ -427,6 +428,10 @@ enum ApprovalReviewer {
 }
 
 impl ApprovalReviewer {
+    fn for_turn(turn: &TurnContext) -> Self {
+        Self::for_policy(turn.approval_policy(), turn.config.approvals_reviewer)
+    }
+
     fn for_policy(approval_policy: AskForApproval, reviewer: ApprovalsReviewer) -> Self {
         if routes_approval_policy_to_guardian(approval_policy, reviewer) {
             Self::Guardian
@@ -487,8 +492,6 @@ impl Session {
         action: ApprovalAction,
         ctx: ApprovalContext,
     ) -> Result<ReviewDecision, ToolError> {
-        // Stdin is a fresh sandbox approval, not an exec-policy cache hit. Strict
-        // review can route Never to Guardian, but granular restrictions still apply.
         let policy = ctx.review_context.turn().approval_policy();
         if matches!(&action, ApprovalAction::WriteStdin { .. })
             && !(ctx.strict_auto_review && matches!(policy, AskForApproval::Never))
@@ -553,7 +556,7 @@ impl Session {
                 _ => {}
             }
         }
-        resolution.into_tool_result(ctx.review_context.turn().model_info())
+        resolution.into_tool_result(&ctx.review_context.turn().model_info)
     }
 
     async fn request_reviewer_approval(
@@ -571,10 +574,7 @@ impl Session {
         {
             ApprovalReviewer::for_policy(*approval_policy, *reviewer)
         } else {
-            ApprovalReviewer::for_policy(
-                ctx.review_context.approval_policy,
-                ctx.review_context.approvals_reviewer,
-            )
+            ApprovalReviewer::for_turn(ctx.review_context.turn())
         };
 
         let decision = match reviewer {
@@ -593,9 +593,6 @@ impl Session {
         action: ApprovalAction,
         ctx: &ApprovalContext,
     ) -> ReviewDecision {
-        // Guardian inherits only the current turn's ready environments. A retained
-        // terminal handle may outlive its selection, but must not be reviewed in
-        // a different environment that happens to have the same launch directory.
         if let ApprovalAction::WriteStdin { environment_id, .. } = &action
             && !ctx
                 .review_context
@@ -732,7 +729,7 @@ impl Session {
                         /*approval_id*/ None,
                         Some(environment_id.clone()),
                         command.clone(),
-                        cwd.into(),
+                        cwd,
                         reason,
                         ctx.network_approval_context.clone(),
                         proposed_execpolicy_amendment.clone(),
@@ -765,7 +762,8 @@ impl Session {
                         process_id.to_string(),
                         input.clone(),
                     ],
-                    cwd.clone(),
+                    cwd.to_abs_path()
+                        .unwrap_or_else(|_| ctx.review_context.turn().cwd.clone()),
                     ctx.approval_reason.clone(),
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
@@ -791,7 +789,7 @@ impl Session {
                     Some(approval_id.clone()),
                     Some(environment_id.clone()),
                     command.clone(),
-                    cwd.clone().into(),
+                    cwd.clone(),
                     /*reason*/ None,
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
@@ -863,7 +861,7 @@ impl Session {
                     /*approval_id*/ None,
                     Some(environment_id.clone()),
                     command.clone(),
-                    cwd.clone().into(),
+                    cwd.clone(),
                     ctx.approval_reason.clone(),
                     ctx.network_approval_context.clone(),
                     /*proposed_execpolicy_amendment*/ None,

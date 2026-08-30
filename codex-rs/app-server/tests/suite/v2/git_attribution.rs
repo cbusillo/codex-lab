@@ -356,11 +356,7 @@ fn replace_attribution_fragment_with_legacy(
                 }
             }
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && world_state
-                    .state
-                    .as_object_mut()
-                    .and_then(|state| state.remove("git_attribution"))
-                    .is_some()
+                && world_state.state.remove("git_attribution").is_some()
             {
                 removed_saved_attribution = true;
             }

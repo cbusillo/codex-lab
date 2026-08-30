@@ -713,6 +713,17 @@ impl Match for ResponseMock {
     }
 }
 
+struct RecordingMatcher<M> {
+    matcher: M,
+    response_mock: ResponseMock,
+}
+
+impl<M: Match> Match for RecordingMatcher<M> {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        self.matcher.matches(request) && self.response_mock.matches(request)
+    }
+}
+
 /// Build an SSE stream body from a list of JSON events.
 pub fn sse(events: Vec<Value>) -> String {
     use std::fmt::Write as _;
@@ -1106,6 +1117,28 @@ where
 {
     let (mock, response_mock) = base_mock();
     mock.and(matcher)
+        .respond_with(sse_response(body))
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    response_mock
+}
+
+pub async fn mount_sse_once_match_recording_matches<M>(
+    server: &MockServer,
+    matcher: M,
+    body: String,
+) -> ResponseMock
+where
+    M: wiremock::Match + Send + Sync + 'static,
+{
+    let response_mock = ResponseMock::new();
+    Mock::given(method("POST"))
+        .and(path_regex(".*/(responses|guardian)$"))
+        .and(RecordingMatcher {
+            matcher,
+            response_mock: response_mock.clone(),
+        })
         .respond_with(sse_response(body))
         .up_to_n_times(1)
         .mount(server)

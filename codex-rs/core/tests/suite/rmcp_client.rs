@@ -651,23 +651,13 @@ async fn text_only_mcp_content_uses_content_items() -> anyhow::Result<()> {
     })
     .await;
 
-    let output = final_mock.single_request().function_call_output(call_id);
-    let header = output["output"][0]["text"]
-        .as_str()
-        .expect("first content item should contain the wall-time header");
-    assert_wall_time_header(header);
+    let output = final_mock
+        .single_request()
+        .function_call_output_text(call_id)
+        .expect("text-only MCP output should be returned as text");
     assert_eq!(
-        output["output"],
-        json!([
-            {
-                "type": "input_text",
-                "text": header,
-            },
-            {
-                "type": "input_text",
-                "text": "content item fixture result",
-            },
-        ])
+        serde_json::from_str::<Value>(split_wall_time_wrapped_output(&output))?,
+        json!([{"type": "text", "text": "content item fixture result"}])
     );
 
     server.verify().await;
@@ -1864,9 +1854,8 @@ async fn stdio_mcp_tool_call_includes_sandbox_state_meta(
 
     let final_request = final_mock.single_request();
     if attachment_owned_permissions {
-        let restricted_output_item = final_request.function_call_output(restricted_call_id);
-        let restricted_output = restricted_output_item["output"][1]["text"]
-            .as_str()
+        let restricted_output = final_request
+            .function_call_output_text(restricted_call_id)
             .expect("restricted MCP tool should produce a denied call output");
         assert!(
             restricted_output
@@ -2843,20 +2832,16 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
     .await;
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
-    let output_item = final_mock.single_request().function_call_output(call_id);
-    let header = output_item["output"][0]["text"]
-        .as_str()
-        .expect("first content item should contain the wall-time header");
-    assert_wall_time_header(header);
+    let output = final_mock
+        .single_request()
+        .function_call_output_text(call_id)
+        .expect("sanitized image output should be returned as text");
     assert_eq!(
-        output_item["output"],
-        json!([
-            {"type": "input_text", "text": header},
-            {
-                "type": "input_text",
-                "text": "<image content omitted because you do not support image input>",
-            },
-        ])
+        serde_json::from_str::<Value>(split_wall_time_wrapped_output(&output))?,
+        json!([{
+            "type": "text",
+            "text": "<image content omitted because you do not support image input>",
+        }])
     );
     server.verify().await;
     Ok(())

@@ -7,7 +7,6 @@ use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
 use crate::session::new_submission_id;
 use crate::session::session::Session;
-use crate::session::step_settings::StepSettingsUpdate;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_exec_server::SelectedCapabilityRootsStatus;
@@ -179,14 +178,14 @@ impl GuardianRootMessage {
     }
 }
 
-/// Authorization state that changes on history rewrites or genuine user input.
+/// Authorization state that changes on history rewrites or genuine user messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GuardianAuthorizationVersion {
     /// Conversation-history rewrite generation.
     pub history_version: u64,
     /// Number of genuine user messages in the conversation snapshot.
     pub user_message_count: usize,
-    /// Number of successful, host-produced answers to genuine user-input requests.
+    /// Number of genuine request-user-input responses retained by the host.
     pub user_input_response_count: usize,
 }
 
@@ -346,8 +345,8 @@ impl CodexThread {
     /// Submits turn input without requiring the caller to inspect thread state.
     ///
     /// The result describes whether Core started a turn, steered an active
-    /// turn, or declined it without recording or enqueueing the input.
-    /// User input and named standalone function-call outputs are accepted.
+    /// turn, or declined it without recording or enqueueing the input. Only
+    /// user input is accepted.
     pub async fn start_or_steer_turn(
         &self,
         request: TurnInputRequest,
@@ -399,13 +398,17 @@ impl CodexThread {
             trace,
             cyber_access_program,
         } = request;
-        let start_options = TurnStartOptions {
-            cyber_access_program,
-            ..Default::default()
-        };
         match self
             .io
-            .submit_recover_turn(thread_settings, start_options, trace, turn_id)
+            .submit_recover_turn(
+                thread_settings,
+                TurnStartOptions {
+                    cyber_access_program,
+                    ..Default::default()
+                },
+                trace,
+                turn_id,
+            )
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {
@@ -446,7 +449,6 @@ impl CodexThread {
             .send(Submission {
                 id: new_submission_id(),
                 op: Op::SuspendTurnAndShutdown { reply },
-                client_user_message_id: None,
                 trace: current_span_w3c_trace_context(),
                 parent_turn_id: None,
                 root_turn_id: None,
@@ -534,7 +536,7 @@ impl CodexThread {
         &self,
         overrides: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<ThreadConfigSnapshot> {
-        let updates = Self::thread_settings_update(overrides);
+        let updates = self.thread_settings_update(overrides).await;
         self.session.preview_settings(&updates).await
     }
 
@@ -546,11 +548,14 @@ impl CodexThread {
         &self,
         settings: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<()> {
-        let updates = Self::thread_settings_update(settings);
-        self.session.update_settings(updates).await.map(|_| ())
+        let updates = self.thread_settings_update(settings).await;
+        self.session.update_settings(updates).await
     }
 
-    fn thread_settings_update(overrides: CodexThreadSettingsOverrides) -> SessionSettingsUpdate {
+    async fn thread_settings_update(
+        &self,
+        overrides: CodexThreadSettingsOverrides,
+    ) -> SessionSettingsUpdate {
         let CodexThreadSettingsOverrides {
             environments,
             profile_workspace_roots,
@@ -567,23 +572,28 @@ impl CodexThread {
             collaboration_mode,
             personality,
         } = overrides;
+        let collaboration_mode = if let Some(collaboration_mode) = collaboration_mode {
+            collaboration_mode
+        } else {
+            self.session
+                .collaboration_mode()
+                .await
+                .with_updates(model, effort, /*developer_instructions*/ None)
+        };
+
         SessionSettingsUpdate {
-            step_settings: StepSettingsUpdate {
-                model,
-                effort,
-                collaboration_mode,
-                reasoning_summary: summary,
-                service_tier,
-                personality,
-                approval_policy,
-                approvals_reviewer,
-            },
             environments,
             profile_workspace_roots,
+            approval_policy,
+            approvals_reviewer,
             sandbox_policy,
             permission_profile,
             active_permission_profile,
             windows_sandbox_level,
+            collaboration_mode: Some(collaboration_mode),
+            reasoning_summary: summary,
+            service_tier,
+            personality,
             ..Default::default()
         }
     }

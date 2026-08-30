@@ -113,7 +113,7 @@ impl AccountRequestProcessor {
     }
 
     fn auth_storage_home(config: &Config) -> &std::path::Path {
-        config.codex_home.as_path()
+        config.auth_home.as_path()
     }
 
     pub(crate) async fn login_account(

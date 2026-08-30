@@ -11,7 +11,6 @@ pub use codex_connectors::AppMetadata;
 use codex_connectors::ConnectorDirectoryCacheContext;
 use codex_connectors::ConnectorDirectoryCacheKey;
 use codex_connectors::apps_config_from_layer_stack;
-use codex_connectors::connector_runtime_context_key;
 use codex_exec_server::EnvironmentManager;
 use codex_exec_server::ExecServerRuntimePaths;
 use codex_tools::DiscoverableTool;
@@ -36,6 +35,7 @@ use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpStartupPolicy;
+use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::ToolPluginProvenance;
 use codex_mcp::effective_mcp_servers;
@@ -248,11 +248,14 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
 
     let cancel_token = CancellationToken::new();
-    let codex_apps_auth_manager =
-        codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
-            .then(|| Arc::clone(&auth_manager));
+    let codex_apps_auth = if codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()) {
+        codex_mcp::CodexAppsAuth::ControlPlaneManager(Arc::clone(&auth_manager))
+    } else {
+        codex_mcp::CodexAppsAuth::ControlPlane
+    };
     let mcp_runtime = McpRuntime::new(McpRuntimeInput {
         startup_policy: McpStartupPolicy::Eager,
+        startup_reconnect_policy: McpStartupReconnectPolicy::ReconnectInBackground,
         config: Arc::clone(&mcp_config),
         plugins_available: false,
         ready_selected_capability_roots: Vec::new(),
@@ -265,10 +268,10 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         runtime_context,
         codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
         tool_catalog_cache: mcp_manager.tool_catalog_cache(),
-        codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
         client_mcp_extensions: ClientMcpExtensions::default(),
         auth: auth.clone(),
-        auth_manager: codex_apps_auth_manager,
+        auth_manager: Some(Arc::clone(&auth_manager)),
+        codex_apps_auth,
         elicitation_reviewer: None,
         elicitation_lifecycle: None,
     })

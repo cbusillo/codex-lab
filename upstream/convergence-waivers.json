@@ -39,13 +39,6 @@
       "violation": "absent"
     },
     {
-      "disposition": "converged_with_upstream",
-      "issue": 307,
-      "path": "codex-rs/core/src/agent/status.rs",
-      "reason": "Issue #307 adopts the current upstream status mapping: protocol errors are emitted through Error or TurnAborted events, while TurnComplete is terminal completion, preserving bounded and actionable final states.",
-      "violation": "reverted_to_upstream"
-    },
-    {
       "disposition": "upstream_deletion_adopted",
       "issue": 307,
       "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs",
@@ -100,20 +93,6 @@
       "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/close_agent.rs",
       "reason": "Issue #307 accepts this path retirement because close behavior moved to handlers/multi_agents/close_agent.rs and interruption remains explicit in multi_agents_v2/interrupt_agent.rs.",
       "violation": "absent"
-    },
-    {
-      "disposition": "converged_with_upstream",
-      "issue": 307,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/followup_task.rs",
-      "reason": "Issue #307 adopts the upstream V2 follow-up implementation as the canonical continuation path; focused multi-agent control tests cover resumed task delivery.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "converged_with_upstream",
-      "issue": 307,
-      "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/send_message.rs",
-      "reason": "Issue #307 adopts the upstream V2 send-message lifecycle because it preserves typed delivery, status, and failure propagation.",
-      "violation": "reverted_to_upstream"
     },
     {
       "disposition": "upstream_deletion_adopted",

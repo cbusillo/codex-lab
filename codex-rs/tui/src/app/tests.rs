@@ -24,8 +24,6 @@ mod safety_buffering;
 mod session_lifecycle_requests;
 mod session_summary;
 mod startup;
-#[path = "tests/stream_animation_tests.rs"]
-mod stream_animation_tests;
 #[path = "tests/thread_usage.rs"]
 mod thread_usage;
 #[path = "tests/turn_submission.rs"]
@@ -551,6 +549,7 @@ async fn enqueue_primary_thread_session_replays_turns_before_initial_prompt_subm
     let config = app.config.clone();
     let model = get_model_offline_for_tests(config.model.as_deref());
     app.chat_widget = ChatWidget::new_with_app_event(ChatWidgetInit {
+        product_identity: app.product_identity,
         config,
         frame_requester: crate::tui::FrameRequester::test_dummy(),
         app_event_tx: app.app_event_tx.clone(),
@@ -2181,9 +2180,9 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
 }
 
 #[test]
-fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
+fn selected_and_resumed_subagent_threads_use_server_direct_input_capability() -> Result<()> {
     const WORKER_THREADS: usize = 1;
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
@@ -2191,7 +2190,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
         .enable_all()
         .build()?;
 
-    runtime.block_on(async {
+    runtime.block_on(Box::pin(async {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let root_thread_id = ThreadId::new();
         let rollout_dir = app
@@ -2275,19 +2274,12 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .await?;
         app.enqueue_primary_thread_session(root.session, root.turns)
             .await?;
-        for (child_thread_id, multi_agent_version) in child_thread_ids
-            .iter()
-            .copied()
-            .zip([MultiAgentVersion::V1, MultiAgentVersion::V2])
-        {
+        for child_thread_id in child_thread_ids.iter().copied() {
             assert!(
                 app.attach_live_thread_for_selection(&mut app_server, child_thread_id)
                     .await?
             );
-            assert_eq!(
-                app.agent_navigation.is_parent_owned(child_thread_id),
-                multi_agent_version == MultiAgentVersion::V2
-            );
+            assert!(app.agent_navigation.is_parent_owned(child_thread_id));
         }
 
         app.agent_navigation
@@ -2313,7 +2305,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 is_closed: false,
             })
         );
-        assert!(!app.agent_navigation.is_parent_owned(child_thread_ids[0]));
+        assert!(app.agent_navigation.is_parent_owned(child_thread_ids[0]));
         assert!(app.agent_navigation.is_parent_owned(child_thread_ids[1]));
 
         let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -2321,11 +2313,14 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .await?;
         while app_event_rx.try_recv().is_ok() {}
         app.chat_widget
-            .restore_user_message_to_composer("v1 remains writable".into());
+            .restore_user_message_to_composer("upgraded v1 stays view-only".into());
+        let draft = app.chat_widget.composer_text_with_pending();
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
         assert!(
-            std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            !std::iter::from_fn(|| app_event_rx.try_recv().ok())
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
 
@@ -2372,7 +2367,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. })))
         );
         Ok(())
-    })
+    }))
 }
 
 #[test]
@@ -4045,6 +4040,7 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
                 git_info: None,
                 name: Some("agent thread".to_string()),
                 turns: Vec::new(),
+                session_provenance: None,
             },
         }),
     )
@@ -4144,6 +4140,7 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
                 git_info: None,
                 name: Some("agent thread".to_string()),
                 turns: Vec::new(),
+                session_provenance: None,
             },
         }),
     )
@@ -4210,6 +4207,7 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         git_info: None,
         name: Some("read thread".to_string()),
         turns: Vec::new(),
+        session_provenance: None,
     };
 
     let session = app
@@ -5408,6 +5406,7 @@ async fn make_test_app() -> App {
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
     App {
+        product_identity: codex_version::ProductIdentity::Codex,
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
         app_event_tx,
@@ -5437,7 +5436,7 @@ async fn make_test_app() -> App {
         enhanced_keys_supported: false,
         keymap: crate::keymap::RuntimeKeymap::defaults(),
         key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
-        commit_animation: None,
+        commit_anim_running: Arc::new(AtomicBool::new(false)),
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         skill_load_warnings: SkillLoadWarningState::default(),
@@ -5464,6 +5463,7 @@ async fn make_test_app() -> App {
         primary_session_configured: None,
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
+        pending_auto_review_summary_fetches: HashSet::new(),
         dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
         dynamic_tool_tasks: HashMap::new(),
         pending_startup_thread_start: false,
@@ -5472,6 +5472,11 @@ async fn make_test_app() -> App {
         rate_limit_hard_stop_generation: 0,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
+        pending_direct_login_add_account: None,
+        direct_login_add_account_attempt_id: 0,
+        pending_login_add_account_id: None,
+        completed_login_add_account_id: None,
+        agent_settings: Default::default(),
         recap: recap::RecapState::default(),
     }
 }
@@ -5489,6 +5494,7 @@ async fn make_test_app_with_channels() -> (
 
     (
         App {
+            product_identity: codex_version::ProductIdentity::Codex,
             model_catalog: chat_widget.model_catalog(),
             session_telemetry,
             app_event_tx,
@@ -5518,7 +5524,7 @@ async fn make_test_app_with_channels() -> (
             enhanced_keys_supported: false,
             keymap: crate::keymap::RuntimeKeymap::defaults(),
             key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
-            commit_animation: None,
+            commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             skill_load_warnings: SkillLoadWarningState::default(),
@@ -5545,6 +5551,7 @@ async fn make_test_app_with_channels() -> (
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            pending_auto_review_summary_fetches: HashSet::new(),
             dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
             dynamic_tool_tasks: HashMap::new(),
             pending_startup_thread_start: false,
@@ -5553,6 +5560,11 @@ async fn make_test_app_with_channels() -> (
             rate_limit_hard_stop_generation: 0,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
+            pending_direct_login_add_account: None,
+            direct_login_add_account_attempt_id: 0,
+            pending_login_add_account_id: None,
+            completed_login_add_account_id: None,
+            agent_settings: Default::default(),
             recap: recap::RecapState::default(),
         },
         rx,
@@ -7582,6 +7594,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
     );
 
     let replacement = ChatWidget::new_with_app_event(ChatWidgetInit {
+        product_identity: app.product_identity,
         config: app.config.clone(),
         frame_requester: crate::tui::FrameRequester::test_dummy(),
         app_event_tx: app.app_event_tx.clone(),

@@ -37,7 +37,7 @@ impl EnvironmentsState {
     ) -> Self {
         let primary_environment = environments.primary();
         let workspace_roots = primary_environment
-            .map(TurnEnvironment::workspace_roots)
+            .map(|environment| environment.effective_workspace_roots().to_vec())
             .unwrap_or_default();
         let permission_profile = primary_environment
             .map(TurnEnvironment::permission_profile)
@@ -49,7 +49,7 @@ impl EnvironmentsState {
             network: network_from_turn_context(turn_context),
             filesystem: Some(FileSystemContext::from_permission_profile(
                 permission_profile,
-                workspace_roots,
+                &workspace_roots,
             )),
             subagents: None,
         }
