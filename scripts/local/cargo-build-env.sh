@@ -64,7 +64,7 @@ elif [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CARGO_TARGET_DIR"
 elif [[ -n "$artifact_root" && -d "$artifact_root" && -w "$artifact_root" ]]; then
 	host="$(host_triple)"
-	target_scope="${CODEX_LAB_CARGO_TARGET_SCOPE:-shared}"
+	target_scope="${CODEX_LAB_CARGO_TARGET_SCOPE:-worktree}"
 	case "$target_scope" in
 	shared)
 		target_dir="${artifact_root%/}/local/$repo_name/cargo-target/$host"

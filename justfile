@@ -42,9 +42,14 @@ assemble-codex-package *args:
     {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py {args}
 
 # Build the CLI and run the app-server test client
+[unix]
 app-server-test-client *args:
     cargo build -p codex-cli
-    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
+    cargo run -p codex-app-server-test-client -- --codex-bin "$CARGO_TARGET_DIR/debug/codex" {args}
+
+[windows]
+app-server-test-client *args:
+    cargo build -p codex-cli; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex.exe {args}
 
 # Remove rebuildable local build and harness artifacts. Defaults to a dry run.
 [no-cd]
