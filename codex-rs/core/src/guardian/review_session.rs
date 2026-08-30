@@ -931,7 +931,7 @@ async fn run_review_on_session(
         });
     let send_followup_reminder = prior_review_count == 1;
     if send_followup_reminder {
-        append_guardian_followup_reminder(review_session).await;
+        ensure_guardian_followup_reminder(review_session).await;
     }
     let reviewer_token_limit_reached = if params.spawn_config.features.enabled(Feature::TokenBudget)
     {
@@ -978,7 +978,7 @@ async fn run_review_on_session(
             return (outcome, keep_review_session, analytics_result);
         }
         if send_followup_reminder {
-            append_guardian_followup_reminder(review_session).await;
+            ensure_guardian_followup_reminder(review_session).await;
         }
     }
 
@@ -1315,7 +1315,25 @@ async fn run_review_on_session(
     (outcome.0, outcome.1, analytics_result)
 }
 
-async fn append_guardian_followup_reminder(review_session: &GuardianReviewSession) {
+async fn ensure_guardian_followup_reminder(review_session: &GuardianReviewSession) {
+    let followup_reminder = GuardianFollowupReviewReminder.body();
+    let already_injected = review_session
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .any(|item| {
+            matches!(item, ResponseItem::Message { role, content, .. }
+            if role == "developer"
+                && content.iter().any(|content| {
+                    matches!(content, ContentItem::InputText { text }
+                        if text == &followup_reminder)
+                }))
+        });
+    if already_injected {
+        return;
+    }
+
     let reminder: ResponseItem = ContextualUserFragment::into(GuardianFollowupReviewReminder);
     review_session
         .session
@@ -2249,6 +2267,32 @@ mod tests {
                 codex_rollout_budget_units: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn guardian_followup_reminder_is_injected_once() {
+        let (review_session, _tx_event, _rx_sub) = test_review_session().await;
+
+        ensure_guardian_followup_reminder(&review_session).await;
+        ensure_guardian_followup_reminder(&review_session).await;
+
+        let followup_reminder = GuardianFollowupReviewReminder.body();
+        let reminders = review_session
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .filter(|item| {
+                matches!(item, ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && content.iter().any(|content| {
+                        matches!(content, ContentItem::InputText { text }
+                            if text == &followup_reminder)
+                    }))
+            })
+            .count();
+
+        assert_eq!(reminders, 1);
     }
 
     #[tokio::test]

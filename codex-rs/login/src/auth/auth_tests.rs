@@ -1418,6 +1418,41 @@ async fn unauthorized_recovery_uses_external_refresh_for_bearer_manager() {
     assert_eq!(refreshed_token.as_deref(), Some("refreshed-provider-token"));
 }
 
+#[tokio::test]
+async fn unauthorized_recovery_uses_external_refresh_for_chatgpt_tokens() {
+    let access_token = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("enterprise".to_string()),
+        chatgpt_account_id: Some("external-account-id".to_string()),
+    })
+    .expect("fake access token");
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        &access_token,
+        "external-account-id",
+        Some("enterprise"),
+    )
+    .expect("external ChatGPT tokens should be valid");
+    let manager = AuthManager::from_auth_for_testing(auth.clone());
+    manager
+        .set_external_auth(Arc::new(StaticExternalAuth(auth.clone())))
+        .await
+        .expect("external auth should install");
+    let mut recovery = manager.unauthorized_recovery();
+
+    assert!(recovery.has_next());
+    assert_eq!(recovery.unavailable_reason(), "ready");
+
+    let result = recovery
+        .next()
+        .await
+        .expect("external refresh should succeed");
+
+    assert_eq!(result.auth_state_changed(), Some(true));
+    assert_eq!(manager.auth_cached(), Some(auth));
+    assert!(!recovery.has_next());
+    assert_eq!(recovery.unavailable_reason(), "recovery_exhausted");
+}
+
 #[derive(Clone)]
 struct StaticExternalAuth(CodexAuth);
 

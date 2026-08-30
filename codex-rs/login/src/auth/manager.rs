@@ -207,6 +207,14 @@ pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OV
 pub const REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REVOKE_TOKEN_URL_OVERRIDE";
 pub const CLIENT_ID_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 static NEXT_DUMMY_AUTH_ID: AtomicU64 = AtomicU64::new(1);
+
+fn auth_home_for_testing() -> PathBuf {
+    let auth_id = NEXT_DUMMY_AUTH_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "codex-auth-manager-{}-{auth_id}",
+        std::process::id()
+    ))
+}
 static MANAGED_AUTH_REFRESH_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 pub(crate) struct AuthRefreshFileGuard {
@@ -2311,7 +2319,7 @@ impl UnauthorizedRecovery {
     }
 
     pub fn has_next(&self) -> bool {
-        if self.manager.has_external_api_key_auth() {
+        if self.manager.has_refreshable_external_auth() {
             return !matches!(self.step, UnauthorizedRecoveryStep::Done);
         }
 
@@ -2332,7 +2340,7 @@ impl UnauthorizedRecovery {
     }
 
     pub fn unavailable_reason(&self) -> &'static str {
-        if self.manager.has_external_api_key_auth() {
+        if self.manager.has_refreshable_external_auth() {
             return if matches!(self.step, UnauthorizedRecoveryStep::Done) {
                 "recovery_exhausted"
             } else {
@@ -2618,7 +2626,7 @@ impl AuthManager {
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
 
         Arc::new(Self {
-            codex_home: PathBuf::from("non-existent"),
+            codex_home: auth_home_for_testing(),
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
@@ -2680,7 +2688,7 @@ impl AuthManager {
         };
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
         Arc::new(Self {
-            codex_home: PathBuf::from("non-existent"),
+            codex_home: auth_home_for_testing(),
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
@@ -2708,7 +2716,7 @@ impl AuthManager {
     pub fn external_bearer_only(config: ModelProviderAuthInfo) -> Arc<Self> {
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
         Arc::new(Self {
-            codex_home: PathBuf::from("non-existent"),
+            codex_home: auth_home_for_testing(),
             inner: RwLock::new(CachedAuth {
                 auth: None,
                 permanent_refresh_failure: None,
@@ -3234,12 +3242,12 @@ impl AuthManager {
             .and_then(|external_auth| external_auth.as_ref().map(Arc::clone))
     }
 
-    fn has_external_api_key_auth(&self) -> bool {
+    fn has_refreshable_external_auth(&self) -> bool {
         self.has_external_auth()
             && self
                 .auth_cached()
                 .as_ref()
-                .is_none_or(CodexAuth::is_api_key_auth)
+                .is_none_or(|auth| auth.is_api_key_auth() || auth.supports_unauthorized_recovery())
     }
 
     async fn resolve_external_auth(
