@@ -333,7 +333,7 @@ class LocalCleanupSpaceTest(unittest.TestCase):
 
             self.assertEqual(0, env.returncode, env.stderr)
             self.assertIn(
-                f"{artifact_root / 'local' / 'codex-lab' / 'cargo-target'}/",
+                f"{artifact_root / 'local' / 'codex-lab' / 'worktrees'}/",
                 env.stdout,
             )
             self.assertNotIn(f"/local/{workspace.name}/", env.stdout)

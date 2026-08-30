@@ -11,6 +11,8 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
+from pathlib import Path
 
 
 ARGS_TOKEN = "{args}"
@@ -19,6 +21,24 @@ POWERSHELL_ARGS = "@($args | Select-Object -Skip 1)"
 POWERSHELL_STDERR_NULL = "2>$null; exit $LASTEXITCODE"
 SH_ARGS = '"$@"'
 SH_STDERR_NULL = "2>/dev/null"
+CARGO_ENV_RECIPES = {
+    "app-server-test-client",
+    "bench",
+    "bench-smoke",
+    "clippy",
+    "code-mode-host",
+    "codex",
+    "exec",
+    "file-search",
+    "fix",
+    "install",
+    "log",
+    "mcp-server-run",
+    "test",
+    "tui-with-exec-server",
+    "write-config-schema",
+    "write-hooks-schema",
+}
 
 
 def main() -> int:
@@ -37,9 +57,32 @@ def main() -> int:
 
 
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
+    os.environ.update(resolve_cargo_environment(recipe_name, os.environ))
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
+
+
+def resolve_cargo_environment(
+    recipe_name: str, environment: Mapping[str, str]
+) -> dict[str, str]:
+    if recipe_name not in CARGO_ENV_RECIPES:
+        return {}
+    repo_root = environment.get("CODEX_REPO_ROOT")
+    if not repo_root:
+        return {}
+    resolver = Path(repo_root) / "scripts" / "local" / "cargo-build-env.sh"
+    completed = subprocess.run(
+        [str(resolver)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env=dict(environment),
+    )
+    if completed.returncode != 0:
+        raise SystemExit(completed.returncode)
+    return {"CARGO_TARGET_DIR": completed.stdout.strip()}
 
 
 def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> int:
