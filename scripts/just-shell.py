@@ -40,6 +40,14 @@ CARGO_ENV_RECIPES = {
     "write-hooks-schema",
 }
 V8_ENV_RECIPES = {"bench", "bench-smoke", "clippy", "code-mode-host", "fix", "test"}
+CODEX_CORE_TEST_BINARIES = (
+    ("codex-cli", "codex"),
+    ("codex-code-mode-host", "codex-code-mode-host"),
+    ("codex-exec", "codex-exec"),
+    ("codex-rmcp-client", "test_stdio_server"),
+    ("codex-rmcp-client", "test_streamable_http_server"),
+    ("codex-shell-escalation", "codex-execve-wrapper"),
+)
 
 
 def main() -> int:
@@ -60,6 +68,7 @@ def main() -> int:
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
     os.environ.update(resolve_cargo_environment(recipe_name, os.environ))
     os.environ.update(resolve_rusty_v8_environment(recipe_name, os.environ))
+    build_test_prerequisites(recipe_name, recipe_args, os.environ)
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
@@ -124,6 +133,32 @@ def resolve_rusty_v8_environment(
     return exports
 
 
+def build_test_prerequisites(
+    recipe_name: str, recipe_args: list[str], environment: Mapping[str, str]
+) -> None:
+    if recipe_name != "test" or "--lib" in recipe_args:
+        return
+    selected_packages = {
+        recipe_args[index + 1]
+        for index, argument in enumerate(recipe_args[:-1])
+        if argument in {"-p", "--package"}
+    }
+    selected_packages.update(
+        argument.partition("=")[2]
+        for argument in recipe_args
+        if argument.startswith("--package=")
+    )
+    if "codex-core" not in selected_packages:
+        return
+
+    command = ["cargo", "build"]
+    for package, binary in CODEX_CORE_TEST_BINARIES:
+        command.extend(["-p", package, "--bin", binary])
+    completed = subprocess.run(command, check=False, env=dict(environment))
+    if completed.returncode != 0:
+        raise SystemExit(completed.returncode)
+
+
 def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> int:
     pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
     if pwsh is None:
@@ -134,6 +169,7 @@ def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> in
         )
         return 1
 
+    build_test_prerequisites(recipe_name, recipe_args, os.environ)
     command = command.replace(ARGS_TOKEN, POWERSHELL_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, POWERSHELL_STDERR_NULL)
     return subprocess.run(

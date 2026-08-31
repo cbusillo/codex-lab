@@ -4382,6 +4382,21 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
         DynamicImage::new_rgba8(/*w*/ 2049, /*h*/ 32)
             .write_to(&mut large_image, ImageFormat::Png)?;
     }
+    let prompt_pressure_image_urls = if reviewer_constraint == Some("large_prompt") {
+        [(3200, 3200), (1024, 1024)]
+            .into_iter()
+            .map(|(width, height)| {
+                let mut encoded = Cursor::new(Vec::new());
+                DynamicImage::new_rgba8(width, height).write_to(&mut encoded, ImageFormat::Png)?;
+                Ok(format!(
+                    "data:image/png;base64,{}",
+                    BASE64_STANDARD.encode(encoded.into_inner())
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     let mut image_cap_urls = Vec::new();
     if check_image_cap {
         for index in 0..7 {
@@ -4428,6 +4443,12 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
                 .features
                 .enable(Feature::CodeMode)
                 .expect("enable Code Mode");
+            if reviewer_constraint == Some("large_prompt") {
+                config
+                    .features
+                    .enable(Feature::UnifiedImageBudget)
+                    .expect("enable unified image budget");
+            }
             config
                 .features
                 .set_enabled(
@@ -4498,15 +4519,27 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     } else {
         String::new()
     };
+    let prompt_pressure_call = prompt_pressure_image_urls
+        .iter()
+        .map(|url| {
+            format!(
+                r#"await tools.mcp__{repl_server}__image_scenario({{ scenario: "image_only", data_url: {} }});"#,
+                serde_json::to_string(url).expect("serialize prompt pressure image data URL")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let code = r#"
 await tools.mcp__node_repl_echo({ message: "guardian-hidden-unrelated-result" });
 await tools.mcp__node_repl__js({ code: 'nodeRepl.fail()' });
+await tools.mcp__node_repl__js({ code: `nodeRepl.write(${JSON.stringify("a".repeat(SNAPSHOT_PADDING) + "b".repeat(SNAPSHOT_PADDING))})` });
 await tools.mcp__node_repl__js({ code: `nodeRepl.write(${JSON.stringify("a".repeat(SNAPSHOT_PADDING) + ["guardian-visible", "dom-middle"].join("-") + "b".repeat(SNAPSHOT_PADDING))})` });
 await tools.mcp__node_repl__echo({ message: ["guardian-visible-other-", "tool-result"].join("") });
 await tools.mcp__node_repl__encrypted_output({});
 await tools.mcp__node_repl__js({ code: 'nodeRepl.empty()' });
 await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
+PROMPT_PRESSURE_CALL
 if (LARGE_IMAGE) await tools.mcp__node_repl__image_scenario({ scenario: "invalid_image_bytes_then_image" });
 IMAGE_CAP_CALLS
 await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated", justification: "review" });
@@ -4517,7 +4550,8 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     .replace("node_repl", repl_server)
     .replace("SNAPSHOT_PADDING", &snapshot_padding.to_string())
     .replace("LARGE_IMAGE", &check_detail.to_string())
-    .replace("IMAGE_CAP_CALLS", &image_cap_calls);
+    .replace("IMAGE_CAP_CALLS", &image_cap_calls)
+    .replace("PROMPT_PRESSURE_CALL", &prompt_pressure_call);
     let response_mock = responses::mount_sse_sequence(
         &server,
         vec![
@@ -4597,7 +4631,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     assert_eq!(reviewer_image_urls.len(), expected_images);
     if check_image_cap {
         assert_eq!(reviewer_image_urls, image_cap_urls[3..].to_vec());
-        assert!(guardian_text.contains("<omitted node_repl_images=\"3\""));
+        assert!(guardian_text.contains("<omitted node_repl_images=\"4\""));
         assert!(guardian_text.contains("<omitted node_repl_responses="));
     } else if reviewer_images {
         assert_eq!(reviewer_image_urls[0], PRIVATE_IMAGE);
@@ -4646,17 +4680,37 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         usize::from(evidence_enabled),
         "a reused Guardian session must not append the same evidence twice"
     );
+    let expected_second_reviewer_images = if reviewer_constraint == Some("large_prompt") {
+        vec![PRIVATE_IMAGE.to_string()]
+    } else if check_image_cap {
+        let mut images = reviewer_image_urls.clone();
+        images.push(PRIVATE_IMAGE.to_string());
+        images
+    } else {
+        reviewer_image_urls
+    };
     assert_eq!(
         guardian_requests[1].message_input_image_urls("user"),
-        if reviewer_constraint == Some("large_prompt") {
-            vec![PRIVATE_IMAGE.to_string()]
-        } else {
-            reviewer_image_urls
-        }
+        expected_second_reviewer_images
     );
     let parent_request = requests.last().expect("parent turn should complete");
-    let parent_input = serde_json::to_string(&parent_request.input())?;
-    assert!(!parent_input.contains("data:image/png;base64,"));
+    let parent_input = parent_request.input();
+    let mut pending_values = parent_input.iter().collect::<Vec<_>>();
+    let mut contains_parent_image = false;
+    while let Some(value) = pending_values.pop() {
+        match value {
+            Value::Array(values) => pending_values.extend(values),
+            Value::Object(object) => {
+                contains_parent_image |=
+                    object.get("type").and_then(Value::as_str) == Some("input_image");
+                pending_values.extend(object.values());
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    assert!(!contains_parent_image);
+    let parent_input = serde_json::to_string(&parent_input)?;
+    assert!(!parent_input.contains(PRIVATE_IMAGE));
     assert!(!parent_input.contains("guardian-visible-before-image"));
     assert!(!parent_input.contains("guardian-visible-after-image"));
     assert!(
