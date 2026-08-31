@@ -39,6 +39,7 @@ CARGO_ENV_RECIPES = {
     "write-config-schema",
     "write-hooks-schema",
 }
+V8_ENV_RECIPES = {"bench", "bench-smoke", "clippy", "code-mode-host", "fix", "test"}
 
 
 def main() -> int:
@@ -58,6 +59,7 @@ def main() -> int:
 
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
     os.environ.update(resolve_cargo_environment(recipe_name, os.environ))
+    os.environ.update(resolve_rusty_v8_environment(recipe_name, os.environ))
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
@@ -83,6 +85,43 @@ def resolve_cargo_environment(
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
     return {"CARGO_TARGET_DIR": completed.stdout.strip()}
+
+
+def resolve_rusty_v8_environment(
+    recipe_name: str, environment: Mapping[str, str]
+) -> dict[str, str]:
+    if recipe_name not in V8_ENV_RECIPES:
+        return {}
+    archive = environment.get("RUSTY_V8_ARCHIVE")
+    binding = environment.get("RUSTY_V8_SRC_BINDING_PATH")
+    if bool(archive) != bool(binding):
+        print(
+            "both RUSTY_V8_ARCHIVE and RUSTY_V8_SRC_BINDING_PATH must be set together",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    if archive and binding:
+        return {}
+    repo_root = environment.get("CODEX_REPO_ROOT")
+    if not repo_root:
+        return {}
+    helper = Path(repo_root) / "scripts" / "local" / "rusty_v8_env.py"
+    completed = subprocess.run(
+        [sys.executable, str(helper), "resolve"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        env=dict(environment),
+    )
+    if completed.returncode != 0:
+        raise SystemExit(completed.returncode)
+    exports: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key in {"RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH"}:
+            exports[key] = value
+    return exports
 
 
 def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> int:
