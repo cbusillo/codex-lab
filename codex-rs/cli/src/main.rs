@@ -2566,7 +2566,7 @@ async fn run_interactive_tui(
     };
     let mut attempted_backups = HashSet::new();
     loop {
-        let err = match start_tui().await {
+        let err = match Box::pin(start_tui()).await {
             Ok(exit_info) => return Ok(exit_info),
             Err(err) => err,
         };
