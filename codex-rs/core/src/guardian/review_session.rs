@@ -89,7 +89,10 @@ use super::prompt::guardian_policy_prompt_with_config_and_template;
 use super::review::guardian_review_session_config;
 
 const GUARDIAN_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-const GUARDIAN_MAX_IMAGE_ITEM_TOKENS: i64 = 10_000;
+// The evidence renderer is already bounded to 32,000 bytes of text and four images. This
+// higher-level cap keeps image admission best-effort under larger transcript pressure while
+// allowing the bounded four-image evidence covered by integration tests.
+const GUARDIAN_MAX_MULTIMODAL_PROMPT_TOKENS: i64 = 25_000;
 #[derive(Debug)]
 pub(crate) enum GuardianReviewSessionOutcome {
     Completed(anyhow::Result<Option<String>>),
@@ -1085,7 +1088,7 @@ async fn run_review_on_session(
                         .estimate_token_count_with_base_instructions(&base_instructions)
                         .unwrap_or(i64::MAX)
                         .max(review_session.session.get_total_token_usage().await);
-                    prompt_tokens <= GUARDIAN_MAX_IMAGE_ITEM_TOKENS
+                    prompt_tokens <= GUARDIAN_MAX_MULTIMODAL_PROMPT_TOKENS
                         && prompt_tokens.saturating_add(history_tokens) <= context_window
                 } else {
                     false

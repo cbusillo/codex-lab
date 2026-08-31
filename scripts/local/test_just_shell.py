@@ -84,6 +84,81 @@ class JustShellTest(unittest.TestCase):
                 {"CODEX_REPO_ROOT": "/repo", "RUSTY_V8_ARCHIVE": "/cache/archive"},
             )
 
+    @staticmethod
+    def test_codex_core_tests_build_runtime_binaries() -> None:
+        completed = mock.Mock(returncode=0)
+        environment = {"CARGO_TARGET_DIR": "/tmp/target"}
+        with mock.patch("subprocess.run", return_value=completed) as run:
+            just_shell.build_test_prerequisites(
+                "test", ["-p", "codex-core"], environment
+            )
+
+        run.assert_called_once_with(
+            [
+                "cargo",
+                "build",
+                "-p",
+                "codex-cli",
+                "--bin",
+                "codex",
+                "-p",
+                "codex-code-mode-host",
+                "--bin",
+                "codex-code-mode-host",
+                "-p",
+                "codex-exec",
+                "--bin",
+                "codex-exec",
+                "-p",
+                "codex-rmcp-client",
+                "--bin",
+                "test_stdio_server",
+                "-p",
+                "codex-rmcp-client",
+                "--bin",
+                "test_streamable_http_server",
+                "-p",
+                "codex-shell-escalation",
+                "--bin",
+                "codex-execve-wrapper",
+            ],
+            check=False,
+            env=environment,
+        )
+
+    @staticmethod
+    def test_codex_core_lib_tests_skip_runtime_binaries() -> None:
+        with mock.patch("subprocess.run") as run:
+            just_shell.build_test_prerequisites(
+                "test", ["--package=codex-core", "--lib"], {}
+            )
+
+        run.assert_not_called()
+
+    @staticmethod
+    def test_powershell_builds_test_prerequisites() -> None:
+        completed = mock.Mock(returncode=0)
+        recipe_args = ["-p", "codex-core"]
+        with (
+            mock.patch("shutil.which", return_value="pwsh.exe"),
+            mock.patch("subprocess.run", return_value=completed) as run,
+        ):
+            exit_code = just_shell.run_powershell("cargo test", "test", recipe_args)
+
+        assert exit_code == 0
+        assert run.call_count == 2
+        assert run.call_args_list[0].args[0][:2] == ["cargo", "build"]
+        assert run.call_args_list[1].args[0][0] == "pwsh.exe"
+
+    @staticmethod
+    def test_other_package_tests_skip_codex_core_runtime_binaries() -> None:
+        with mock.patch("subprocess.run") as run:
+            just_shell.build_test_prerequisites(
+                "test", ["-p", "codex-rollout-trace"], {}
+            )
+
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
