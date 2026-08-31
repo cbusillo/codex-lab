@@ -863,7 +863,7 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
                     text: "hi".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
+                internal_chat_message_metadata_passthrough: None,
             }
         ]
     );
@@ -900,7 +900,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
                     text: "generate a lobster".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
+                internal_chat_message_metadata_passthrough: None,
             },
             ResponseItem::ImageGenerationCall {
                 id: Some(ResponseItemId::with_suffix("ig", "123")),
