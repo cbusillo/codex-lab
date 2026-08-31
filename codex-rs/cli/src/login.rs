@@ -12,10 +12,12 @@ use codex_core::config::Config;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::AuthManager;
 use codex_login::AuthRouteConfig;
 use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
 use codex_login::ServerOptions;
+use codex_login::is_workload_identity_selected;
 use codex_login::list_auth_profiles;
 use codex_login::login_with_access_token;
 use codex_login::login_with_api_key;
@@ -582,6 +584,20 @@ pub async fn run_login_status(
     profile: Option<String>,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+
+    if is_workload_identity_selected() {
+        match AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await {
+            Ok(_) => {
+                eprintln!("Logged in using workload identity");
+                std::process::exit(0);
+            }
+            Err(err) => {
+                eprintln!("Error checking login status: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let target = resolve_login_target_or_exit(&config, profile);
 
     match load_auth_for_target(&config, &target).await {
