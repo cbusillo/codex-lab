@@ -30,7 +30,7 @@ use codex_skills::install_system_skills;
 
 use crate::HostSkillsSnapshot;
 use crate::SkillLoadOutcome;
-use crate::host_roots::resolve_skill_roots;
+use crate::host_roots::resolve_skill_roots_with_home_dir;
 use crate::loader::HostSkillRoot;
 use crate::loader::HostSkillRootSnapshot;
 use crate::loader::MAX_CONCURRENT_ROOT_SCANS;
@@ -74,6 +74,7 @@ impl HostSkillsLoadInput {
 /// Source-specific model exposure remains the responsibility of the skills extension.
 pub struct HostSkillsService {
     codex_home: AbsolutePathBuf,
+    home_dir: Option<AbsolutePathBuf>,
     restriction_product: Option<Product>,
     extra_roots: RwLock<Vec<AbsolutePathBuf>>,
     cache_by_cwd: RwLock<HashMap<AbsolutePathBuf, HostSkillsSnapshot>>,
@@ -111,7 +112,12 @@ impl HostSkillsRequest<'_> {
 
 impl HostSkillsService {
     pub fn new(codex_home: AbsolutePathBuf, bundled_skills_enabled: bool) -> Self {
-        Self::new_with_restriction_product(codex_home, bundled_skills_enabled, Some(Product::Codex))
+        Self::new_with_restriction_product_and_home_dir(
+            codex_home,
+            bundled_skills_enabled,
+            Some(Product::Codex),
+            current_home_dir(),
+        )
     }
 
     pub fn new_with_restriction_product(
@@ -119,8 +125,37 @@ impl HostSkillsService {
         bundled_skills_enabled: bool,
         restriction_product: Option<Product>,
     ) -> Self {
+        Self::new_with_restriction_product_and_home_dir(
+            codex_home,
+            bundled_skills_enabled,
+            restriction_product,
+            current_home_dir(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_home_dir(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        home_dir: Option<AbsolutePathBuf>,
+    ) -> Self {
+        Self::new_with_restriction_product_and_home_dir(
+            codex_home,
+            bundled_skills_enabled,
+            Some(Product::Codex),
+            home_dir,
+        )
+    }
+
+    fn new_with_restriction_product_and_home_dir(
+        codex_home: AbsolutePathBuf,
+        bundled_skills_enabled: bool,
+        restriction_product: Option<Product>,
+        home_dir: Option<AbsolutePathBuf>,
+    ) -> Self {
         let service = Self {
             codex_home,
+            home_dir,
             restriction_product,
             extra_roots: RwLock::new(Vec::new()),
             cache_by_cwd: RwLock::new(HashMap::new()),
@@ -219,10 +254,11 @@ impl HostSkillsService {
         if bundled_skills_enabled {
             self.ensure_system_skills_installed();
         }
-        let mut roots = resolve_skill_roots(
+        let mut roots = resolve_skill_roots_with_home_dir(
             fs,
             &input.config_layer_stack,
             &input.cwd,
+            self.home_dir.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -253,10 +289,11 @@ impl HostSkillsService {
             return snapshot;
         }
 
-        let mut roots = resolve_skill_roots(
+        let mut roots = resolve_skill_roots_with_home_dir(
             fs.clone(),
             &input.config_layer_stack,
             &input.cwd,
+            self.home_dir.as_ref(),
             input.effective_skill_roots.clone(),
             self.extra_roots(),
         )
@@ -423,6 +460,10 @@ impl HostSkillsService {
             tracing::error!("failed to install system skills: {err}");
         }
     }
+}
+
+fn current_home_dir() -> Option<AbsolutePathBuf> {
+    dirs::home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
 }
 
 impl SkillRootLoader<PluginSkillRoot> for HostSkillsService {
