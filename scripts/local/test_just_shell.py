@@ -63,6 +63,27 @@ class JustShellTest(unittest.TestCase):
 
         self.assertLessEqual(expected, just_shell.CARGO_ENV_RECIPES)
 
+    def test_v8_environment_preserves_explicit_overrides(self) -> None:
+        with mock.patch("subprocess.run") as run:
+            environment = just_shell.resolve_rusty_v8_environment(
+                "test",
+                {
+                    "CODEX_REPO_ROOT": "/repo",
+                    "RUSTY_V8_ARCHIVE": "/cache/archive",
+                    "RUSTY_V8_SRC_BINDING_PATH": "/cache/binding",
+                },
+            )
+
+        self.assertEqual(environment, {})
+        run.assert_not_called()
+
+    def test_v8_environment_rejects_partial_override(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "2"):
+            just_shell.resolve_rusty_v8_environment(
+                "test",
+                {"CODEX_REPO_ROOT": "/repo", "RUSTY_V8_ARCHIVE": "/cache/archive"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

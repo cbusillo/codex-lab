@@ -94,6 +94,12 @@ install:
 feedback-latency *args:
     {{ python }} {{ justfile_directory() }}/scripts/local/feedback_latency.py {args}
 
+[doc('Resolve or inspect checksum-verified local rusty_v8 artifacts')]
+[no-cd]
+[unix]
+local-rusty-v8 *args:
+    {{ python }} {{ justfile_directory() }}/scripts/local/rusty_v8_env.py {args}
+
 # Run nextest with --no-fail-fast so all tests are run.
 #
 # Run `cargo install --locked cargo-nextest` if you don't have it installed.
