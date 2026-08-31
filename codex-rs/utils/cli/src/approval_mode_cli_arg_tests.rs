@@ -30,7 +30,6 @@ fn deprecated_on_failure_alias_maps_to_on_request() {
 #[test]
 fn documented_values_still_parse() {
     let parsed = [
-        ("untrusted", AskForApproval::UnlessTrusted),
         ("on-request", AskForApproval::OnRequest),
         ("never", AskForApproval::Never),
     ]
@@ -42,7 +41,6 @@ fn documented_values_still_parse() {
     assert_eq!(
         parsed,
         [
-            (AskForApproval::UnlessTrusted, AskForApproval::UnlessTrusted),
             (AskForApproval::OnRequest, AskForApproval::OnRequest),
             (AskForApproval::Never, AskForApproval::Never),
         ]
@@ -60,5 +58,5 @@ fn deprecated_alias_is_not_advertised() {
         .map(|value| value.get_name().to_string())
         .collect();
 
-    assert_eq!(advertised, vec!["untrusted", "on-request", "never"]);
+    assert_eq!(advertised, vec!["on-request", "never"]);
 }
