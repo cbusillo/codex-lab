@@ -15,7 +15,6 @@ use codex_skills::system_cache_root_dir;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::PluginSkillRoot;
-use dirs::home_dir;
 use futures::StreamExt;
 use toml::Value as TomlValue;
 
@@ -25,27 +24,7 @@ const AGENTS_DIR_NAME: &str = ".agents";
 const SKILLS_DIR_NAME: &str = "skills";
 const MAX_CONCURRENT_ANCESTOR_PROBES: usize = 256;
 
-pub(crate) async fn resolve_skill_roots(
-    repository_file_system: Option<Arc<dyn ExecutorFileSystem>>,
-    config_layer_stack: &ConfigLayerStack,
-    cwd: &AbsolutePathBuf,
-    plugin_skill_roots: Vec<PluginSkillRoot>,
-    extra_skill_roots: Vec<AbsolutePathBuf>,
-) -> Vec<HostSkillRoot> {
-    let home_dir =
-        home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok());
-    resolve_skill_roots_with_home_dir(
-        repository_file_system,
-        config_layer_stack,
-        cwd,
-        home_dir.as_ref(),
-        plugin_skill_roots,
-        extra_skill_roots,
-    )
-    .await
-}
-
-async fn resolve_skill_roots_with_home_dir(
+pub(crate) async fn resolve_skill_roots_with_home_dir(
     repository_file_system: Option<Arc<dyn ExecutorFileSystem>>,
     config_layer_stack: &ConfigLayerStack,
     cwd: &AbsolutePathBuf,
