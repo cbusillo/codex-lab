@@ -446,6 +446,48 @@ async fn thread_resume_rejects_unmaterialized_thread() -> Result<()> {
         resume_err.error.message
     );
 
+    let foreign_start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse {
+        thread: foreign_thread,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(foreign_start_id)).await??;
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: foreign_thread.id.clone(),
+        input: vec![UserInput::Text {
+            text: "materialize foreign thread".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+
+    let foreign_resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            path: foreign_thread.path,
+            ..Default::default()
+        })
+        .await?;
+    let foreign_resume_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(foreign_resume_id)),
+    )
+    .await??;
+    assert!(
+        foreign_resume_err.error.message.contains("stale path")
+            && foreign_resume_err
+                .error
+                .message
+                .contains("resolves to thread"),
+        "unexpected resume error: {}",
+        foreign_resume_err.error.message
+    );
+
     Ok(())
 }
 

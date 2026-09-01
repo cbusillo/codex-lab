@@ -4098,7 +4098,7 @@ impl ThreadRequestProcessor {
             let source_thread = self
                 .read_stored_thread_for_resume(
                     &params.thread_id,
-                    /*path*/ None,
+                    params.path.as_ref(),
                     /*include_history*/ false,
                 )
                 .await?;
@@ -4126,17 +4126,34 @@ impl ThreadRequestProcessor {
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
             let existing_thread_rollout_path = existing_thread.rollout_path();
-            let active_path = existing_thread_rollout_path
-                .as_ref()
-                .or(source_thread.rollout_path.as_ref());
-            if let (Some(requested_path), Some(active_path)) = (params.path.as_ref(), active_path)
-                && !path_utils::paths_match_after_normalization(requested_path, active_path)
-            {
-                return Err(invalid_request(format!(
-                    "cannot resume running thread {existing_thread_id} with stale path: requested `{}`, active `{}`",
-                    requested_path.display(),
-                    active_path.display()
-                )));
+            if let Some(requested_path) = params.path.as_ref() {
+                if source_thread.thread_id != existing_thread_id {
+                    return Err(invalid_request(format!(
+                        "cannot resume running thread {existing_thread_id} with stale path: requested `{}` resolves to thread {}",
+                        requested_path.display(),
+                        source_thread.thread_id
+                    )));
+                }
+                let resolved_requested_path =
+                    source_thread.rollout_path.as_ref().ok_or_else(|| {
+                        internal_error(format!(
+                            "thread {} resolved from rollout path has no rollout path",
+                            source_thread.thread_id
+                        ))
+                    })?;
+                let active_path = existing_thread_rollout_path
+                    .as_ref()
+                    .unwrap_or(resolved_requested_path);
+                if !path_utils::paths_match_after_normalization(
+                    resolved_requested_path,
+                    active_path,
+                ) {
+                    return Err(invalid_request(format!(
+                        "cannot resume running thread {existing_thread_id} with stale path: requested `{}`, active `{}`",
+                        requested_path.display(),
+                        active_path.display()
+                    )));
+                }
             }
             let config_snapshot = existing_thread.config_snapshot().await;
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
@@ -4439,7 +4456,39 @@ impl ThreadRequestProcessor {
                 "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
             )));
         }
-
+        if let Some(requested_path) = path
+            && matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated)
+        {
+            let resolved_requested_path = stored_thread.rollout_path.as_ref().ok_or_else(|| {
+                internal_error(format!(
+                    "paginated thread {} has no rollout path",
+                    stored_thread.thread_id
+                ))
+            })?;
+            let current_thread = self
+                .thread_store
+                .read_thread(StoreReadThreadParams {
+                    thread_id: stored_thread.thread_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+                .map_err(thread_store_resume_read_error)?;
+            let current_path = current_thread.rollout_path.as_ref().ok_or_else(|| {
+                internal_error(format!(
+                    "paginated thread {} has no current rollout path",
+                    stored_thread.thread_id
+                ))
+            })?;
+            if !path_utils::paths_match_after_normalization(resolved_requested_path, current_path) {
+                return Err(invalid_request(format!(
+                    "cannot use stale path for paginated thread {}: requested {}, current {}; omit path and retry by thread id",
+                    stored_thread.thread_id,
+                    requested_path.display(),
+                    current_path.display()
+                )));
+            }
+        }
         Ok(stored_thread)
     }
 

@@ -151,7 +151,7 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
             && stale_resume_error
                 .error
                 .message
-                .contains("omit path and resume by thread id"),
+                .contains("omit path and retry by thread id"),
         "unexpected resume error: {}",
         stale_resume_error.error.message,
     );
@@ -200,10 +200,18 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
         .expect("third turn response request")
         .body_json::<serde_json::Value>()?["input"]
         .clone();
-    let model_input = serde_json::to_string(&model_input)?;
-    assert!(model_input.contains("first"));
-    assert!(!model_input.contains("second"));
-    assert!(model_input.contains("third"));
+    let turn_inputs = model_input
+        .as_array()
+        .expect("model input array")
+        .iter()
+        .filter(|item| item["role"] == "user")
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter(|content| content["type"] == "input_text")
+        .filter_map(|content| content["text"].as_str())
+        .filter(|text| ["first", "second", "third"].contains(text))
+        .collect::<Vec<_>>();
+    assert_eq!(turn_inputs, vec!["first", "third"]);
     assert_eq!(
         turn_ids_from_cursor(
             &mut mcp,
@@ -214,6 +222,72 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
         .await?,
         vec![turn_ids[0].clone(), third_turn.turn.id]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_accepts_current_paginated_relative_path() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    initialize_experimental(&mut mcp).await?;
+
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            history_mode: Some(ThreadHistoryMode::Paginated),
+            ..Default::default()
+        })
+        .await?;
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: thread.id.clone(),
+        input: vec![UserInput::Text {
+            text: "materialize".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+    let relative_path = thread
+        .path
+        .as_ref()
+        .expect("thread rollout path")
+        .strip_prefix(std::fs::canonicalize(codex_home.path())?)?
+        .to_path_buf();
+
+    mcp.shutdown_gracefully().await?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build()
+        .await?;
+    initialize_experimental(&mut mcp).await?;
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            path: Some(relative_path.clone()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: resumed, ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert_eq!(resumed.id, thread.id);
+
+    let running_resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            path: Some(relative_path),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread: resumed, ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(running_resume_id)).await??;
+    assert_eq!(resumed.id, thread.id);
+
     Ok(())
 }
 
