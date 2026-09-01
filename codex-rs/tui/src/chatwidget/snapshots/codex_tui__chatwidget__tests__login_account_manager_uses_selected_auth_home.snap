@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+assertion_line: 1834
+expression: popup
+---
+┌────────────────────────────── Manage Accounts ───────────────────────────────┐
+│ Connected Accounts                                                           │
+│                                                                              │
+│ > Profile account  API key - connected YYYY-MM-DD HH:MM  switching           │
+│ unavailable                                                                  │
+│                                                                              │
+│ Add account...                                                               │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

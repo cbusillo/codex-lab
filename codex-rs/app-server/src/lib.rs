@@ -514,6 +514,7 @@ pub async fn run_main_with_transport_options(
     )?;
     let ignore_user_config = loader_overrides.ignore_user_config;
     let config_manager = ConfigManager::new(ConfigManagerArgs {
+        auth_home: codex_home.to_path_buf(),
         codex_home: codex_home.to_path_buf(),
         cli_overrides: cli_kv_overrides.clone(),
         loader_overrides,

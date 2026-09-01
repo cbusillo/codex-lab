@@ -368,6 +368,7 @@ enabled = false
             bad_loads: AtomicUsize::new(0),
         });
         let config_manager = ConfigManager::new(ConfigManagerArgs {
+            auth_home: temp_dir.path().to_path_buf(),
             codex_home: temp_dir.path().to_path_buf(),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::without_managed_config_for_tests(),

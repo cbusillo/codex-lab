@@ -113,7 +113,7 @@ impl AccountRequestProcessor {
     }
 
     fn auth_storage_home(config: &Config) -> &std::path::Path {
-        config.codex_home.as_path()
+        config.auth_home.as_path()
     }
 
     pub(crate) async fn login_account(
@@ -593,7 +593,7 @@ impl AccountRequestProcessor {
 
             match credentials {
                 BedrockLoginCredentials::ApiKey(api_key) => login_with_bedrock_api_key(
-                    &self.config.codex_home,
+                    Self::auth_storage_home(&self.config),
                     api_key.trim(),
                     region,
                     self.config.cli_auth_credentials_store_mode,
@@ -609,7 +609,7 @@ impl AccountRequestProcessor {
                         .map(str::trim)
                         .filter(|token| !token.is_empty());
                     login_with_bedrock_access_keys(
-                        &self.config.codex_home,
+                        Self::auth_storage_home(&self.config),
                         access_key_id.trim(),
                         secret_access_key.trim(),
                         session_token,
@@ -983,7 +983,7 @@ impl AccountRequestProcessor {
         account_id: &str,
     ) -> Result<codex_login::StoredAccount, JSONRPCErrorError> {
         let account = codex_login::find_account(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
             account_id,
         )
@@ -1002,7 +1002,7 @@ impl AccountRequestProcessor {
 
     fn activate_policy_compatible_fallback(&self) -> Result<Option<String>, JSONRPCErrorError> {
         let accounts = codex_login::list_accounts(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
         )
         .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?;
@@ -1014,7 +1014,7 @@ impl AccountRequestProcessor {
                 continue;
             }
             match codex_login::activate_account(
-                &self.config.codex_home,
+                Self::auth_storage_home(&self.config),
                 &account.id,
                 self.config.cli_auth_credentials_store_mode,
                 self.config.auth_keyring_backend_kind(),
@@ -1027,7 +1027,7 @@ impl AccountRequestProcessor {
         }
 
         codex_login::clear_active_account(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
             self.config.auth_keyring_backend_kind(),
         )
@@ -1046,7 +1046,7 @@ impl AccountRequestProcessor {
         self.cancel_active_login().await;
 
         codex_login::activate_account(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             &account.id,
             self.config.cli_auth_credentials_store_mode,
             self.config.auth_keyring_backend_kind(),
@@ -1060,12 +1060,12 @@ impl AccountRequestProcessor {
 
     async fn list_accounts_response(&self) -> Result<ListAccountsResponse, JSONRPCErrorError> {
         let active_account_id = codex_login::get_active_account_id(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
         )
         .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
         let accounts = codex_login::list_accounts(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
         )
         .map_err(|err| internal_error(format!("failed to read stored accounts: {err}")))?
@@ -1099,13 +1099,13 @@ impl AccountRequestProcessor {
         self.cancel_active_login().await;
 
         let previous_active_account_id = codex_login::get_active_account_id(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
         )
         .map_err(|err| internal_error(format!("failed to read active account id: {err}")))?;
         let removed_was_active = previous_active_account_id.as_deref() == Some(&params.account_id);
         let removed = codex_login::remove_account(
-            &self.config.codex_home,
+            Self::auth_storage_home(&self.config),
             self.config.cli_auth_credentials_store_mode,
             &params.account_id,
         )

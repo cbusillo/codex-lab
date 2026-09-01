@@ -321,8 +321,17 @@ pub(super) async fn start_app_server_for_session_command(
         arg0_paths,
         explicit_remote_endpoint,
     } = options;
+    super::ensure_auth_profile_supports_remote_target(
+        cli.auth_profile.as_deref(),
+        explicit_remote_endpoint.as_ref(),
+    )?;
     let loader_overrides = LoaderOverrides::default();
     let strict_config = cli.strict_config;
+    let auth_home = match cli.auth_profile.as_deref() {
+        Some(profile) => codex_login::profile_home(&codex_home, profile)
+            .map_err(|err| eyre!("invalid --auth-profile {profile:?}: {err}"))?,
+        None => codex_home.clone(),
+    };
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
     let overrides_cli = CliConfigOverrides { raw_overrides };
     let cli_kv_overrides = overrides_cli
@@ -339,6 +348,7 @@ pub(super) async fn start_app_server_for_session_command(
 
     let workload_identity_selected = codex_login::is_workload_identity_selected();
     let reuse_implicit_local_daemon = !workload_identity_selected
+        && cli.auth_profile.is_none()
         && super::can_reuse_implicit_local_daemon(
             &cli_kv_overrides,
             &launch_loader_overrides,
@@ -403,6 +413,7 @@ pub(super) async fn start_app_server_for_session_command(
         &app_server_target,
         &bootstrap_config,
         codex_home.as_path(),
+        auth_home.as_path(),
     )
     .await?;
 
@@ -419,6 +430,8 @@ pub(super) async fn start_app_server_for_session_command(
     });
     let cwd = cli.cwd.clone();
     let config = ConfigBuilder::default()
+        .codex_home(codex_home)
+        .auth_home(auth_home)
         .cli_overrides(cli_kv_overrides.clone())
         .harness_overrides(ConfigOverrides {
             model,

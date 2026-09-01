@@ -73,6 +73,7 @@ use codex_config::types::WindowsToml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
+use codex_login::AuthManagerConfig;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_login::test_support::auth_manager_from_optional_auth;
 use codex_model_provider::ProviderCapabilities;
@@ -208,6 +209,22 @@ async fn derive_legacy_sandbox_policy_for_test(
             );
             SandboxPolicy::new_read_only_policy()
         })
+}
+
+#[tokio::test]
+async fn config_builder_uses_auth_home_for_auth_config() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let auth_home = codex_home.path().join("auth-profiles").join("work");
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .auth_home(auth_home.clone())
+        .build()
+        .await?;
+
+    assert_eq!(config.codex_home, codex_home.abs());
+    assert_eq!(config.auth_home.to_path_buf(), auth_home);
+    assert_eq!(AuthManagerConfig::codex_home(&config), auth_home);
+    Ok(())
 }
 
 #[tokio::test]

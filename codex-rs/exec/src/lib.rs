@@ -585,6 +585,7 @@ pub async fn run_main(
     let build_config = |overrides| {
         ConfigBuilder::default()
             .codex_home(codex_home.to_path_buf())
+            .auth_home(auth_home.clone())
             .cli_overrides(cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(loader_overrides.clone())

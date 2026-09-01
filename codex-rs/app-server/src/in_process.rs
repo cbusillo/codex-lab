@@ -454,6 +454,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let config_manager = ConfigManager::new(ConfigManagerArgs {
+            auth_home: args.config.auth_home.to_path_buf(),
             codex_home: args.config.codex_home.to_path_buf(),
             cli_overrides: args.cli_overrides,
             loader_overrides: args.loader_overrides,

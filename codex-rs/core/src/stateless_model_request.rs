@@ -79,7 +79,7 @@ pub(crate) async fn run_stateless_model_request(
         Arc::clone(&auth_manager),
         ExecutionAccountOptions {
             codex_home: config.codex_home.to_path_buf(),
-            auth_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
             auth_credentials_store_mode: config.cli_auth_credentials_store_mode,
             keyring_backend_kind: config.auth_keyring_backend_kind(),
             forced_chatgpt_workspace_id: config.forced_chatgpt_workspace_id.clone(),

@@ -620,6 +620,7 @@ mod thread_processor_behavior_tests {
             supports_standalone_web_search: false,
         };
         let config_manager = ConfigManager::new(ConfigManagerArgs {
+            auth_home: temp_dir.path().to_path_buf(),
             codex_home: temp_dir.path().to_path_buf(),
             cli_overrides: Vec::new(),
             loader_overrides: LoaderOverrides::default(),

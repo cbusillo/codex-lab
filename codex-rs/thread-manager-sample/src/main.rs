@@ -264,6 +264,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         memories: MemoriesConfig::default(),
         sqlite: SqliteConfig::from_sqlite_home(codex_home.clone()),
         log_dir: codex_home.join("log").to_path_buf(),
+        auth_home: codex_home.clone(),
         codex_home,
         history: History::default(),
         ephemeral: true,
