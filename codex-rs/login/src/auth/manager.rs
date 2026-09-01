@@ -2036,8 +2036,17 @@ async fn request_chatgpt_token_refresh(
     } else {
         let body = response.text().await.unwrap_or_default();
         tracing::error!("Failed to refresh token: {status}: {body}");
-        let failed = classify_refresh_token_failure(&body);
-        if status == StatusCode::UNAUTHORIZED || failed.reason != RefreshTokenFailedReason::Other {
+        let code = extract_refresh_token_error_code(&body);
+        let is_invalid_grant_bad_request = status == StatusCode::BAD_REQUEST
+            && code
+                .as_deref()
+                .is_some_and(|code| code.eq_ignore_ascii_case("invalid_grant"));
+        let failed =
+            classify_refresh_token_failure(code.as_deref(), &body, is_invalid_grant_bad_request);
+        if status == StatusCode::UNAUTHORIZED
+            || failed.reason != RefreshTokenFailedReason::Other
+            || is_invalid_grant_bad_request
+        {
             Err(RefreshTokenError::Permanent(failed))
         } else {
             let message = try_parse_error_message(&body);
@@ -2048,10 +2057,12 @@ async fn request_chatgpt_token_refresh(
     }
 }
 
-fn classify_refresh_token_failure(body: &str) -> RefreshTokenFailedError {
-    let code = extract_refresh_token_error_code(body);
-
-    let normalized_code = code.as_deref().map(str::to_ascii_lowercase);
+fn classify_refresh_token_failure(
+    code: Option<&str>,
+    body: &str,
+    is_invalid_grant_bad_request: bool,
+) -> RefreshTokenFailedError {
+    let normalized_code = code.map(str::to_ascii_lowercase);
     let reason = match normalized_code.as_deref() {
         Some("refresh_token_expired") => RefreshTokenFailedReason::Expired,
         Some("refresh_token_reused") => RefreshTokenFailedReason::Exhausted,
@@ -2059,7 +2070,7 @@ fn classify_refresh_token_failure(body: &str) -> RefreshTokenFailedError {
         _ => RefreshTokenFailedReason::Other,
     };
 
-    if reason == RefreshTokenFailedReason::Other {
+    if reason == RefreshTokenFailedReason::Other && !is_invalid_grant_bad_request {
         tracing::warn!(
             backend_code = normalized_code.as_deref(),
             backend_body = body,
