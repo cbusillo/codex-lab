@@ -690,6 +690,22 @@ async fn block_turn_finalizations(sess: &Arc<Session>) -> tokio::sync::oneshot::
     release_tx
 }
 
+async fn enqueue_trigger_turn_mailbox_item(sess: &Session, text: &str) {
+    sess.input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                text.to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
+        )
+        .await;
+}
+
 #[tokio::test]
 async fn aborting_regular_task_parked_on_finalization_emits_started_before_aborted() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
@@ -734,6 +750,71 @@ async fn aborting_regular_task_parked_on_finalization_emits_started_before_abort
     let turn_started_idx = turn_started_idx.expect("expected TurnStarted event");
     let turn_aborted_idx = turn_aborted_idx.expect("expected TurnAborted event");
     assert!(turn_started_idx < turn_aborted_idx);
+}
+
+#[tokio::test]
+async fn repeated_interrupt_invalidates_pending_work_restart() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    enqueue_trigger_turn_mailbox_item(&sess, "pending after repeated interrupt").await;
+
+    sess.interrupt_task().await;
+    sess.interrupt_task().await;
+    let _ = release_tx.send(());
+    sess.turn_finalizations.wait().await;
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+}
+
+#[tokio::test]
+async fn shutdown_invalidates_pending_work_restart() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    enqueue_trigger_turn_mailbox_item(&sess, "pending during shutdown").await;
+
+    sess.interrupt_task().await;
+    let generation_before_shutdown = sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let shutdown_sess = Arc::clone(&sess);
+    let shutdown_task = tokio::spawn(async move {
+        super::handlers::shutdown_session_runtime(&shutdown_sess).await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while sess
+            .interrupt_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == generation_before_shutdown
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown should invalidate pending work starts");
+    let _ = release_tx.send(());
+    shutdown_task.await.expect("shutdown task should finish");
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
 fn test_model_client_session() -> crate::client::ModelClientSession {
@@ -10618,12 +10699,13 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
         other => panic!("unexpected event: {other:?}"),
     }
     abort_task.await.expect("abort task should finish");
-    // Expected flushes:
-    // 1. Task-runner flush after the task body observes cancellation.
-    // 2. Interrupted-marker flush before TurnAborted so abort observers can reread it.
-    // 3. Terminal-event flush after TurnAborted is appended.
-    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 3).await;
-    assert_eq!(3, calls.flush_thread);
+    // Required flushes:
+    // 1. Interrupted-marker flush before TurnAborted so abort observers can reread it.
+    // 2. Terminal-event flush after TurnAborted is appended.
+    // The task-runner flush is also present when cancellation reaches a task that already began
+    // running, but abort cleanup can now win the start race without weakening terminal durability.
+    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
+    assert!(calls.flush_thread >= 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

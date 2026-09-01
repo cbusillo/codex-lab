@@ -9,6 +9,10 @@ use tracing::error;
 
 type TurnFinalization = Shared<BoxFuture<'static, ()>>;
 
+/// Serializes terminal turn work and exposes its tail to gate the next start.
+///
+/// Each finalization is eagerly driven after the prior tail, while cloned tail
+/// futures let shutdown and new tasks wait for the same ordered completion.
 pub(crate) struct TurnFinalizationQueue {
     tail: Mutex<TurnFinalization>,
 }

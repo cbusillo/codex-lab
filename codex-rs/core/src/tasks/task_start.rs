@@ -11,6 +11,10 @@ use crate::session::turn_context::TurnContext;
 
 use super::AnySessionTask;
 
+/// Runs turn-start lifecycle exactly once after prior finalization completes.
+///
+/// The shared future is intentionally awaited by both the normal task driver
+/// and abort cleanup so a parked task still emits start before its abort.
 #[derive(Clone)]
 pub(crate) struct TaskStart {
     start: Shared<BoxFuture<'static, ()>>,

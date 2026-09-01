@@ -235,6 +235,10 @@ enum InitialInputRecordState {
     Finished,
 }
 
+/// Records initial turn input exactly once across normal and abort paths.
+///
+/// The in-flight shared future stays in the state so a second waiter can resume
+/// it when cancellation drops the task that originally drove the recording.
 pub(crate) struct InitialInputRecorder {
     state: Mutex<InitialInputRecordState>,
 }

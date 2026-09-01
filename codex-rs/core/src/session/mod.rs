@@ -4307,9 +4307,13 @@ impl Session {
         turn_state.lock().await.has_memory_citation = true;
     }
 
+    pub(crate) fn invalidate_pending_work_starts(&self) {
+        self.interrupt_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
-        self.interrupt_generation.fetch_add(1, Ordering::SeqCst);
+        self.invalidate_pending_work_starts();
         let had_active_turn = self.active_turn.lock().await.is_some();
         self.begin_abort_all_tasks(
             TurnAbortReason::Interrupted,
