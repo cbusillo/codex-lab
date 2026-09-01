@@ -805,6 +805,20 @@ pub(crate) async fn run_hooks_and_record_inputs(
     turn_context: &Arc<TurnContext>,
     input: &[TurnInput],
 ) -> bool {
+    if !sess.hooks().has_user_prompt_submit_hooks() {
+        for input_item in input {
+            record_pending_input(
+                sess,
+                turn_context,
+                input_item.clone(),
+                Vec::new(),
+                PersistContext::Standard,
+            )
+            .await;
+        }
+        return false;
+    }
+
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     for input_item in input {

@@ -257,6 +257,12 @@ impl ClaudeHooksEngine {
         &self.warnings
     }
 
+    pub(crate) fn has_user_prompt_submit_hooks(&self) -> bool {
+        self.handlers
+            .iter()
+            .any(|handler| handler.event_name == HookEventName::UserPromptSubmit)
+    }
+
     pub(crate) fn set_executor_hooks(&mut self, executor_hooks: Vec<ExecutorPluginHookSource>) {
         self.handlers.retain(|handler| {
             !matches!(

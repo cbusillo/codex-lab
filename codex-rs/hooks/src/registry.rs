@@ -253,6 +253,10 @@ impl Hooks {
         self.engine.preview_user_prompt_submit(request)
     }
 
+    pub fn has_user_prompt_submit_hooks(&self) -> bool {
+        self.engine.has_user_prompt_submit_hooks()
+    }
+
     pub async fn run_user_prompt_submit(
         &self,
         request: UserPromptSubmitRequest,

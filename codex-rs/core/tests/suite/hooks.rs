@@ -1866,12 +1866,14 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn() -> Result<()>
     )
     .context("release gated async hook")?;
 
-    let finished_path = test
-        .codex_home_path()
-        .join("async_user_prompt_submit_finished");
-    fs_wait::wait_for_path_exists(finished_path, Duration::from_secs(5))
-        .await
-        .context("timed out waiting for the async hook to finish")?;
+    assert!(
+        codex_core::test_support::wait_for_async_hook_result_while_idle(
+            &test.codex,
+            Duration::from_secs(5),
+        )
+        .await,
+        "timed out waiting for the async hook result to be buffered"
+    );
 
     assert!(
         timeout(Duration::from_millis(150), test.codex.next_event())
