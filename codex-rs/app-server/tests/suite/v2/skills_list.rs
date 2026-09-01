@@ -143,8 +143,11 @@ fn write_cached_remote_plugin_with_skill(
     Ok(skill_path)
 }
 
-fn write_cached_local_curated_plugin_with_skill(codex_home: &std::path::Path) -> Result<()> {
-    let plugin_root = codex_home.join("plugins/cache/openai-api-curated/google-calendar/local");
+fn write_cached_local_curated_plugin_with_skill(
+    codex_home: &std::path::Path,
+    marketplace: &str,
+) -> Result<()> {
+    let plugin_root = codex_home.join(format!("plugins/cache/{marketplace}/google-calendar/local"));
     std::fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
     std::fs::write(
         plugin_root.join(".codex-plugin/plugin.json"),
@@ -398,7 +401,7 @@ async fn runtime_remote_plugin_toggle_updates_local_curated_plugin_skills() -> R
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     let server = MockServer::start().await;
-    write_cached_local_curated_plugin_with_skill(codex_home.path())?;
+    write_cached_local_curated_plugin_with_skill(codex_home.path(), "openai-curated")?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -407,7 +410,7 @@ async fn runtime_remote_plugin_toggle_updates_local_curated_plugin_skills() -> R
 [features]
 plugins = true
 
-[plugins."google-calendar@openai-api-curated"]
+[plugins."google-calendar@openai-curated"]
 enabled = true
 "#,
             server.uri()
@@ -463,7 +466,7 @@ enabled = true
 
     std::fs::write(
         codex_home.path().join(
-            "plugins/cache/openai-api-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
+            "plugins/cache/openai-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
         ),
         "---\nname: meeting-prep\ndescription: Updated meeting preparation\n---\n\n# Body\n",
     )?;
@@ -846,7 +849,7 @@ async fn skills_list_preserves_requested_cwd_order() -> Result<()> {
     let first_cwd = TempDir::new()?;
     let second_cwd = TempDir::new()?;
     write_skill(&codex_home, "shared-skill")?;
-    write_cached_local_curated_plugin_with_skill(codex_home.path())?;
+    write_cached_local_curated_plugin_with_skill(codex_home.path(), "openai-api-curated")?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         r#"[features]
@@ -965,7 +968,7 @@ async fn skills_list_force_reload_refreshes_cached_plugin_roots() -> Result<()> 
     let codex_home = TempDir::new()?;
     let first_cwd = TempDir::new()?;
     let second_cwd = TempDir::new()?;
-    write_cached_local_curated_plugin_with_skill(codex_home.path())?;
+    write_cached_local_curated_plugin_with_skill(codex_home.path(), "openai-api-curated")?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         r#"[features]
