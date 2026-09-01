@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
 use crate::account_switching::RateLimitSwitchState;
@@ -133,6 +134,7 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 use codex_utils_stream_parser::extract_proposed_plan_text;
 use codex_utils_stream_parser::strip_citations;
 use futures::future::BoxFuture;
+use futures::future::Shared;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
 use tokio_util::sync::CancellationToken;
@@ -227,6 +229,57 @@ impl RunTurnState {
     }
 }
 
+enum InitialInputRecordState {
+    Pending(Vec<TurnInput>),
+    Recording(Shared<BoxFuture<'static, bool>>),
+    Finished,
+}
+
+pub(crate) struct InitialInputRecorder {
+    state: Mutex<InitialInputRecordState>,
+}
+
+impl InitialInputRecorder {
+    pub(crate) fn new(input: &[TurnInput]) -> Self {
+        Self {
+            state: Mutex::new(InitialInputRecordState::Pending(input.to_vec())),
+        }
+    }
+
+    pub(crate) async fn record(&self, sess: Arc<Session>, turn_context: Arc<TurnContext>) -> bool {
+        let recording = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*state {
+                InitialInputRecordState::Recording(recording) => recording.clone(),
+                InitialInputRecordState::Finished => return false,
+                InitialInputRecordState::Pending(_) => {
+                    let InitialInputRecordState::Pending(input) =
+                        std::mem::replace(&mut *state, InitialInputRecordState::Finished)
+                    else {
+                        unreachable!();
+                    };
+                    let recording = async move {
+                        run_hooks_and_record_inputs(&sess, &turn_context, &input).await
+                    }
+                    .boxed()
+                    .shared();
+                    *state = InitialInputRecordState::Recording(recording.clone());
+                    recording
+                }
+            }
+        };
+        let blocked = recording.await;
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = InitialInputRecordState::Finished;
+        blocked
+    }
+}
+
 /// Owned inputs for one `run_turn` attempt.
 pub(crate) struct RunTurnParams {
     pub(crate) sess: Arc<Session>,
@@ -236,6 +289,7 @@ pub(crate) struct RunTurnParams {
     pub(crate) model_request_history_mode: ModelRequestHistoryMode,
     pub(crate) prewarmed_client_session: Option<ModelClientSession>,
     pub(crate) cancellation_token: CancellationToken,
+    pub(crate) initial_input_recorder: Arc<InitialInputRecorder>,
 }
 
 pub(crate) async fn run_turn(
@@ -250,6 +304,7 @@ pub(crate) async fn run_turn(
         model_request_history_mode,
         prewarmed_client_session,
         cancellation_token,
+        initial_input_recorder,
     } = params;
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(
@@ -279,7 +334,9 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            initial_input_recorder
+                .record(Arc::clone(&sess), Arc::clone(&turn_context))
+                .await;
             return Err(err);
         }
         let error = err.to_codex_protocol_error();
@@ -298,7 +355,9 @@ pub(crate) async fn run_turn(
         {
             Ok(requirements) => requirements,
             Err(err) => {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+                initial_input_recorder
+                    .record(Arc::clone(&sess), Arc::clone(&turn_context))
+                    .await;
                 return Err(err.into());
             }
         };
@@ -314,7 +373,9 @@ pub(crate) async fn run_turn(
     {
         Ok(step_context) => step_context,
         Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+            initial_input_recorder
+                .record(Arc::clone(&sess), Arc::clone(&turn_context))
+                .await;
             return Err(err);
         }
         Err(err) => return Err(err),
@@ -343,7 +404,10 @@ pub(crate) async fn run_turn(
         if run_pending_session_start_hooks(&sess, &turn_context).await {
             return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
         }
-        if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+        if initial_input_recorder
+            .record(Arc::clone(&sess), Arc::clone(&turn_context))
+            .await
+        {
             return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
         }
 
@@ -361,7 +425,10 @@ pub(crate) async fn run_turn(
         }
 
         track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
-    } else if run_hooks_and_record_inputs(&sess, &turn_context, &input).await {
+    } else if initial_input_recorder
+        .record(Arc::clone(&sess), Arc::clone(&turn_context))
+        .await
+    {
         return Ok(TurnRunResult::ineligible(/*model_used_tools*/ false));
     }
 

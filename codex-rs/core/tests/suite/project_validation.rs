@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
@@ -18,6 +19,7 @@ use codex_config::ShellcheckValidationProviderConfig;
 use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::WriteFileOptions;
@@ -41,6 +43,8 @@ use codex_skills_extension::install;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::approx_token_count;
+use core_test_support::fs_wait;
+use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_apply_patch_custom_tool_call;
@@ -1388,11 +1392,45 @@ async fn project_validation_interrupt_during_initial_fingerprint_records_input()
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = build_validation_codex(
-        &server,
-        shell_command("printf validation-pass", /*timeout_ms*/ 5_000),
-    )
-    .await?;
+    let response_mock = responses::mount_sse_once(&server, sse_completed("resp-1")).await;
+    let command = shell_command("printf validation-pass", /*timeout_ms*/ 5_000);
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            let script_path = home.join("slow_user_prompt_submit_hook.py");
+            let started_path = home.join("slow_user_prompt_submit_started");
+            let release_path = home.join("slow_user_prompt_submit_release");
+            let script = format!(
+                r#"import json
+from pathlib import Path
+import sys
+import time
+
+prompt = json.load(sys.stdin).get("prompt")
+Path(r"{started_path}").write_text(prompt, encoding="utf-8")
+while not Path(r"{release_path}").exists():
+    time.sleep(0.01)
+"#,
+                started_path = started_path.display(),
+                release_path = release_path.display(),
+            );
+            let hooks = serde_json::json!({
+                "hooks": {
+                    "UserPromptSubmit": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": format!("python3 {}", script_path.display()),
+                        }]
+                    }]
+                }
+            });
+            fs::write(&script_path, script).expect("write slow user prompt submit hook");
+            fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
+        })
+        .with_config(move |config| {
+            config.validation.project_command = Some(command);
+            trust_discovered_hooks(config);
+        });
+    let test = builder.build(&server).await?;
     init_git_repo(test.cwd_path())?;
 
     let head_path = test.workspace_path(".git/HEAD");
@@ -1424,10 +1462,40 @@ async fn project_validation_interrupt_during_initial_fingerprint_records_input()
         .await
         .context("timed out waiting for initial validation fingerprint capture")??;
     test.codex.submit(Op::Interrupt).await?;
+
+    fs_wait::wait_for_path_exists(
+        test.codex_home_path()
+            .join("slow_user_prompt_submit_started"),
+        Duration::from_secs(5),
+    )
+    .await
+    .context("timed out waiting for interrupted input hook to start")?;
+    let next_prompt = "run after the interrupted prompt";
+    let next_submission = timeout(
+        Duration::from_secs(1),
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: next_prompt.to_string(),
+                text_elements: Vec::new(),
+            }])),
+    )
+    .await
+    .context("next turn submission was blocked by interrupted input recording")??;
+    assert!(matches!(
+        next_submission,
+        TurnInputSubmission::Started { .. }
+    ));
     let _ = capture_release_tx.send(());
     capture_task
         .await
         .context("validation fingerprint capture task panicked")??;
+    sleep(Duration::from_millis(/*millis*/ 250)).await;
+    fs::write(
+        test.codex_home_path()
+            .join("slow_user_prompt_submit_release"),
+        "ready",
+    )
+    .context("release interrupted input hook")?;
 
     let events = collect_events_until_terminal(&test.codex).await?;
     let user_messages = events
@@ -1438,10 +1506,27 @@ async fn project_validation_interrupt_during_initial_fingerprint_records_input()
         })
         .collect::<Vec<_>>();
     assert_eq!(user_messages, vec!["preserve this input"]);
+    let user_message_index = events
+        .iter()
+        .position(|event| matches!(event, EventMsg::UserMessage(_)))
+        .context("expected preserved user message event")?;
+    let turn_aborted_index = events
+        .iter()
+        .position(|event| matches!(event, EventMsg::TurnAborted(_)))
+        .context("expected turn aborted event")?;
+    assert!(user_message_index < turn_aborted_index);
+
+    let next_events = collect_events_until_terminal(&test.codex).await?;
     assert!(
-        events
+        next_events
             .iter()
-            .any(|event| matches!(event, EventMsg::TurnAborted(_)))
+            .any(|event| matches!(event, EventMsg::TurnComplete(_)))
+    );
+    let request = response_mock.single_request();
+    assert!(
+        request
+            .message_input_texts("user")
+            .contains(&next_prompt.to_string())
     );
     Ok(())
 }

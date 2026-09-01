@@ -23,6 +23,7 @@ use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::session::TurnInputQueue;
 use crate::session::turn_context::TurnContext;
 use crate::tasks::AnySessionTask;
+use crate::tasks::TaskStart;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::ReviewDecision;
@@ -76,6 +77,7 @@ pub(crate) struct RunningTask {
     pub(crate) kind: TaskKind,
     pub(crate) background_review_trigger_eligible: bool,
     pub(crate) task: Arc<dyn AnySessionTask>,
+    pub(crate) start: TaskStart,
     pub(crate) cancellation_token: CancellationToken,
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,

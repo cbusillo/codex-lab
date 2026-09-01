@@ -8,6 +8,7 @@ use codex_prompts::render_review_exit_interrupted;
 use codex_prompts::render_review_exit_success;
 use codex_protocol::ResponseItemId;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::items::EnteredReviewModeItem;
 use codex_protocol::items::ExitedReviewModeItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -48,6 +49,7 @@ const BACKGROUND_AUTO_REVIEW_PROGRESS_INTERVAL: Duration = Duration::from_secs(1
 
 pub(crate) struct ReviewTask {
     persistence: Option<ReviewPersistenceContext>,
+    entered_review_mode: Option<EnteredReviewModeItem>,
 }
 
 struct ReviewExecution {
@@ -65,12 +67,16 @@ struct ReviewConversation {
 
 impl ReviewTask {
     pub(crate) fn new() -> Self {
-        Self { persistence: None }
+        Self {
+            persistence: None,
+            entered_review_mode: None,
+        }
     }
 
     pub(crate) fn with_persistence(persistence: ReviewPersistenceContext) -> Self {
         Self {
             persistence: Some(persistence),
+            entered_review_mode: None,
         }
     }
 
@@ -82,6 +88,11 @@ impl ReviewTask {
     pub(crate) fn persistence_context(&self) -> Option<ReviewPersistenceContext> {
         self.persistence.clone()
     }
+
+    pub(crate) fn with_entered_review_mode(mut self, item: EnteredReviewModeItem) -> Self {
+        self.entered_review_mode = Some(item);
+        self
+    }
 }
 
 impl SessionTask for ReviewTask {
@@ -91,6 +102,14 @@ impl SessionTask for ReviewTask {
 
     fn span_name(&self) -> &'static str {
         "session_task.review"
+    }
+
+    async fn start(&self, session: Arc<Session>, ctx: Arc<TurnContext>) {
+        if let Some(item) = self.entered_review_mode.clone() {
+            let item = TurnItem::EnteredReviewMode(item);
+            session.emit_turn_item_started(ctx.as_ref(), &item).await;
+            session.emit_turn_item_completed(ctx.as_ref(), item).await;
+        }
     }
 
     async fn run(

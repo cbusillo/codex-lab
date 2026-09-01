@@ -409,7 +409,12 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
         startup_prewarm.abort().await;
     }
     let _ = sess.conversation.shutdown().await;
-    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::SuppressPendingWork,
+    )
+    .await;
+    sess.turn_finalizations.wait().await;
     sess.cancel_background_auto_review().await;
     sess.hooks().shutdown().await;
     sess.async_hook_results.close();

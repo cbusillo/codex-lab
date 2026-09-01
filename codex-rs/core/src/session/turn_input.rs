@@ -237,9 +237,8 @@ async fn start_or_steer(
                     client_id,
                 });
             }
-            session
-                .spawn_task(turn_context, task_input, RegularTask::new())
-                .await;
+            let task = RegularTask::new(&task_input);
+            session.spawn_task(turn_context, task_input, task).await;
             Ok(TurnInputSubmission::Started {
                 turn_id: submission_id,
             })
@@ -357,11 +356,12 @@ async fn start_if_idle(
             )
             .await;
     }
+    let task = RegularTask::new(&task_input);
     session
         .start_task(
             turn_context,
             task_input,
-            RegularTask::new(),
+            task,
             MailboxParentProvenance::Ignore,
         )
         .await;

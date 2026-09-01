@@ -17,6 +17,7 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session_models_manager::models_manager_for_execution_account;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
+use crate::tasks::TurnFinalizationQueue;
 use codex_extension_api::ExtensionDataInit;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::RouteAwareClientPool;
@@ -69,12 +70,14 @@ pub(crate) struct Session {
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    pub(crate) turn_finalizations: TurnFinalizationQueue,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
+    pub(crate) interrupt_generation: AtomicU64,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -1552,12 +1555,14 @@ impl Session {
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
+                turn_finalizations: TurnFinalizationQueue::default(),
                 async_hook_results,
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,
                 fork_persistence,
+                interrupt_generation: AtomicU64::new(0),
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {

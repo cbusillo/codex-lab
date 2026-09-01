@@ -564,7 +564,7 @@ async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_start
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(),
+        crate::tasks::RegularTask::new(&[]),
     )
     .await;
 
@@ -637,7 +637,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(),
+        crate::tasks::RegularTask::new(&[]),
     )
     .await;
 
@@ -677,6 +677,63 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     assert!(started_at.is_some());
     assert!(completed_at.is_some());
     assert!(duration_ms.is_some());
+}
+
+async fn block_turn_finalizations(sess: &Arc<Session>) -> tokio::sync::oneshot::Sender<()> {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    sess.turn_finalizations.enqueue(async move {
+        let _ = started_tx.send(());
+        let _ = release_rx.await;
+    });
+    started_rx.await.expect("finalization should start");
+    release_tx
+}
+
+#[tokio::test]
+async fn aborting_regular_task_parked_on_finalization_emits_started_before_aborted() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        crate::tasks::RegularTask::new(&[]),
+    )
+    .await;
+
+    let abort_sess = Arc::clone(&sess);
+    let abort_task = tokio::spawn(async move {
+        abort_sess
+            .abort_all_tasks(TurnAbortReason::Interrupted)
+            .await;
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err()
+    );
+    let _ = release_tx.send(());
+    abort_task.await.expect("abort task should finish");
+
+    let mut turn_started_idx = None;
+    let mut turn_aborted_idx = None;
+    for idx in 0..3 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout waiting for abort events")
+            .expect("event");
+        match event.msg {
+            EventMsg::TurnStarted(_) => turn_started_idx = Some(idx),
+            EventMsg::TurnAborted(_) => {
+                turn_aborted_idx = Some(idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let turn_started_idx = turn_started_idx.expect("expected TurnStarted event");
+    let turn_aborted_idx = turn_aborted_idx.expect("expected TurnAborted event");
+    assert!(turn_started_idx < turn_aborted_idx);
 }
 
 fn test_model_client_session() -> crate::client::ModelClientSession {
@@ -6148,12 +6205,14 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        turn_finalizations: crate::tasks::TurnFinalizationQueue::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        interrupt_generation: AtomicU64::new(0),
         next_internal_sub_id: AtomicU64::new(0),
     };
     let per_turn_config =
@@ -8392,12 +8451,14 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        turn_finalizations: crate::tasks::TurnFinalizationQueue::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        interrupt_generation: AtomicU64::new(0),
         next_internal_sub_id: AtomicU64::new(0),
     });
     let per_turn_config =
@@ -11259,6 +11320,65 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
         }),
         "expected a model-visible turn aborted marker in history after interrupt"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_review_task_parked_on_finalization_enters_before_exiting() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    let task =
+        ReviewTask::new().with_entered_review_mode(codex_protocol::items::EnteredReviewModeItem {
+            id: "entered-review".to_string(),
+            target: codex_protocol::protocol::ReviewTarget::Custom {
+                instructions: "review parked turn".to_string(),
+            },
+            user_facing_hint: "reviewing".to_string(),
+        });
+    sess.spawn_task(Arc::clone(&tc), Vec::new(), task).await;
+
+    let abort_sess = Arc::clone(&sess);
+    let abort_task = tokio::spawn(async move {
+        abort_sess
+            .abort_all_tasks(TurnAbortReason::Interrupted)
+            .await;
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .is_err()
+    );
+    let _ = release_tx.send(());
+    abort_task.await.expect("abort task should finish");
+
+    let mut entered_review_mode_idx = None;
+    let mut exited_review_mode_idx = None;
+    let mut turn_aborted_idx = None;
+    let mut idx = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for review abort events")
+            .expect("event");
+        let event_idx = idx;
+        idx = idx.saturating_add(1);
+        match event.msg {
+            EventMsg::EnteredReviewMode(_) => entered_review_mode_idx = Some(event_idx),
+            EventMsg::ExitedReviewMode(_) => exited_review_mode_idx = Some(event_idx),
+            EventMsg::TurnAborted(_) => {
+                turn_aborted_idx = Some(event_idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let entered_review_mode_idx =
+        entered_review_mode_idx.expect("expected EnteredReviewMode event");
+    let exited_review_mode_idx = exited_review_mode_idx.expect("expected ExitedReviewMode event");
+    let turn_aborted_idx = turn_aborted_idx.expect("expected TurnAborted event");
+    assert!(entered_review_mode_idx < exited_review_mode_idx);
+    assert!(exited_review_mode_idx < turn_aborted_idx);
 }
 
 #[tokio::test]
