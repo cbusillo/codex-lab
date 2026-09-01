@@ -1,6 +1,5 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use codex_analytics::TurnProfileFact;
 use codex_protocol::protocol::EventMsg;
@@ -14,7 +13,6 @@ use crate::session::session::Session;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 
-use super::InterruptedAbortAftermath;
 use super::InterruptedTurnHistoryMarker;
 use super::interrupted_turn_history_marker;
 
@@ -23,7 +21,6 @@ pub(super) async fn finalize_aborted_turn(
     task: RunningTask,
     active_turn: ActiveTurn,
     reason: TurnAbortReason,
-    aftermath: InterruptedAbortAftermath,
     interrupt_generation: Option<u64>,
 ) {
     let sub_id = task.turn_context.sub_id.clone();
@@ -102,11 +99,9 @@ pub(super) async fn finalize_aborted_turn(
         .emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
         .await;
     session.input_queue.clear_pending(&active_turn).await;
-    if let Some(generation) = interrupt_generation
-        && reason == TurnAbortReason::Interrupted
-        && aftermath == InterruptedAbortAftermath::StartPendingWork
-        && session.interrupt_generation.load(Ordering::SeqCst) == generation
-    {
-        session.maybe_start_turn_for_pending_work().await;
+    if let Some(generation) = interrupt_generation {
+        session
+            .maybe_start_turn_for_pending_work_after_interrupt(generation)
+            .await;
     }
 }

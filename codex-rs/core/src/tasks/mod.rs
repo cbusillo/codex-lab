@@ -92,6 +92,12 @@ pub(crate) enum InterruptedAbortAftermath {
     SuppressPendingWork,
 }
 
+#[derive(Clone, Copy)]
+enum PendingWorkStartGuard {
+    Unconditional,
+    InterruptGeneration(u64),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
     Disabled,
@@ -527,7 +533,25 @@ impl Session {
         let session = Arc::clone(self);
         Box::pin(async move {
             session
-                .maybe_start_turn_for_pending_work_with_sub_id(uuid::Uuid::new_v4().to_string())
+                .maybe_start_turn_for_pending_work_with_guard(
+                    uuid::Uuid::new_v4().to_string(),
+                    PendingWorkStartGuard::Unconditional,
+                )
+                .await;
+        })
+    }
+
+    pub(crate) fn maybe_start_turn_for_pending_work_after_interrupt(
+        self: &Arc<Self>,
+        interrupt_generation: u64,
+    ) -> BoxFuture<'static, ()> {
+        let session = Arc::clone(self);
+        Box::pin(async move {
+            session
+                .maybe_start_turn_for_pending_work_with_guard(
+                    uuid::Uuid::new_v4().to_string(),
+                    PendingWorkStartGuard::InterruptGeneration(interrupt_generation),
+                )
                 .await;
         })
     }
@@ -541,6 +565,18 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
+        self.maybe_start_turn_for_pending_work_with_guard(
+            sub_id,
+            PendingWorkStartGuard::Unconditional,
+        )
+        .await;
+    }
+
+    async fn maybe_start_turn_for_pending_work_with_guard(
+        self: &Arc<Self>,
+        sub_id: String,
+        guard: PendingWorkStartGuard,
+    ) {
         if !self.input_queue.has_pending_mailbox_items().await
             || (!self.input_queue.has_trigger_turn_mailbox_items().await
                 && !self.has_outstanding_durable_sleep())
@@ -550,7 +586,13 @@ impl Session {
 
         {
             let mut active_turn = self.active_turn.lock().await;
-            if active_turn.is_some() {
+            if active_turn.is_some()
+                || matches!(
+                    guard,
+                    PendingWorkStartGuard::InterruptGeneration(generation)
+                        if self.interrupt_generation.load(Ordering::SeqCst) != generation
+                )
+            {
                 return;
             }
             *active_turn = Some(ActiveTurn::default());
@@ -992,7 +1034,6 @@ impl Session {
                 task,
                 active_turn,
                 reason,
-                aftermath,
                 interrupt_generation,
             ));
     }

@@ -752,7 +752,7 @@ async fn aborting_regular_task_parked_on_finalization_emits_started_before_abort
     assert!(turn_started_idx < turn_aborted_idx);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_interrupt_invalidates_pending_work_restart() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let release_tx = block_turn_finalizations(&sess).await;
@@ -768,15 +768,39 @@ async fn repeated_interrupt_invalidates_pending_work_restart() {
     enqueue_trigger_turn_mailbox_item(&sess, "pending after repeated interrupt").await;
 
     sess.interrupt_task().await;
-    sess.interrupt_task().await;
+    let generation_before_second_interrupt = sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let active_turn = sess.active_turn.lock().await;
     let _ = release_tx.send(());
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let interrupt_sess = Arc::clone(&sess);
+    let interrupt_task = tokio::spawn(async move {
+        interrupt_sess.interrupt_task().await;
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == generation_before_second_interrupt
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second interrupt should invalidate pending work starts"
+        );
+        std::thread::yield_now();
+    }
+    drop(active_turn);
+    interrupt_task
+        .await
+        .expect("second interrupt task should finish");
     sess.turn_finalizations.wait().await;
 
     assert!(sess.active_turn.lock().await.is_none());
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_invalidates_pending_work_restart() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let release_tx = block_turn_finalizations(&sess).await;
@@ -795,22 +819,26 @@ async fn shutdown_invalidates_pending_work_restart() {
     let generation_before_shutdown = sess
         .interrupt_generation
         .load(std::sync::atomic::Ordering::SeqCst);
+    let active_turn = sess.active_turn.lock().await;
+    let _ = release_tx.send(());
+    std::thread::sleep(std::time::Duration::from_millis(20));
     let shutdown_sess = Arc::clone(&sess);
     let shutdown_task = tokio::spawn(async move {
         super::handlers::shutdown_session_runtime(&shutdown_sess).await;
     });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while sess
-            .interrupt_generation
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == generation_before_shutdown
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("shutdown should invalidate pending work starts");
-    let _ = release_tx.send(());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == generation_before_shutdown
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shutdown should invalidate pending work starts"
+        );
+        std::thread::yield_now();
+    }
+    drop(active_turn);
     shutdown_task.await.expect("shutdown task should finish");
 
     assert!(sess.active_turn.lock().await.is_none());
