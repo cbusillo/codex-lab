@@ -55,6 +55,33 @@ fn test_host_skills_service(
     )
 }
 
+#[test]
+fn home_dir_from_env_prefers_an_absolute_environment_home() {
+    let env_home = tempfile::tempdir().expect("temporary environment home");
+    let fallback_home = tempfile::tempdir().expect("temporary fallback home");
+
+    assert_eq!(
+        home_dir_from_env(
+            Some(env_home.path().as_os_str().to_owned()),
+            Some(fallback_home.path().to_path_buf()),
+        ),
+        Some(env_home.path().abs())
+    );
+}
+
+#[test]
+fn home_dir_from_env_falls_back_for_a_relative_environment_home() {
+    let fallback_home = tempfile::tempdir().expect("temporary fallback home");
+
+    assert_eq!(
+        home_dir_from_env(
+            Some(std::ffi::OsString::from("relative-home")),
+            Some(fallback_home.path().to_path_buf()),
+        ),
+        Some(fallback_home.path().abs())
+    );
+}
+
 fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &str) {
     let skill_dir = codex_home.path().join("skills").join(dir);
     fs::create_dir_all(&skill_dir).unwrap();

@@ -463,7 +463,19 @@ impl HostSkillsService {
 }
 
 fn current_home_dir() -> Option<AbsolutePathBuf> {
-    dirs::home_dir().and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+    home_dir_from_env(std::env::var_os("HOME"), dirs::home_dir())
+}
+
+fn home_dir_from_env(
+    env_home: Option<std::ffi::OsString>,
+    fallback_home: Option<std::path::PathBuf>,
+) -> Option<AbsolutePathBuf> {
+    env_home
+        .map(std::path::PathBuf::from)
+        .and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+        .or_else(|| {
+            fallback_home.and_then(|path| AbsolutePathBuf::from_absolute_path_checked(path).ok())
+        })
 }
 
 impl SkillRootLoader<PluginSkillRoot> for HostSkillsService {
