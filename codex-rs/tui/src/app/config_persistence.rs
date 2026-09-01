@@ -98,6 +98,7 @@ impl App {
         let cwd_display = cwd.display().to_string();
         let builder = ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())
+            .auth_home(self.config.auth_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
@@ -120,6 +121,7 @@ impl App {
         overrides.default_permissions = Some(profile_id.to_string());
         let builder = ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())
+            .auth_home(self.config.auth_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())

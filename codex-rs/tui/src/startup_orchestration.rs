@@ -56,6 +56,10 @@ pub(super) async fn run_main_inner(
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
     product_identity: codex_version::ProductIdentity,
 ) -> std::io::Result<AppExitInfo> {
+    ensure_auth_profile_supports_remote_target(
+        cli.auth_profile.as_deref(),
+        explicit_remote_endpoint.as_ref(),
+    )?;
     let strict_config = cli.strict_config;
     let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
         (
@@ -111,7 +115,7 @@ pub(super) async fn run_main_inner(
         launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
     }
     #[allow(clippy::print_stderr)]
-    let _auth_home = match cli.auth_profile.as_deref() {
+    let auth_home = match cli.auth_profile.as_deref() {
         Some(profile) => match profile_home(&codex_home, profile) {
             Ok(auth_home) => auth_home,
             Err(err) => {
@@ -164,12 +168,17 @@ pub(super) async fn run_main_inner(
                 &validation_target,
                 &validation_bootstrap,
                 &codex_home,
+                &auth_home,
             )
             .await?
         } else {
             CloudConfigBundleLoader::default()
         };
         load_config_or_exit(
+            ConfigHomes {
+                codex_home: codex_home.clone(),
+                auth_home: auth_home.clone(),
+            },
             cli_kv_overrides.clone(),
             ConfigOverrides {
                 model: cli.model.clone(),
@@ -308,6 +317,7 @@ pub(super) async fn run_main_inner(
             &app_server_target,
             &bootstrap_config,
             &codex_home,
+            &auth_home,
         ))
         .await??;
 
@@ -411,6 +421,10 @@ pub(super) async fn run_main_inner(
 
     let config = startup_draft
         .run_until(load_config_or_exit(
+            ConfigHomes {
+                codex_home,
+                auth_home,
+            },
             cli_kv_overrides.clone(),
             overrides.clone(),
             loader_overrides.clone(),

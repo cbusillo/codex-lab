@@ -19,7 +19,7 @@ impl Config {
 
     pub fn auth_config(&self) -> AuthConfig {
         AuthConfig {
-            codex_home: self.codex_home.to_path_buf(),
+            codex_home: self.auth_home.to_path_buf(),
             auth_credentials_store_mode: self.cli_auth_credentials_store_mode,
             keyring_backend_kind: self.auth_keyring_backend_kind(),
             forced_login_method: self.forced_login_method,

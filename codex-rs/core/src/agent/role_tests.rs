@@ -72,9 +72,11 @@ async fn apply_role_returns_error_for_unknown_role() {
 #[tokio::test]
 async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let auth_home = TempDir::new().expect("create temporary auth home");
     let before_layers = session_flags_layer_count(&config);
     config.model = Some("gpt-5.4-mini".to_string());
     config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config.auth_home = auth_home.path().abs();
 
     apply_role_to_config(&mut config, Some("explorer"))
         .await
@@ -82,6 +84,7 @@ async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort(
 
     assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(config.auth_home.as_path(), auth_home.path());
     assert_eq!(session_flags_layer_count(&config), before_layers);
 }
 

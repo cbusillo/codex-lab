@@ -311,6 +311,18 @@ impl AppServerTarget {
     }
 }
 
+fn ensure_auth_profile_supports_remote_target(
+    auth_profile: Option<&str>,
+    explicit_remote_endpoint: Option<&RemoteAppServerEndpoint>,
+) -> std::io::Result<()> {
+    if auth_profile.is_some() && explicit_remote_endpoint.is_some() {
+        return Err(std::io::Error::other(
+            "--auth-profile cannot be used with a remote app server",
+        ));
+    }
+    Ok(())
+}
+
 async fn init_state_db_for_app_server_target(
     config: &Config,
     app_server_target: &AppServerTarget,
@@ -913,10 +925,12 @@ async fn cloud_config_bundle_for_app_server_target(
     app_server_target: &AppServerTarget,
     bootstrap_config: &ConfigTomlLoadResult,
     codex_home: &Path,
+    auth_home: &Path,
 ) -> std::io::Result<CloudConfigBundleLoader> {
+    let mut auth_config = bootstrap_auth_config(codex_home, bootstrap_config)?;
+    auth_config.codex_home = auth_home.to_path_buf();
     cloud_config_bundle_loader_for_storage(
-        app_server_target
-            .auth_config_for_cloud_loader(bootstrap_auth_config(codex_home, bootstrap_config)?),
+        app_server_target.auth_config_for_cloud_loader(auth_config),
         /*enable_codex_api_key_env*/ false,
     )
     .await
@@ -1240,6 +1254,10 @@ async fn run_ratatui_app(
                         && (onboarding_result.directory_trust_persisted || show_login_screen)
                     {
                         load_config_or_exit(
+                            ConfigHomes {
+                                codex_home: initial_config.codex_home.to_path_buf(),
+                                auth_home: initial_config.auth_home.to_path_buf(),
+                            },
                             cli_kv_overrides.clone(),
                             overrides.clone(),
                             loader_overrides.clone(),
@@ -1544,6 +1562,8 @@ async fn run_ratatui_app(
         session_selection,
         resume_picker::SessionSelection::StartFresh
     ) && (cli.resume_picker || cli.fork_picker);
+    let session_codex_home = config.codex_home.to_path_buf();
+    let session_auth_home = config.auth_home.to_path_buf();
 
     let reloaded_config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
@@ -1551,6 +1571,10 @@ async fn run_ratatui_app(
                 .run_until(
                     &mut tui,
                     load_config_or_exit_with_fallback_cwd(
+                        ConfigHomes {
+                            codex_home: session_codex_home.clone(),
+                            auth_home: session_auth_home.clone(),
+                        },
                         cli_kv_overrides.clone(),
                         overrides.clone(),
                         loader_overrides.clone(),
@@ -1566,6 +1590,10 @@ async fn run_ratatui_app(
                 .run_until(
                     &mut tui,
                     load_config_or_exit(
+                        ConfigHomes {
+                            codex_home: session_codex_home,
+                            auth_home: session_auth_home,
+                        },
                         cli_kv_overrides.clone(),
                         overrides.clone(),
                         loader_overrides.clone(),
@@ -1882,7 +1910,13 @@ where
     }
 }
 
+struct ConfigHomes {
+    codex_home: PathBuf,
+    auth_home: PathBuf,
+}
+
 async fn load_config_or_exit(
+    homes: ConfigHomes,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
@@ -1890,6 +1924,7 @@ async fn load_config_or_exit(
     strict_config: bool,
 ) -> Config {
     load_config_or_exit_with_fallback_cwd(
+        homes,
         cli_kv_overrides,
         overrides,
         loader_overrides,
@@ -1901,6 +1936,7 @@ async fn load_config_or_exit(
 }
 
 async fn load_config_or_exit_with_fallback_cwd(
+    homes: ConfigHomes,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     overrides: ConfigOverrides,
     loader_overrides: LoaderOverrides,
@@ -1909,6 +1945,8 @@ async fn load_config_or_exit_with_fallback_cwd(
     fallback_cwd: Option<PathBuf>,
 ) -> Config {
     let builder = ConfigBuilder::default()
+        .codex_home(homes.codex_home)
+        .auth_home(homes.auth_home)
         .cli_overrides(cli_kv_overrides)
         .harness_overrides(overrides)
         .loader_overrides(loader_overrides)

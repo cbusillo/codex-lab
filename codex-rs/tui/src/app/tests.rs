@@ -6977,6 +6977,29 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
     Ok(())
 }
 
+#[tokio::test]
+async fn in_session_config_rebuilds_preserve_auth_home() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let auth_home = tempdir()?;
+    let expected_auth_home = AbsolutePathBuf::try_from(auth_home.path().to_path_buf())?;
+    app.config.auth_home = expected_auth_home.clone();
+
+    let cwd_config = app
+        .rebuild_config_for_cwd(app.config.cwd.to_path_buf())
+        .await?;
+    let permission_config = app
+        .rebuild_config_for_permission_profile(
+            codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY,
+        )
+        .await?;
+
+    assert_eq!(
+        (cwd_config.auth_home, permission_config.auth_home),
+        (expected_auth_home.clone(), expected_auth_home)
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_app_resume_uses_configured_or_explicit_cwd() -> Result<()> {
     let temp_dir = tempdir()?;

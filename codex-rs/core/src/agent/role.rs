@@ -520,6 +520,7 @@ mod reload {
             config_layer_stack,
         )
         .await?;
+        next_config.auth_home = config.auth_home.clone();
         if preserve_current_reasoning_effort {
             next_config
                 .model_reasoning_effort

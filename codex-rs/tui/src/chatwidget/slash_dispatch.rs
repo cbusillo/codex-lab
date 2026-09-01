@@ -31,7 +31,7 @@ impl ChatWidget {
     ) {
         let default_auth_home_is_current = true;
         let view = LoginAccountsView::new_with_feedback(
-            &self.config.codex_home,
+            &self.config.auth_home,
             self.app_event_tx.clone(),
             default_auth_home_is_current,
             self.config.cli_auth_credentials_store_mode,
