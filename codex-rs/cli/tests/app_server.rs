@@ -94,6 +94,10 @@ fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
             .as_slice(),
             "cannot apply local provider or additional-directory overrides",
         ),
+        (
+            ["--auth-profile", "work", "agents"].as_slice(),
+            "does not accept `--auth-profile`",
+        ),
     ] {
         let mut cmd = codex_command(codex_home.path())?;
         cmd.args(args)
