@@ -192,63 +192,6 @@ async fn start_or_steer(
         .map(|_| start.root_turn_id.clone());
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
 
-    let reserved_turn_state = {
-        let mut active_turn = session.active_turn.lock().await;
-        if active_turn.is_some() {
-            None
-        } else {
-            let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
-            Some(Arc::clone(&active_turn.turn_state))
-        }
-    };
-    if let Some(turn_state) = reserved_turn_state {
-        let turn_context = match settings.apply_started(session, submission_id.clone()).await {
-            Ok(turn_context) => turn_context,
-            Err(error) => {
-                session.clear_reserved_idle_turn(&turn_state).await;
-                return Err(error);
-            }
-        };
-        if can_start_root_turn
-            && !items.is_empty()
-            && turn_context
-                .turn_metadata_state
-                .can_start_root_turn(&turn_context.session_source)
-        {
-            turn_context
-                .turn_metadata_state
-                .set_root_turn_id(submission_id.clone());
-        }
-        if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
-            turn_context
-                .turn_metadata_state
-                .set_responsesapi_client_metadata(responsesapi_client_metadata);
-        }
-        session
-            .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
-            .await;
-        turn_context.session_telemetry.user_prompt(&items);
-        let mut task_input = merge_additional_context_input(session, additional_context).await;
-        if !items.is_empty() {
-            task_input.push(TurnInput::UserInput {
-                content: items,
-                client_id,
-            });
-        }
-        let task = RegularTask::new(&task_input);
-        session
-            .start_task(
-                turn_context,
-                task_input,
-                task,
-                MailboxParentProvenance::Ignore,
-            )
-            .await;
-        return Ok(TurnInputSubmission::Started {
-            turn_id: submission_id,
-        });
-    }
-
     match session
         .steer_input(
             &mut items,
@@ -265,11 +208,41 @@ async fn start_or_steer(
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered { turn_id })
         }
-        Err(NotSubmittedReason::NoActiveTurn)
-            if session.input_queue.has_trigger_turn_mailbox_items().await =>
-        {
-            Ok(TurnInputSubmission::NotSubmitted {
-                reason: NotSubmittedReason::PendingTriggerTurn,
+        Err(NotSubmittedReason::NoActiveTurn) => {
+            let turn_context = settings
+                .apply_started(session, submission_id.clone())
+                .await?;
+            if can_start_root_turn
+                && !items.is_empty()
+                && turn_context
+                    .turn_metadata_state
+                    .can_start_root_turn(&turn_context.session_source)
+            {
+                turn_context
+                    .turn_metadata_state
+                    .set_root_turn_id(submission_id.clone());
+            }
+            if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+                turn_context
+                    .turn_metadata_state
+                    .set_responsesapi_client_metadata(responsesapi_client_metadata);
+            }
+            session
+                .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+                .await;
+            turn_context.session_telemetry.user_prompt(&items);
+            let mut task_input = merge_additional_context_input(session, additional_context).await;
+            if !items.is_empty() {
+                task_input.push(TurnInput::UserInput {
+                    content: items,
+                    client_id,
+                });
+            }
+            let task = RegularTask::new(&task_input);
+            session.invalidate_pending_work_starts();
+            session.spawn_task(turn_context, task_input, task).await;
+            Ok(TurnInputSubmission::Started {
+                turn_id: submission_id,
             })
         }
         Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),

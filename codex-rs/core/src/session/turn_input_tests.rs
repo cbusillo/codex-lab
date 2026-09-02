@@ -363,8 +363,22 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
 }
 
 #[tokio::test]
-async fn start_or_steer_preserves_reserved_trigger_turn() {
-    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+async fn start_or_steer_suppresses_deferred_trigger_turn_restart() {
+    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    session.turn_finalizations.enqueue(async move {
+        let _ = release_rx.await;
+    });
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
     session
         .input_queue
         .enqueue_mailbox_communication(
@@ -379,11 +393,7 @@ async fn start_or_steer_preserves_reserved_trigger_turn() {
             /*root_turn_id*/ None,
         )
         .await;
-    let reserved_turn_state = {
-        let mut active_turn = session.active_turn.lock().await;
-        let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
-        Arc::clone(&active_turn.turn_state)
-    };
+    session.interrupt_task().await;
 
     let submission = handle(
         &session,
@@ -398,18 +408,20 @@ async fn start_or_steer_preserves_reserved_trigger_turn() {
     .expect("start-or-steer submission should be valid");
 
     assert_eq!(
-        TurnInputSubmission::NotSubmitted {
-            reason: NotSubmittedReason::PendingTriggerTurn,
+        TurnInputSubmission::Started {
+            turn_id: "test-submission".to_string(),
         },
         submission
     );
-    {
-        let active_turn = session.active_turn.lock().await;
-        let active_turn = active_turn.as_ref().expect("reserved turn should remain");
-        assert!(active_turn.task.is_none());
-        assert!(Arc::ptr_eq(&active_turn.turn_state, &reserved_turn_state));
-    }
-    assert!(session.input_queue.has_trigger_turn_mailbox_items().await);
+    let _ = release_tx.send(());
+    session.turn_finalizations.wait().await;
+
+    let active_turn = session.active_turn.lock().await;
+    let active_task = active_turn
+        .as_ref()
+        .and_then(|active_turn| active_turn.task.as_ref())
+        .expect("explicit user turn should remain active");
+    assert_eq!(active_task.turn_context.sub_id, "test-submission");
 }
 
 #[tokio::test]

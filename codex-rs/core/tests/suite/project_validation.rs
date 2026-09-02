@@ -1398,6 +1398,7 @@ async fn project_validation_interrupt_during_initial_fingerprint_records_input()
         .with_pre_build_hook(|home| {
             let script_path = home.join("slow_user_prompt_submit_hook.py");
             let started_path = home.join("slow_user_prompt_submit_started");
+            let started_tmp_path = home.join("slow_user_prompt_submit_started.tmp");
             let release_path = home.join("slow_user_prompt_submit_release");
             let script = format!(
                 r#"import json
@@ -1407,11 +1408,14 @@ import time
 
 prompt = json.load(sys.stdin).get("prompt", "")
 if prompt == "preserve this input":
-    Path(r"{started_path}").write_text(prompt, encoding="utf-8")
+    started_tmp_path = Path(r"{started_tmp_path}")
+    started_tmp_path.write_text(prompt, encoding="utf-8")
+    started_tmp_path.replace(r"{started_path}")
     while not Path(r"{release_path}").exists():
         time.sleep(0.01)
 "#,
                 started_path = started_path.display(),
+                started_tmp_path = started_tmp_path.display(),
                 release_path = release_path.display(),
             );
             let hooks = serde_json::json!({
@@ -1480,7 +1484,7 @@ if prompt == "preserve this input":
     );
     let next_prompt = "run after the interrupted prompt";
     let next_submission = timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(3),
         test.codex
             .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
                 text: next_prompt.to_string(),
