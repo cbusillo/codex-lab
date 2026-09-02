@@ -728,15 +728,20 @@ async fn aborting_regular_task_parked_on_finalization_emits_started_before_abort
 
     let mut turn_started_idx = None;
     let mut turn_aborted_idx = None;
-    for idx in 0..3 {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+    let mut idx = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
             .await
             .expect("timeout waiting for abort events")
             .expect("event");
+        let event_idx = idx;
+        idx = idx.saturating_add(1);
         match event.msg {
-            EventMsg::TurnStarted(_) => turn_started_idx = Some(idx),
+            EventMsg::TurnStarted(_) => turn_started_idx = Some(event_idx),
             EventMsg::TurnAborted(_) => {
-                turn_aborted_idx = Some(idx);
+                turn_aborted_idx = Some(event_idx);
                 break;
             }
             _ => {}
