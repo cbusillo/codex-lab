@@ -90,15 +90,14 @@ async fn request_failures_classify_https_proxy_authentication_challenges() {
     );
     *request.timeout_mut() = Some(Duration::from_secs(3));
 
-    let error = pool
-        .send_with_resolver(request, move |_| async move {
-            Ok(OutboundProxyRoute::Proxy {
-                url: format!("http://{address}"),
-                no_proxy: None,
-            })
+    let error = await_fixture_request(pool.send_with_resolver(request, move |_| async move {
+        Ok(OutboundProxyRoute::Proxy {
+            url: format!("http://{address}"),
+            no_proxy: None,
         })
-        .await
-        .expect_err("HTTPS proxy challenge should reject the CONNECT request");
+    }))
+    .await
+    .expect_err("HTTPS proxy challenge should reject the CONNECT request");
     let requests = proxy.join().expect("proxy fixture should finish");
 
     assert_eq!(requests.len(), 1);
@@ -140,15 +139,16 @@ async fn streams_request_bodies_without_exposing_reqwest_body() {
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
     );
-    let response = pool
-        .put(format!("http://{address}/upload"))
-        .header(http::header::CONTENT_LENGTH, /*value*/ 5)
-        .body_stream(stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
-            b"hello",
-        ))]))
-        .send()
-        .await
-        .expect("streaming request should succeed");
+    let response = await_fixture_request(
+        pool.put(format!("http://{address}/upload"))
+            .header(http::header::CONTENT_LENGTH, /*value*/ 5)
+            .body_stream(stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
+                b"hello",
+            ))]))
+            .send(),
+    )
+    .await
+    .expect("streaming request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
     let requests = server.join().expect("response server should finish");
@@ -208,11 +208,10 @@ async fn legacy_custom_ca_fallback_is_limited_to_reqwest_default() {
             let (address, server) = spawn_response_server(vec![
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
             ]);
-            let response = pool
-                .get(format!("http://{address}/update"))
-                .send()
-                .await
-                .expect("default-routed request should fall back to system roots");
+            let response =
+                await_fixture_request(pool.get(format!("http://{address}/update")).send())
+                    .await
+                    .expect("default-routed request should fall back to system roots");
 
             assert_eq!(response.status(), StatusCode::OK);
             let requests = server.join().expect("response server should finish");
@@ -361,10 +360,10 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
         reqwest::Url::parse(&initial_url).expect("valid initial URL"),
     );
 
-    let response = pool
-        .send_with_resolver(request, |url| resolver.resolve(url))
-        .await
-        .expect("fallback-enabled client should follow redirects");
+    let response =
+        await_fixture_request(pool.send_with_resolver(request, |url| resolver.resolve(url)))
+            .await
+            .expect("fallback-enabled client should follow redirects");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(resolver.observed_urls(), vec![initial_url, final_url]);
@@ -474,10 +473,11 @@ async fn no_redirect_pool_returns_redirect_response() {
             reqwest::Url::parse(&initial_url).expect("request URL should parse"),
         );
 
-        let response = pool
-            .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-            .await
-            .expect("no-redirect request should finish");
+        let response = await_fixture_request(
+            pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+        )
+        .await
+        .expect("no-redirect request should finish");
 
         assert_eq!(response.status(), StatusCode::FOUND);
         let requests = server.join().expect("redirect server should finish");
@@ -572,21 +572,20 @@ async fn request_timeout_is_shared_across_redirect_hops() {
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
 
-    let error = pool
-        .send_with_resolver(request, move |_| {
-            let resolver_call = observed_resolver_calls.fetch_add(1, Ordering::SeqCst);
-            async move {
-                let delay = if resolver_call == 0 {
-                    Duration::from_millis(500)
-                } else {
-                    Duration::from_millis(1_750)
-                };
-                tokio::time::sleep(delay).await;
-                Ok(OutboundProxyRoute::Direct)
-            }
-        })
-        .await
-        .expect_err("redirect chain should exceed its shared timeout");
+    let error = await_fixture_request(pool.send_with_resolver(request, move |_| {
+        let resolver_call = observed_resolver_calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let delay = if resolver_call == 0 {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(1_750)
+            };
+            tokio::time::sleep(delay).await;
+            Ok(OutboundProxyRoute::Direct)
+        }
+    }))
+    .await
+    .expect_err("redirect chain should exceed its shared timeout");
 
     assert!(matches!(error, RouteAwareRequestError::Timeout));
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
@@ -608,10 +607,11 @@ async fn rejects_replayable_redirect_to_unsupported_scheme() {
         reqwest::Url::parse(&format!("http://{address}/start")).expect("request URL should parse"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("unsupported redirect scheme should fail");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("unsupported redirect scheme should fail");
 
     assert!(matches!(
         error,
@@ -640,10 +640,11 @@ async fn rejects_redirects_beyond_the_limit() {
         reqwest::Url::parse(&format!("http://{address}/start")).expect("request URL should parse"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("redirect chain should stop at the limit");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("redirect chain should stop at the limit");
     let requests = server.join().expect("redirect server should finish");
 
     assert!(matches!(error, RouteAwareRequestError::TooManyRedirects));
@@ -693,10 +694,11 @@ async fn disabled_pool_logging_does_not_expose_request_or_response_data() {
     *request.body_mut() = Some("request-body-secret-value".into());
     *request.timeout_mut() = Some(Duration::from_secs(2));
 
-    let response = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect("route-aware request should succeed");
+    let response = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect("route-aware request should succeed");
     assert_eq!(response.status(), StatusCode::OK);
     server.join().expect("server thread should finish");
 
@@ -789,6 +791,15 @@ fn manual_redirect_pool() -> RouteAwareClientPool {
         ClientRouteClass::Api,
         HttpClientBuilder::new(),
     )
+}
+
+async fn await_fixture_request<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(Duration::from_secs(10), future)
+        .await
+        .expect("fixture-backed request should finish")
 }
 
 fn spawn_response_server(responses: Vec<String>) -> (std::net::SocketAddr, ResponseServer) {

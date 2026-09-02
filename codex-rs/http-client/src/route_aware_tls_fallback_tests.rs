@@ -44,10 +44,11 @@ async fn default_pool_does_not_retry_a_native_tls_protocol_failure() {
         reqwest::Url::parse(&url).expect("valid HTTPS URL"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("ordinary traffic should preserve the native TLS failure");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("ordinary traffic should preserve the native TLS failure");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -74,10 +75,11 @@ async fn retries_a_native_tls_protocol_failure_once_with_rustls() {
     let mut request = reqwest::Request::new(Method::POST, destination.clone());
     *request.body_mut() = Some(Bytes::from_static(b"mcp-initialize").into());
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -122,8 +124,7 @@ async fn retries_a_native_tls_failure_after_another_request_caches_rustls() {
 
     let request = reqwest::Request::new(Method::POST, destination.clone());
     let replay = request.try_clone().expect("request should be replayable");
-    let error = native_client
-        .execute_without_request_logging(request)
+    let error = await_fixture_request(native_client.execute_without_request_logging(request))
         .await
         .expect_err("native TLS handshake should fail");
     let rustls_client = pool
@@ -134,17 +135,16 @@ async fn retries_a_native_tls_failure_after_another_request_caches_rustls() {
         .expect("TLS fallback cache")
         .remember(&destination, &route, rustls_client);
 
-    let error = pool
-        .retry_with_rustls(
-            &destination,
-            &route,
-            selected_tls_backend,
-            Some(&replay),
-            error,
-            /*timeout_deadline*/ None,
-        )
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(pool.retry_with_rustls(
+        &destination,
+        &route,
+        selected_tls_backend,
+        Some(&replay),
+        error,
+        /*timeout_deadline*/ None,
+    ))
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -178,10 +178,11 @@ async fn does_not_retry_a_cached_rustls_tls_protocol_failure() {
         .remember(&destination, &OutboundProxyRoute::Direct, rustls_client);
     let request = reqwest::Request::new(Method::POST, destination);
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("cached rustls TLS handshake should fail");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("cached rustls TLS handshake should fail");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -273,10 +274,11 @@ async fn retries_a_tls_protocol_failure_when_request_url_contains_certificate_ma
     destination.set_path("/certificate/hostname/expired/revoked/mcp");
     let request = reqwest::Request::new(Method::POST, destination);
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -311,10 +313,11 @@ async fn does_not_retry_a_non_replayable_streaming_request() {
         Bytes::from_static(b"streaming body"),
     )])));
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("non-replayable request should preserve the native TLS failure");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("non-replayable request should preserve the native TLS failure");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -462,6 +465,15 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
         trusted_rustls_client,
         requests_rx,
     ))
+}
+
+async fn await_fixture_request<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(Duration::from_secs(10), future)
+        .await
+        .expect("fixture-backed request should finish")
 }
 
 fn spawn_protocol_version_rejection_server(
