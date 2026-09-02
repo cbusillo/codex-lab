@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -790,34 +791,102 @@ fn manual_redirect_pool() -> RouteAwareClientPool {
     )
 }
 
-fn spawn_response_server(
-    responses: Vec<String>,
-) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+fn spawn_response_server(responses: Vec<String>) -> (std::net::SocketAddr, ResponseServer) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("response listener should bind");
     let address = listener
         .local_addr()
         .expect("response listener should have an address");
-    let server = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        for response in responses {
-            let (mut stream, _) = listener
-                .accept()
-                .expect("response server should accept the next request");
-            requests.push(read_http_message(&mut stream));
-            stream
-                .write_all(response.as_bytes())
-                .expect("response server should write response");
-        }
-        requests
+    listener
+        .set_nonblocking(true)
+        .expect("response listener should become nonblocking");
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let result = (|| -> io::Result<Vec<String>> {
+            let mut requests = Vec::new();
+            for response in responses {
+                let mut stream = loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => return Ok(requests),
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                requests.push(read_http_message(&mut stream)?);
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(requests)
+        })();
+        let _ = result_tx.send(result);
     });
-    (address, server)
+    (
+        address,
+        ResponseServer {
+            stop_tx: Some(stop_tx),
+            result_rx,
+            thread: Some(thread),
+        },
+    )
 }
 
-fn read_http_message(stream: &mut impl Read) -> String {
+struct ResponseServer {
+    stop_tx: Option<mpsc::Sender<()>>,
+    result_rx: mpsc::Receiver<io::Result<Vec<String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ResponseServer {
+    fn join(mut self) -> io::Result<Vec<String>> {
+        let result = match self.result_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.stop();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the response server",
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "response server exited without returning a result",
+            )),
+        };
+        self.stop_tx.take();
+        self.thread
+            .take()
+            .expect("response server thread should exist")
+            .join()
+            .expect("response server thread should finish");
+        result
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+    }
+}
+
+impl Drop for ResponseServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn read_http_message(stream: &mut impl Read) -> io::Result<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     loop {
-        let bytes_read = stream.read(&mut chunk).expect("HTTP message should read");
+        let bytes_read = stream.read(&mut chunk)?;
         if bytes_read == 0 {
             break;
         }
@@ -839,7 +908,7 @@ fn read_http_message(stream: &mut impl Read) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&buffer).into_owned()
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 #[derive(Clone)]

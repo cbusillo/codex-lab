@@ -484,6 +484,8 @@ fn spawn_protocol_version_rejection_server(
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false)?;
+                        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
                         let mut client_hello = [0_u8; 2_048];
                         if stream.read(&mut client_hello)? == 0 {
                             return Err(io::Error::new(
