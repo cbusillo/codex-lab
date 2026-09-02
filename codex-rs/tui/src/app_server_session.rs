@@ -1589,7 +1589,13 @@ impl AppServerSession {
     }
 
     pub(crate) async fn shutdown(self) -> std::io::Result<()> {
-        self.client.shutdown().await
+        let Self {
+            client,
+            dynamic_tool_mcp,
+            ..
+        } = self;
+        drop(dynamic_tool_mcp);
+        client.shutdown().await
     }
 
     pub(crate) fn request_handle(&self) -> AppServerRequestHandle {

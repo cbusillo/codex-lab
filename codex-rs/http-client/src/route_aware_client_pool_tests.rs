@@ -797,32 +797,12 @@ fn spawn_response_server(
     let address = listener
         .local_addr()
         .expect("response listener should have an address");
-    listener
-        .set_nonblocking(true)
-        .expect("response listener should become nonblocking");
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
         for response in responses {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "response server should receive the next request"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("response server should accept: {error}"),
-                }
-            };
-            stream
-                .set_nonblocking(false)
-                .expect("response stream should become blocking");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("response stream should get a read timeout");
+            let (mut stream, _) = listener
+                .accept()
+                .expect("response server should accept the next request");
             requests.push(read_http_message(&mut stream));
             stream
                 .write_all(response.as_bytes())

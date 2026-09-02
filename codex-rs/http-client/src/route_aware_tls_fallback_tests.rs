@@ -476,15 +476,14 @@ fn spawn_protocol_version_rejection_server(
     thread::spawn(move || {
         let result = (|| -> io::Result<usize> {
             let mut attempts = 0;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while attempts < maximum_attempts && Instant::now() < deadline {
-                if stop_rx.try_recv().is_ok() {
-                    break;
+            while attempts < maximum_attempts {
+                match stop_rx.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false)?;
-                        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                         let mut client_hello = [0_u8; 2_048];
                         if stream.read(&mut client_hello)? == 0 {
                             return Err(io::Error::new(
@@ -493,6 +492,7 @@ fn spawn_protocol_version_rejection_server(
                             ));
                         }
                         stream.write_all(PROTOCOL_VERSION_TLS_ALERT)?;
+                        stream.flush()?;
                         attempts += 1;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
