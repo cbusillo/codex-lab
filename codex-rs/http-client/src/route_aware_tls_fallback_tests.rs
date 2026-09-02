@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 use bytes::Bytes;
 use futures::stream;
@@ -28,7 +27,12 @@ use crate::tls_backend_fallback::should_retry_with_rustls;
 
 const PROTOCOL_VERSION_TLS_ALERT: &[u8] = &[21, 3, 3, 0, 2, 2, 70];
 
-type SuccessfulTlsFallbackServer = (String, HttpClient, mpsc::Receiver<io::Result<Vec<String>>>);
+type SuccessfulTlsFallbackServer = (
+    String,
+    HttpClient,
+    mpsc::Receiver<io::Result<Vec<String>>>,
+    mpsc::Sender<()>,
+);
 
 #[tokio::test]
 async fn default_pool_does_not_retry_a_native_tls_protocol_failure() {
@@ -198,7 +202,7 @@ async fn does_not_retry_a_cached_rustls_tls_protocol_failure() {
 
 #[tokio::test]
 async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destination() {
-    let (url, trusted_rustls_client, observed_requests) =
+    let (url, trusted_rustls_client, observed_requests, stop_server) =
         spawn_successful_tls_fallback_server().expect("TLS fallback server should start");
     let pool = RouteAwareClientPool::new(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -221,10 +225,10 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
 
     let mut initialize_request = reqwest::Request::new(Method::POST, destination.clone());
     *initialize_request.body_mut() = Some(Bytes::from_static(b"mcp-initialize").into());
-    let initialize_response = pool
-        .send_with_resolver(initialize_request, |_| async {
+    let initialize_response =
+        await_fixture_request(pool.send_with_resolver(initialize_request, |_| async {
             Ok(OutboundProxyRoute::Direct)
-        })
+        }))
         .await
         .expect("native TLS protocol failure should recover with rustls");
 
@@ -239,10 +243,11 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
 
     let mut tool_request = reqwest::Request::new(Method::POST, destination);
     *tool_request.body_mut() = Some(Bytes::from_static(b"mcp-tool-call").into());
-    let tool_response = pool
-        .send_with_resolver(tool_request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect("remembered destination should reuse rustls without another native TLS attempt");
+    let tool_response = await_fixture_request(
+        pool.send_with_resolver(tool_request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect("remembered destination should reuse rustls without another native TLS attempt");
 
     assert_eq!(
         tool_response
@@ -258,6 +263,7 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
             .expect("TLS fallback server should capture both requests"),
         vec!["mcp-initialize".to_string(), "mcp-tool-call".to_string()]
     );
+    drop(stop_server);
 }
 
 #[tokio::test]
@@ -365,22 +371,25 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let (requests_tx, requests_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = mpsc::channel();
 
     thread::spawn(move || {
         let result = (|| -> io::Result<Vec<String>> {
             let mut observed_requests = Vec::new();
             for connection_index in 0..3 {
-                let deadline = Instant::now() + Duration::from_secs(5);
                 let mut stream = loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "TLS fallback server stopped before all requests completed",
+                            ));
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "timed out waiting for the TLS fallback client",
-                                ));
-                            }
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(error) => return Err(error),
@@ -464,6 +473,7 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
         format!("https://{address}/mcp"),
         trusted_rustls_client,
         requests_rx,
+        stop_tx,
     ))
 }
 
