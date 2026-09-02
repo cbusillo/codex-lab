@@ -191,6 +191,7 @@ async fn start_or_steer(
         .as_ref()
         .map(|_| start.root_turn_id.clone());
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
+
     match session
         .steer_input(
             &mut items,
@@ -237,9 +238,9 @@ async fn start_or_steer(
                     client_id,
                 });
             }
-            session
-                .spawn_task(turn_context, task_input, RegularTask::new())
-                .await;
+            let task = RegularTask::new(&task_input);
+            session.invalidate_pending_work_starts();
+            session.spawn_task(turn_context, task_input, task).await;
             Ok(TurnInputSubmission::Started {
                 turn_id: submission_id,
             })
@@ -357,11 +358,12 @@ async fn start_if_idle(
             )
             .await;
     }
+    let task = RegularTask::new(&task_input);
     session
         .start_task(
             turn_context,
             task_input,
-            RegularTask::new(),
+            task,
             MailboxParentProvenance::Ignore,
         )
         .await;

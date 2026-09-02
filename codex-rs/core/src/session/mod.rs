@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -4306,10 +4307,19 @@ impl Session {
         turn_state.lock().await.has_memory_citation = true;
     }
 
+    pub(crate) fn invalidate_pending_work_starts(&self) {
+        self.interrupt_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
+        self.invalidate_pending_work_starts();
         let had_active_turn = self.active_turn.lock().await.is_some();
-        self.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        self.begin_abort_all_tasks(
+            TurnAbortReason::Interrupted,
+            crate::tasks::InterruptedAbortAftermath::StartPendingWork,
+        )
+        .await;
         if !had_active_turn {
             self.cancel_mcp_startup();
         }

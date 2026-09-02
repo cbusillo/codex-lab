@@ -12,10 +12,10 @@ use crate::session::project_validation::ProjectValidationRun;
 use crate::session::project_validation::project_validation_worktree_fingerprint;
 use crate::session::project_validation::run_project_validation;
 use crate::session::session::Session;
+use crate::session::turn::InitialInputRecorder;
 use crate::session::turn::ProjectValidationEligibility;
 use crate::session::turn::RunTurnParams;
 use crate::session::turn::RunTurnState;
-use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
@@ -28,8 +28,9 @@ use tracing::trace_span;
 use super::SessionTask;
 use super::SessionTaskResult;
 
-#[derive(Default)]
-pub(crate) struct RegularTask;
+pub(crate) struct RegularTask {
+    initial_input_recorder: Arc<InitialInputRecorder>,
+}
 
 /// Tracks whether the next validation follows ordinary model work or the
 /// single corrective model run.
@@ -40,8 +41,10 @@ enum NextProjectValidationAttempt {
 }
 
 impl RegularTask {
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(input: &[TurnInput]) -> Self {
+        Self {
+            initial_input_recorder: Arc::new(InitialInputRecorder::new(input)),
+        }
     }
 }
 
@@ -58,6 +61,18 @@ impl SessionTask for RegularTask {
         true
     }
 
+    async fn start(&self, sess: Arc<Session>, ctx: Arc<TurnContext>) {
+        let event = EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: ctx.sub_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            started_at: ctx.turn_timing_state.started_at_unix_secs().await,
+            model_context_window: ctx.model_context_window(),
+            collaboration_mode_kind: ctx.mode,
+        });
+        sess.send_event(ctx.as_ref(), event).await;
+        sess.set_server_reasoning_included(/*included*/ false).await;
+    }
+
     async fn run(
         self: Arc<Self>,
         sess: Arc<Session>,
@@ -66,26 +81,16 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
-        // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
-        // not wait on startup prewarm resolution.
-        let prewarmed_client_session = async {
-            let event = EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: ctx.sub_id.clone(),
-                trace_id: ctx.trace_id.clone(),
-                started_at: ctx.turn_timing_state.started_at_unix_secs().await,
-                model_context_window: ctx.model_context_window(),
-                collaboration_mode_kind: ctx.mode,
-            });
-            sess.send_event(ctx.as_ref(), event).await;
-            sess.set_server_reasoning_included(/*included*/ false).await;
-            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
-                .await
-        }
-        .instrument(trace_span!("regular_task.prepare_run_turn"))
-        .await;
+        // `SessionTask::start` emits `TurnStarted` before startup prewarm resolution.
+        let prewarmed_client_session = sess
+            .consume_startup_prewarm_for_regular_turn(&cancellation_token)
+            .instrument(trace_span!("regular_task.prepare_run_turn"))
+            .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
-                run_hooks_and_record_inputs(&sess, &ctx, &input).await;
+                self.initial_input_recorder
+                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .await;
                 return Ok(None);
             }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
@@ -101,7 +106,9 @@ impl SessionTask for RegularTask {
         // turn-authored changes from pre-existing ones.
         let project_validation_worktree_at_turn_start = tokio::select! {
             _ = cancellation_token.cancelled() => {
-                run_hooks_and_record_inputs(&sess, &ctx, &next_input).await;
+                self.initial_input_recorder
+                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .await;
                 return Ok(None);
             },
             fingerprint = project_validation_worktree_fingerprint(&ctx) => fingerprint,
@@ -124,6 +131,7 @@ impl SessionTask for RegularTask {
                     model_request_history_mode,
                     prewarmed_client_session: prewarmed_client_session.take(),
                     cancellation_token: cancellation_token.child_token(),
+                    initial_input_recorder: Arc::clone(&self.initial_input_recorder),
                 },
                 &mut run_turn_state,
             )
@@ -202,6 +210,17 @@ impl SessionTask for RegularTask {
                 continue;
             }
             return Ok(last_agent_message);
+        }
+    }
+
+    fn abort(
+        &self,
+        sess: Arc<Session>,
+        ctx: Arc<TurnContext>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let initial_input_recorder = Arc::clone(&self.initial_input_recorder);
+        async move {
+            initial_input_recorder.record(sess, ctx).await;
         }
     }
 }

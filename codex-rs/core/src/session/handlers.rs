@@ -405,11 +405,17 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
 }
 
 pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+    sess.invalidate_pending_work_starts();
     if let Some(startup_prewarm) = sess.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
     let _ = sess.conversation.shutdown().await;
-    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::SuppressPendingWork,
+    )
+    .await;
+    sess.turn_finalizations.wait().await;
     sess.cancel_background_auto_review().await;
     sess.hooks().shutdown().await;
     sess.async_hook_results.close();

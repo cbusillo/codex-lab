@@ -363,6 +363,68 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
 }
 
 #[tokio::test]
+async fn start_or_steer_suppresses_deferred_trigger_turn_restart() {
+    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    session.turn_finalizations.enqueue(async move {
+        let _ = release_rx.await;
+    });
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    session
+        .input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
+        )
+        .await;
+    session.interrupt_task().await;
+
+    let submission = handle(
+        &session,
+        TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "explicit user input".to_string(),
+            text_elements: Vec::new(),
+        }]),
+        TurnInputMode::StartOrSteer,
+        "test-submission".to_string(),
+    )
+    .await
+    .expect("start-or-steer submission should be valid");
+
+    assert_eq!(
+        TurnInputSubmission::Started {
+            turn_id: "test-submission".to_string(),
+        },
+        submission
+    );
+    let _ = release_tx.send(());
+    session.turn_finalizations.wait().await;
+
+    let active_turn = session.active_turn.lock().await;
+    let active_task = active_turn
+        .as_ref()
+        .and_then(|active_turn| active_turn.task.as_ref())
+        .expect("explicit user turn should remain active");
+    assert_eq!(active_task.turn_context.sub_id, "test-submission");
+}
+
+#[tokio::test]
 async fn steer_only_requires_active_turn() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
     let submission = submit_steer_only(

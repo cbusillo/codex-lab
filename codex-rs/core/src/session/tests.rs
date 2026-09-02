@@ -564,7 +564,7 @@ async fn regular_turn_emits_turn_started_with_trace_id_without_waiting_for_start
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(),
+        crate::tasks::RegularTask::new(&[]),
     )
     .await;
 
@@ -637,7 +637,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     sess.spawn_task(
         Arc::clone(&tc),
         Vec::new(),
-        crate::tasks::RegularTask::new(),
+        crate::tasks::RegularTask::new(&[]),
     )
     .await;
 
@@ -677,6 +677,167 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     assert!(started_at.is_some());
     assert!(completed_at.is_some());
     assert!(duration_ms.is_some());
+}
+
+async fn block_turn_finalizations(sess: &Arc<Session>) -> tokio::sync::oneshot::Sender<()> {
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    sess.turn_finalizations.enqueue(async move {
+        let _ = started_tx.send(());
+        let _ = release_rx.await;
+    });
+    started_rx.await.expect("finalization should start");
+    release_tx
+}
+
+async fn enqueue_trigger_turn_mailbox_item(sess: &Session, text: &str) {
+    sess.input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                text.to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn aborting_regular_task_parked_on_finalization_emits_started_before_aborted() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        crate::tasks::RegularTask::new(&[]),
+    )
+    .await;
+
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::StartPendingWork,
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
+    let _ = release_tx.send(());
+    sess.turn_finalizations.wait().await;
+
+    let mut turn_started_idx = None;
+    let mut turn_aborted_idx = None;
+    let mut idx = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for abort events")
+            .expect("event");
+        let event_idx = idx;
+        idx = idx.saturating_add(1);
+        match event.msg {
+            EventMsg::TurnStarted(_) => turn_started_idx = Some(event_idx),
+            EventMsg::TurnAborted(_) => {
+                turn_aborted_idx = Some(event_idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let turn_started_idx = turn_started_idx.expect("expected TurnStarted event");
+    let turn_aborted_idx = turn_aborted_idx.expect("expected TurnAborted event");
+    assert!(turn_started_idx < turn_aborted_idx);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the test deliberately blocks turn installation while polling both racing futures"
+)]
+async fn repeated_interrupt_invalidates_pending_work_restart() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    enqueue_trigger_turn_mailbox_item(&sess, "pending after repeated interrupt").await;
+
+    sess.interrupt_task().await;
+    let generation_before_second_interrupt = sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let (finalization, second_interrupt) = {
+        let _active_turn = sess.active_turn.lock().await;
+        let _ = release_tx.send(());
+        let mut finalization = Box::pin(sess.turn_finalizations.wait());
+        assert!(futures::poll!(finalization.as_mut()).is_pending());
+        let mut second_interrupt = Box::pin(sess.interrupt_task());
+        assert!(futures::poll!(second_interrupt.as_mut()).is_pending());
+        assert_ne!(
+            sess.interrupt_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            generation_before_second_interrupt
+        );
+        (finalization, second_interrupt)
+    };
+    second_interrupt.await;
+    finalization.await;
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the test deliberately blocks turn installation while polling both racing futures"
+)]
+async fn shutdown_invalidates_pending_work_restart() {
+    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    )
+    .await;
+    enqueue_trigger_turn_mailbox_item(&sess, "pending during shutdown").await;
+
+    sess.interrupt_task().await;
+    let generation_before_shutdown = sess
+        .interrupt_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let (finalization, shutdown) = {
+        let _active_turn = sess.active_turn.lock().await;
+        let _ = release_tx.send(());
+        let mut finalization = Box::pin(sess.turn_finalizations.wait());
+        assert!(futures::poll!(finalization.as_mut()).is_pending());
+        let mut shutdown = Box::pin(super::handlers::shutdown_session_runtime(&sess));
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert_ne!(
+            sess.interrupt_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            generation_before_shutdown
+        );
+        (finalization, shutdown)
+    };
+    shutdown.await;
+    finalization.await;
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
 fn test_model_client_session() -> crate::client::ModelClientSession {
@@ -6148,12 +6309,14 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        turn_finalizations: crate::tasks::TurnFinalizationQueue::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        interrupt_generation: AtomicU64::new(0),
         next_internal_sub_id: AtomicU64::new(0),
     };
     let per_turn_config =
@@ -8392,12 +8555,14 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        turn_finalizations: crate::tasks::TurnFinalizationQueue::default(),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
+        interrupt_generation: AtomicU64::new(0),
         next_internal_sub_id: AtomicU64::new(0),
     });
     let per_turn_config =
@@ -10557,12 +10722,13 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
         other => panic!("unexpected event: {other:?}"),
     }
     abort_task.await.expect("abort task should finish");
-    // Expected flushes:
-    // 1. Task-runner flush after the task body observes cancellation.
-    // 2. Interrupted-marker flush before TurnAborted so abort observers can reread it.
-    // 3. Terminal-event flush after TurnAborted is appended.
-    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 3).await;
-    assert_eq!(3, calls.flush_thread);
+    // Required flushes:
+    // 1. Interrupted-marker flush before TurnAborted so abort observers can reread it.
+    // 2. Terminal-event flush after TurnAborted is appended.
+    // The task-runner flush is also present when cancellation reaches a task that already began
+    // running, but abort cleanup can now win the start race without weakening terminal durability.
+    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
+    assert!(calls.flush_thread >= 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11259,6 +11425,60 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
         }),
         "expected a model-visible turn aborted marker in history after interrupt"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn abort_review_task_parked_on_finalization_enters_before_exiting() {
+    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+    let release_tx = block_turn_finalizations(&sess).await;
+    let task =
+        ReviewTask::new().with_entered_review_mode(codex_protocol::items::EnteredReviewModeItem {
+            id: "entered-review".to_string(),
+            target: codex_protocol::protocol::ReviewTarget::Custom {
+                instructions: "review parked turn".to_string(),
+            },
+            user_facing_hint: "reviewing".to_string(),
+        });
+    sess.spawn_task(Arc::clone(&tc), Vec::new(), task).await;
+
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::StartPendingWork,
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
+    let _ = release_tx.send(());
+    sess.turn_finalizations.wait().await;
+
+    let mut entered_review_mode_idx = None;
+    let mut exited_review_mode_idx = None;
+    let mut turn_aborted_idx = None;
+    let mut idx = 0usize;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .expect("timeout waiting for review abort events")
+            .expect("event");
+        let event_idx = idx;
+        idx = idx.saturating_add(1);
+        match event.msg {
+            EventMsg::EnteredReviewMode(_) => entered_review_mode_idx = Some(event_idx),
+            EventMsg::ExitedReviewMode(_) => exited_review_mode_idx = Some(event_idx),
+            EventMsg::TurnAborted(_) => {
+                turn_aborted_idx = Some(event_idx);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let entered_review_mode_idx =
+        entered_review_mode_idx.expect("expected EnteredReviewMode event");
+    let exited_review_mode_idx = exited_review_mode_idx.expect("expected ExitedReviewMode event");
+    let turn_aborted_idx = turn_aborted_idx.expect("expected TurnAborted event");
+    assert!(entered_review_mode_idx < exited_review_mode_idx);
+    assert!(exited_review_mode_idx < turn_aborted_idx);
 }
 
 #[tokio::test]

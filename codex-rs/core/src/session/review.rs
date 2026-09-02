@@ -74,9 +74,19 @@ pub(super) async fn spawn_review_thread(
                 }
             };
         }
-        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+        sess.begin_abort_all_tasks(
+            TurnAbortReason::Replaced,
+            crate::tasks::InterruptedAbortAftermath::SuppressPendingWork,
+        )
+        .await;
         sess.clear_connector_selection().await;
-        let turn_context = Arc::clone(&prepared.turn_context);
+        prepared.task = prepared
+            .task
+            .with_entered_review_mode(EnteredReviewModeItem {
+                id: uuid::Uuid::now_v7().to_string(),
+                target: review_request.target,
+                user_facing_hint: review_request.user_facing_hint.unwrap_or_default(),
+            });
         sess.start_task(
             prepared.turn_context,
             prepared.input,
@@ -84,15 +94,6 @@ pub(super) async fn spawn_review_thread(
             crate::tasks::MailboxParentProvenance::Ignore,
         )
         .await;
-        let item = TurnItem::EnteredReviewMode(EnteredReviewModeItem {
-            id: uuid::Uuid::now_v7().to_string(),
-            target: review_request.target,
-            user_facing_hint: review_request.user_facing_hint.unwrap_or_default(),
-        });
-        sess.emit_turn_item_started(turn_context.as_ref(), &item)
-            .await;
-        sess.emit_turn_item_completed(turn_context.as_ref(), item)
-            .await;
     } else {
         sess.spawn_task(prepared.turn_context, prepared.input, prepared.task)
             .await;
