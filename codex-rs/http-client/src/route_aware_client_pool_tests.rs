@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::Duration;
-use std::time::Instant;
 
 use bytes::Bytes;
 use futures::stream;
@@ -89,15 +89,14 @@ async fn request_failures_classify_https_proxy_authentication_challenges() {
     );
     *request.timeout_mut() = Some(Duration::from_secs(3));
 
-    let error = pool
-        .send_with_resolver(request, move |_| async move {
-            Ok(OutboundProxyRoute::Proxy {
-                url: format!("http://{address}"),
-                no_proxy: None,
-            })
+    let error = await_fixture_request(pool.send_with_resolver(request, move |_| async move {
+        Ok(OutboundProxyRoute::Proxy {
+            url: format!("http://{address}"),
+            no_proxy: None,
         })
-        .await
-        .expect_err("HTTPS proxy challenge should reject the CONNECT request");
+    }))
+    .await
+    .expect_err("HTTPS proxy challenge should reject the CONNECT request");
     let requests = proxy.join().expect("proxy fixture should finish");
 
     assert_eq!(requests.len(), 1);
@@ -139,15 +138,16 @@ async fn streams_request_bodies_without_exposing_reqwest_body() {
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
     );
-    let response = pool
-        .put(format!("http://{address}/upload"))
-        .header(http::header::CONTENT_LENGTH, /*value*/ 5)
-        .body_stream(stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
-            b"hello",
-        ))]))
-        .send()
-        .await
-        .expect("streaming request should succeed");
+    let response = await_fixture_request(
+        pool.put(format!("http://{address}/upload"))
+            .header(http::header::CONTENT_LENGTH, /*value*/ 5)
+            .body_stream(stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
+                b"hello",
+            ))]))
+            .send(),
+    )
+    .await
+    .expect("streaming request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
     let requests = server.join().expect("response server should finish");
@@ -207,11 +207,10 @@ async fn legacy_custom_ca_fallback_is_limited_to_reqwest_default() {
             let (address, server) = spawn_response_server(vec![
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
             ]);
-            let response = pool
-                .get(format!("http://{address}/update"))
-                .send()
-                .await
-                .expect("default-routed request should fall back to system roots");
+            let response =
+                await_fixture_request(pool.get(format!("http://{address}/update")).send())
+                    .await
+                    .expect("default-routed request should fall back to system roots");
 
             assert_eq!(response.status(), StatusCode::OK);
             let requests = server.join().expect("response server should finish");
@@ -360,10 +359,10 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
         reqwest::Url::parse(&initial_url).expect("valid initial URL"),
     );
 
-    let response = pool
-        .send_with_resolver(request, |url| resolver.resolve(url))
-        .await
-        .expect("fallback-enabled client should follow redirects");
+    let response =
+        await_fixture_request(pool.send_with_resolver(request, |url| resolver.resolve(url)))
+            .await
+            .expect("fallback-enabled client should follow redirects");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(resolver.observed_urls(), vec![initial_url, final_url]);
@@ -375,57 +374,11 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
 
 #[tokio::test]
 async fn reqwest_default_route_preserves_transport_redirects() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("redirect listener should have an address");
-    listener
-        .set_nonblocking(true)
-        .expect("redirect listener should become nonblocking");
-    let server = std::thread::spawn(move || {
-        let mut request_lines = Vec::new();
-        for response in [
-            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-        ] {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "redirect server should receive the next request"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("redirect server should accept: {error}"),
-                }
-            };
-            stream
-                .set_nonblocking(false)
-                .expect("redirect stream should become blocking");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("redirect stream should get a read timeout");
-            let mut buffer = [0_u8; 1024];
-            let size = stream
-                .read(&mut buffer)
-                .expect("redirect server should read request");
-            let request = String::from_utf8_lossy(&buffer[..size]);
-            request_lines.push(
-                request
-                    .lines()
-                    .next()
-                    .expect("request should have a request line")
-                    .to_string(),
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("redirect server should write response");
-        }
-        request_lines
-    });
+    let (address, server) = spawn_response_server(vec![
+        "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_string(),
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string(),
+    ]);
     let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
@@ -437,15 +390,26 @@ async fn reqwest_default_route_preserves_transport_redirects() {
         reqwest::Url::parse(&initial_url).expect("request URL should parse"),
     );
 
-    let response = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect("default-routed request should follow redirect");
+    let response = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect("default-routed request should follow redirect");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.url().as_str(), format!("http://{address}/final"));
+    let requests = server.join().expect("redirect server should finish");
     assert_eq!(
-        server.join().expect("redirect server should finish"),
+        requests
+            .iter()
+            .map(|request| {
+                request
+                    .lines()
+                    .next()
+                    .expect("request should have a request line")
+                    .to_string()
+            })
+            .collect::<Vec<_>>(),
         vec![
             "GET /start HTTP/1.1".to_string(),
             "GET /final HTTP/1.1".to_string(),
@@ -473,10 +437,11 @@ async fn no_redirect_pool_returns_redirect_response() {
             reqwest::Url::parse(&initial_url).expect("request URL should parse"),
         );
 
-        let response = pool
-            .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-            .await
-            .expect("no-redirect request should finish");
+        let response = await_fixture_request(
+            pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+        )
+        .await
+        .expect("no-redirect request should finish");
 
         assert_eq!(response.status(), StatusCode::FOUND);
         let requests = server.join().expect("redirect server should finish");
@@ -571,21 +536,20 @@ async fn request_timeout_is_shared_across_redirect_hops() {
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
 
-    let error = pool
-        .send_with_resolver(request, move |_| {
-            let resolver_call = observed_resolver_calls.fetch_add(1, Ordering::SeqCst);
-            async move {
-                let delay = if resolver_call == 0 {
-                    Duration::from_millis(500)
-                } else {
-                    Duration::from_millis(1_750)
-                };
-                tokio::time::sleep(delay).await;
-                Ok(OutboundProxyRoute::Direct)
-            }
-        })
-        .await
-        .expect_err("redirect chain should exceed its shared timeout");
+    let error = await_fixture_request(pool.send_with_resolver(request, move |_| {
+        let resolver_call = observed_resolver_calls.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let delay = if resolver_call == 0 {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(1_750)
+            };
+            tokio::time::sleep(delay).await;
+            Ok(OutboundProxyRoute::Direct)
+        }
+    }))
+    .await
+    .expect_err("redirect chain should exceed its shared timeout");
 
     assert!(matches!(error, RouteAwareRequestError::Timeout));
     assert_eq!(resolver_calls.load(Ordering::SeqCst), 2);
@@ -607,10 +571,11 @@ async fn rejects_replayable_redirect_to_unsupported_scheme() {
         reqwest::Url::parse(&format!("http://{address}/start")).expect("request URL should parse"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("unsupported redirect scheme should fail");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("unsupported redirect scheme should fail");
 
     assert!(matches!(
         error,
@@ -639,10 +604,11 @@ async fn rejects_redirects_beyond_the_limit() {
         reqwest::Url::parse(&format!("http://{address}/start")).expect("request URL should parse"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("redirect chain should stop at the limit");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("redirect chain should stop at the limit");
     let requests = server.join().expect("redirect server should finish");
 
     assert!(matches!(error, RouteAwareRequestError::TooManyRedirects));
@@ -692,10 +658,11 @@ async fn disabled_pool_logging_does_not_expose_request_or_response_data() {
     *request.body_mut() = Some("request-body-secret-value".into());
     *request.timeout_mut() = Some(Duration::from_secs(2));
 
-    let response = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect("route-aware request should succeed");
+    let response = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect("route-aware request should succeed");
     assert_eq!(response.status(), StatusCode::OK);
     server.join().expect("server thread should finish");
 
@@ -790,9 +757,16 @@ fn manual_redirect_pool() -> RouteAwareClientPool {
     )
 }
 
-fn spawn_response_server(
-    responses: Vec<String>,
-) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<String>>) {
+async fn await_fixture_request<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(Duration::from_secs(10), future)
+        .await
+        .expect("fixture-backed request should finish")
+}
+
+fn spawn_response_server(responses: Vec<String>) -> (std::net::SocketAddr, ResponseServer) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("response listener should bind");
     let address = listener
         .local_addr()
@@ -800,44 +774,94 @@ fn spawn_response_server(
     listener
         .set_nonblocking(true)
         .expect("response listener should become nonblocking");
-    let server = std::thread::spawn(move || {
-        let mut requests = Vec::new();
-        for response in responses {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "response server should receive the next request"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let result = (|| -> io::Result<Vec<String>> {
+            let mut requests = Vec::new();
+            for response in responses {
+                let mut stream = loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => return Ok(requests),
+                        Err(mpsc::TryRecvError::Empty) => {}
                     }
-                    Err(error) => panic!("response server should accept: {error}"),
-                }
-            };
-            stream
-                .set_nonblocking(false)
-                .expect("response stream should become blocking");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .expect("response stream should get a read timeout");
-            requests.push(read_http_message(&mut stream));
-            stream
-                .write_all(response.as_bytes())
-                .expect("response server should write response");
-        }
-        requests
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                stream.set_nonblocking(false)?;
+                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+                requests.push(read_http_message(&mut stream)?);
+                stream.write_all(response.as_bytes())?;
+            }
+            Ok(requests)
+        })();
+        let _ = result_tx.send(result);
     });
-    (address, server)
+    (
+        address,
+        ResponseServer {
+            stop_tx: Some(stop_tx),
+            result_rx,
+            thread: Some(thread),
+        },
+    )
 }
 
-fn read_http_message(stream: &mut impl Read) -> String {
+struct ResponseServer {
+    stop_tx: Option<mpsc::Sender<()>>,
+    result_rx: mpsc::Receiver<io::Result<Vec<String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ResponseServer {
+    fn join(mut self) -> io::Result<Vec<String>> {
+        let result = match self.result_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                self.stop();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the response server",
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "response server exited without returning a result",
+            )),
+        };
+        self.stop_tx.take();
+        self.thread
+            .take()
+            .expect("response server thread should exist")
+            .join()
+            .expect("response server thread should finish");
+        result
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+    }
+}
+
+impl Drop for ResponseServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn read_http_message(stream: &mut impl Read) -> io::Result<String> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 1024];
     loop {
-        let bytes_read = stream.read(&mut chunk).expect("HTTP message should read");
+        let bytes_read = stream.read(&mut chunk)?;
         if bytes_read == 0 {
             break;
         }
@@ -859,7 +883,7 @@ fn read_http_message(stream: &mut impl Read) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&buffer).into_owned()
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
 }
 
 #[derive(Clone)]

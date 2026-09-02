@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 use bytes::Bytes;
 use futures::stream;
@@ -28,7 +27,12 @@ use crate::tls_backend_fallback::should_retry_with_rustls;
 
 const PROTOCOL_VERSION_TLS_ALERT: &[u8] = &[21, 3, 3, 0, 2, 2, 70];
 
-type SuccessfulTlsFallbackServer = (String, HttpClient, mpsc::Receiver<io::Result<Vec<String>>>);
+type SuccessfulTlsFallbackServer = (
+    String,
+    HttpClient,
+    mpsc::Receiver<io::Result<Vec<String>>>,
+    mpsc::Sender<()>,
+);
 
 #[tokio::test]
 async fn default_pool_does_not_retry_a_native_tls_protocol_failure() {
@@ -44,10 +48,11 @@ async fn default_pool_does_not_retry_a_native_tls_protocol_failure() {
         reqwest::Url::parse(&url).expect("valid HTTPS URL"),
     );
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("ordinary traffic should preserve the native TLS failure");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("ordinary traffic should preserve the native TLS failure");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -74,10 +79,11 @@ async fn retries_a_native_tls_protocol_failure_once_with_rustls() {
     let mut request = reqwest::Request::new(Method::POST, destination.clone());
     *request.body_mut() = Some(Bytes::from_static(b"mcp-initialize").into());
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -122,8 +128,7 @@ async fn retries_a_native_tls_failure_after_another_request_caches_rustls() {
 
     let request = reqwest::Request::new(Method::POST, destination.clone());
     let replay = request.try_clone().expect("request should be replayable");
-    let error = native_client
-        .execute_without_request_logging(request)
+    let error = await_fixture_request(native_client.execute_without_request_logging(request))
         .await
         .expect_err("native TLS handshake should fail");
     let rustls_client = pool
@@ -134,17 +139,16 @@ async fn retries_a_native_tls_failure_after_another_request_caches_rustls() {
         .expect("TLS fallback cache")
         .remember(&destination, &route, rustls_client);
 
-    let error = pool
-        .retry_with_rustls(
-            &destination,
-            &route,
-            selected_tls_backend,
-            Some(&replay),
-            error,
-            /*timeout_deadline*/ None,
-        )
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(pool.retry_with_rustls(
+        &destination,
+        &route,
+        selected_tls_backend,
+        Some(&replay),
+        error,
+        /*timeout_deadline*/ None,
+    ))
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -178,10 +182,11 @@ async fn does_not_retry_a_cached_rustls_tls_protocol_failure() {
         .remember(&destination, &OutboundProxyRoute::Direct, rustls_client);
     let request = reqwest::Request::new(Method::POST, destination);
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("cached rustls TLS handshake should fail");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("cached rustls TLS handshake should fail");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -197,7 +202,7 @@ async fn does_not_retry_a_cached_rustls_tls_protocol_failure() {
 
 #[tokio::test]
 async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destination() {
-    let (url, trusted_rustls_client, observed_requests) =
+    let (url, trusted_rustls_client, observed_requests, stop_server) =
         spawn_successful_tls_fallback_server().expect("TLS fallback server should start");
     let pool = RouteAwareClientPool::new(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -220,10 +225,10 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
 
     let mut initialize_request = reqwest::Request::new(Method::POST, destination.clone());
     *initialize_request.body_mut() = Some(Bytes::from_static(b"mcp-initialize").into());
-    let initialize_response = pool
-        .send_with_resolver(initialize_request, |_| async {
+    let initialize_response =
+        await_fixture_request(pool.send_with_resolver(initialize_request, |_| async {
             Ok(OutboundProxyRoute::Direct)
-        })
+        }))
         .await
         .expect("native TLS protocol failure should recover with rustls");
 
@@ -238,10 +243,11 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
 
     let mut tool_request = reqwest::Request::new(Method::POST, destination);
     *tool_request.body_mut() = Some(Bytes::from_static(b"mcp-tool-call").into());
-    let tool_response = pool
-        .send_with_resolver(tool_request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect("remembered destination should reuse rustls without another native TLS attempt");
+    let tool_response = await_fixture_request(
+        pool.send_with_resolver(tool_request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect("remembered destination should reuse rustls without another native TLS attempt");
 
     assert_eq!(
         tool_response
@@ -257,6 +263,7 @@ async fn successful_rustls_fallback_replays_the_request_and_reuses_the_destinati
             .expect("TLS fallback server should capture both requests"),
         vec!["mcp-initialize".to_string(), "mcp-tool-call".to_string()]
     );
+    drop(stop_server);
 }
 
 #[tokio::test]
@@ -273,10 +280,11 @@ async fn retries_a_tls_protocol_failure_when_request_url_contains_certificate_ma
     destination.set_path("/certificate/hostname/expired/revoked/mcp");
     let request = reqwest::Request::new(Method::POST, destination);
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("both TLS handshakes should be rejected");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("both TLS handshakes should be rejected");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -311,10 +319,11 @@ async fn does_not_retry_a_non_replayable_streaming_request() {
         Bytes::from_static(b"streaming body"),
     )])));
 
-    let error = pool
-        .send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) })
-        .await
-        .expect_err("non-replayable request should preserve the native TLS failure");
+    let error = await_fixture_request(
+        pool.send_with_resolver(request, |_| async { Ok(OutboundProxyRoute::Direct) }),
+    )
+    .await
+    .expect_err("non-replayable request should preserve the native TLS failure");
 
     let _ = stop_server.send(());
     assert!(error.is_connect());
@@ -362,22 +371,25 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
     let address = listener.local_addr()?;
     listener.set_nonblocking(true)?;
     let (requests_tx, requests_rx) = mpsc::channel();
+    let (stop_tx, stop_rx) = mpsc::channel();
 
     thread::spawn(move || {
         let result = (|| -> io::Result<Vec<String>> {
             let mut observed_requests = Vec::new();
             for connection_index in 0..3 {
-                let deadline = Instant::now() + Duration::from_secs(5);
                 let mut stream = loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Interrupted,
+                                "TLS fallback server stopped before all requests completed",
+                            ));
+                        }
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "timed out waiting for the TLS fallback client",
-                                ));
-                            }
                             thread::sleep(Duration::from_millis(10));
                         }
                         Err(error) => return Err(error),
@@ -461,7 +473,17 @@ fn spawn_successful_tls_fallback_server() -> io::Result<SuccessfulTlsFallbackSer
         format!("https://{address}/mcp"),
         trusted_rustls_client,
         requests_rx,
+        stop_tx,
     ))
+}
+
+async fn await_fixture_request<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(Duration::from_secs(10), future)
+        .await
+        .expect("fixture-backed request should finish")
 }
 
 fn spawn_protocol_version_rejection_server(
@@ -476,15 +498,16 @@ fn spawn_protocol_version_rejection_server(
     thread::spawn(move || {
         let result = (|| -> io::Result<usize> {
             let mut attempts = 0;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while attempts < maximum_attempts && Instant::now() < deadline {
-                if stop_rx.try_recv().is_ok() {
-                    break;
+            while attempts < maximum_attempts {
+                match stop_rx.try_recv() {
+                    Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => {}
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         stream.set_nonblocking(false)?;
-                        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+                        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+                        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
                         let mut client_hello = [0_u8; 2_048];
                         if stream.read(&mut client_hello)? == 0 {
                             return Err(io::Error::new(
@@ -493,6 +516,7 @@ fn spawn_protocol_version_rejection_server(
                             ));
                         }
                         stream.write_all(PROTOCOL_VERSION_TLS_ALERT)?;
+                        stream.flush()?;
                         attempts += 1;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
