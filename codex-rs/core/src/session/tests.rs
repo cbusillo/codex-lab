@@ -717,19 +717,14 @@ async fn aborting_regular_task_parked_on_finalization_emits_started_before_abort
     )
     .await;
 
-    let abort_sess = Arc::clone(&sess);
-    let abort_task = tokio::spawn(async move {
-        abort_sess
-            .abort_all_tasks(TurnAbortReason::Interrupted)
-            .await;
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
-            .await
-            .is_err()
-    );
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::StartPendingWork,
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
     let _ = release_tx.send(());
-    abort_task.await.expect("abort task should finish");
+    sess.turn_finalizations.wait().await;
 
     let mut turn_started_idx = None;
     let mut turn_aborted_idx = None;
@@ -752,7 +747,11 @@ async fn aborting_regular_task_parked_on_finalization_emits_started_before_abort
     assert!(turn_started_idx < turn_aborted_idx);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the test deliberately blocks turn installation while polling both racing futures"
+)]
 async fn repeated_interrupt_invalidates_pending_work_restart() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let release_tx = block_turn_finalizations(&sess).await;
@@ -771,36 +770,32 @@ async fn repeated_interrupt_invalidates_pending_work_restart() {
     let generation_before_second_interrupt = sess
         .interrupt_generation
         .load(std::sync::atomic::Ordering::SeqCst);
-    let active_turn = sess.active_turn.lock().await;
-    let _ = release_tx.send(());
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let interrupt_sess = Arc::clone(&sess);
-    let interrupt_task = tokio::spawn(async move {
-        interrupt_sess.interrupt_task().await;
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while sess
-        .interrupt_generation
-        .load(std::sync::atomic::Ordering::SeqCst)
-        == generation_before_second_interrupt
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "second interrupt should invalidate pending work starts"
+    let (finalization, second_interrupt) = {
+        let _active_turn = sess.active_turn.lock().await;
+        let _ = release_tx.send(());
+        let mut finalization = Box::pin(sess.turn_finalizations.wait());
+        assert!(futures::poll!(finalization.as_mut()).is_pending());
+        let mut second_interrupt = Box::pin(sess.interrupt_task());
+        assert!(futures::poll!(second_interrupt.as_mut()).is_pending());
+        assert_ne!(
+            sess.interrupt_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            generation_before_second_interrupt
         );
-        std::thread::yield_now();
-    }
-    drop(active_turn);
-    interrupt_task
-        .await
-        .expect("second interrupt task should finish");
-    sess.turn_finalizations.wait().await;
+        (finalization, second_interrupt)
+    };
+    second_interrupt.await;
+    finalization.await;
 
     assert!(sess.active_turn.lock().await.is_none());
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the test deliberately blocks turn installation while polling both racing futures"
+)]
 async fn shutdown_invalidates_pending_work_restart() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let release_tx = block_turn_finalizations(&sess).await;
@@ -819,27 +814,22 @@ async fn shutdown_invalidates_pending_work_restart() {
     let generation_before_shutdown = sess
         .interrupt_generation
         .load(std::sync::atomic::Ordering::SeqCst);
-    let active_turn = sess.active_turn.lock().await;
-    let _ = release_tx.send(());
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let shutdown_sess = Arc::clone(&sess);
-    let shutdown_task = tokio::spawn(async move {
-        super::handlers::shutdown_session_runtime(&shutdown_sess).await;
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while sess
-        .interrupt_generation
-        .load(std::sync::atomic::Ordering::SeqCst)
-        == generation_before_shutdown
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "shutdown should invalidate pending work starts"
+    let (finalization, shutdown) = {
+        let _active_turn = sess.active_turn.lock().await;
+        let _ = release_tx.send(());
+        let mut finalization = Box::pin(sess.turn_finalizations.wait());
+        assert!(futures::poll!(finalization.as_mut()).is_pending());
+        let mut shutdown = Box::pin(super::handlers::shutdown_session_runtime(&sess));
+        assert!(futures::poll!(shutdown.as_mut()).is_pending());
+        assert_ne!(
+            sess.interrupt_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            generation_before_shutdown
         );
-        std::thread::yield_now();
-    }
-    drop(active_turn);
-    shutdown_task.await.expect("shutdown task should finish");
+        (finalization, shutdown)
+    };
+    shutdown.await;
+    finalization.await;
 
     assert!(sess.active_turn.lock().await.is_none());
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
@@ -11446,19 +11436,14 @@ async fn abort_review_task_parked_on_finalization_enters_before_exiting() {
         });
     sess.spawn_task(Arc::clone(&tc), Vec::new(), task).await;
 
-    let abort_sess = Arc::clone(&sess);
-    let abort_task = tokio::spawn(async move {
-        abort_sess
-            .abort_all_tasks(TurnAbortReason::Interrupted)
-            .await;
-    });
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
-            .await
-            .is_err()
-    );
+    sess.begin_abort_all_tasks(
+        TurnAbortReason::Interrupted,
+        crate::tasks::InterruptedAbortAftermath::StartPendingWork,
+    )
+    .await;
+    assert!(rx.try_recv().is_err());
     let _ = release_tx.send(());
-    abort_task.await.expect("abort task should finish");
+    sess.turn_finalizations.wait().await;
 
     let mut entered_review_mode_idx = None;
     let mut exited_review_mode_idx = None;

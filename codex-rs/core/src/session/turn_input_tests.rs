@@ -363,6 +363,56 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
 }
 
 #[tokio::test]
+async fn start_or_steer_preserves_reserved_trigger_turn() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    session
+        .input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
+        )
+        .await;
+    let reserved_turn_state = {
+        let mut active_turn = session.active_turn.lock().await;
+        let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+        Arc::clone(&active_turn.turn_state)
+    };
+
+    let submission = handle(
+        &session,
+        TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "explicit user input".to_string(),
+            text_elements: Vec::new(),
+        }]),
+        TurnInputMode::StartOrSteer,
+        "test-submission".to_string(),
+    )
+    .await
+    .expect("start-or-steer submission should be valid");
+
+    assert_eq!(
+        TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PendingTriggerTurn,
+        },
+        submission
+    );
+    {
+        let active_turn = session.active_turn.lock().await;
+        let active_turn = active_turn.as_ref().expect("reserved turn should remain");
+        assert!(active_turn.task.is_none());
+        assert!(Arc::ptr_eq(&active_turn.turn_state, &reserved_turn_state));
+    }
+    assert!(session.input_queue.has_trigger_turn_mailbox_items().await);
+}
+
+#[tokio::test]
 async fn steer_only_requires_active_turn() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
     let submission = submit_steer_only(

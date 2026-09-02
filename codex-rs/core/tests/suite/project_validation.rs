@@ -1405,10 +1405,11 @@ from pathlib import Path
 import sys
 import time
 
-prompt = json.load(sys.stdin).get("prompt")
-Path(r"{started_path}").write_text(prompt, encoding="utf-8")
-while not Path(r"{release_path}").exists():
-    time.sleep(0.01)
+prompt = json.load(sys.stdin).get("prompt", "")
+if prompt == "preserve this input":
+    Path(r"{started_path}").write_text(prompt, encoding="utf-8")
+    while not Path(r"{release_path}").exists():
+        time.sleep(0.01)
 "#,
                 started_path = started_path.display(),
                 release_path = release_path.display(),
@@ -1470,6 +1471,13 @@ while not Path(r"{release_path}").exists():
     )
     .await
     .context("timed out waiting for interrupted input hook to start")?;
+    assert_eq!(
+        fs::read_to_string(
+            test.codex_home_path()
+                .join("slow_user_prompt_submit_started")
+        )?,
+        "preserve this input"
+    );
     let next_prompt = "run after the interrupted prompt";
     let next_submission = timeout(
         Duration::from_secs(1),
@@ -1489,7 +1497,6 @@ while not Path(r"{release_path}").exists():
     capture_task
         .await
         .context("validation fingerprint capture task panicked")??;
-    sleep(Duration::from_millis(/*millis*/ 250)).await;
     fs::write(
         test.codex_home_path()
             .join("slow_user_prompt_submit_release"),
