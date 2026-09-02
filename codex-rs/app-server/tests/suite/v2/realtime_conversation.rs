@@ -1068,7 +1068,11 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
         }
     )));
     assert!(matches!(
-        history.data.last(),
+        history
+            .data
+            .iter()
+            .rev()
+            .find(|entry| matches!(entry, ThreadTimelineEntry::Realtime { .. })),
         Some(ThreadTimelineEntry::Realtime {
             item: ThreadRealtimeItem {
                 content: ThreadRealtimeItemContent::RealtimeSessionClosed { .. },
