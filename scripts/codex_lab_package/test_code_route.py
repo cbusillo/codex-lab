@@ -125,7 +125,10 @@ class CodeRouteTest(unittest.TestCase):
             "provenance path": {"executable_path": "/tmp/not-the-engine"},
         }
         for message, overrides in cases.items():
-            with self.subTest(message=message), tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temp_dir,
+            ):
                 root = Path(temp_dir).resolve()
                 state_path = write_state(root)
                 engine, tools = write_engine_fixture(
@@ -251,7 +254,7 @@ def write_engine_fixture(
     provenance.update(provenance_overrides or {})
     engine_path.write_text(
         "#!/bin/sh\n"
-        "if [ \"${1:-}\" = debug ] && [ \"${2:-}\" = provenance ]; then\n"
+        'if [ "${1:-}" = debug ] && [ "${2:-}" = provenance ]; then\n'
         f"  cat <<'EOF'\n{json.dumps(provenance)}\nEOF\n"
         "  exit 0\n"
         "fi\n"
@@ -262,7 +265,7 @@ def write_engine_fixture(
     codesign_path = root / "fake-codesign"
     codesign_path.write_text(
         "#!/bin/sh\n"
-        "if [ \"${1:-}\" = --verify ]; then exit 0; fi\n"
+        'if [ "${1:-}" = --verify ]; then exit 0; fi\n'
         f"echo 'Identifier={SIGNING_IDENTIFIER}' >&2\n"
         f"echo 'TeamIdentifier={TEAM_IDENTIFIER}' >&2\n",
         encoding="utf-8",

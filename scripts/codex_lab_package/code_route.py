@@ -390,9 +390,8 @@ def require_prior_route(prior: PriorCodeRoute, active_path: Path) -> None:
     backup_path = prior.backup_path
     if backup_path is None:
         raise ValueError("Recorded prior code route backup path is missing")
-    if (
-        backup_path.parent != active_path.parent
-        or not backup_path.name.startswith(PRIOR_BACKUP_PREFIX)
+    if backup_path.parent != active_path.parent or not backup_path.name.startswith(
+        PRIOR_BACKUP_PREFIX
     ):
         raise ValueError("Recorded prior code route backup path is unsafe")
     mode = lstat_mode(backup_path, "prior code route backup")
@@ -467,17 +466,11 @@ def read_code_route_state(state: dict, state_path: Path) -> CodeRouteState | Non
                 engine_value, "signingIdentifier", state_path
             ),
             source_commit=required_string(engine_value, "sourceCommit", state_path),
-            team_identifier=required_string(
-                engine_value, "teamIdentifier", state_path
-            ),
+            team_identifier=required_string(engine_value, "teamIdentifier", state_path),
             release_tag=required_string(engine_value, "releaseTag", state_path),
-            release_version=required_string(
-                engine_value, "releaseVersion", state_path
-            ),
+            release_version=required_string(engine_value, "releaseVersion", state_path),
             version=required_string(engine_value, "version", state_path),
-            build_channel=required_string(
-                engine_value, "buildChannel", state_path
-            ),
+            build_channel=required_string(engine_value, "buildChannel", state_path),
             lab_home=Path(required_string(engine_value, "labHome", state_path)),
         ),
         launcher_sha256=required_sha256(value, "launcherSha256", state_path),
@@ -652,7 +645,9 @@ def optional_int(value: dict, field: str, state_path: Path) -> int | None:
 
 def required_sha256(value: dict, field: str, state_path: Path) -> str:
     result = required_string(value, field, state_path)
-    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+    if len(result) != 64 or any(
+        character not in "0123456789abcdef" for character in result
+    ):
         raise ValueError(
             f"Install state codeRoute field {field} must be a lowercase SHA-256: {state_path}"
         )

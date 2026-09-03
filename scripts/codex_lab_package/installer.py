@@ -397,9 +397,7 @@ def install_from_manifest_url(
                     engine_path=supervisor_paths.managed_cli,
                     lab_home=supervisor_paths.lab_home,
                     release_tag=release["tag"],
-                    release_version=manifest.get(
-                        "releaseVersion", manifest["version"]
-                    ),
+                    release_version=manifest.get("releaseVersion", manifest["version"]),
                 ),
                 temp_dir / "code-route",
             )
@@ -743,9 +741,7 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
     engine_signing_identifier = None
     engine_team_identifier = None
     if isinstance(managed_engine, dict):
-        engine_sha256 = optional_state_sha256(
-            managed_engine, "sha256", state_path
-        )
+        engine_sha256 = optional_state_sha256(managed_engine, "sha256", state_path)
         engine_signing_identifier = optional_state_string(
             managed_engine, "signingIdentifier", state_path
         )
@@ -795,9 +791,7 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
         listen_host=listen_host,
         listen_port=listen_port,
         release_tag=required_state_string(state, "releaseTag", state_path),
-        release_version=required_state_string(
-            state, "releaseVersion", state_path
-        ),
+        release_version=required_state_string(state, "releaseVersion", state_path),
         shim_path=Path(shim_path) if isinstance(shim_path, str) else None,
         source_commit=source_commit,
         state_path=state_path,
