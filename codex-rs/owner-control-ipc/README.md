@@ -29,6 +29,9 @@ tracing, network client, async runtime, app-server, core, tool, shell, MCP,
 browser, Code Bridge, CLI, TUI, or authorization integration. Same-UID peer
 checks do not isolate an owner process from an agent running as the same OS
 user, authenticate the pathname to clients, or prevent same-UID replacement and
-denial-of-service races. Genuine principal separation, owner UI, process
+denial-of-service races. Neither peer credentials nor socket-path checks are
+evidence of principal separation or client-path authenticity; the machine-checked
+host provenance therefore remains `self_asserted` with no gesture source and no
+custody proof. Genuine principal separation, owner UI, process
 custody, and active route adoption remain follow-on work tracked by `#794` and
 `#795`.

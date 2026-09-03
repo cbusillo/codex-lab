@@ -67,11 +67,12 @@ impl ValidationError {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum DescriptorId {
     ManagedSecretReencryption,
     ManagedAuthzPolicySet,
+    ManagedMergeTrainPolicyImport,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

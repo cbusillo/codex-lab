@@ -48,6 +48,23 @@ DENIED_IPC_SOURCE_SYMBOLS = {
     "std::env",
     "std::process",
 }
+DENIED_HOST_SOURCE_SYMBOLS = {
+    "Deserialize",
+    "Serialize",
+    "std::env",
+    "std::fs",
+    "std::net",
+    "std::process",
+}
+PUBLIC_OBSERVATION_FIELDS = {
+    "pub channel_binding:",
+    "pub channel_binding_sha256:",
+    "pub observed_host:",
+    "pub principal_claim:",
+    "pub principal_claim_sha256:",
+    "pub provenance_tier:",
+    "pub server_observed_corroboration:",
+}
 
 
 def dependency_package_names(
@@ -167,6 +184,44 @@ def check_isolation() -> int:
             "host has unexpected dev dependencies: "
             + ", ".join(sorted(unexpected_dev))
         )
+    host_source_root = CARGO_ROOT / "owner-control-host" / "src"
+    host_source = "\n".join(
+        path.read_text()
+        for path in sorted(host_source_root.rglob("*.rs"))
+        if path.name != "tests.rs" and not path.name.endswith("_tests.rs")
+    )
+    forbidden_host_symbols = sorted(
+        symbol for symbol in DENIED_HOST_SOURCE_SYMBOLS if symbol in host_source
+    )
+    if forbidden_host_symbols:
+        errors.append(
+            "host source contains denied observation capability symbols: "
+            + ", ".join(forbidden_host_symbols)
+        )
+    public_observation_fields = sorted(
+        field for field in PUBLIC_OBSERVATION_FIELDS if field in host_source
+    )
+    if public_observation_fields:
+        errors.append(
+            "host observed descriptors expose public construction fields: "
+            + ", ".join(public_observation_fields)
+        )
+    if (
+        (host_source_root / "main.rs").exists()
+        or (host_source_root / "bin").exists()
+        or host_manifest.get("bin")
+    ):
+        errors.append("host must not define a binary entry point")
+    host_package = host_manifest.get("package", {})
+    if (
+        (CARGO_ROOT / "owner-control-host" / "build.rs").exists()
+        or isinstance(host_package, dict)
+        and host_package.get("build") not in {None, False}
+    ):
+        errors.append("host must not define a build script")
+    host_library = host_manifest.get("lib", {})
+    if not isinstance(host_library, dict) or host_library.get("path") != "src/lib.rs":
+        errors.append("host library path must remain src/lib.rs")
 
     with IPC_MANIFEST.open("rb") as file:
         ipc_manifest = tomllib.load(file)

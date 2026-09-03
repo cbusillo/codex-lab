@@ -6,6 +6,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_owner_control_contract::ChallengeResponse;
 use codex_owner_control_contract::ChannelBindingRecord;
 use codex_owner_control_contract::OwnerControlConfirmationEnvelope;
+use codex_owner_control_contract::OwnerControlGestureSourceClaim;
+use codex_owner_control_contract::OwnerControlKeyCustodyClaim;
+use codex_owner_control_contract::OwnerControlPrincipalSeparationClaim;
+use codex_owner_control_contract::OwnerControlProvenanceTier;
+use codex_owner_control_contract::OwnerControlServerObservedCorroboration;
 use codex_owner_control_contract::channel_binding_sha256;
 use codex_owner_control_contract::load_embedded_artifact;
 use codex_owner_control_contract::signature_payload_bytes;
@@ -16,6 +21,89 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::*;
+
+#[test]
+fn current_host_observation_is_sealed_self_asserted_and_inert() {
+    let observed = ObservedOwnerControlHost::current(
+        "current-owner-control-host",
+        "current-owner-control-principal",
+    )
+    .unwrap();
+
+    assert_eq!(
+        observed.principal_claim().principal_separation,
+        OwnerControlPrincipalSeparationClaim::NotClaimed
+    );
+    assert_eq!(
+        observed.principal_claim().key_custody,
+        OwnerControlKeyCustodyClaim::NotClaimed
+    );
+    assert_eq!(
+        observed.principal_claim().gesture_source,
+        OwnerControlGestureSourceClaim::NotClaimed
+    );
+    assert_eq!(
+        observed.server_observed_corroboration(),
+        OwnerControlServerObservedCorroboration::None
+    );
+    assert_eq!(
+        observed.provenance_tier(),
+        OwnerControlProvenanceTier::SelfAsserted
+    );
+    assert_eq!(
+        observed.authority_state(),
+        OwnerControlAuthorityState::Inert
+    );
+    assert!(!observed.authorizes_execution());
+}
+
+#[test]
+fn enrollment_intent_binds_observation_to_exact_channel_without_authority() {
+    let (_, mut binding, _) = synthetic_challenge();
+    binding.owner_public_key =
+        URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(&[11; 32]).verifying_key().to_bytes());
+    let observed = ObservedOwnerControlHost::current(
+        "current-owner-control-host",
+        "current-owner-control-principal",
+    )
+    .unwrap();
+
+    let intent = observed.bind_channel(binding.clone()).unwrap();
+
+    assert_eq!(intent.channel_binding(), &binding);
+    assert_eq!(
+        intent.channel_binding_sha256(),
+        channel_binding_sha256(&binding).unwrap()
+    );
+    assert_eq!(intent.observed_host(), &observed);
+    assert_eq!(
+        intent.principal_claim_sha256(),
+        codex_owner_control_contract::owner_control_host_principal_claim_sha256(
+            observed.principal_claim()
+        )
+        .unwrap()
+    );
+    assert!(!intent.authorizes_execution());
+}
+
+#[test]
+fn enrollment_intent_rejects_published_conformance_keys() {
+    let binding = load_embedded_artifact()
+        .unwrap()
+        .confirmation_golden_vectors
+        .into_iter()
+        .next()
+        .unwrap()
+        .channel_binding
+        .payload;
+    let observed = ObservedOwnerControlHost::current(
+        "current-owner-control-host",
+        "current-owner-control-principal",
+    )
+    .unwrap();
+
+    assert!(observed.bind_channel(binding).is_err());
+}
 
 #[test]
 fn confirms_a_canonical_challenge_as_a_complete_golden_envelope() {
