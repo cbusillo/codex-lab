@@ -6,18 +6,20 @@ TUI, app-server, tools, MCP, Code Bridge, networking, helper processes, key
 custody, IPC, runtime authorization, or other runtime behavior.
 
 The vendored artifact at `contracts/owner-control-contract.json` is byte-for-byte
-from `cbusillo/launchplane` commit
-`9068747f4bedf56ebea82e361f6993f565e2599f`, merged into `main` by PR `#2273`
-as merge commit `036725dcdd8786d10fd5f1a07ac79e89cb156166`. Its SHA-256 is
-`e3e40e511f3246380291edd7bf3872847039c49c94121885e12fa6116a0b1fae`.
+from reviewed `cbusillo/launchplane` head
+`bb20d9ae6754c7c408ea275e9a135d39f2cb971d`, merged into `main` by PR `#2275`
+as merge commit `6e60897eebd6ee2ba2a3bc234e85de531c8298a0`. Its SHA-256 is
+`cf2815b65bafb7e25b00647dbdfd464577cb0a6e8a861ae3e1e019840865804e`.
 
 The public API exposes typed artifact loading, strict model validation, the
 artifact's canonical JSON serializer, SHA-256 helpers, and Ed25519 signature
-proof verification over published conformance envelopes. The v3 container also
+proof verification over published conformance envelopes. The v5 container also
 strictly parses Launchplane's synthetic shadow-verification and challenge
-lifecycle vectors, verifies their embedded wire payloads and proofs, pins every
-preserved v2 section digest, and requires all published outcomes to remain inert
-and non-authorizing.
+lifecycle vectors and enrollment-provenance evidence, verifies their embedded
+wire payloads and proofs, recomputes every preserved-v4 digest, and requires all
+published provenance combinations to remain `self_asserted`, inert, and
+non-authorizing. Caller claims for principal separation, key custody, or gesture
+source never raise trust without server-observed corroboration.
 
 Signature proof only shows that the key embedded in a structurally valid
 envelope signed its exact challenge response. It is never authorization:

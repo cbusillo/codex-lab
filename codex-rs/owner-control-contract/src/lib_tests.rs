@@ -266,7 +266,7 @@ fn deserialization_shape_errors_keep_their_locations() {
 }
 
 #[test]
-fn field_validation_order_matches_launchplane_models() {
+fn field_validation_order_matches_control_plane_models() {
     let artifact = load_embedded_artifact().unwrap();
     let vector = &artifact.golden_vectors[0];
 
@@ -290,12 +290,12 @@ fn field_validation_order_matches_launchplane_models() {
 }
 
 #[test]
-fn embedded_v3_artifact_is_exactly_pinned() {
+fn embedded_v5_artifact_is_exactly_pinned() {
     let artifact = load_embedded_artifact().expect("embedded artifact should load");
 
-    assert_eq!(artifact.schema_version, 3);
-    assert_eq!(artifact.compatibility.container_schema_version, 3);
-    assert_eq!(artifact.compatibility.previous_container_schema_version, 2);
+    assert_eq!(artifact.schema_version, 5);
+    assert_eq!(artifact.compatibility.container_schema_version, 5);
+    assert_eq!(artifact.compatibility.previous_container_schema_version, 4);
     assert_eq!(artifact.signature_declaration.contract_schema_version, 2);
     assert_eq!(
         format!("{:x}", Sha256::digest(EMBEDDED_CONTRACT_JSON.as_bytes())),
@@ -304,17 +304,14 @@ fn embedded_v3_artifact_is_exactly_pinned() {
 }
 
 #[test]
-fn compatibility_digests_recompute_from_the_published_v2_sections() {
+fn compatibility_digests_recompute_from_the_published_preserved_sections() {
     let artifact = load_embedded_artifact().expect("embedded artifact should load");
     let raw: serde_json::Value = serde_json::from_str(EMBEDDED_CONTRACT_JSON).unwrap();
     let expected_sections = [
         "canonical_json",
         "canonicalization_vectors",
-        "confirmation_golden_vectors",
-        "golden_vectors",
         "negative_confirmation_vectors",
         "negative_vectors",
-        "schemas",
         "signature_declaration",
     ];
 
@@ -334,6 +331,29 @@ fn compatibility_digests_recompute_from_the_published_v2_sections() {
             "{section}"
         );
     }
+    let expected_v4_sections = [
+        "canonical_json",
+        "canonicalization_vectors",
+        "challenge_lifecycle_vectors",
+        "compatibility",
+        "confirmation_golden_vectors",
+        "golden_vectors",
+        "negative_confirmation_vectors",
+        "negative_vectors",
+        "schema_version",
+        "schemas",
+        "signature_declaration",
+        "verification_state_vectors",
+    ];
+    assert_eq!(
+        artifact
+            .compatibility
+            .preserved_v4_section_sha256
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        expected_v4_sections.into_iter().collect::<BTreeSet<_>>()
+    );
 }
 
 #[test]
@@ -430,7 +450,7 @@ fn lifecycle_vector_pins_only_the_published_boundary_transition() {
 }
 
 #[test]
-fn v3_artifact_drift_and_unknown_fields_fail_closed() {
+fn v5_artifact_drift_and_unknown_fields_fail_closed() {
     let raw: serde_json::Value = serde_json::from_str(EMBEDDED_CONTRACT_JSON).unwrap();
 
     let mut unknown_root = raw.clone();
@@ -448,7 +468,7 @@ fn v3_artifact_drift_and_unknown_fields_fail_closed() {
     assert!(serde_json::from_value::<ContractArtifact>(normalized_optional_field).is_err());
 
     let mut wrong_version: ContractArtifact = serde_json::from_value(raw.clone()).unwrap();
-    wrong_version.schema_version = 4;
+    wrong_version.schema_version = 6;
     assert!(wrong_version.validate().is_err());
 
     let mut preserved_section_drift: ContractArtifact =
@@ -458,6 +478,34 @@ fn v3_artifact_drift_and_unknown_fields_fail_closed() {
         .get_mut("approval_request")
         .unwrap()["title"] = json!("drifted");
     assert!(preserved_section_drift.validate().is_err());
+
+    let mut coordinated_digest_drift: ContractArtifact =
+        serde_json::from_value(raw.clone()).unwrap();
+    coordinated_digest_drift.canonical_json.encoding = "utf-16".to_owned();
+    coordinated_digest_drift
+        .compatibility
+        .preserved_v2_section_sha256
+        .insert(
+            "canonical_json".to_owned(),
+            canonical_json_sha256(
+                &serde_json::to_value(&coordinated_digest_drift.canonical_json).unwrap(),
+            )
+            .unwrap(),
+        );
+    assert!(coordinated_digest_drift.validate().is_err());
+
+    let mut provenance_schema_drift: ContractArtifact =
+        serde_json::from_value(raw.clone()).unwrap();
+    provenance_schema_drift.provenance_schemas.insert(
+        "owner_control_host_principal_claim".to_owned(),
+        serde_json::Value::Null,
+    );
+    assert!(provenance_schema_drift.validate().is_err());
+
+    let mut mixed_negative_vector: ContractArtifact = serde_json::from_value(raw.clone()).unwrap();
+    mixed_negative_vector.negative_provenance_vectors[0].operation =
+        Some(NegativeProvenanceOperation::EnrollChannelSession);
+    assert!(mixed_negative_vector.validate().is_err());
 
     let mut authorizing_vector: ContractArtifact = serde_json::from_value(raw).unwrap();
     authorizing_vector.verification_state_vectors[0]

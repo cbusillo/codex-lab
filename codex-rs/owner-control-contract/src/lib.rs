@@ -3,6 +3,7 @@ mod canonical;
 mod confirmation;
 mod decode;
 mod model;
+mod provenance;
 
 pub use artifact::ArtifactError;
 pub use artifact::CanonicalJsonSpec;
@@ -19,6 +20,10 @@ pub use artifact::GoldenVector;
 pub use artifact::NegativeConfirmationModel;
 pub use artifact::NegativeConfirmationVector;
 pub use artifact::NegativeModel;
+pub use artifact::NegativeProvenanceModel;
+pub use artifact::NegativeProvenanceOperation;
+pub use artifact::NegativeProvenanceResult;
+pub use artifact::NegativeProvenanceVector;
 pub use artifact::NegativeVector;
 pub use artifact::OWNER_CONTROL_CONTRACT_SCHEMA_VERSION;
 pub use artifact::OwnerControlAuthorityState;
@@ -30,6 +35,8 @@ pub use artifact::OwnerControlRejectionReason;
 pub use artifact::OwnerControlTransitionReason;
 pub use artifact::OwnerControlVerificationStatus;
 pub use artifact::OwnerControlVerifierMode;
+pub use artifact::ProvenanceDeclaration;
+pub use artifact::ProvenanceVector;
 pub use artifact::SignatureDeclaration;
 pub use artifact::VerificationOutcome;
 pub use artifact::VerificationStateExpectation;
@@ -60,6 +67,20 @@ pub use model::ServerReviewPayload;
 pub use model::ValidationError;
 pub use model::approval_request_digest;
 pub use model::challenge_response_digest;
+pub use provenance::OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION;
+pub use provenance::OwnerControlEnrollmentContext;
+pub use provenance::OwnerControlEnrollmentProvenance;
+pub use provenance::OwnerControlGestureSourceClaim;
+pub use provenance::OwnerControlHostPrincipalClaim;
+pub use provenance::OwnerControlKeyCustodyClaim;
+pub use provenance::OwnerControlPrincipalSeparationClaim;
+pub use provenance::OwnerControlProvenanceResult;
+pub use provenance::OwnerControlProvenanceTier;
+pub use provenance::OwnerControlServerObservedCorroboration;
+pub use provenance::derive_owner_control_provenance_tier;
+pub use provenance::is_published_owner_control_synthetic_public_key;
+pub use provenance::owner_control_host_principal_claim_sha256;
+pub use provenance::owner_control_public_key_sha256;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]
@@ -68,3 +89,7 @@ mod tests;
 #[cfg(test)]
 #[path = "confirmation_tests.rs"]
 mod confirmation_tests;
+
+#[cfg(test)]
+#[path = "provenance_tests.rs"]
+mod provenance_tests;

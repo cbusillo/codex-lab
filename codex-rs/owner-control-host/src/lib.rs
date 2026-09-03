@@ -12,16 +12,135 @@ use codex_owner_control_contract::ChannelBindingRecord;
 use codex_owner_control_contract::Decision;
 use codex_owner_control_contract::OWNER_CONTROL_SCHEMA_VERSION;
 use codex_owner_control_contract::OWNER_CONTROL_SIGNATURE_ALGORITHM;
+use codex_owner_control_contract::OwnerControlAuthorityState;
 use codex_owner_control_contract::OwnerControlConfirmationEnvelope;
+use codex_owner_control_contract::OwnerControlGestureSourceClaim;
+use codex_owner_control_contract::OwnerControlHostPrincipalClaim;
+use codex_owner_control_contract::OwnerControlKeyCustodyClaim;
+use codex_owner_control_contract::OwnerControlPrincipalSeparationClaim;
+use codex_owner_control_contract::OwnerControlProvenanceTier;
+use codex_owner_control_contract::OwnerControlServerObservedCorroboration;
+use codex_owner_control_contract::ValidationError;
 use codex_owner_control_contract::approval_request_digest;
 use codex_owner_control_contract::canonical_json_sha256;
 use codex_owner_control_contract::channel_binding_sha256;
+use codex_owner_control_contract::derive_owner_control_provenance_tier;
+use codex_owner_control_contract::is_published_owner_control_synthetic_public_key;
+use codex_owner_control_contract::owner_control_host_principal_claim_sha256;
 use codex_owner_control_contract::signature_payload_bytes;
 use codex_owner_control_contract::verify_confirmation_signature_proof;
 use serde_json::Value;
 use time::OffsetDateTime;
 use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
+
+/// A sealed read-only view of capabilities this host can currently observe.
+///
+/// The current host has no separate security domain, no custody attestation,
+/// and no gesture source. Caller-declared identifiers are retained only for
+/// enrollment binding and never raise the derived trust tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedOwnerControlHost {
+    principal_claim: OwnerControlHostPrincipalClaim,
+    server_observed_corroboration: OwnerControlServerObservedCorroboration,
+    provenance_tier: OwnerControlProvenanceTier,
+}
+
+impl ObservedOwnerControlHost {
+    pub fn current(
+        host_instance_id: impl Into<String>,
+        principal_id: impl Into<String>,
+    ) -> Result<Self, ValidationError> {
+        let principal_claim = OwnerControlHostPrincipalClaim {
+            schema_version:
+                codex_owner_control_contract::OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION,
+            host_instance_id: host_instance_id.into(),
+            principal_id: principal_id.into(),
+            principal_separation: OwnerControlPrincipalSeparationClaim::NotClaimed,
+            key_custody: OwnerControlKeyCustodyClaim::NotClaimed,
+            gesture_source: OwnerControlGestureSourceClaim::NotClaimed,
+        };
+        principal_claim.validate()?;
+        let server_observed_corroboration = OwnerControlServerObservedCorroboration::None;
+        let provenance_tier = derive_owner_control_provenance_tier(server_observed_corroboration);
+        Ok(Self {
+            principal_claim,
+            server_observed_corroboration,
+            provenance_tier,
+        })
+    }
+
+    pub fn principal_claim(&self) -> &OwnerControlHostPrincipalClaim {
+        &self.principal_claim
+    }
+
+    pub fn server_observed_corroboration(&self) -> OwnerControlServerObservedCorroboration {
+        self.server_observed_corroboration
+    }
+
+    pub fn provenance_tier(&self) -> OwnerControlProvenanceTier {
+        self.provenance_tier
+    }
+
+    pub fn authority_state(&self) -> OwnerControlAuthorityState {
+        OwnerControlAuthorityState::Inert
+    }
+
+    pub fn authorizes_execution(&self) -> bool {
+        false
+    }
+
+    pub fn bind_channel(
+        &self,
+        channel_binding: ChannelBindingRecord,
+    ) -> Result<OwnerControlEnrollmentIntent, ValidationError> {
+        channel_binding.validate()?;
+        if is_published_owner_control_synthetic_public_key(&channel_binding.owner_public_key)? {
+            return Err(ValidationError::Rule {
+                rule: "published owner-control conformance keys cannot be enrolled",
+            });
+        }
+        Ok(OwnerControlEnrollmentIntent {
+            channel_binding_sha256: channel_binding_sha256(&channel_binding)?,
+            principal_claim_sha256: owner_control_host_principal_claim_sha256(
+                &self.principal_claim,
+            )?,
+            channel_binding,
+            observed_host: self.clone(),
+        })
+    }
+}
+
+/// An inert, data-only request to bind one observed host to one channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerControlEnrollmentIntent {
+    channel_binding: ChannelBindingRecord,
+    channel_binding_sha256: String,
+    observed_host: ObservedOwnerControlHost,
+    principal_claim_sha256: String,
+}
+
+impl OwnerControlEnrollmentIntent {
+    pub fn channel_binding(&self) -> &ChannelBindingRecord {
+        &self.channel_binding
+    }
+
+    pub fn channel_binding_sha256(&self) -> &str {
+        &self.channel_binding_sha256
+    }
+
+    pub fn observed_host(&self) -> &ObservedOwnerControlHost {
+        &self.observed_host
+    }
+
+    pub fn principal_claim_sha256(&self) -> &str {
+        &self.principal_claim_sha256
+    }
+
+    pub fn authorizes_execution(&self) -> bool {
+        false
+    }
+}
 
 /// Supplies the current instant without choosing a runtime or clock source.
 pub trait OwnerClock {

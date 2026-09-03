@@ -18,6 +18,12 @@ use crate::ChannelBindingRecord;
 use crate::DescriptorId;
 use crate::ErrorLocation;
 use crate::OwnerControlConfirmationEnvelope;
+use crate::OwnerControlEnrollmentContext;
+use crate::OwnerControlEnrollmentProvenance;
+use crate::OwnerControlHostPrincipalClaim;
+use crate::OwnerControlProvenanceResult;
+use crate::OwnerControlProvenanceTier;
+use crate::OwnerControlServerObservedCorroboration;
 use crate::OwnerControlSignaturePayload;
 use crate::ServerReviewPayload;
 use crate::approval_request_digest;
@@ -25,6 +31,8 @@ use crate::canonical_json_bytes;
 use crate::canonical_json_sha256;
 use crate::channel_binding_sha256;
 use crate::model::ValidationError;
+use crate::owner_control_host_principal_claim_sha256;
+use crate::provenance::is_published_synthetic_public_key_sha256;
 use crate::signature_payload;
 use crate::verify_confirmation_signature_proof;
 
@@ -45,9 +53,10 @@ pub use state_vectors::VerificationStateVector;
 
 pub const EMBEDDED_CONTRACT_JSON: &str = include_str!("../contracts/owner-control-contract.json");
 pub const EMBEDDED_CONTRACT_SHA256: &str =
-    "e3e40e511f3246380291edd7bf3872847039c49c94121885e12fa6116a0b1fae";
-pub const OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 3;
-const PREVIOUS_OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 2;
+    "cf2815b65bafb7e25b00647dbdfd464577cb0a6e8a861ae3e1e019840865804e";
+pub const OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 5;
+const PREVIOUS_OWNER_CONTROL_CONTRACT_SCHEMA_VERSION: u8 = 4;
+const PRESERVED_V2_SIGNATURE_CONTRACT_SCHEMA_VERSION: u8 = 2;
 const OWNER_CONTROL_STATE_SCHEMA_VERSION: u8 = 1;
 const OWNER_CONTROL_MAX_ATTEMPTS: u8 = 8;
 
@@ -182,6 +191,102 @@ pub struct NegativeConfirmationVector {
     pub verification: Option<VerificationOutcome>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceDeclaration {
+    pub authority_state: OwnerControlAuthorityState,
+    pub authorizes_execution: bool,
+    pub claim_source: String,
+    pub enrollment_context: OwnerControlEnrollmentContext,
+    pub provenance_schema_version: u8,
+    pub provenance_tier: OwnerControlProvenanceTier,
+    pub runtime_synthetic_key_policy: String,
+    pub server_observed_corroboration: OwnerControlServerObservedCorroboration,
+    pub trust_derivation: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProvenanceVector {
+    pub claim: GoldenPayload<OwnerControlHostPrincipalClaim>,
+    pub enrollment_provenance: GoldenPayload<OwnerControlEnrollmentProvenance>,
+    pub result: OwnerControlProvenanceResult,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NegativeProvenanceModel {
+    OwnerControlEnrollmentProvenance,
+    OwnerControlHostPrincipalClaim,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NegativeProvenanceOperation {
+    EnrollChannelSession,
+    IssueChallenge,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NegativeProvenanceResult {
+    Reject,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NegativeProvenanceVector {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_session_id: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub error_location: Option<Vec<ErrorLocation>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model: Option<NegativeProvenanceModel>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub operation: Option<NegativeProvenanceOperation>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub owner_public_key_sha256: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload: Option<Value>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result: Option<NegativeProvenanceResult>,
+    pub rule: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub runtime_guard_matches: Option<bool>,
+}
+
 fn deserialize_optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -202,7 +307,11 @@ pub struct ContractArtifact {
     pub confirmation_golden_vectors: Vec<ConfirmationGoldenVector>,
     pub golden_vectors: Vec<GoldenVector>,
     pub negative_confirmation_vectors: Vec<NegativeConfirmationVector>,
+    pub negative_provenance_vectors: Vec<NegativeProvenanceVector>,
     pub negative_vectors: Vec<NegativeVector>,
+    pub provenance_declaration: ProvenanceDeclaration,
+    pub provenance_schemas: BTreeMap<String, Value>,
+    pub provenance_vectors: Vec<ProvenanceVector>,
     pub schema_version: u8,
     pub schemas: BTreeMap<String, Value>,
     pub signature_declaration: SignatureDeclaration,
@@ -213,7 +322,7 @@ impl ContractArtifact {
     pub fn validate(&self) -> Result<(), ArtifactError> {
         if self.schema_version != OWNER_CONTROL_CONTRACT_SCHEMA_VERSION {
             return Err(ArtifactError::Invalid(
-                "contract schema_version must be exactly 3".to_owned(),
+                "contract schema_version must be exactly 5".to_owned(),
             ));
         }
         self.compatibility.validate(self)?;
@@ -264,6 +373,9 @@ impl ContractArtifact {
         for vector in &self.negative_confirmation_vectors {
             validate_negative_confirmation_vector(vector)?;
         }
+        self.provenance_declaration.validate()?;
+        validate_provenance_vectors(&self.provenance_vectors)?;
+        validate_negative_provenance_vectors(&self.negative_provenance_vectors)?;
         let expected_schemas = [
             "approval_request",
             "challenge_response",
@@ -277,16 +389,247 @@ impl ContractArtifact {
                 "schemas must contain the six published model schemas".to_owned(),
             ));
         }
+        let expected_provenance_schemas = [
+            "owner_control_enrollment_provenance",
+            "owner_control_host_principal_claim",
+        ];
+        if self
+            .provenance_schemas
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            != expected_provenance_schemas
+        {
+            return Err(ArtifactError::Invalid(
+                "provenance_schemas must contain the two published provenance models".to_owned(),
+            ));
+        }
+        let expected_provenance_schema_sha256 = [
+            (
+                "owner_control_enrollment_provenance",
+                "b52b43f6b17c750543d238ffc0399a4892ada0d6a6f2b611973b2c8577268033",
+            ),
+            (
+                "owner_control_host_principal_claim",
+                "f384cb1095888940d1196a105a78f889ab7e38496d77c4ec9489a7d07cce1327",
+            ),
+        ];
+        for (schema, expected_sha256) in expected_provenance_schema_sha256 {
+            let actual_sha256 = canonical_json_sha256(&self.provenance_schemas[schema])?;
+            if actual_sha256 != expected_sha256 {
+                return Err(ArtifactError::Invalid(format!(
+                    "published provenance schema {schema} has SHA-256 {actual_sha256}, expected {expected_sha256}"
+                )));
+            }
+        }
         state_vectors::validate_verification_state_vectors(&self.verification_state_vectors)?;
         state_vectors::validate_challenge_lifecycle_vectors(&self.challenge_lifecycle_vectors)?;
         Ok(())
     }
 }
 
+impl ProvenanceDeclaration {
+    fn validate(&self) -> Result<(), ArtifactError> {
+        if self.authority_state != OwnerControlAuthorityState::Inert
+            || self.authorizes_execution
+            || self.claim_source != "caller-declared"
+            || self.enrollment_context != OwnerControlEnrollmentContext::PostgresRecordStore
+            || self.provenance_schema_version != 1
+            || self.provenance_tier != OwnerControlProvenanceTier::SelfAsserted
+            || self.runtime_synthetic_key_policy != "reject-published-conformance-keys"
+            || self.server_observed_corroboration != OwnerControlServerObservedCorroboration::None
+            || self.trust_derivation != "corroboration-only"
+        {
+            return Err(ArtifactError::Invalid(
+                "provenance_declaration does not match the inert v5 contract".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_provenance_vectors(vectors: &[ProvenanceVector]) -> Result<(), ArtifactError> {
+    use crate::OwnerControlGestureSourceClaim;
+    use crate::OwnerControlKeyCustodyClaim;
+    use crate::OwnerControlPrincipalSeparationClaim;
+
+    if vectors.len() != 18 {
+        return Err(ArtifactError::Invalid(
+            "provenance_vectors must contain all eighteen claim combinations".to_owned(),
+        ));
+    }
+    let mut combinations = std::collections::BTreeSet::new();
+    for vector in vectors {
+        vector.claim.payload.validate()?;
+        vector.enrollment_provenance.payload.validate()?;
+        validate_golden_payload(&vector.claim)?;
+        validate_golden_payload(&vector.enrollment_provenance)?;
+        if vector
+            .enrollment_provenance
+            .payload
+            .host_principal_claim()?
+            != vector.claim.payload
+        {
+            return Err(ArtifactError::Invalid(
+                "provenance vector enrollment does not bind its exact claim".to_owned(),
+            ));
+        }
+        if vector
+            .enrollment_provenance
+            .payload
+            .host_principal_claim_sha256
+            != owner_control_host_principal_claim_sha256(&vector.claim.payload)?
+        {
+            return Err(ArtifactError::Invalid(
+                "provenance vector claim digest does not match its claim".to_owned(),
+            ));
+        }
+        let expected = OwnerControlProvenanceResult {
+            authority_state: OwnerControlAuthorityState::Inert,
+            authorizes_execution: false,
+            provenance_tier: OwnerControlProvenanceTier::SelfAsserted,
+            server_observed_corroboration: OwnerControlServerObservedCorroboration::None,
+        };
+        if vector.result != expected {
+            return Err(ArtifactError::Invalid(
+                "provenance vector result must remain self-asserted and inert".to_owned(),
+            ));
+        }
+        combinations.insert((
+            vector.claim.payload.principal_separation,
+            vector.claim.payload.key_custody,
+            vector.claim.payload.gesture_source,
+        ));
+    }
+    let expected_combinations = [
+        OwnerControlPrincipalSeparationClaim::NotClaimed,
+        OwnerControlPrincipalSeparationClaim::SharedRuntime,
+        OwnerControlPrincipalSeparationClaim::SeparateOsPrincipal,
+    ]
+    .into_iter()
+    .flat_map(|principal_separation| {
+        [
+            OwnerControlKeyCustodyClaim::NotClaimed,
+            OwnerControlKeyCustodyClaim::SoftwareBacked,
+            OwnerControlKeyCustodyClaim::HardwareBacked,
+        ]
+        .into_iter()
+        .flat_map(move |key_custody| {
+            [
+                OwnerControlGestureSourceClaim::NotClaimed,
+                OwnerControlGestureSourceClaim::LocalInteractive,
+            ]
+            .into_iter()
+            .map(move |gesture_source| (principal_separation, key_custody, gesture_source))
+        })
+    })
+    .collect::<std::collections::BTreeSet<_>>();
+    if combinations != expected_combinations {
+        return Err(ArtifactError::Invalid(
+            "provenance_vectors are not exhaustive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_negative_provenance_vectors(
+    vectors: &[NegativeProvenanceVector],
+) -> Result<(), ArtifactError> {
+    if vectors.len() != 8 {
+        return Err(ArtifactError::Invalid(
+            "negative_provenance_vectors must contain eight published cases".to_owned(),
+        ));
+    }
+    let mut structural_count = 0;
+    let mut missing_provenance_count = 0;
+    let mut synthetic_key_digests = std::collections::BTreeSet::new();
+    for vector in vectors {
+        if let (Some(model), Some(payload), Some(error_location)) =
+            (vector.model, &vector.payload, &vector.error_location)
+        {
+            if vector.channel_session_id.is_some()
+                || vector.operation.is_some()
+                || vector.owner_public_key_sha256.is_some()
+                || vector.result.is_some()
+                || vector.runtime_guard_matches.is_some()
+            {
+                return Err(ArtifactError::Invalid(format!(
+                    "negative provenance vector {} mixes structural and runtime fields",
+                    vector.rule
+                )));
+            }
+            structural_count += 1;
+            let result = match model {
+                NegativeProvenanceModel::OwnerControlEnrollmentProvenance => {
+                    OwnerControlEnrollmentProvenance::from_value(payload.clone()).map(|_| ())
+                }
+                NegativeProvenanceModel::OwnerControlHostPrincipalClaim => {
+                    OwnerControlHostPrincipalClaim::from_value(payload.clone()).map(|_| ())
+                }
+            };
+            match result {
+                Ok(()) => {
+                    return Err(ArtifactError::Invalid(format!(
+                        "negative provenance vector {} was accepted",
+                        vector.rule
+                    )));
+                }
+                Err(error) if error.location() == *error_location => {}
+                Err(error) => {
+                    return Err(ArtifactError::Invalid(format!(
+                        "negative provenance vector {} failed at {:?}, expected {:?}",
+                        vector.rule,
+                        error.location(),
+                        error_location
+                    )));
+                }
+            }
+            continue;
+        }
+        if vector.operation == Some(NegativeProvenanceOperation::IssueChallenge)
+            && vector.result == Some(NegativeProvenanceResult::Reject)
+            && vector.rule == "missing-enrollment-provenance-is-rejected"
+            && vector.channel_session_id.is_some()
+            && vector.model.is_none()
+            && vector.payload.is_none()
+            && vector.error_location.is_none()
+            && vector.owner_public_key_sha256.is_none()
+            && vector.runtime_guard_matches.is_none()
+        {
+            missing_provenance_count += 1;
+            continue;
+        }
+        if let Some(owner_public_key_sha256) = vector.owner_public_key_sha256.as_deref()
+            && vector.operation == Some(NegativeProvenanceOperation::EnrollChannelSession)
+            && vector.result == Some(NegativeProvenanceResult::Reject)
+            && vector.rule == "published-synthetic-conformance-key-is-rejected"
+            && vector.runtime_guard_matches == Some(true)
+            && vector.channel_session_id.is_none()
+            && vector.error_location.is_none()
+            && vector.model.is_none()
+            && vector.payload.is_none()
+            && is_published_synthetic_public_key_sha256(owner_public_key_sha256)
+        {
+            synthetic_key_digests.insert(owner_public_key_sha256);
+            continue;
+        }
+        return Err(ArtifactError::Invalid(format!(
+            "negative provenance vector {} has an unsupported shape",
+            vector.rule
+        )));
+    }
+    if structural_count != 4 || missing_provenance_count != 1 || synthetic_key_digests.len() != 3 {
+        return Err(ArtifactError::Invalid(
+            "negative_provenance_vectors do not cover the published guards".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl SignatureDeclaration {
     fn validate(&self) -> Result<(), ArtifactError> {
         if self.algorithm != "ed25519"
-            || self.contract_schema_version != PREVIOUS_OWNER_CONTROL_CONTRACT_SCHEMA_VERSION
+            || self.contract_schema_version != PRESERVED_V2_SIGNATURE_CONTRACT_SCHEMA_VERSION
             || self.domain != "launchplane-owner-control-confirmation-v1"
             || self.legacy_golden_channel_binding
                 != "synthetic-placeholder-not-channel-binding-record"
