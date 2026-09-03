@@ -16,11 +16,14 @@ from codex_lab_package.installer import DEFAULT_STATE_PATH
 from codex_lab_package.installer import CodexLabInstallStateError
 from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabUpdateError
+from codex_lab_package.installer import activate_code_route
 from codex_lab_package.installer import check_for_update
+from codex_lab_package.installer import deactivate_code_route
 from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import read_install_state
+from codex_lab_package.installer import require_recorded_code_route
 from codex_lab_package.installer import update_from_latest_release
 from codex_lab_package.installer import uninstall_codex_lab
 
@@ -59,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         "--uninstall",
         action="store_true",
         help="Remove the recorded Codex Lab install and restore a prior managed engine.",
+    )
+    source.add_argument(
+        "--activate-code",
+        action="store_true",
+        help="Explicitly route ~/.local/bin/code to the verified managed Codex Lab engine.",
+    )
+    source.add_argument(
+        "--deactivate-code",
+        action="store_true",
+        help="Restore the route captured by --activate-code.",
     )
     parser.add_argument(
         "--repository",
@@ -101,8 +114,11 @@ def main() -> int:
     if args.status:
         try:
             status = read_install_state(args.state_path)
+            require_recorded_code_route(status)
         except CodexLabInstallStateError as exc:
             return print_install_state_error(exc)
+        except ValueError as exc:
+            return print_command_error("Code route is invalid", exc)
         print(f"Codex Lab {status.version} from {status.release_tag}")
         print(f"Bundle version: {status.bundle_version}")
         if status.source_commit:
@@ -112,6 +128,13 @@ def main() -> int:
             print(f"Shim: {status.shim_path}")
         else:
             print("Shim: not installed")
+        if status.code_route is None:
+            print("Code route: inactive")
+        else:
+            print(f"Code route: active at {status.code_route.active_path}")
+            print(f"Code route engine: {status.code_route.engine.path}")
+            print(f"Code route release: {status.code_route.engine.release_tag}")
+            print(f"Code route prior: {status.code_route.prior.kind}")
         if status.engine_path is not None:
             print(f"Engine: {status.engine_path}")
         if status.supervisor_label is not None:
@@ -121,20 +144,55 @@ def main() -> int:
 
     if args.uninstall:
         try:
-            result = uninstall_codex_lab(state_path=args.state_path)
+            uninstall_result = uninstall_codex_lab(state_path=args.state_path)
         except CodexLabInstallStateError as exc:
             return print_install_state_error(exc)
         except (CodexLabRollbackError, OSError, ValueError) as exc:
             return print_command_error("Could not uninstall Codex Lab", exc)
         print("Uninstalled Codex Lab")
-        print(f"App: {result.app_path}")
-        if result.shim_path is not None:
-            print(f"Shim: {result.shim_path}")
-        if result.engine_path is not None:
-            print(f"Engine: {result.engine_path}")
-        if result.restored_engine_path is not None:
-            print(f"Restored prior engine: {result.restored_engine_path}")
-        print(f"State: {result.state_path}")
+        print(f"App: {uninstall_result.app_path}")
+        if uninstall_result.shim_path is not None:
+            print(f"Shim: {uninstall_result.shim_path}")
+        if uninstall_result.engine_path is not None:
+            print(f"Engine: {uninstall_result.engine_path}")
+        if uninstall_result.restored_engine_path is not None:
+            print(f"Restored prior engine: {uninstall_result.restored_engine_path}")
+        if uninstall_result.restored_code_route_path is not None:
+            print(
+                "Restored prior code route: "
+                f"{uninstall_result.restored_code_route_path}"
+            )
+        print(f"State: {uninstall_result.state_path}")
+        return 0
+
+    if args.activate_code:
+        try:
+            route_result = activate_code_route(state_path=args.state_path)
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
+        except (OSError, ValueError) as exc:
+            return print_command_error("Could not activate the code route", exc)
+        if route_result.changed:
+            print(f"Activated code route: {route_result.active_path}")
+        else:
+            print(f"Code route is already active: {route_result.active_path}")
+        print(f"State: {route_result.state_path}")
+        return 0
+
+    if args.deactivate_code:
+        try:
+            route_result = deactivate_code_route(state_path=args.state_path)
+        except CodexLabInstallStateError as exc:
+            return print_install_state_error(exc)
+        except (OSError, ValueError) as exc:
+            return print_command_error("Could not deactivate the code route", exc)
+        if not route_result.changed:
+            print("Code route is already inactive")
+        elif route_result.restored_prior:
+            print(f"Restored prior code route: {route_result.active_path}")
+        else:
+            print(f"Removed code route: {route_result.active_path}")
+        print(f"State: {route_result.state_path}")
         return 0
 
     if args.check:
