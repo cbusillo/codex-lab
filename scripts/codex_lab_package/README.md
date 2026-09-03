@@ -89,6 +89,22 @@ transaction. No manual canary provisioning is required for a supported release.
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:
 
+The primary `code` route is activated and restored only through explicit
+operator actions:
+
+```shell
+CODEX_REPO_ROOT="$PWD" uv run scripts/install_codex_lab.py --activate-code
+CODEX_REPO_ROOT="$PWD" uv run scripts/install_codex_lab.py --deactivate-code
+```
+
+Activation atomically preserves the existing `~/.local/bin/code` route and
+installs a launcher pinned to the installed managed engine's digest, Developer
+ID identity, source commit, release identity, and clean provenance. It performs
+no source build or discovery fallback, uses `~/.codex-lab`, and never modifies
+`~/.code`. Normal install and update do not silently activate the route.
+Deactivation and uninstall restore the exact captured symlink, regular file, or
+absent state and fail closed if the active launcher or preserved route changed.
+
 ```shell
 scripts/install_codex_lab.py \
   --latest \

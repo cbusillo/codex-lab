@@ -657,6 +657,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 "Source commit: abc123\n"
                 f"App: {result.app_dir}\n"
                 f"Shim: {result.shim_path}\n"
+                "Code route: inactive\n"
                 f"Engine: {result.engine_path}\n"
                 f"Supervisor: {result.supervisor_label}\n"
                 f"State: {result.state_path}\n",
