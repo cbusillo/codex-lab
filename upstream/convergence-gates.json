@@ -180,6 +180,12 @@
         },
         {
           "kind": "symbol",
+          "path": "codex-rs/core/tests/suite/code_mode.rs",
+          "token": "async fn code_mode_only_keeps_multi_agent_tools_model_visible()",
+          "ciTier": "nightly"
+        },
+        {
+          "kind": "symbol",
           "path": "codex-rs/core/src/tools/spec_plan.rs",
           "token": "spawn_tool_spec::build_for_config_with_external_selectors(",
           "ciTier": "blocking"
@@ -192,7 +198,7 @@
         },
         {
           "kind": "semantic_reachability",
-          "description": "First #664 production-edge proof for app-server extension composition and native external-agent routing.",
+          "description": "First #664 production-edge proof for app-server extension composition, direct model exposure, and native external-agent routing.",
           "baseline": {
             "derivedFrom": "upstream/convergence-reachability-baseline.json",
             "issue": 664,
@@ -254,6 +260,20 @@
               "root": "codex-rs/core/src/lib.rs",
               "path": "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs",
               "token": ""
+            },
+            {
+              "id": "core-multi-agent-v2-direct-model-exposure",
+              "kind": "token",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/tools/spec_plan.rs",
+              "token": "let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {\n                ToolExposure::DirectModelOnly"
+            },
+            {
+              "id": "core-multi-agent-v2-bounded-agent-type-description",
+              "kind": "token",
+              "root": "codex-rs/core/src/lib.rs",
+              "path": "codex-rs/core/src/tools/spec_plan.rs",
+              "token": "bounded_agent_type_description(agent_type_description)"
             },
             {
               "id": "core-native-external-routing-callsite",

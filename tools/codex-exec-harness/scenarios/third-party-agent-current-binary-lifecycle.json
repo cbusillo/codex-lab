@@ -18,9 +18,9 @@
         "events": [
           {
             "item": {
-              "type": "function_call",
-              "name": "shell_command",
-              "arguments": "{\"command\":\"sh generate-context.sh\"}",
+              "type": "custom_tool_call",
+              "name": "exec",
+              "input": "const result = await tools.exec_command({cmd: \"sh generate-context.sh\"});\ntext(result.output);",
               "call_id": "call-third-party-agent-generate-context"
             }
           }
@@ -112,8 +112,17 @@
     "responses": [
       {
         "request": 0,
-        "scope": "input",
-        "contains_all": ["fixture_external", "spawn_agent"]
+        "scope": "input_tools",
+        "contains_all": [
+          "fixture_external",
+          "agents",
+          "spawn_agent",
+          "send_message",
+          "followup_task",
+          "wait_agent",
+          "interrupt_agent",
+          "list_agents"
+        ]
       },
       {
         "request": 3,
