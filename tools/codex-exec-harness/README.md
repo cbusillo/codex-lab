@@ -141,6 +141,8 @@ Scenarios are JSON files. Supported fields:
     characterization scenario green
   - `responses[].absent_keys` asserts top-level keys are absent from the
     selected response-request scope
+  - `responses[].scope = "input_tools"` restricts assertions to structured tool
+    declarations nested in Responses Lite developer input items
 - `timeout_seconds`: per-run timeout, defaulting to 90 seconds
 
 The fake Responses API is for request-shape proof only. Use direct scenario runs
@@ -174,10 +176,12 @@ passing rerun.
 
 `third-party-agent-current-binary-lifecycle.json` provides the deterministic
 current-binary gate for issue #312 and the file-backed handoff proof for #83.
-It configures a fixture external-command agent, then proves native spawn,
-bounded parent-visible completion output, full first/last-marker recovery from
-a large workspace context file, terminal status listing, and V2 interrupt
-cleanup without using a paid provider or inherited credentials.
+It configures a fixture external-command agent, verifies that code-mode-only
+requests keep the `agents` namespace and all six V2 lifecycle tools visible to
+the model, then proves native spawn, bounded parent-visible completion output,
+full first/last-marker recovery from a large workspace context file, terminal
+status listing, and V2 interrupt cleanup without using a paid provider or
+inherited credentials.
 
 `provider-routing-high-risk-external.json` proves issue #370's significance-aware
 automatic routing with a deterministic external-command fixture.
