@@ -174,6 +174,8 @@ provenance_field() {{
 [ "$(provenance_field build_channel)" = "$EXPECTED_BUILD_CHANNEL" ] \
   || fail "managed engine build channel does not match the activated route"
 
+"$RM" -f "$PROVENANCE_FILE"
+trap - EXIT HUP INT TERM
 exec "$ENV" CODEX_HOME="$LAB_HOME" CODEX_LAB_HOME="$LAB_HOME" "$ENGINE" "$@"
 """
 
@@ -215,7 +217,7 @@ def deactivate_code_route(
 def recover_code_route_transaction(
     state_path: Path,
     *,
-    active_path: Path = DEFAULT_CODE_ROUTE_PATH,
+    active_path: Path | None = None,
     lock_held: bool = False,
 ) -> None:
     from .code_route_transaction import (
@@ -234,13 +236,7 @@ def require_active_code_route(
     *,
     expected_path: Path,
 ) -> None:
-    expected_path = absolute_path(expected_path)
-    if route.active_path != expected_path:
-        raise ValueError(
-            "Recorded active code route path does not match the requested route: "
-            f"{route.active_path} != {expected_path}"
-        )
-    require_safe_parent(route.active_path.parent)
+    require_code_route_metadata(route, expected_path=expected_path)
     mode = lstat_mode(route.active_path, "active code route")
     if not stat.S_ISREG(mode) or route.active_path.is_symlink():
         raise ValueError(
@@ -249,6 +245,21 @@ def require_active_code_route(
     if sha256_file(route.active_path) != route.launcher_sha256:
         raise ValueError("Recorded active code route launcher has changed")
     require_prior_route(route.prior, route.active_path)
+
+
+def require_code_route_metadata(
+    route: CodeRouteState,
+    *,
+    expected_path: Path,
+) -> None:
+    expected_path = absolute_path(expected_path)
+    if route.active_path != expected_path:
+        raise ValueError(
+            "Recorded active code route path does not match the requested route: "
+            f"{route.active_path} != {expected_path}"
+        )
+    require_safe_parent(route.active_path.parent)
+    require_prior_route_metadata(route.prior, route.active_path)
 
 
 def capture_prior_metadata(
@@ -281,6 +292,29 @@ def capture_prior_metadata(
 
 
 def require_prior_route(prior: PriorCodeRoute, active_path: Path) -> None:
+    require_prior_route_metadata(prior, active_path)
+    if prior.kind == "absent":
+        return
+    backup_path = prior.backup_path
+    assert backup_path is not None
+    mode = lstat_mode(backup_path, "prior code route backup")
+    if prior.kind == "symlink":
+        if not stat.S_ISLNK(mode) or os.readlink(backup_path) != prior.symlink_target:
+            raise ValueError("Recorded prior code route symlink has changed")
+        return
+    if prior.kind == "regular":
+        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+            raise ValueError("Recorded prior code route backup is not a regular file")
+        if stat.S_IMODE(mode) != prior.mode or sha256_file(backup_path) != prior.sha256:
+            raise ValueError("Recorded prior code route file has changed")
+        return
+    raise ValueError(f"Recorded prior code route kind is unsupported: {prior.kind}")
+
+
+def require_prior_route_metadata(
+    prior: PriorCodeRoute,
+    active_path: Path,
+) -> None:
     if prior.kind == "absent":
         if any(
             value is not None
@@ -300,16 +334,21 @@ def require_prior_route(prior: PriorCodeRoute, active_path: Path) -> None:
         PRIOR_BACKUP_PREFIX
     ):
         raise ValueError("Recorded prior code route backup path is unsafe")
-    mode = lstat_mode(backup_path, "prior code route backup")
     if prior.kind == "symlink":
-        if not stat.S_ISLNK(mode) or os.readlink(backup_path) != prior.symlink_target:
-            raise ValueError("Recorded prior code route symlink has changed")
+        if (
+            prior.symlink_target is None
+            or prior.mode is not None
+            or prior.sha256 is not None
+        ):
+            raise ValueError("Recorded prior code route symlink metadata is malformed")
         return
     if prior.kind == "regular":
-        if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-            raise ValueError("Recorded prior code route backup is not a regular file")
-        if stat.S_IMODE(mode) != prior.mode or sha256_file(backup_path) != prior.sha256:
-            raise ValueError("Recorded prior code route file has changed")
+        if (
+            prior.mode is None
+            or prior.sha256 is None
+            or prior.symlink_target is not None
+        ):
+            raise ValueError("Recorded prior code route file metadata is malformed")
         return
     raise ValueError(f"Recorded prior code route kind is unsupported: {prior.kind}")
 

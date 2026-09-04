@@ -1170,13 +1170,13 @@ def recover_install_transaction(
         current_sha256 = install_transaction.state_sha256(state_path)
         rolled_back = False
         if journal["operation"] == "install":
-            if current_sha256 == journal["stateAfterSha256"]:
+            if current_sha256 == journal["stateBeforeSha256"]:
+                rollback_install_transaction(journal)
+                rolled_back = True
+            elif current_sha256 == journal["stateAfterSha256"]:
                 cleanup_install_transaction(journal)
             elif current_sha256 == journal["pendingStateSha256"]:
                 cleanup_install_transaction(journal)
-            elif current_sha256 == journal["stateBeforeSha256"]:
-                rollback_install_transaction(journal)
-                rolled_back = True
             else:
                 raise install_transaction.InstallTransactionRecoveryError(
                     "Codex Lab installer transaction state is ambiguous; journal was preserved"
@@ -1185,12 +1185,12 @@ def recover_install_transaction(
             if current_sha256 is None:
                 complete_uninstall_transaction(journal)
                 cleanup_uninstall_transaction(journal)
-            elif current_sha256 == journal.get("stateUnreconciledSha256"):
-                pass
             elif current_sha256 == journal["stateBeforeSha256"]:
                 rollback_install_transaction(journal)
                 set_supervisor_reconciled(state_path, False)
                 rolled_back = True
+            elif current_sha256 == journal.get("stateUnreconciledSha256"):
+                pass
             else:
                 raise install_transaction.InstallTransactionRecoveryError(
                     "Codex Lab uninstall transaction state is ambiguous; journal was preserved"
@@ -1526,8 +1526,6 @@ def deactivate_code_route(
     state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         status = read_install_state(state_path, lock_held=True)
-        if status.code_route is not None:
-            require_active_code_route(status.code_route, expected_path=code_route_path)
         return deactivate_installed_code_route(
             status.state_path,
             active_path=code_route_path,
@@ -1697,10 +1695,6 @@ def _uninstall_codex_lab_locked(
     engine_operations = engine_operations or DEFAULT_ENGINE_OPERATIONS
     status = read_install_state(state_path, lock_held=True)
     if status.code_route is not None:
-        require_active_code_route(
-            status.code_route,
-            expected_path=status.code_route.active_path,
-        )
         raise ValueError(
             "Deactivate the explicit code route before uninstalling Codex Lab"
         )
@@ -2351,8 +2345,15 @@ def transaction_target(
     preserve_backup: bool,
 ) -> dict:
     target = resolve_destination(target)
+    cleanup_boundary = target.parent
+    while (
+        not path_exists(cleanup_boundary)
+        and cleanup_boundary != cleanup_boundary.parent
+    ):
+        cleanup_boundary = cleanup_boundary.parent
     return {
         "backupPath": str(install_transaction.backup_path_for(target, transaction_id)),
+        "cleanupBoundary": str(cleanup_boundary),
         "parentWasPresent": path_exists(target.parent),
         "preserveBackup": preserve_backup,
         "stagedPath": str(install_transaction.staged_path_for(target, transaction_id)),
@@ -2474,11 +2475,23 @@ def cleanup_empty_transaction_parents(journal: dict) -> None:
         reverse=True,
     )
     for parent in new_parent_paths:
-        remove_empty_transaction_parents(parent)
+        target = next(
+            target
+            for target in journal["targets"]
+            if Path(target["targetPath"]).parent == parent
+            and not target["parentWasPresent"]
+        )
+        cleanup_boundary = target.get("cleanupBoundary")
+        if cleanup_boundary is None:
+            continue
+        remove_empty_transaction_parents(
+            parent,
+            boundary=Path(cleanup_boundary),
+        )
 
 
-def remove_empty_transaction_parents(parent: Path) -> None:
-    while parent != parent.parent:
+def remove_empty_transaction_parents(parent: Path, *, boundary: Path) -> None:
+    while parent != boundary:
         try:
             parent.rmdir()
         except OSError:

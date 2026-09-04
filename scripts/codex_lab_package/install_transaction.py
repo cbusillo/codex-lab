@@ -110,7 +110,8 @@ def validate_journal(value: object, state_path: Path) -> None:
         raise InstallTransactionRecoveryError(
             "Codex Lab installer transaction belongs to a different state path"
         )
-    if value.get("operation") not in {"install", "uninstall"}:
+    operation = value.get("operation")
+    if operation not in {"install", "uninstall"}:
         raise InstallTransactionRecoveryError(
             "Codex Lab installer transaction operation is unsupported"
         )
@@ -129,6 +130,23 @@ def validate_journal(value: object, state_path: Path) -> None:
             raise InstallTransactionRecoveryError(
                 f"Codex Lab installer transaction field {field} is malformed"
             )
+    if operation == "install" and (
+        value.get("pendingStateSha256") is None
+        or value.get("stateAfterSha256") is None
+        or value.get("stateUnreconciledSha256") is not None
+    ):
+        raise InstallTransactionRecoveryError(
+            "Codex Lab install transaction state identities are malformed"
+        )
+    if operation == "uninstall" and (
+        value.get("stateBeforeSha256") is None
+        or value.get("stateUnreconciledSha256") is None
+        or value.get("pendingStateSha256") is not None
+        or value.get("stateAfterSha256") is not None
+    ):
+        raise InstallTransactionRecoveryError(
+            "Codex Lab uninstall transaction state identities are malformed"
+        )
     targets = value.get("targets")
     if not isinstance(targets, list) or not targets:
         raise InstallTransactionRecoveryError(
@@ -180,7 +198,30 @@ def validate_journal(value: object, state_path: Path) -> None:
             raise InstallTransactionRecoveryError(
                 "Codex Lab installer transaction retained backup path is unsafe"
             )
-    if value.get("operation") == "uninstall":
+        cleanup_boundary = target_value.get("cleanupBoundary")
+        if cleanup_boundary is None:
+            continue
+        if (
+            not isinstance(cleanup_boundary, str)
+            or not Path(cleanup_boundary).is_absolute()
+        ):
+            raise InstallTransactionRecoveryError(
+                "Codex Lab installer transaction cleanup boundary is malformed"
+            )
+        target_parent = Path(target_value["targetPath"]).parent
+        boundary_path = Path(cleanup_boundary)
+        if (
+            boundary_path != target_parent
+            and boundary_path not in target_parent.parents
+        ):
+            raise InstallTransactionRecoveryError(
+                "Codex Lab installer transaction cleanup boundary is unsafe"
+            )
+        if target_value["parentWasPresent"] != (boundary_path == target_parent):
+            raise InstallTransactionRecoveryError(
+                "Codex Lab installer transaction cleanup boundary is inconsistent"
+            )
+    if operation == "uninstall":
         for field in (
             "engineBackupPath",
             "enginePath",

@@ -41,6 +41,10 @@ class CodeRouteTest(unittest.TestCase):
                 ),
                 lock_path_for_state(canonical),
             )
+            self.assertEqual(
+                lock_path_for_state(root / "state" / "INSTALL-STATE.JSON"),
+                lock_path_for_state(canonical),
+            )
 
     def test_state_path_symlink_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -106,6 +110,31 @@ class CodeRouteTest(unittest.TestCase):
             self.assertIsNone(
                 json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
             )
+
+    def test_launcher_removes_provenance_temp_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            provenance_temp = root / "tmp"
+            provenance_temp.mkdir()
+
+            activate_code_route(
+                state_path,
+                engine,
+                active_path=route_path,
+                tools=tools,
+            )
+            subprocess.run(
+                [str(route_path), "hello"],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "TMPDIR": str(provenance_temp)},
+            )
+
+            self.assertEqual(list(provenance_temp.iterdir()), [])
 
     def test_dangling_symlink_route_is_captured_and_restored(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -251,13 +280,50 @@ class CodeRouteTest(unittest.TestCase):
                     )
 
             self.assertTrue(journal_path_for_state(state_path).is_file())
-            recover_code_route_transaction(state_path, active_path=route_path)
+            recover_code_route_transaction(state_path)
 
             self.assertEqual(route_path.read_text(encoding="utf-8"), "prior")
             self.assertFalse(journal_path_for_state(state_path).exists())
             self.assertIsNone(
                 json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
             )
+
+    def test_recovery_preserves_unexpected_route_until_moved_aside(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+
+            with (
+                mock.patch.object(
+                    code_route_transaction,
+                    "write_launcher",
+                    side_effect=KeyboardInterrupt,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                activate_code_route(
+                    state_path,
+                    engine,
+                    active_path=route_path,
+                    tools=tools,
+                )
+
+            route_path.parent.mkdir(exist_ok=True)
+            route_path.write_text("external route", encoding="utf-8")
+            with self.assertRaisesRegex(CodeRouteRecoveryError, "move it aside"):
+                recover_code_route_transaction(state_path)
+
+            preserved_path = route_path.with_name("code.external")
+            route_path.rename(preserved_path)
+            recover_code_route_transaction(state_path)
+
+            self.assertEqual(
+                preserved_path.read_text(encoding="utf-8"),
+                "external route",
+            )
+            self.assertFalse(journal_path_for_state(state_path).exists())
 
     def test_recovers_committed_activation_with_pending_journal(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -350,7 +416,7 @@ class CodeRouteTest(unittest.TestCase):
                     "read_state_document_with_sha256",
                     side_effect=read_then_change_state,
                 ),
-                self.assertRaisesRegex(CodeRouteRecoveryError, "ambiguous"),
+                self.assertRaisesRegex(CodeRouteRecoveryError, "changed while"),
             ):
                 activate_code_route(
                     state_path,
@@ -362,7 +428,137 @@ class CodeRouteTest(unittest.TestCase):
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual(state["concurrent"], "preserved")
             self.assertIsNone(state["codeRoute"])
-            self.assertTrue(journal_path_for_state(state_path).exists())
+            self.assertFalse(journal_path_for_state(state_path).exists())
+            self.assertFalse(route_path.exists())
+
+    def test_deactivate_recovers_after_tampered_launcher_is_moved_aside(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior", encoding="utf-8")
+            activate_code_route(
+                state_path,
+                engine,
+                active_path=route_path,
+                tools=tools,
+            )
+            route_path.write_text("external replacement", encoding="utf-8")
+
+            with self.assertRaisesRegex(CodeRouteRecoveryError, "move.*aside"):
+                deactivate_code_route(state_path, active_path=route_path)
+
+            replacement_path = route_path.with_name("code.external")
+            route_path.rename(replacement_path)
+            result = deactivate_code_route(state_path, active_path=route_path)
+
+            self.assertTrue(result.restored_prior)
+            self.assertEqual(route_path.read_text(encoding="utf-8"), "prior")
+            self.assertEqual(
+                replacement_path.read_text(encoding="utf-8"),
+                "external replacement",
+            )
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
+            )
+
+    def test_deactivate_clears_route_when_prior_backup_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior", encoding="utf-8")
+            activate_code_route(
+                state_path,
+                engine,
+                active_path=route_path,
+                tools=tools,
+            )
+            route = read_code_route_state(
+                json.loads(state_path.read_text(encoding="utf-8")),
+                state_path,
+            )
+            assert route is not None
+            assert route.prior.backup_path is not None
+            route.prior.backup_path.unlink()
+
+            result = deactivate_code_route(state_path, active_path=route_path)
+
+            self.assertFalse(result.restored_prior)
+            self.assertFalse(route_path.exists())
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
+            )
+
+    def test_deactivate_restores_prior_when_launcher_is_already_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior", encoding="utf-8")
+            activate_code_route(
+                state_path,
+                engine,
+                active_path=route_path,
+                tools=tools,
+            )
+            route_path.unlink()
+
+            result = deactivate_code_route(state_path, active_path=route_path)
+
+            self.assertTrue(result.restored_prior)
+            self.assertEqual(route_path.read_text(encoding="utf-8"), "prior")
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
+            )
+
+    def test_recovery_accepts_legacy_custom_deactivation_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "custom" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior", encoding="utf-8")
+            activate_code_route(
+                state_path,
+                engine,
+                active_path=route_path,
+                tools=tools,
+            )
+
+            with (
+                mock.patch.object(
+                    code_route_transaction.code_route,
+                    "write_state_code_route",
+                    side_effect=KeyboardInterrupt,
+                ),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                deactivate_code_route(state_path, active_path=route_path)
+
+            journal_path = journal_path_for_state(state_path)
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            journal.pop("activeWasPresent")
+            journal.pop("restorePrior")
+            journal_path.write_text(json.dumps(journal), encoding="utf-8")
+            journal_path.chmod(0o600)
+
+            recover_code_route_transaction(state_path)
+
+            route = read_code_route_state(
+                json.loads(state_path.read_text(encoding="utf-8")),
+                state_path,
+            )
+            assert route is not None
+            require_active_code_route(route, expected_path=route_path)
+            self.assertFalse(journal_path.exists())
 
     def test_rejects_unsafe_state_parent_without_touching_route(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

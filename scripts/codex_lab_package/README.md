@@ -88,8 +88,10 @@ transaction. No manual canary provisioning is required for a supported release.
 
 The installer records a bounded, `0600` journal beside the install state before
 it changes any target. Every replacement uses a deterministic per-target staging
-and backup path, so startup can either recover an interrupted transaction or
-fail closed without guessing which files changed. State written before launchd
+and backup path, and rollback removes newly created parents only up to the exact
+preexisting ancestor recorded in the journal. Startup can therefore recover an
+interrupted transaction or fail closed without guessing which files changed.
+State written before launchd
 reconciliation carries `supervisorReconciled: false`; `--status`, `--check`,
 and code-route activation refuse that state until a reinstall/update repairs it
 or `--uninstall` tears it down safely.
@@ -114,8 +116,12 @@ Install and update are refused while the explicit route is active; deactivate
 it first so a release replacement cannot silently retarget `code`. Status,
 activation, deactivation, and uninstall recover any durable route transaction
 journal before proceeding. Deactivation restores the exact captured symlink,
-regular file, or absent state and fails closed if the active launcher or
-preserved route changed. Uninstall also refuses an active route instead of
+regular file, or absent state when the captured backup remains available. If an
+external tool replaces the active launcher or the preserved backup, deactivation
+keeps the conflicting path untouched and tells the operator to move it aside and
+retry; if the preserved backup is already missing, deactivation removes only the
+verified managed launcher and records the route inactive. Uninstall also refuses
+an active route instead of
 combining route restoration with the installer rollback transaction.
 
 ```shell

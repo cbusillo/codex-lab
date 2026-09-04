@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import unicodedata
 import uuid
 
 from . import code_route
@@ -167,7 +168,24 @@ def deactivate_code_route(
             restored_prior=False,
             state_path=state_path,
         )
-    code_route.require_active_code_route(route, expected_path=active_path)
+    code_route.require_code_route_metadata(route, expected_path=active_path)
+    active_was_present = code_route.path_exists(active_path)
+    if active_was_present and not matches_launcher(active_path, route.launcher_sha256):
+        raise code_route.CodeRouteRecoveryError(
+            "Recorded active code route launcher has changed; move the conflicting "
+            f"path aside and retry deactivation: {active_path}"
+        )
+    restore_prior = False
+    if route.prior.kind != "absent":
+        assert route.prior.backup_path is not None
+        if code_route.path_exists(route.prior.backup_path):
+            if not matches_prior(route.prior.backup_path, route.prior):
+                raise code_route.CodeRouteRecoveryError(
+                    "Recorded prior code route backup has changed; move the "
+                    "conflicting backup aside and retry deactivation: "
+                    f"{route.prior.backup_path}"
+                )
+            restore_prior = True
     code_route.require_safe_parent(state_path.parent)
     transaction_id = uuid.uuid4().hex
     active_backup_path = active_path.parent / (
@@ -178,8 +196,10 @@ def deactivate_code_route(
     journal = {
         "activeBackupPath": str(active_backup_path),
         "activePath": str(active_path),
+        "activeWasPresent": active_was_present,
         "launcherSourcePath": None,
         "operation": "deactivate",
+        "restorePrior": restore_prior,
         "routeAfter": None,
         "routeBefore": code_route.serialize_code_route_state(route),
         "schemaVersion": JOURNAL_SCHEMA_VERSION,
@@ -190,8 +210,9 @@ def deactivate_code_route(
     }
     write_journal(state_path, journal)
     try:
-        safe_rename(active_path, active_backup_path)
-        if route.prior.kind != "absent":
+        if active_was_present:
+            safe_rename(active_path, active_backup_path)
+        if restore_prior:
             assert route.prior.backup_path is not None
             safe_rename(route.prior.backup_path, active_path)
         code_route.write_state_code_route(
@@ -212,7 +233,7 @@ def deactivate_code_route(
     return code_route.CodeRouteResult(
         active_path=active_path,
         changed=True,
-        restored_prior=route.prior.kind != "absent",
+        restored_prior=restore_prior,
         state_path=state_path,
     )
 
@@ -220,11 +241,13 @@ def deactivate_code_route(
 def recover_code_route_transaction(
     state_path: Path,
     *,
-    active_path: Path,
+    active_path: Path | None,
     lock_held: bool = False,
 ) -> None:
     state_path = code_route.exact_state_path(state_path)
-    active_path = code_route.absolute_path(active_path)
+    active_path = (
+        code_route.absolute_path(active_path) if active_path is not None else None
+    )
     if not lock_held:
         if not code_route.path_exists(state_path.parent):
             return
@@ -242,11 +265,26 @@ def recover_code_route_transaction(
         return
     journal = read_journal(state_path, active_path=active_path)
     current_sha256 = state_sha256(state_path) if state_path.exists() else None
-    if current_sha256 == journal["stateBeforeSha256"]:
+    current_route = state_code_route_value(state_path) if state_path.exists() else None
+    if current_sha256 == journal["stateBeforeSha256"] or (
+        current_sha256
+        not in {
+            journal["stateBeforeSha256"],
+            journal["stateAfterSha256"],
+        }
+        and current_route == journal["routeBefore"]
+    ):
         rollback_uncommitted(journal)
         clear_journal(state_path)
         return
-    if current_sha256 == journal["stateAfterSha256"]:
+    if current_sha256 == journal["stateAfterSha256"] or (
+        current_sha256
+        not in {
+            journal["stateBeforeSha256"],
+            journal["stateAfterSha256"],
+        }
+        and current_route == journal["routeAfter"]
+    ):
         finish_committed_cleanup(state_path, journal)
         require_transaction_clear(state_path)
         return
@@ -291,7 +329,10 @@ def rollback_activation(journal: dict, route: code_route.CodeRouteState) -> None
         safe_unlink(active_path)
     if route.prior.kind == "absent":
         if code_route.path_exists(active_path):
-            raise recovery_path_error(active_path)
+            raise code_route.CodeRouteRecoveryError(
+                "Unexpected code route path is preserved; move it aside and retry "
+                f"transaction recovery: {active_path}"
+            )
     else:
         assert route.prior.backup_path is not None
         if code_route.path_exists(route.prior.backup_path):
@@ -311,20 +352,28 @@ def rollback_activation(journal: dict, route: code_route.CodeRouteState) -> None
 
 def rollback_deactivation(journal: dict, route: code_route.CodeRouteState) -> None:
     active_backup_path = required_journal_path(journal, "activeBackupPath")
-    if route.prior.kind != "absent" and matches_prior(route.active_path, route.prior):
+    active_was_present = journal["activeWasPresent"]
+    restore_prior = journal["restorePrior"]
+    if restore_prior and matches_prior(route.active_path, route.prior):
         assert route.prior.backup_path is not None
         if code_route.path_exists(route.prior.backup_path):
             raise recovery_path_error(route.prior.backup_path)
         safe_rename(route.active_path, route.prior.backup_path)
-    if code_route.path_exists(active_backup_path):
+    if active_was_present and code_route.path_exists(active_backup_path):
         if not matches_launcher(active_backup_path, route.launcher_sha256):
             raise recovery_path_error(active_backup_path)
         if code_route.path_exists(route.active_path):
             raise recovery_path_error(route.active_path)
         safe_rename(active_backup_path, route.active_path)
-    elif not matches_launcher(route.active_path, route.launcher_sha256):
+    elif active_was_present and not matches_launcher(
+        route.active_path, route.launcher_sha256
+    ):
         raise recovery_path_error(route.active_path)
-    code_route.require_active_code_route(route, expected_path=route.active_path)
+    elif not active_was_present and code_route.path_exists(route.active_path):
+        raise recovery_path_error(route.active_path)
+    if restore_prior:
+        assert route.prior.backup_path is not None
+        code_route.require_prior_route(route.prior, route.active_path)
 
 
 def finish_committed_cleanup(state_path: Path, journal: dict) -> None:
@@ -345,7 +394,7 @@ def finish_committed_cleanup(state_path: Path, journal: dict) -> None:
                     raise recovery_path_error(launcher_source_path)
                 safe_unlink(launcher_source_path)
         elif operation == "deactivate":
-            require_deactivated_layout(route)
+            require_deactivated_layout(route, restore_prior=journal["restorePrior"])
             active_backup_path = required_journal_path(journal, "activeBackupPath")
             if code_route.path_exists(active_backup_path):
                 if not matches_launcher(active_backup_path, route.launcher_sha256):
@@ -360,8 +409,12 @@ def finish_committed_cleanup(state_path: Path, journal: dict) -> None:
         return
 
 
-def require_deactivated_layout(route: code_route.CodeRouteState) -> None:
-    if route.prior.kind == "absent":
+def require_deactivated_layout(
+    route: code_route.CodeRouteState,
+    *,
+    restore_prior: bool,
+) -> None:
+    if not restore_prior:
         if code_route.path_exists(route.active_path):
             raise recovery_path_error(route.active_path)
         return
@@ -387,23 +440,24 @@ def read_journal_route(
         raise code_route.CodeRouteRecoveryError(str(exc)) from exc
 
 
-def read_journal(state_path: Path, *, active_path: Path) -> dict:
+def read_journal(state_path: Path, *, active_path: Path | None) -> dict:
     journal_path = journal_path_for_state(state_path)
     try:
-        mode = journal_path.lstat().st_mode
+        journal_stat = journal_path.lstat()
     except FileNotFoundError as exc:
         raise code_route.CodeRouteRecoveryError(
             f"Code route transaction journal disappeared: {journal_path}"
         ) from exc
+    mode = journal_stat.st_mode
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         raise code_route.CodeRouteRecoveryError(
             f"Code route transaction journal is unsafe: {journal_path}"
         )
-    if stat.S_IMODE(mode) & 0o077:
+    if stat.S_IMODE(mode) & 0o077 or journal_stat.st_uid != os.getuid():
         raise code_route.CodeRouteRecoveryError(
             f"Code route transaction journal permissions are unsafe: {journal_path}"
         )
-    if journal_path.stat().st_size > MAX_JOURNAL_BYTES:
+    if journal_stat.st_size > MAX_JOURNAL_BYTES:
         raise code_route.CodeRouteRecoveryError(
             f"Code route transaction journal is too large: {journal_path}"
         )
@@ -414,10 +468,20 @@ def read_journal(state_path: Path, *, active_path: Path) -> dict:
             f"Could not read code route transaction journal: {journal_path}"
         ) from exc
     validate_journal(value, state_path, active_path=active_path)
+    if value["operation"] == "deactivate" and value.get("activeWasPresent") is None:
+        route = read_journal_route(value["routeBefore"], state_path)
+        assert route is not None
+        value["activeWasPresent"] = True
+        value["restorePrior"] = route.prior.kind != "absent"
     return value
 
 
-def validate_journal(value: object, state_path: Path, *, active_path: Path) -> None:
+def validate_journal(
+    value: object,
+    state_path: Path,
+    *,
+    active_path: Path | None,
+) -> None:
     if (
         not isinstance(value, dict)
         or value.get("schemaVersion") != JOURNAL_SCHEMA_VERSION
@@ -466,7 +530,7 @@ def validate_journal(value: object, state_path: Path, *, active_path: Path) -> N
         raise code_route.CodeRouteRecoveryError(
             "Code route transaction active path must be absolute"
         )
-    if journal_active_path != active_path:
+    if active_path is not None and journal_active_path != active_path:
         raise code_route.CodeRouteRecoveryError(
             "Code route transaction journal belongs to a different active path"
         )
@@ -484,7 +548,9 @@ def validate_journal(value: object, state_path: Path, *, active_path: Path) -> N
             )
         if (
             value.get("activeBackupPath") is not None
+            or value.get("activeWasPresent") is not None
             or value.get("routeBefore") is not None
+            or value.get("restorePrior") is not None
         ):
             raise code_route.CodeRouteRecoveryError(
                 "Code route activation journal is malformed"
@@ -495,8 +561,18 @@ def validate_journal(value: object, state_path: Path, *, active_path: Path) -> N
             raise code_route.CodeRouteRecoveryError(
                 "Code route transaction backup path is unsafe"
             )
+        active_was_present = value.get("activeWasPresent")
+        restore_prior = value.get("restorePrior")
+        legacy_fields = active_was_present is None and restore_prior is None
         if (
-            value.get("launcherSourcePath") is not None
+            (
+                not legacy_fields
+                and (
+                    not isinstance(active_was_present, bool)
+                    or not isinstance(restore_prior, bool)
+                )
+            )
+            or value.get("launcherSourcePath") is not None
             or value.get("routeAfter") is not None
         ):
             raise code_route.CodeRouteRecoveryError(
@@ -507,7 +583,15 @@ def validate_journal(value: object, state_path: Path, *, active_path: Path) -> N
         raise code_route.CodeRouteRecoveryError(
             "Code route transaction route metadata is inconsistent"
         )
-    if route.prior.backup_path is not None:
+    if (
+        value["operation"] == "deactivate"
+        and value.get("restorePrior") is True
+        and route.prior.kind == "absent"
+    ):
+        raise code_route.CodeRouteRecoveryError(
+            "Code route deactivation journal restore metadata is inconsistent"
+        )
+    if value["operation"] == "activate" and route.prior.backup_path is not None:
         expected_prior_backup = journal_active_path.parent / (
             f"{code_route.PRIOR_BACKUP_PREFIX}{transaction_id}"
         )
@@ -662,6 +746,20 @@ def updated_state(
     return result
 
 
+def state_code_route_value(state_path: Path) -> object:
+    try:
+        value = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise code_route.CodeRouteRecoveryError(
+            f"Could not read code route transaction state: {state_path}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise code_route.CodeRouteRecoveryError(
+            f"Code route transaction state is malformed: {state_path}"
+        )
+    return value.get("codeRoute")
+
+
 def state_sha256(state_path: Path) -> str:
     return code_route.sha256_file(state_path)
 
@@ -681,7 +779,8 @@ def journal_path_for_state(state_path: Path) -> Path:
 
 def lock_path_for_state(state_path: Path) -> Path:
     state_path = code_route.exact_state_path(state_path)
-    state_digest = hashlib.sha256(str(state_path).encode()).hexdigest()
+    lock_identity = unicodedata.normalize("NFC", str(state_path)).casefold()
+    state_digest = hashlib.sha256(lock_identity.encode()).hexdigest()
     return lock_root_path() / f"{state_digest}{LOCK_SUFFIX}"
 
 
