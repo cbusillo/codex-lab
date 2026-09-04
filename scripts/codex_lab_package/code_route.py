@@ -504,6 +504,25 @@ def absolute_path(path: Path) -> Path:
     return Path(os.path.abspath(path.expanduser()))
 
 
+def exact_state_path(path: Path) -> Path:
+    path = absolute_path(path)
+    for system_alias in (Path("/var"), Path("/tmp")):
+        try:
+            relative_path = path.relative_to(system_alias)
+        except ValueError:
+            continue
+        if system_alias.is_symlink():
+            path = system_alias.resolve(strict=True) / relative_path
+        break
+    require_safe_parent(path.parent)
+    path = path.parent.resolve(strict=False) / path.name
+    if path.is_symlink():
+        raise CodeRouteRecoveryError(
+            f"Install state path must not be a symlink: {path}"
+        )
+    return path
+
+
 def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 

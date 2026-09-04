@@ -514,6 +514,37 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertIsNotNone(update.install)
             self.assertTrue(read_install_state(state_path).supervisor_reconciled)
 
+    def test_final_state_failure_preserves_repairable_pending_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            state_path = root / "install" / "install-state.json"
+
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.write_state_document",
+                    side_effect=OSError("final state fsync failed"),
+                ),
+                self.assertRaisesRegex(
+                    CodexLabInstallStateError, "final state reconciliation"
+                ),
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=state_path,
+                    download=release.download,
+                )
+
+            status = read_install_state(state_path)
+            self.assertFalse(status.supervisor_reconciled)
+            self.assertTrue(status.app_path.exists())
+            assert status.engine_path is not None
+            self.assertTrue(status.engine_path.exists())
+            self.assertEqual(len(self.supervisor_installs), 1)
+            self.assertFalse(install_transaction.journal_exists(state_path))
+
     def test_recovery_rejects_forged_transaction_target(self) -> None:
         class PowerLoss(BaseException):
             pass
@@ -581,6 +612,81 @@ class CodexLabInstallerTest(unittest.TestCase):
                 )
 
             self.assertEqual(victim_path.read_text(encoding="utf-8"), "preserved")
+            self.assertTrue(journal_path.exists())
+
+    def test_recovery_rejects_unmanaged_code_mode_host_target(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            convert_test_release_to_schema_two(release)
+            state_path = root / "install" / "install-state.json"
+            original_apply = installer_module.apply_install_transaction_target
+
+            def crash_after_app(target: dict, *, force: bool) -> None:
+                original_apply(target, force=force)
+                if Path(target["targetPath"]).name == "Codex Lab.app":
+                    raise PowerLoss()
+
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.apply_install_transaction_target",
+                    side_effect=crash_after_app,
+                ),
+                self.assertRaises(PowerLoss),
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=state_path,
+                    download=release.download,
+                )
+
+            journal_path = install_transaction.journal_path_for_state(state_path)
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            engine_target = next(
+                target
+                for target in journal["targets"]
+                if Path(target["targetPath"]).name == "codex"
+            )
+            host_path = Path(engine_target["targetPath"]).with_name(
+                "codex-code-mode-host"
+            )
+            journal["targets"].append(
+                {
+                    "backupPath": str(
+                        install_transaction.backup_path_for(
+                            host_path, journal["transactionId"]
+                        )
+                    ),
+                    "parentWasPresent": True,
+                    "preserveBackup": False,
+                    "stagedPath": str(
+                        install_transaction.staged_path_for(
+                            host_path, journal["transactionId"]
+                        )
+                    ),
+                    "targetPath": str(host_path),
+                    "wasPresent": True,
+                }
+            )
+            journal_path.write_text(json.dumps(journal), encoding="utf-8")
+            journal_path.chmod(0o600)
+
+            with self.assertRaisesRegex(
+                CodexLabInstallStateError, "targets do not match"
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=state_path,
+                    download=release.download,
+                )
+
             self.assertTrue(journal_path.exists())
 
     def test_active_code_route_refuses_install_and_update_before_download(self) -> None:
@@ -741,6 +847,27 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(route_path.stat().st_mode & 0o777, 0o751)
             self.assertFalse(result.state_path.exists())
 
+    def test_uninstall_rejects_state_path_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            state_alias = root / "install-state-alias.json"
+            state_alias.symlink_to(result.state_path)
+
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                uninstall_codex_lab(state_path=state_alias)
+
+            self.assertTrue(state_alias.is_symlink())
+            self.assertTrue(result.state_path.exists())
+            self.assertTrue(result.app_dir.exists())
+
     def test_uninstall_recovery_marks_stopped_supervisor_unreconciled(self) -> None:
         class PowerLoss(BaseException):
             pass
@@ -774,6 +901,48 @@ class CodexLabInstallerTest(unittest.TestCase):
 
             uninstall_codex_lab(state_path=result.state_path)
             self.assertFalse(result.state_path.exists())
+
+    def test_uninstall_recovery_resumes_after_unreconciled_state_write(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.apply_uninstall_transaction_target",
+                    side_effect=PowerLoss,
+                ),
+                self.assertRaises(PowerLoss),
+            ):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            with (
+                mock.patch(
+                    "codex_lab_package.install_transaction.clear_journal",
+                    side_effect=PowerLoss,
+                ),
+                self.assertRaises(PowerLoss),
+            ):
+                read_install_state(result.state_path)
+
+            self.assertTrue(install_transaction.journal_exists(result.state_path))
+            self.assertFalse(
+                json.loads(result.state_path.read_text(encoding="utf-8"))[
+                    "supervisorReconciled"
+                ]
+            )
+            status = read_install_state(result.state_path)
+            self.assertFalse(status.supervisor_reconciled)
+            self.assertFalse(install_transaction.journal_exists(result.state_path))
 
     def test_uninstall_recovery_completes_after_state_removal(self) -> None:
         class PowerLoss(BaseException):
@@ -814,6 +983,35 @@ class CodexLabInstallerTest(unittest.TestCase):
             assert result.shim_path is not None
             self.assertFalse(result.shim_path.exists())
             self.assertFalse(result.engine_path.exists())
+
+    def test_uninstall_recovery_clears_journal_after_cleanup_crash(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+
+            with (
+                mock.patch(
+                    "codex_lab_package.install_transaction.clear_journal",
+                    side_effect=PowerLoss,
+                ),
+                self.assertRaises(PowerLoss),
+            ):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertTrue(install_transaction.journal_exists(result.state_path))
+            with self.assertRaisesRegex(CodexLabInstallStateError, "not found"):
+                read_install_state(result.state_path)
+            self.assertFalse(install_transaction.journal_exists(result.state_path))
 
     def test_uninstall_rejects_replaced_code_mode_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

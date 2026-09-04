@@ -27,7 +27,7 @@ def activate_code_route(
     tools: code_route.LauncherTools,
     lock_held: bool = False,
 ) -> code_route.CodeRouteResult:
-    state_path = code_route.absolute_path(state_path)
+    state_path = code_route.exact_state_path(state_path)
     active_path = code_route.absolute_path(active_path)
     if not lock_held:
         with transaction_lock(state_path):
@@ -138,7 +138,7 @@ def deactivate_code_route(
     active_path: Path,
     lock_held: bool = False,
 ) -> code_route.CodeRouteResult:
-    state_path = code_route.absolute_path(state_path)
+    state_path = code_route.exact_state_path(state_path)
     active_path = code_route.absolute_path(active_path)
     if not lock_held:
         with transaction_lock(state_path):
@@ -223,7 +223,7 @@ def recover_code_route_transaction(
     active_path: Path,
     lock_held: bool = False,
 ) -> None:
-    state_path = code_route.absolute_path(state_path)
+    state_path = code_route.exact_state_path(state_path)
     active_path = code_route.absolute_path(active_path)
     if not lock_held:
         if not code_route.path_exists(state_path.parent):
@@ -519,7 +519,7 @@ def validate_journal(value: object, state_path: Path, *, active_path: Path) -> N
 
 @contextmanager
 def transaction_lock(state_path: Path):
-    state_path = code_route.absolute_path(state_path)
+    state_path = code_route.exact_state_path(state_path)
     lock_root = lock_root_path()
     code_route.require_safe_parent(lock_root.parent)
     lock_root.mkdir(mode=0o700, exist_ok=True)
@@ -675,10 +675,12 @@ def document_bytes(value: dict) -> bytes:
 
 
 def journal_path_for_state(state_path: Path) -> Path:
+    state_path = code_route.exact_state_path(state_path)
     return state_path.with_name(f".{state_path.name}{JOURNAL_SUFFIX}")
 
 
 def lock_path_for_state(state_path: Path) -> Path:
+    state_path = code_route.exact_state_path(state_path)
     state_digest = hashlib.sha256(str(state_path).encode()).hexdigest()
     return lock_root_path() / f"{state_digest}{LOCK_SUFFIX}"
 

@@ -284,35 +284,33 @@ def install_from_manifest_url(
     download: DownloadFunc | None = None,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabInstallResult:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     app_dir = resolve_destination(app_dir)
     shim_dir = resolve_destination(shim_dir) if shim_dir is not None else None
     supervisor_paths = supervisor_paths or default_supervisor_paths()
-    (
-        allowed_targets,
-        required_targets,
-        expected_engine_path,
-        expected_host_path,
-    ) = install_transaction_target_scope(
-        state_path=state_path,
-        app_path=app_dir,
-        shim_path=resolve_destination(shim_dir / "codex-lab")
-        if shim_dir is not None
-        else None,
-        engine_path=supervisor_paths.managed_cli,
-        code_mode_host_path=None,
-    )
     with transaction_lock(state_path):
         recover_code_route_transaction(state_path, lock_held=True)
+        expected_targets = None
+        if install_transaction_recovery_state_missing(state_path):
+            has_code_mode_host = recovery_manifest_has_code_mode_host(
+                manifest_url,
+                download=download or download_url,
+            )
+            expected_targets = install_transaction_target_scope(
+                state_path=state_path,
+                app_path=app_dir,
+                shim_path=resolve_destination(shim_dir / "codex-lab")
+                if shim_dir is not None
+                else None,
+                engine_path=supervisor_paths.managed_cli,
+                code_mode_host_path=supervisor_paths.code_mode_host
+                if has_code_mode_host
+                else None,
+            )
         recover_install_transaction(
             state_path,
             lock_held=True,
-            expected_targets=(
-                allowed_targets,
-                required_targets,
-                expected_engine_path,
-                expected_host_path,
-            ),
+            expected_targets=expected_targets,
         )
         return _install_from_manifest_url_locked(
             manifest_url,
@@ -345,7 +343,7 @@ def _install_from_manifest_url_locked(
 
     app_dir = resolve_destination(app_dir)
     shim_path = resolve_destination(shim_dir / "codex-lab") if shim_dir else None
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     previous_status = read_optional_install_state(state_path, lock_held=True)
     require_code_route_inactive_for_install(previous_status)
 
@@ -569,6 +567,7 @@ def _install_from_manifest_url_locked(
         }
         install_transaction.require_no_code_route_journal(state_path)
         install_transaction.write_journal(state_path, journal)
+        supervisor_install_complete = False
         try:
             for source, target, _preserve_backup in planned_sources:
                 if source is not None:
@@ -602,8 +601,14 @@ def _install_from_manifest_url_locked(
             )
             apply_install_transaction_target(state_target, force=True)
             engine_operations.install_supervisor(supervisor_paths, engine_release)
+            supervisor_install_complete = True
             write_state_document(state_path, completed_state_document)
         except Exception as install_error:
+            if supervisor_install_complete:
+                raise CodexLabInstallStateError(
+                    "Codex Lab files and supervisor were installed, but final state "
+                    "reconciliation did not complete; retry update or uninstall"
+                ) from install_error
             try:
                 rollback_install_transaction(journal)
                 install_transaction.clear_journal(state_path)
@@ -955,6 +960,42 @@ def preflight_new_backup_path(path: Path) -> None:
         raise FileExistsError(f"Engine backup path already exists: {path}")
 
 
+def install_transaction_recovery_state_missing(state_path: Path) -> bool:
+    if not install_transaction.journal_exists(state_path):
+        return False
+    journal = install_transaction.read_journal(state_path)
+    state_target = next(
+        (
+            target
+            for target in journal["targets"]
+            if target["targetPath"] == str(state_path)
+        ),
+        None,
+    )
+    if state_target is None:
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction does not contain its state path"
+        )
+    return not path_exists(state_path) and not path_exists(
+        Path(state_target["backupPath"])
+    )
+
+
+def recovery_manifest_has_code_mode_host(
+    manifest_url: str,
+    *,
+    download: DownloadFunc,
+) -> bool:
+    if not is_https_url(manifest_url):
+        raise ValueError(f"manifest URL must be an HTTPS URL: {manifest_url}")
+    with tempfile.TemporaryDirectory(prefix="codex-lab-recovery-") as temp_dir_name:
+        manifest_path = Path(temp_dir_name) / MANIFEST_NAME
+        download(manifest_url, manifest_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        validate_manifest(manifest)
+        return managed_engine_release_from_manifest(manifest).code_mode_host is not None
+
+
 def install_transaction_target_scope(
     *,
     state_path: Path,
@@ -963,11 +1004,11 @@ def install_transaction_target_scope(
     engine_path: Path,
     code_mode_host_path: Path | None,
 ) -> tuple[set[Path], set[Path], Path, Path]:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     app_path = resolve_destination(app_path)
     engine_path = resolve_destination(engine_path)
     derived_host_path = engine_path.with_name(CODE_MODE_HOST_NAME)
-    allowed_targets = {state_path, app_path, engine_path, derived_host_path}
+    allowed_targets = {state_path, app_path, engine_path}
     required_targets = {state_path, app_path, engine_path}
     if shim_path is not None:
         shim_path = resolve_destination(shim_path)
@@ -979,6 +1020,7 @@ def install_transaction_target_scope(
             raise install_transaction.InstallTransactionRecoveryError(
                 "Recorded Code Mode host path does not match the managed engine"
             )
+        allowed_targets.add(code_mode_host_path)
         required_targets.add(code_mode_host_path)
     return allowed_targets, required_targets, engine_path, derived_host_path
 
@@ -999,23 +1041,54 @@ def install_transaction_target_scope_from_journal_state(
         raise install_transaction.InstallTransactionRecoveryError(
             "Codex Lab installer transaction does not contain its state path"
         )
-    candidate_path = (
-        state_path if path_exists(state_path) else Path(state_target["backupPath"])
-    )
-    if not path_exists(candidate_path):
+    candidate_paths = [
+        path
+        for path in (state_path, Path(state_target["backupPath"]))
+        if path_exists(path)
+    ]
+    if not candidate_paths:
         raise install_transaction.InstallTransactionRecoveryError(
             "Interrupted first install requires retrying the exact installer command"
         )
-    candidate_sha256 = install_transaction.state_sha256(candidate_path)
     expected_digests = {
         journal.get("stateBeforeSha256"),
+        journal.get("stateUnreconciledSha256"),
         journal.get("pendingStateSha256"),
         journal.get("stateAfterSha256"),
     }
-    if candidate_sha256 not in expected_digests:
-        raise install_transaction.InstallTransactionRecoveryError(
-            "Codex Lab installer transaction state identity is ambiguous"
+    scopes = []
+    for candidate_path in candidate_paths:
+        candidate_sha256 = install_transaction.state_sha256(candidate_path)
+        if candidate_sha256 not in expected_digests:
+            raise install_transaction.InstallTransactionRecoveryError(
+                "Codex Lab installer transaction state identity is ambiguous"
+            )
+        scopes.append(
+            install_transaction_target_scope_from_document(
+                state_path,
+                candidate_path,
+            )
         )
+    allowed_targets = set().union(*(scope[0] for scope in scopes))
+    required_targets = set.intersection(*(scope[1] for scope in scopes))
+    engine_paths = {scope[2] for scope in scopes}
+    host_paths = {scope[3] for scope in scopes}
+    if len(engine_paths) != 1 or len(host_paths) != 1:
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction managed paths are ambiguous"
+        )
+    return (
+        allowed_targets,
+        required_targets,
+        engine_paths.pop(),
+        host_paths.pop(),
+    )
+
+
+def install_transaction_target_scope_from_document(
+    state_path: Path,
+    candidate_path: Path,
+) -> tuple[set[Path], set[Path], Path, Path]:
     try:
         state = json.loads(candidate_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1057,7 +1130,7 @@ def recover_install_transaction(
     lock_held: bool = False,
     expected_targets: tuple[set[Path], set[Path], Path, Path] | None = None,
 ) -> None:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     if not lock_held:
         with transaction_lock(state_path):
             recover_install_transaction(
@@ -1070,6 +1143,9 @@ def recover_install_transaction(
         return
     try:
         journal = install_transaction.read_journal(state_path)
+        if uninstall_transaction_cleanup_complete(state_path, journal):
+            install_transaction.clear_journal(state_path)
+            return
         (
             allowed_targets,
             required_targets,
@@ -1109,6 +1185,8 @@ def recover_install_transaction(
             if current_sha256 is None:
                 complete_uninstall_transaction(journal)
                 cleanup_uninstall_transaction(journal)
+            elif current_sha256 == journal.get("stateUnreconciledSha256"):
+                pass
             elif current_sha256 == journal["stateBeforeSha256"]:
                 rollback_install_transaction(journal)
                 set_supervisor_reconciled(state_path, False)
@@ -1122,6 +1200,48 @@ def recover_install_transaction(
             cleanup_empty_transaction_parents(journal)
     except install_transaction.InstallTransactionRecoveryError as exc:
         raise CodexLabInstallStateError(str(exc)) from exc
+
+
+def uninstall_transaction_cleanup_complete(state_path: Path, journal: dict) -> bool:
+    if journal["operation"] != "uninstall" or path_exists(state_path):
+        return False
+    if journal.get("enginePath") is None:
+        return False
+    engine_path = Path(journal["enginePath"])
+    host_path = (
+        Path(journal["codeModeHostPath"])
+        if journal.get("codeModeHostPath") is not None
+        else None
+    )
+    engine_backup_path = (
+        Path(journal["engineBackupPath"])
+        if journal.get("engineBackupPath") is not None
+        else None
+    )
+    host_backup_path = (
+        Path(journal["codeModeHostBackupPath"])
+        if journal.get("codeModeHostBackupPath") is not None
+        else None
+    )
+    for target in journal["targets"]:
+        target_path = Path(target["targetPath"])
+        if path_exists(Path(target["stagedPath"])) or path_exists(
+            Path(target["backupPath"])
+        ):
+            return False
+        if target_path == engine_path:
+            if path_exists(target_path) != (engine_backup_path is not None):
+                return False
+            continue
+        if host_path is not None and target_path == host_path:
+            if path_exists(target_path) != (host_backup_path is not None):
+                return False
+            continue
+        if path_exists(target_path):
+            return False
+    return not (
+        engine_backup_path is not None and path_exists(engine_backup_path)
+    ) and not (host_backup_path is not None and path_exists(host_backup_path))
 
 
 def complete_uninstall_transaction(journal: dict) -> None:
@@ -1160,7 +1280,7 @@ def read_install_state(
     *,
     lock_held: bool = False,
 ) -> CodexLabInstallStatus:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     if not lock_held:
         with transaction_lock(state_path):
             return read_install_state(state_path, lock_held=True)
@@ -1313,7 +1433,7 @@ def activate_code_route(
     code_route_path: Path = DEFAULT_CODE_ROUTE_PATH,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodeRouteResult:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         return _activate_code_route_locked(
             state_path=state_path,
@@ -1403,7 +1523,7 @@ def deactivate_code_route(
     state_path: Path = DEFAULT_STATE_PATH,
     code_route_path: Path = DEFAULT_CODE_ROUTE_PATH,
 ) -> CodeRouteResult:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         status = read_install_state(state_path, lock_held=True)
         if status.code_route is not None:
@@ -1446,7 +1566,7 @@ def read_verified_install_status(
     *,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabInstallStatus:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         status = read_install_state(state_path, lock_held=True)
         require_recorded_install_status(
@@ -1463,7 +1583,7 @@ def check_for_update(
     lock_held: bool = False,
     validate_install: bool = True,
 ) -> CodexLabUpdateCheck:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     if not lock_held:
         with transaction_lock(state_path):
             return check_for_update(
@@ -1502,7 +1622,7 @@ def update_from_latest_release(
     download: DownloadFunc | None = None,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabUpdateResult:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         return _update_from_latest_release_locked(
             repository=repository,
@@ -1561,7 +1681,7 @@ def uninstall_codex_lab(
     state_path: Path = DEFAULT_STATE_PATH,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabUninstallResult:
-    state_path = resolve_destination(state_path)
+    state_path = resolve_state_path(state_path)
     with transaction_lock(state_path):
         return _uninstall_codex_lab_locked(
             state_path=state_path,
@@ -1650,6 +1770,7 @@ def _uninstall_codex_lab_locked(
         "schemaVersion": install_transaction.JOURNAL_SCHEMA_VERSION,
         "stateAfterSha256": None,
         "stateBeforeSha256": install_transaction.state_sha256(status.state_path),
+        "stateUnreconciledSha256": unreconciled_state_sha256(status.state_path),
         "statePath": str(status.state_path),
         "targets": targets,
         "transactionId": transaction_id,
@@ -1936,6 +2057,19 @@ def absolute_path(path: Path) -> Path:
 def resolve_destination(path: Path) -> Path:
     path = absolute_path(path)
     return path.parent.resolve(strict=False) / path.name
+
+
+def resolve_state_path(path: Path) -> Path:
+    path = absolute_path(path)
+    ancestor = path.parent
+    while not path_exists(ancestor):
+        ancestor = ancestor.parent
+    if not ancestor.is_dir():
+        raise NotADirectoryError(f"Install state parent is not a directory: {ancestor}")
+    path = path.parent.resolve(strict=False) / path.name
+    if path.is_symlink():
+        raise ValueError(f"Install state path must not be a symlink: {path}")
+    return path
 
 
 def require_sibling_download_url(
@@ -2383,6 +2517,16 @@ def set_supervisor_reconciled(state_path: Path, reconciled: bool) -> None:
         )
     state["supervisorReconciled"] = reconciled
     write_state_document(state_path, state)
+
+
+def unreconciled_state_sha256(state_path: Path) -> str:
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise CodexLabInstallStateError(
+            f"Install state must be a JSON object: {state_path}"
+        )
+    state["supervisorReconciled"] = False
+    return document_sha256(state)
 
 
 def manifest_release_version(manifest: dict) -> str:

@@ -42,6 +42,28 @@ class CodeRouteTest(unittest.TestCase):
                 lock_path_for_state(canonical),
             )
 
+    def test_state_path_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            state_alias = root / "install-state-alias.json"
+            state_alias.symlink_to(state_path)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+
+            with self.assertRaisesRegex(
+                CodeRouteRecoveryError, "must not be a symlink"
+            ):
+                activate_code_route(
+                    state_alias,
+                    engine,
+                    active_path=route_path,
+                    tools=tools,
+                )
+
+            self.assertFalse(route_path.exists())
+            self.assertTrue(state_alias.is_symlink())
+
     def test_regular_route_is_captured_launched_and_restored_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()

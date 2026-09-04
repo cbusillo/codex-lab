@@ -114,7 +114,12 @@ def validate_journal(value: object, state_path: Path) -> None:
         raise InstallTransactionRecoveryError(
             "Codex Lab installer transaction operation is unsupported"
         )
-    for field in ("stateBeforeSha256", "pendingStateSha256", "stateAfterSha256"):
+    for field in (
+        "stateBeforeSha256",
+        "stateUnreconciledSha256",
+        "pendingStateSha256",
+        "stateAfterSha256",
+    ):
         digest = value.get(field)
         if digest is not None and (
             not isinstance(digest, str)
@@ -229,6 +234,22 @@ def validate_journal_targets(
         raise InstallTransactionRecoveryError(
             "Codex Lab installer transaction Code Mode host backup path is unsafe"
         )
+    for target in journal["targets"]:
+        retained_backup = target.get("retainedBackupPath")
+        if retained_backup is None:
+            continue
+        target_path = Path(target["targetPath"])
+        expected_retained = (
+            expected_engine_backup
+            if target_path == expected_engine_path
+            else expected_host_backup
+            if target_path == expected_code_mode_host_path
+            else None
+        )
+        if expected_retained is None or retained_backup != str(expected_retained):
+            raise InstallTransactionRecoveryError(
+                "Codex Lab installer transaction retained backup ownership is unsafe"
+            )
     if journal.get("enginePath") != str(expected_engine_path):
         raise InstallTransactionRecoveryError(
             "Codex Lab installer transaction engine path is unsafe"
