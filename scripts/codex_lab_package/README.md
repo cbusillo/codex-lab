@@ -86,8 +86,43 @@ signed managed CLI and Code Mode host, and the
 `dev.everycode.codex-lab.app-server.v1` user LaunchAgent as one rollback-aware
 transaction. No manual canary provisioning is required for a supported release.
 
+The installer records a bounded, `0600` journal beside the install state before
+it changes any target. Every replacement uses a deterministic per-target staging
+and backup path, and rollback removes newly created parents only up to the exact
+preexisting ancestor recorded in the journal. Startup can therefore recover an
+interrupted transaction or fail closed without guessing which files changed.
+State written before launchd
+reconciliation carries `supervisorReconciled: false`; `--status`, `--check`,
+and code-route activation refuse that state until a reinstall/update repairs it
+or `--uninstall` tears it down safely.
+
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:
+
+The primary `code` route is activated and restored only through explicit
+operator actions:
+
+```shell
+CODEX_REPO_ROOT="$PWD" uv run scripts/install_codex_lab.py --activate-code
+CODEX_REPO_ROOT="$PWD" uv run scripts/install_codex_lab.py --deactivate-code
+```
+
+Activation atomically preserves the existing `~/.local/bin/code` route and
+installs a launcher pinned to the installed managed engine's digest, Developer
+ID identity, source commit, release identity, and clean provenance. It performs
+no source build or discovery fallback, uses `~/.codex-lab`, and never modifies
+`~/.code`. Normal install and update do not silently activate the route.
+Install and update are refused while the explicit route is active; deactivate
+it first so a release replacement cannot silently retarget `code`. Status,
+activation, deactivation, and uninstall recover any durable route transaction
+journal before proceeding. Deactivation restores the exact captured symlink,
+regular file, or absent state when the captured backup remains available. If an
+external tool replaces the active launcher or the preserved backup, deactivation
+keeps the conflicting path untouched and tells the operator to move it aside and
+retry; if the preserved backup is already missing, deactivation removes only the
+verified managed launcher and records the route inactive. Uninstall also refuses
+an active route instead of
+combining route restoration with the installer rollback transaction.
 
 ```shell
 scripts/install_codex_lab.py \
@@ -125,10 +160,14 @@ scripts/install_codex_lab.py --update
 `--update` reads the recorded install state, preserves the installed app path and
 shim path, installs the matching engine, and restarts the pinned supervisor only
 when a newer published Lab release is available. It does not enable the upstream
-standalone updater.
+standalone updater. Current state records pin the Code Mode host digest and
+Developer ID identity. When upgrading an older state that predates those fields,
+the installer first verifies the installed engine and host against that state's
+published release manifest before replacing either binary.
 
 To remove the recorded install and restore any managed engine that predated the
-first supported installer run, use:
+first supported installer run, first deactivate any explicit `code` route, then
+use:
 
 ```shell
 scripts/install_codex_lab.py --uninstall
@@ -138,12 +177,13 @@ The installer downloads the manifest, `SHA256SUMS`, app zip, shim zip, and engin
 zip into a temporary staging directory. It validates release URLs, sizes, and
 SHA-256 hashes; rejects unsafe zip members; smoke-checks the app and shim; and
 uses macOS code-signing inspection plus engine provenance to require the exact
-binary digest, source commit, version, stable identifier, TeamIdentifier, and V8
-JIT entitlement from the release metadata. It then replaces the engine, app,
-shim, and state as a rollback set before installing and health-checking the
-LaunchAgent. A provisioning failure restores the prior files and the
-supervisor's own rollback restores its prior runner, plist, and load state.
-Existing targets are refused unless `--force` is supplied.
+binary digest, source commit, release version, compatibility version, stable
+identifier, TeamIdentifier, and V8 JIT entitlement from the release metadata.
+It then replaces the engine, app, shim, and state as a rollback set before
+installing and health-checking the LaunchAgent. A provisioning failure restores
+the prior files and the supervisor's own rollback restores its prior runner,
+plist, and load state. Existing targets are refused unless `--force` is
+supplied.
 
 The app and shim remain unsigned Lab launch surfaces. The managed engine is the
 individually Developer ID signed execution boundary pinned by the supervisor.
