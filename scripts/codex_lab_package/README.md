@@ -102,8 +102,12 @@ installs a launcher pinned to the installed managed engine's digest, Developer
 ID identity, source commit, release identity, and clean provenance. It performs
 no source build or discovery fallback, uses `~/.codex-lab`, and never modifies
 `~/.code`. Normal install and update do not silently activate the route.
-Deactivation and uninstall restore the exact captured symlink, regular file, or
-absent state and fail closed if the active launcher or preserved route changed.
+Install and update are refused while the explicit route is active; deactivate
+it first so a release replacement cannot silently retarget `code`. Status,
+activation, deactivation, and uninstall recover any durable route transaction
+journal before proceeding. Deactivation and uninstall restore the exact
+captured symlink, regular file, or absent state and fail closed if the active
+launcher or preserved route changed.
 
 ```shell
 scripts/install_codex_lab.py \
@@ -154,12 +158,13 @@ The installer downloads the manifest, `SHA256SUMS`, app zip, shim zip, and engin
 zip into a temporary staging directory. It validates release URLs, sizes, and
 SHA-256 hashes; rejects unsafe zip members; smoke-checks the app and shim; and
 uses macOS code-signing inspection plus engine provenance to require the exact
-binary digest, source commit, version, stable identifier, TeamIdentifier, and V8
-JIT entitlement from the release metadata. It then replaces the engine, app,
-shim, and state as a rollback set before installing and health-checking the
-LaunchAgent. A provisioning failure restores the prior files and the
-supervisor's own rollback restores its prior runner, plist, and load state.
-Existing targets are refused unless `--force` is supplied.
+binary digest, source commit, release version, compatibility version, stable
+identifier, TeamIdentifier, and V8 JIT entitlement from the release metadata.
+It then replaces the engine, app, shim, and state as a rollback set before
+installing and health-checking the LaunchAgent. A provisioning failure restores
+the prior files and the supervisor's own rollback restores its prior runner,
+plist, and load state. Existing targets are refused unless `--force` is
+supplied.
 
 The app and shim remain unsigned Lab launch surfaces. The managed engine is the
 individually Developer ID signed execution boundary pinned by the supervisor.

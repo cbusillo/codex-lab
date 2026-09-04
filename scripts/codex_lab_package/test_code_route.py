@@ -14,8 +14,11 @@ from codex_lab_package.code_route import LauncherTools
 from codex_lab_package.code_route import activate_code_route
 from codex_lab_package.code_route import deactivate_code_route
 from codex_lab_package.code_route import read_code_route_state
+from codex_lab_package.code_route import recover_code_route_transaction
 from codex_lab_package.code_route import require_active_code_route
 from codex_lab_package.code_route import sha256_file
+from codex_lab_package.code_route_transaction import journal_path_for_state
+import codex_lab_package.code_route_transaction as code_route_transaction
 
 
 SOURCE_COMMIT = "a" * 40
@@ -178,6 +181,96 @@ class CodeRouteTest(unittest.TestCase):
                 json.loads(state_path.read_text(encoding="utf-8")),
                 {"codeRoute": None, "sentinel": "preserved"},
             )
+
+    def test_recovers_interrupted_activation_before_state_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior", encoding="utf-8")
+            original_safe_rename = code_route_transaction.safe_rename
+            rename_count = 0
+
+            def interrupt_after_rename(source: Path, target: Path) -> None:
+                nonlocal rename_count
+                original_safe_rename(source, target)
+                rename_count += 1
+                if rename_count == 2:
+                    raise KeyboardInterrupt
+
+            with mock.patch.object(
+                code_route_transaction,
+                "safe_rename",
+                side_effect=interrupt_after_rename,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    activate_code_route(
+                        state_path,
+                        engine,
+                        active_path=route_path,
+                        tools=tools,
+                    )
+
+            self.assertTrue(journal_path_for_state(state_path).is_file())
+            recover_code_route_transaction(state_path)
+
+            self.assertEqual(route_path.read_text(encoding="utf-8"), "prior")
+            self.assertFalse(journal_path_for_state(state_path).exists())
+            self.assertIsNone(
+                json.loads(state_path.read_text(encoding="utf-8"))["codeRoute"]
+            )
+
+    def test_recovers_committed_activation_with_pending_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+
+            with mock.patch.object(
+                code_route_transaction,
+                "clear_journal",
+                side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    activate_code_route(
+                        state_path,
+                        engine,
+                        active_path=route_path,
+                        tools=tools,
+                    )
+
+            self.assertTrue(journal_path_for_state(state_path).is_file())
+            recover_code_route_transaction(state_path)
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            route = read_code_route_state(state, state_path)
+            assert route is not None
+            require_active_code_route(route, expected_path=route_path)
+            self.assertFalse(journal_path_for_state(state_path).exists())
+
+    def test_rejects_unsafe_state_parent_without_touching_route(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            real_state_parent = root / "real-state"
+            real_state_parent.mkdir()
+            state_path = write_state(real_state_parent)
+            linked_state_parent = root / "linked-state"
+            linked_state_parent.symlink_to(real_state_parent, target_is_directory=True)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+
+            with self.assertRaisesRegex(ValueError, "parent path is unsafe"):
+                activate_code_route(
+                    linked_state_parent / "state" / state_path.name,
+                    engine,
+                    active_path=route_path,
+                    tools=tools,
+                )
+
+            self.assertFalse(route_path.exists())
 
     def test_rejects_unsafe_route_paths_and_tampered_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

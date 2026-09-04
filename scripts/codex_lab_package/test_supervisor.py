@@ -85,6 +85,7 @@ __RUNTIME_OUTPUT__
         return EngineIdentity(
             build_channel="release",
             build_profile="release",
+            release_version="1.2.3-lab.5",
             sha256="a" * 64,
             signing_identifier="dev.example.codex-lab",
             source_commit="b" * 40,
@@ -106,6 +107,7 @@ __RUNTIME_OUTPUT__
             subprocess.run(["/bin/sh", "-n", str(runner_path)], check=True)
             self.assertIn("EXPECTED_SHA256=" + "a" * 64, runner)
             self.assertIn("EXPECTED_SOURCE_COMMIT=" + "b" * 40, runner)
+            self.assertIn("EXPECTED_RELEASE_VERSION=1.2.3-lab.5", runner)
             self.assertIn("com\\.apple\\.security\\.cs\\.allow-jit", runner)
             self.assertIn("LISTEN_URL=ws://127.0.0.1:4766", runner)
             self.assertIn("app-server --remote-control --listen", runner)
@@ -129,6 +131,7 @@ __RUNTIME_OUTPUT__
 
             identity = inspect_engine(engine, codesign_path=codesign)
             self.assertEqual(identity.source_commit, source_commit)
+            self.assertEqual(identity.release_version, "1.2.3-lab.5")
             self.assertEqual(
                 identity.sha256, hashlib.sha256(engine.read_bytes()).hexdigest()
             )
@@ -267,6 +270,7 @@ __RUNTIME_OUTPUT__
                     paths,
                     expected_sha256="a" * 64,
                     expected_source_commit="b" * 40,
+                    expected_release_version="1.2.3-lab.5",
                     expected_version="1.2.3",
                     launchctl_path=launchctl,
                     uid=501,
