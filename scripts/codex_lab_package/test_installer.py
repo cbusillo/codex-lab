@@ -29,6 +29,7 @@ from codex_lab_package.distribution_manifest import build_manifest
 from codex_lab_package.distribution_manifest import sha256_file
 from codex_lab_package.distribution_manifest import sha256_zip_member
 from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
+from codex_lab_package.installer import CodexLabInstallStateError
 from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabReleaseSummary
 from codex_lab_package.installer import CodexLabUpdateError
@@ -45,6 +46,7 @@ from codex_lab_package.installer import latest_release_tag
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
 from codex_lab_package.installer import read_install_state
+from codex_lab_package.installer import read_verified_install_status
 from codex_lab_package.installer import replace_path
 from codex_lab_package.installer import select_latest_lab_release_tag
 from codex_lab_package.installer import update_from_latest_release
@@ -57,6 +59,7 @@ from codex_lab_package.layout import build_codex_lab_app
 from codex_lab_package.supervisor import CodeModeHostIdentity
 from codex_lab_package.supervisor import EngineIdentity
 from codex_lab_package.supervisor import SupervisorPaths
+from codex_lab_package import install_transaction
 import codex_lab_package.installer as installer_module
 import install_codex_lab as install_codex_lab_cli
 
@@ -411,6 +414,86 @@ class CodexLabInstallerTest(unittest.TestCase):
                 )
 
             self.assertFalse((root / "install").exists())
+
+    def test_recovery_rolls_back_crash_during_file_replacement(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            state_path = root / "install" / "install-state.json"
+            original_apply = installer_module.apply_install_transaction_target
+
+            def crash_after_app(target: dict, *, force: bool) -> None:
+                original_apply(target, force=force)
+                if Path(target["targetPath"]).name == "Codex Lab.app":
+                    raise PowerLoss()
+
+            with (
+                mock.patch(
+                    "codex_lab_package.installer.apply_install_transaction_target",
+                    side_effect=crash_after_app,
+                ),
+                self.assertRaises(PowerLoss),
+            ):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=state_path,
+                    download=release.download,
+                )
+
+            self.assertTrue(install_transaction.journal_exists(state_path))
+            with self.assertRaisesRegex(CodexLabInstallStateError, "not found"):
+                read_install_state(state_path)
+            self.assertFalse(install_transaction.journal_exists(state_path))
+            self.assertFalse((root / "install").exists())
+
+    def test_recovery_marks_supervisor_crash_unreconciled_until_repair(self) -> None:
+        class PowerLoss(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            state_path = root / "install" / "install-state.json"
+
+            def crash_supervisor(_paths: SupervisorPaths, _release: object) -> None:
+                raise PowerLoss()
+
+            operations = EngineProvisioningOperations(
+                inspect=fake_inspect_engine,
+                install_supervisor=crash_supervisor,
+                uninstall_supervisor=self._uninstall_supervisor,
+                inspect_code_mode_host=fake_inspect_code_mode_host,
+            )
+            with self.assertRaises(PowerLoss):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=state_path,
+                    download=release.download,
+                    engine_operations=operations,
+                )
+
+            status = read_install_state(state_path)
+            self.assertFalse(status.supervisor_reconciled)
+            self.assertFalse(install_transaction.journal_exists(state_path))
+            with self.assertRaisesRegex(ValueError, "reconciliation is incomplete"):
+                read_verified_install_status(state_path)
+
+            install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=state_path,
+                force=True,
+                download=release.download,
+            )
+            self.assertTrue(read_install_state(state_path).supervisor_reconciled)
 
     def test_active_code_route_refuses_install_and_update_before_download(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

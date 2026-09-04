@@ -24,6 +24,11 @@ from .code_route import recover_code_route_transaction
 from .code_route import require_active_code_route
 from .code_route import serialize_code_route_state
 from .code_route_transaction import transaction_lock
+from .code_route_transaction import document_sha256
+from .code_route_transaction import document_bytes
+from .code_route_transaction import durable_write
+from .code_route_transaction import safe_rename
+from . import install_transaction
 from .distribution_manifest import APP_ZIP
 from .distribution_manifest import ARTIFACTS
 from .distribution_manifest import ENGINE_ZIP
@@ -121,6 +126,7 @@ class CodexLabInstallStatus:
     source_commit: str | None
     source_repository: str | None
     state_path: Path
+    supervisor_reconciled: bool
     supervisor_label: str | None
     version: str
 
@@ -279,6 +285,7 @@ def install_from_manifest_url(
     state_path = resolve_destination(state_path)
     with transaction_lock(state_path):
         recover_code_route_transaction(state_path, lock_held=True)
+        recover_install_transaction(state_path, lock_held=True)
         return _install_from_manifest_url_locked(
             manifest_url,
             app_dir=app_dir,
@@ -461,87 +468,131 @@ def _install_from_manifest_url_locked(
             code_mode_host_backup_path = default_code_mode_host_backup_path(state_path)
             preflight_new_backup_path(code_mode_host_backup_path)
 
-        replacements = []
-        installed_shim = None
+        transaction_id = install_transaction.new_transaction_id()
+        planned_sources: list[tuple[Path | None, Path, bool]] = []
+        if code_mode_host_source is not None:
+            planned_sources.append(
+                (
+                    code_mode_host_source,
+                    supervisor_paths.code_mode_host,
+                    preserve_existing_code_mode_host,
+                )
+            )
+        elif code_mode_host_was_installer_managed and path_exists(
+            supervisor_paths.code_mode_host
+        ):
+            planned_sources.append((None, supervisor_paths.code_mode_host, False))
+        planned_sources.extend(
+            (
+                (engine_source, supervisor_paths.managed_cli, preserve_existing_engine),
+                (app_source, app_dir, False),
+            )
+        )
+        if shim_path is not None:
+            planned_sources.append((shim_source, shim_path, False))
+        installed_shim = shim_path
+        state_document = install_state_document(
+            manifest,
+            app_dir=app_dir,
+            code_mode_host_backup_path=code_mode_host_backup_path,
+            code_mode_host_path=supervisor_paths.code_mode_host
+            if code_mode_host_source is not None
+            else None,
+            engine_backup_path=engine_backup_path,
+            shim_path=installed_shim,
+            supervisor_paths=supervisor_paths,
+            code_route=None,
+            supervisor_reconciled=False,
+            engine_backup_sha256=sha256_file(supervisor_paths.managed_cli)
+            if preserve_existing_engine
+            else None,
+            code_mode_host_backup_sha256=sha256_file(supervisor_paths.code_mode_host)
+            if preserve_existing_code_mode_host
+            else None,
+        )
+        completed_state_document = dict(state_document)
+        completed_state_document["supervisorReconciled"] = True
+        targets = [
+            transaction_target(target, transaction_id, preserve_backup=preserve_backup)
+            for _source, target, preserve_backup in planned_sources
+        ]
+        if preserve_existing_engine:
+            assert engine_backup_path is not None
+            transaction_target_for(targets, supervisor_paths.managed_cli)[
+                "retainedBackupPath"
+            ] = str(engine_backup_path)
+        if preserve_existing_code_mode_host:
+            assert code_mode_host_backup_path is not None
+            transaction_target_for(targets, supervisor_paths.code_mode_host)[
+                "retainedBackupPath"
+            ] = str(code_mode_host_backup_path)
+        targets.append(
+            transaction_target(state_path, transaction_id, preserve_backup=False)
+        )
+        if installed_shim is not None:
+            installed_shim_source = install_transaction.staged_path_for(
+                installed_shim, transaction_id
+            )
+            installed_shim_source.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(shim_source, installed_shim_source)
+            installed_shim_source.write_text(
+                build_shim_script(app_dir), encoding="utf-8"
+            )
+            make_executable(installed_shim_source)
+        journal = {
+            "operation": "install",
+            "pendingStateSha256": document_sha256(state_document),
+            "schemaVersion": install_transaction.JOURNAL_SCHEMA_VERSION,
+            "stateAfterSha256": document_sha256(completed_state_document),
+            "stateBeforeSha256": install_transaction.state_sha256(state_path),
+            "statePath": str(state_path),
+            "targets": targets,
+            "transactionId": transaction_id,
+        }
+        install_transaction.require_no_code_route_journal(state_path)
+        install_transaction.write_journal(state_path, journal)
         try:
-            if code_mode_host_source is not None:
-                replacements.append(
-                    replace_path(
-                        code_mode_host_source,
-                        supervisor_paths.code_mode_host,
-                        force=force,
-                        backup_path=code_mode_host_backup_path
-                        if preserve_existing_code_mode_host
-                        else None,
-                        preserve_backup=preserve_existing_code_mode_host,
+            for source, target, _preserve_backup in planned_sources:
+                if source is not None:
+                    if target != shim_path:
+                        stage_transaction_source(source, target, transaction_id)
+                    apply_install_transaction_target(
+                        transaction_target_for(targets, target), force=force
                     )
-                )
-            elif code_mode_host_was_installer_managed and path_exists(
-                supervisor_paths.code_mode_host
-            ):
-                replacements.append(stage_path_removal(supervisor_paths.code_mode_host))
-            engine_replacement = replace_path(
-                engine_source,
-                supervisor_paths.managed_cli,
-                force=force,
-                backup_path=engine_backup_path if preserve_existing_engine else None,
-                preserve_backup=preserve_existing_engine,
+                    retain_transaction_backup(transaction_target_for(targets, target))
+                else:
+                    apply_uninstall_transaction_target(
+                        transaction_target_for(targets, target)
+                    )
+            smoke_check(app_dir, installed_shim)
+            state_target = transaction_target_for(targets, state_path)
+            durable_write(
+                Path(state_target["stagedPath"]),
+                document_bytes(state_document),
+                mode=0o600,
+                replace=False,
             )
-            replacements.append(engine_replacement)
-            app_replacement = replace_path(
-                app_source,
-                app_dir,
-                force=force,
-            )
-            replacements.append(app_replacement)
-            installed_app = app_replacement.target
-            if shim_path is not None:
-                shim_replacement = replace_path(
-                    shim_source,
-                    shim_path,
-                    force=force,
-                )
-                replacements.append(shim_replacement)
-                installed_shim = shim_replacement.target
-                installed_shim.write_text(
-                    build_shim_script(installed_app), encoding="utf-8"
-                )
-                make_executable(installed_shim)
-            smoke_check(installed_app, installed_shim)
-            state_source = temp_dir / "install-state.json"
-            write_install_state(
-                state_source,
-                manifest,
-                app_dir=installed_app,
-                code_mode_host_backup_path=code_mode_host_backup_path,
-                code_mode_host_path=supervisor_paths.code_mode_host
-                if code_mode_host_source is not None
-                else None,
-                engine_backup_path=engine_backup_path,
-                shim_path=installed_shim,
-                supervisor_paths=supervisor_paths,
-                code_route=None,
-            )
-            replacements.append(
-                replace_path(
-                    state_source,
-                    state_path,
-                    force=True,
-                )
-            )
+            apply_install_transaction_target(state_target, force=True)
+            journal["phase"] = "state-pending"
+            install_transaction.rewrite_journal(state_path, journal)
             engine_operations.install_supervisor(supervisor_paths, engine_release)
+            write_state_document(state_path, completed_state_document)
+            journal["phase"] = "supervisor-reconciled"
+            install_transaction.rewrite_journal(state_path, journal)
         except Exception as install_error:
             try:
-                rollback_replacements(replacements)
+                rollback_install_transaction(journal)
+                rollback_replacements([])
             except Exception as rollback_error:
                 raise CodexLabRollbackError(
                     "Codex Lab installation failed and file rollback did not complete: "
                     f"{rollback_error}"
                 ) from install_error
             raise
-        cleanup_replacements(replacements)
+        cleanup_install_transaction(journal)
+        install_transaction.clear_journal(state_path)
         return CodexLabInstallResult(
-            app_dir=installed_app,
+            app_dir=app_dir,
             code_mode_host_path=supervisor_paths.code_mode_host
             if code_mode_host_source is not None
             else None,
@@ -880,6 +931,83 @@ def preflight_new_backup_path(path: Path) -> None:
         raise FileExistsError(f"Engine backup path already exists: {path}")
 
 
+def recover_install_transaction(state_path: Path, *, lock_held: bool = False) -> None:
+    state_path = resolve_destination(state_path)
+    if not lock_held:
+        with transaction_lock(state_path):
+            recover_install_transaction(state_path, lock_held=True)
+        return
+    if not install_transaction.journal_exists(state_path):
+        return
+    try:
+        journal = install_transaction.read_journal(state_path)
+        current_sha256 = install_transaction.state_sha256(state_path)
+        rolled_back = False
+        if journal["operation"] == "install":
+            if current_sha256 == journal["stateAfterSha256"]:
+                cleanup_install_transaction(journal)
+            elif (
+                journal.get("phase") == "state-pending"
+                and current_sha256 == journal["pendingStateSha256"]
+            ):
+                cleanup_install_transaction(journal)
+            elif current_sha256 == journal["stateBeforeSha256"]:
+                rollback_install_transaction(journal)
+                rolled_back = True
+            else:
+                raise install_transaction.InstallTransactionRecoveryError(
+                    "Codex Lab installer transaction state is ambiguous; journal was preserved"
+                )
+        else:
+            if current_sha256 is None:
+                complete_uninstall_transaction(journal)
+                cleanup_uninstall_transaction(journal)
+            elif current_sha256 == journal["stateBeforeSha256"]:
+                rollback_install_transaction(journal)
+                set_supervisor_reconciled(state_path, False)
+                rolled_back = True
+            else:
+                raise install_transaction.InstallTransactionRecoveryError(
+                    "Codex Lab uninstall transaction state is ambiguous; journal was preserved"
+                )
+        install_transaction.clear_journal(state_path)
+        if rolled_back:
+            cleanup_empty_transaction_parents(journal)
+    except install_transaction.InstallTransactionRecoveryError as exc:
+        raise CodexLabInstallStateError(str(exc)) from exc
+
+
+def complete_uninstall_transaction(journal: dict) -> None:
+    engine_path = Path(journal["enginePath"]) if journal.get("enginePath") else None
+    code_mode_host_path = (
+        Path(journal["codeModeHostPath"]) if journal.get("codeModeHostPath") else None
+    )
+    for target in journal["targets"]:
+        target_path = Path(target["targetPath"])
+        if target_path not in {engine_path, code_mode_host_path}:
+            install_transaction.remove_path(target_path)
+    restore_uninstall_backup(journal.get("engineBackupPath"), engine_path)
+    restore_uninstall_backup(journal.get("codeModeHostBackupPath"), code_mode_host_path)
+
+
+def restore_uninstall_backup(backup_path: str | None, target_path: Path | None) -> None:
+    if backup_path is None or target_path is None:
+        return
+    backup = Path(backup_path)
+    if path_exists(backup):
+        if path_exists(target_path):
+            install_transaction.remove_path(target_path)
+        safe_rename(backup, target_path)
+
+
+def cleanup_uninstall_transaction(journal: dict) -> None:
+    for target in journal["targets"]:
+        for field in ("stagedPath", "backupPath"):
+            path = Path(target[field])
+            if path_exists(path):
+                install_transaction.remove_path(path)
+
+
 def read_install_state(
     state_path: Path = DEFAULT_STATE_PATH,
     *,
@@ -890,6 +1018,7 @@ def read_install_state(
         with transaction_lock(state_path):
             return read_install_state(state_path, lock_held=True)
     recover_code_route_transaction(state_path, lock_held=True)
+    recover_install_transaction(state_path, lock_held=True)
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -983,6 +1112,11 @@ def read_install_state(
         raise CodexLabInstallStateError(
             f"Install state field supervisorLabel must be a non-empty string or null: {state_path}"
         )
+    supervisor_reconciled = state.get("supervisorReconciled", True)
+    if not isinstance(supervisor_reconciled, bool):
+        raise CodexLabInstallStateError(
+            f"Install state field supervisorReconciled must be a boolean: {state_path}"
+        )
     try:
         code_route = read_code_route_state(state, state_path)
     except ValueError as exc:
@@ -1020,6 +1154,7 @@ def read_install_state(
         source_commit=source_commit,
         source_repository=source_repository,
         state_path=state_path,
+        supervisor_reconciled=supervisor_reconciled,
         supervisor_label=supervisor_label,
         version=required_state_string(state, "version", state_path),
     )
@@ -1047,6 +1182,11 @@ def _activate_code_route_locked(
     engine_operations: EngineProvisioningOperations | None,
 ) -> CodeRouteResult:
     status = read_install_state(state_path, lock_held=True)
+    if not status.supervisor_reconciled:
+        raise ValueError(
+            "Codex Lab supervisor reconciliation is incomplete; reinstall, update, "
+            "or uninstall to repair the interrupted installer transaction"
+        )
     engine_operations = engine_operations or DEFAULT_ENGINE_OPERATIONS
     expected_paths = default_supervisor_paths()
     if status.lab_home != expected_paths.lab_home:
@@ -1141,6 +1281,11 @@ def require_recorded_install_status(
     *,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> None:
+    if not status.supervisor_reconciled:
+        raise ValueError(
+            "Codex Lab supervisor reconciliation is incomplete; reinstall, update, "
+            "or uninstall to repair the interrupted installer transaction"
+        )
     require_recorded_install(
         status,
         supervisor_paths=supervisor_paths_from_status(status),
@@ -1328,58 +1473,76 @@ def _uninstall_codex_lab_locked(
             current_code_mode_host_identity,
         )
 
-    removals: list[Replacement] = []
+    transaction_id = install_transaction.new_transaction_id()
+    removal_paths = [status.app_path, status.shim_path]
+    if manages_code_mode_host:
+        removal_paths.append(supervisor_paths.code_mode_host)
+    if manages_engine:
+        removal_paths.append(supervisor_paths.managed_cli)
+    removal_paths.append(status.state_path)
+    targets = [
+        transaction_target(target, transaction_id, preserve_backup=False)
+        for target in removal_paths
+        if target is not None
+    ]
+    journal = {
+        "codeModeHostBackupPath": str(status.code_mode_host_backup_path)
+        if manages_code_mode_host and status.code_mode_host_backup_path is not None
+        else None,
+        "codeModeHostPath": str(supervisor_paths.code_mode_host)
+        if manages_code_mode_host
+        else None,
+        "engineBackupPath": str(status.engine_backup_path)
+        if manages_engine and status.engine_backup_path is not None
+        else None,
+        "enginePath": str(supervisor_paths.managed_cli) if manages_engine else None,
+        "operation": "uninstall",
+        "pendingStateSha256": None,
+        "schemaVersion": install_transaction.JOURNAL_SCHEMA_VERSION,
+        "stateAfterSha256": None,
+        "stateBeforeSha256": install_transaction.state_sha256(status.state_path),
+        "statePath": str(status.state_path),
+        "targets": targets,
+        "transactionId": transaction_id,
+    }
+    install_transaction.require_no_code_route_journal(status.state_path)
+    install_transaction.write_journal(status.state_path, journal)
     restored_engine_path = None
     restored_code_mode_host_path = None
     try:
-        for target in (status.app_path, status.shim_path):
-            if target is not None and path_exists(target):
-                removals.append(stage_path_removal(target))
-        removals.append(stage_path_removal(status.state_path))
-
         if manages_engine:
             engine_operations.uninstall_supervisor(supervisor_paths)
-            if manages_code_mode_host:
-                removals.append(stage_path_removal(supervisor_paths.code_mode_host))
-            removals.append(stage_path_removal(supervisor_paths.managed_cli))
+        for target in targets:
+            apply_uninstall_transaction_target(target)
         if manages_engine and status.engine_backup_path is not None:
-            supervisor_paths.managed_cli.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(
-                str(status.engine_backup_path),
-                str(supervisor_paths.managed_cli),
-            )
+            safe_rename(status.engine_backup_path, supervisor_paths.managed_cli)
             restored_engine_path = supervisor_paths.managed_cli
         if manages_engine and status.code_mode_host_backup_path is not None:
-            supervisor_paths.code_mode_host.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(
-                str(status.code_mode_host_backup_path),
-                str(supervisor_paths.code_mode_host),
+            safe_rename(
+                status.code_mode_host_backup_path,
+                supervisor_paths.code_mode_host,
             )
             restored_code_mode_host_path = supervisor_paths.code_mode_host
+        journal["phase"] = "state-removed"
+        install_transaction.rewrite_journal(status.state_path, journal)
     except Exception as uninstall_error:
         try:
             if restored_code_mode_host_path is not None:
                 assert status.code_mode_host_backup_path is not None
-                status.code_mode_host_backup_path.parent.mkdir(
-                    parents=True, exist_ok=True
-                )
-                shutil.move(
-                    str(restored_code_mode_host_path),
-                    str(status.code_mode_host_backup_path),
+                safe_rename(
+                    restored_code_mode_host_path,
+                    status.code_mode_host_backup_path,
                 )
             if restored_engine_path is not None:
                 assert status.engine_backup_path is not None
-                status.engine_backup_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(
-                    str(restored_engine_path),
-                    str(status.engine_backup_path),
-                )
-            rollback_replacements(removals)
+                safe_rename(restored_engine_path, status.engine_backup_path)
+            rollback_install_transaction(journal)
             if current_engine_release is not None:
                 engine_operations.install_supervisor(
                     supervisor_paths,
                     current_engine_release,
                 )
+            install_transaction.clear_journal(status.state_path)
         except Exception as rollback_error:
             raise CodexLabRollbackError(
                 "Codex Lab uninstall failed and rollback did not complete: "
@@ -1387,7 +1550,8 @@ def _uninstall_codex_lab_locked(
             ) from uninstall_error
         raise
 
-    cleanup_replacements_best_effort(removals)
+    cleanup_uninstall_transaction(journal)
+    install_transaction.clear_journal(status.state_path)
     return CodexLabUninstallResult(
         app_path=status.app_path,
         code_mode_host_path=status.code_mode_host_path
@@ -1788,8 +1952,40 @@ def write_install_state(
     shim_path: Path | None,
     supervisor_paths: SupervisorPaths,
     code_route: CodeRouteState | None,
+    supervisor_reconciled: bool = True,
+    engine_backup_sha256: str | None = None,
+    code_mode_host_backup_sha256: str | None = None,
 ) -> None:
-    state_path = resolve_destination(state_path)
+    state = install_state_document(
+        manifest,
+        app_dir=app_dir,
+        code_mode_host_backup_path=code_mode_host_backup_path,
+        code_mode_host_path=code_mode_host_path,
+        engine_backup_path=engine_backup_path,
+        shim_path=shim_path,
+        supervisor_paths=supervisor_paths,
+        code_route=code_route,
+        supervisor_reconciled=supervisor_reconciled,
+        engine_backup_sha256=engine_backup_sha256,
+        code_mode_host_backup_sha256=code_mode_host_backup_sha256,
+    )
+    write_state_document(resolve_destination(state_path), state)
+
+
+def install_state_document(
+    manifest: dict,
+    *,
+    app_dir: Path,
+    code_mode_host_backup_path: Path | None,
+    code_mode_host_path: Path | None,
+    engine_backup_path: Path | None,
+    shim_path: Path | None,
+    supervisor_paths: SupervisorPaths,
+    code_route: CodeRouteState | None,
+    supervisor_reconciled: bool,
+    engine_backup_sha256: str | None = None,
+    code_mode_host_backup_sha256: str | None = None,
+) -> dict:
     code_mode_host_release = managed_engine_release_from_manifest(
         manifest
     ).code_mode_host
@@ -1808,8 +2004,11 @@ def write_install_state(
         "codeModeHostBackupPath": str(code_mode_host_backup_path)
         if code_mode_host_backup_path is not None
         else None,
-        "codeModeHostBackupSha256": sha256_file(code_mode_host_backup_path)
+        "codeModeHostBackupSha256": code_mode_host_backup_sha256
+        if code_mode_host_backup_sha256 is not None
+        else sha256_file(code_mode_host_backup_path)
         if code_mode_host_backup_path is not None
+        and path_exists(code_mode_host_backup_path)
         else None,
         "codeModeHostPath": str(code_mode_host_path)
         if code_mode_host_path is not None
@@ -1817,8 +2016,10 @@ def write_install_state(
         "engineBackupPath": str(engine_backup_path)
         if engine_backup_path is not None
         else None,
-        "engineBackupSha256": sha256_file(engine_backup_path)
-        if engine_backup_path is not None
+        "engineBackupSha256": engine_backup_sha256
+        if engine_backup_sha256 is not None
+        else sha256_file(engine_backup_path)
+        if engine_backup_path is not None and path_exists(engine_backup_path)
         else None,
         "enginePath": str(supervisor_paths.managed_cli),
         "managedEngine": {
@@ -1842,15 +2043,158 @@ def write_install_state(
         "shimPath": str(shim_path) if shim_path is not None else None,
         "source": manifest["source"],
         "supervisorLabel": supervisor_paths.label,
+        "supervisorReconciled": supervisor_reconciled,
         "version": manifest["version"],
     }
+    return state
+
+
+def write_state_document(state_path: Path, state: dict) -> None:
     preflight_install_parent(state_path.parent)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = state_path.with_suffix(f"{state_path.suffix}.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    temp_path.replace(state_path)
+    durable_write(state_path, document_bytes(state), mode=0o600)
+
+
+def transaction_target(
+    target: Path,
+    transaction_id: str,
+    *,
+    preserve_backup: bool,
+) -> dict:
+    target = resolve_destination(target)
+    clear_stale_transaction_debris(target)
+    return {
+        "backupPath": str(install_transaction.backup_path_for(target, transaction_id)),
+        "parentWasPresent": path_exists(target.parent),
+        "preserveBackup": preserve_backup,
+        "stagedPath": str(install_transaction.staged_path_for(target, transaction_id)),
+        "targetPath": str(target),
+        "wasPresent": path_exists(target),
+    }
+
+
+def transaction_target_for(targets: list[dict], target: Path) -> dict:
+    target = resolve_destination(target)
+    for value in targets:
+        if value["targetPath"] == str(target):
+            return value
+    raise ValueError(f"Installer transaction does not contain target: {target}")
+
+
+def clear_stale_transaction_debris(target: Path) -> None:
+    for prefix in (".codex-lab-staged-", ".codex-lab-backup-"):
+        for path in target.parent.glob(f".{target.name}{prefix}*"):
+            install_transaction.remove_path(path)
+
+
+def stage_transaction_source(source: Path, target: Path, transaction_id: str) -> None:
+    staged_path = install_transaction.staged_path_for(target, transaction_id)
+    preflight_install_parent(staged_path.parent)
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    if path_exists(staged_path):
+        raise FileExistsError(
+            f"Installer transaction staging path exists: {staged_path}"
+        )
+    if source.is_dir():
+        shutil.copytree(source, staged_path)
+    else:
+        shutil.copy2(source, staged_path)
+
+
+def apply_install_transaction_target(target: dict, *, force: bool) -> None:
+    target_path = Path(target["targetPath"])
+    staged_path = Path(target["stagedPath"])
+    backup_path = Path(target["backupPath"])
+    if not path_exists(staged_path):
+        raise FileNotFoundError(
+            f"Installer transaction staging path is missing: {staged_path}"
+        )
+    preflight_install_parent(target_path.parent)
+    if path_exists(target_path):
+        preflight_install_target(target_path, force=force)
+        safe_rename(target_path, backup_path)
+    safe_rename(staged_path, target_path)
+
+
+def apply_uninstall_transaction_target(target: dict) -> None:
+    target_path = Path(target["targetPath"])
+    backup_path = Path(target["backupPath"])
+    if path_exists(target_path):
+        safe_rename(target_path, backup_path)
+
+
+def rollback_install_transaction(journal: dict) -> None:
+    for target in reversed(journal["targets"]):
+        target_path = Path(target["targetPath"])
+        staged_path = Path(target["stagedPath"])
+        backup_path = Path(target["backupPath"])
+        retained_backup_path = target.get("retainedBackupPath")
+        restore_path = backup_path
+        if not path_exists(restore_path) and retained_backup_path is not None:
+            restore_path = Path(retained_backup_path)
+        if path_exists(restore_path):
+            install_transaction.remove_path(target_path)
+            safe_rename(restore_path, target_path)
+        elif not target["wasPresent"] and path_exists(target_path):
+            install_transaction.remove_path(target_path)
+        if path_exists(staged_path):
+            install_transaction.remove_path(staged_path)
+    cleanup_empty_transaction_parents(journal)
+
+
+def cleanup_empty_transaction_parents(journal: dict) -> None:
+    new_parent_paths = sorted(
+        (
+            Path(target["targetPath"]).parent
+            for target in journal["targets"]
+            if not target["parentWasPresent"]
+        ),
+        key=lambda path: len(path.parts),
+        reverse=True,
+    )
+    for parent in new_parent_paths:
+        remove_empty_transaction_parents(parent)
+
+
+def remove_empty_transaction_parents(parent: Path) -> None:
+    while parent != parent.parent:
+        try:
+            parent.rmdir()
+        except OSError:
+            return
+        parent = parent.parent
+
+
+def cleanup_install_transaction(journal: dict) -> None:
+    for target in journal["targets"]:
+        staged_path = Path(target["stagedPath"])
+        backup_path = Path(target["backupPath"])
+        if path_exists(staged_path):
+            install_transaction.remove_path(staged_path)
+        if not target["preserveBackup"] and path_exists(backup_path):
+            install_transaction.remove_path(backup_path)
+
+
+def retain_transaction_backup(target: dict) -> None:
+    retained_backup_path = target.get("retainedBackupPath")
+    if retained_backup_path is None:
+        return
+    backup_path = Path(target["backupPath"])
+    if not path_exists(backup_path):
+        return
+    retained_path = Path(retained_backup_path)
+    preflight_install_parent(retained_path.parent)
+    retained_path.parent.mkdir(parents=True, exist_ok=True)
+    safe_rename(backup_path, retained_path)
+
+
+def set_supervisor_reconciled(state_path: Path, reconciled: bool) -> None:
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise CodexLabInstallStateError(
+            f"Install state must be a JSON object: {state_path}"
+        )
+    state["supervisorReconciled"] = reconciled
+    write_state_document(state_path, state)
 
 
 def manifest_release_version(manifest: dict) -> str:

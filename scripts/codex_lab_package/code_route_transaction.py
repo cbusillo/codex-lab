@@ -43,6 +43,12 @@ def activate_code_route(
         active_path=active_path,
         lock_held=True,
     )
+    from . import install_transaction
+
+    if install_transaction.journal_exists(state_path):
+        raise code_route.CodeRouteRecoveryError(
+            "Codex Lab installer transaction must recover before activating the code route"
+        )
     state, before_sha256 = code_route.read_state_document_with_sha256(state_path)
     existing = code_route.read_code_route_state(state, state_path)
     if existing is not None:
@@ -146,6 +152,12 @@ def deactivate_code_route(
         active_path=active_path,
         lock_held=True,
     )
+    from . import install_transaction
+
+    if install_transaction.journal_exists(state_path):
+        raise code_route.CodeRouteRecoveryError(
+            "Codex Lab installer transaction must recover before deactivating the code route"
+        )
     state, before_sha256 = code_route.read_state_document_with_sha256(state_path)
     route = code_route.read_code_route_state(state, state_path)
     if route is None:

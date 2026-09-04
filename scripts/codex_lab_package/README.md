@@ -86,6 +86,14 @@ signed managed CLI and Code Mode host, and the
 `dev.everycode.codex-lab.app-server.v1` user LaunchAgent as one rollback-aware
 transaction. No manual canary provisioning is required for a supported release.
 
+The installer records a bounded, `0600` journal beside the install state before
+it changes any target. Every replacement uses a deterministic per-target staging
+and backup path, so startup can either recover an interrupted transaction or
+fail closed without guessing which files changed. State written before launchd
+reconciliation carries `supervisorReconciled: false`; `--status`, `--check`,
+and code-route activation refuse that state until a reinstall/update repairs it
+or `--uninstall` tears it down safely.
+
 Use `scripts/install_codex_lab.py` to install or manually update Codex Lab from a
 published release manifest:
 
