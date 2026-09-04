@@ -18,6 +18,7 @@ use codex_app_server_protocol::RemoteControlConnectionStatus;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_transport::app_server_control_socket_path;
 use codex_utils_home_dir::find_codex_home;
+use codex_version::is_lab_build;
 use managed_install::managed_codex_bin;
 #[cfg(unix)]
 use managed_install::managed_codex_version;
@@ -235,6 +236,18 @@ pub async fn run_pid_update_loop(
     http_client_factory: codex_http_client::HttpClientFactory,
 ) -> Result<()> {
     ensure_supported_platform()?;
+    run_pid_update_loop_for_build(http_client_factory, is_lab_build()).await
+}
+
+async fn run_pid_update_loop_for_build(
+    http_client_factory: codex_http_client::HttpClientFactory,
+    is_lab_build: bool,
+) -> Result<()> {
+    if is_lab_build {
+        return Err(anyhow!(
+            "Codex Lab disables the upstream app-server update loop; use the supported Codex Lab release installer with --check or --status"
+        ));
+    }
     update_loop::run(http_client_factory).await
 }
 
@@ -296,6 +309,7 @@ impl Daemon {
 
     async fn start(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
+        self.stop_updater_for_lab(&settings).await?;
         if let Ok(info) = client::probe(&self.socket_path).await {
             return Ok(self
                 .output(
@@ -334,6 +348,7 @@ impl Daemon {
 
     async fn restart(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
+        self.stop_updater_for_lab(&settings).await?;
         if client::probe(&self.socket_path).await.is_ok()
             && self.running_backend(&settings).await?.is_none()
         {
@@ -407,6 +422,7 @@ impl Daemon {
 
     async fn stop(&self) -> Result<LifecycleOutput> {
         let settings = self.load_settings().await?;
+        self.stop_updater_for_lab(&settings).await?;
         if let Some(backend) = self.running_backend_instance(&settings).await? {
             backend.stop().await?;
             return Ok(self
@@ -530,6 +546,7 @@ impl Daemon {
         mode: RemoteControlMode,
     ) -> Result<RemoteControlOutput> {
         let previous_settings = self.load_settings().await?;
+        self.stop_updater_for_lab(&previous_settings).await?;
         let mut settings = previous_settings.clone();
         let remote_control_enabled = mode.is_enabled();
         let backend = self.running_backend_instance(&previous_settings).await?;
@@ -609,14 +626,17 @@ impl Daemon {
         if updater.is_starting_or_running().await? {
             updater.stop().await?;
         }
-        updater.start().await?;
+        let auto_update_enabled = auto_update_enabled_for_build(is_lab_build());
+        if auto_update_enabled {
+            updater.start().await?;
+        }
 
         let info = self.wait_until_ready().await?;
         let managed_codex_version = self.managed_codex_version_best_effort().await;
         Ok(BootstrapOutput {
             status: BootstrapStatus::Bootstrapped,
             backend: BackendKind::Pid,
-            auto_update_enabled: true,
+            auto_update_enabled,
             remote_control_enabled: settings.remote_control_enabled,
             managed_codex_path: self.managed_codex_bin.clone(),
             managed_codex_version,
@@ -660,8 +680,22 @@ impl Daemon {
     }
 
     async fn is_bootstrapped(&self, settings: &DaemonSettings) -> Result<bool> {
+        if is_lab_build() {
+            return Ok(self.settings_file.is_file() && self.managed_codex_bin.is_file());
+        }
         let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
         updater.is_starting_or_running().await
+    }
+
+    async fn stop_updater_for_lab(&self, settings: &DaemonSettings) -> Result<()> {
+        if !is_lab_build() {
+            return Ok(());
+        }
+        let updater = backend::pid_update_loop_backend(self.backend_paths(settings));
+        if updater.is_starting_or_running().await? {
+            updater.stop().await?;
+        }
+        Ok(())
     }
 
     fn ensure_managed_codex_bin(&self) -> Result<()> {
@@ -670,6 +704,14 @@ impl Daemon {
         }
 
         let managed_codex_path = self.managed_codex_bin.display();
+        if is_lab_build() {
+            return Err(anyhow!(
+                "managed Codex Lab install not found at {managed_codex_path}\n\n\
+                 This command requires a provenance-verified Codex Lab release installed through \
+                 the supported Codex Lab release installer. Run that installer with --status or \
+                 --check, then install or restore the expected release before retrying."
+            ));
+        }
         Err(anyhow!(
             "managed standalone Codex install not found at {managed_codex_path}\n\n\
              This command requires the standalone install managed by the Codex installer, because \
@@ -786,6 +828,10 @@ impl Daemon {
     }
 }
 
+fn auto_update_enabled_for_build(is_lab_build: bool) -> bool {
+    !is_lab_build
+}
+
 fn remote_control_status(mode: RemoteControlMode) -> RemoteControlStatus {
     match mode {
         RemoteControlMode::Enabled => RemoteControlStatus::Enabled,
@@ -849,6 +895,8 @@ fn try_lock_file(_file: &tokio::fs::File) -> Result<bool> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
     use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
@@ -864,9 +912,37 @@ mod tests {
     use super::RestartIfRunningOutcome;
     use super::RestartMode;
     use super::UpdaterRefreshMode;
+    use super::auto_update_enabled_for_build;
     use super::restart_decision;
+    use super::run_pid_update_loop_for_build;
     use super::should_reexec_updater;
     use crate::client::ProbeInfo;
+
+    #[test]
+    fn codex_lab_bootstrap_disables_auto_updates() {
+        assert_eq!(
+            (
+                auto_update_enabled_for_build(/*is_lab_build*/ true),
+                auto_update_enabled_for_build(/*is_lab_build*/ false),
+            ),
+            (false, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_lab_rejects_pid_update_loop_before_network_access() {
+        let error = run_pid_update_loop_for_build(
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            /*is_lab_build*/ true,
+        )
+        .await
+        .expect_err("Lab update loop should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "Codex Lab disables the upstream app-server update loop; use the supported Codex Lab release installer with --check or --status"
+        );
+    }
 
     #[test]
     fn remote_control_status_uses_camel_case_json() {
