@@ -30,7 +30,7 @@ const LIST_CALL_ID: &str = "list-external-probe";
 const MESSAGE_CALL_ID: &str = "message-external-probe";
 const FOLLOWUP_CALL_ID: &str = "followup-external-probe";
 const ROLE: &str = "external_probe";
-const COLLABORATION_NAMESPACE: &str = "collaboration";
+const COLLABORATION_NAMESPACE: &str = "agents";
 const FOLLOW_UP_PROMPT: &str = "summarize what the external agent reported";
 /// The repeating unit of the stub external agent's ~200 KB final message.
 const EXTERNAL_AGENT_OUTPUT_CHUNK: &str = "0123456789";

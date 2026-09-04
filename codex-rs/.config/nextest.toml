@@ -101,6 +101,22 @@ filter = 'package(codex-app-server) & test(suite::v2::attestation::)'
 threads-required = "num-test-threads"
 
 [[profile.default.overrides]]
-# This case runs four embedded app-server and managed-MCP lifecycles sequentially.
-filter = 'package(codex-tui) & test(local_mcp_respects_configured_servers_and_managed_requirements)'
+# These cases cold-start multiple embedded app-server or managed-MCP lifecycles
+# and can exceed the generic timeout after a full TUI suite has run.
+filter = 'package(codex-tui) & (test(overview_cold_resume_honors_working_directory_selection) | test(local_mcp_respects_configured_servers_and_managed_requirements))'
 threads-required = "num-test-threads"
+slow-timeout = { period = "1m", terminate-after = 2 }
+
+[[profile.default.overrides]]
+# These local HTTP reachability probes share the production network deadline.
+# Reserve the runner so unrelated CLI subprocess tests cannot exhaust it.
+filter = 'package(codex-cli) & test(provider_reachability_)'
+threads-required = "num-test-threads"
+slow-timeout = { period = "1m", terminate-after = 2 }
+
+[[profile.default.overrides]]
+# These debug-sandbox tests inspect live process trees or bootstrap a managed
+# subprocess and become unreliable when the CLI suite saturates process slots.
+filter = 'package(codex-cli) & (test(pid_tracker_) | test(debug_sandbox_bootstraps_cloud_managed_permission_profile_from_backend))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "1m", terminate-after = 3 }

@@ -13,11 +13,13 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::security_risk::SecurityRiskScore;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use pretty_assertions::assert_eq;
+use std::collections::BTreeMap;
 
 use super::*;
 use crate::protocol::v2::ProjectValidationSkipReason as V2ProjectValidationSkipReason;
@@ -71,6 +73,7 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
 #[test]
 fn projects_failed_turn_completion_as_snapshot() {
     let error = ErrorEvent {
+        misalignment: None,
         message: "request failed".to_string(),
         codex_error_info: None,
     };
@@ -94,6 +97,7 @@ fn projects_failed_turn_completion_as_snapshot() {
                 turn_id: "turn-1".to_string(),
                 status: TurnStatus::Failed,
                 error: Some(TurnError {
+                    misalignment: None,
                     message: "request failed".to_string(),
                     codex_error_info: None,
                     additional_details: None,
@@ -126,6 +130,7 @@ fn projects_completed_canonical_turn_items() {
         phase: None,
         memory_citation: None,
         delivery: None,
+        questions: None,
     });
 
     let user_changes = project(item_completed(thread_id, "turn-1", user_item.clone()));
@@ -328,15 +333,25 @@ fn ignores_legacy_abort_without_turn_id_and_context_only_records() {
     let compacted = project(RolloutItem::Compacted(CompactedItem {
         message: String::new(),
         replacement_history: None,
+        guardian_history: None,
         mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+    }));
+    let security_risk = project(RolloutItem::SecurityRiskScore(SecurityRiskScore {
+        scores: BTreeMap::from([("action_risk".to_string(), 0.92)]),
+        call_id: None,
+        action: None,
+        sampled_at: None,
     }));
 
     assert!(aborted.is_empty());
     assert!(compacted.is_empty());
+    assert!(security_risk.is_empty());
 }
 
 #[test]

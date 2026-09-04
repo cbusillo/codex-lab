@@ -166,7 +166,9 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
             continue
         if any(action in stripped for action in LINUX_CONTAINER_ACTIONS):
             violations.append(
-                Violation(path, line_number, "Linux container action in active workflow")
+                Violation(
+                    path, line_number, "Linux container action in active workflow"
+                )
             )
             continue
         if re.match(r"^\s*container\s*:", line):

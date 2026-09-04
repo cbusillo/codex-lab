@@ -137,9 +137,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         ):
             with self.subTest(job=job_name):
                 permissions = (
-                    "    permissions:\n"
-                    "      contents: read\n"
-                    "      actions: read\n"
+                    "    permissions:\n      contents: read\n      actions: read\n"
                     if job_name == "full-v8-canary"
                     else ""
                 )
@@ -237,7 +235,9 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         )
 
     def test_full_ci_and_release_use_the_same_apple_silicon_suites(self) -> None:
-        self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
+        self.assertEqual(
+            called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS
+        )
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)
         self.assertEqual(
             release_calls,

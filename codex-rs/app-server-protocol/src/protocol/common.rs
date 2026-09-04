@@ -705,7 +705,6 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadRollbackResponse,
     },
-    #[experimental("thread/revert")]
     ThreadRevert => "thread/revert" {
         params: v2::ThreadRevertParams,
         serialization: thread_id(params.thread_id),
@@ -802,14 +801,12 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadReadResponse,
     },
-    #[experimental("thread/turns/list")]
     ThreadTurnsList => "thread/turns/list" {
         params: v2::ThreadTurnsListParams,
         // Explicitly concurrent: this primarily reads append-only rollout storage.
         serialization: None,
         response: v2::ThreadTurnsListResponse,
     },
-    #[experimental("thread/items/list")]
     ThreadItemsList => "thread/items/list" {
         params: v2::ThreadItemsListParams,
         // Explicitly concurrent: this primarily reads append-only rollout storage.
@@ -873,6 +870,11 @@ client_request_definitions! {
         params: v2::PluginInstalledParams,
         serialization: None,
         response: v2::PluginInstalledResponse,
+    },
+    PluginReconcile => "plugin/reconcile" {
+        params: v2::PluginReconcileParams,
+        serialization: None,
+        response: v2::PluginReconcileResponse,
     },
     PluginRead => "plugin/read" {
         params: v2::PluginReadParams,
@@ -991,6 +993,12 @@ client_request_definitions! {
         inspect_params: true,
         serialization: thread_id(params.thread_id),
         response: v2::TurnStartResponse,
+    },
+    #[experimental("turn/settings/update")]
+    TurnSettingsUpdate => "turn/settings/update" {
+        params: v2::TurnSettingsUpdateParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::TurnSettingsUpdateResponse,
     },
     TurnSteer => "turn/steer" {
         params: v2::TurnSteerParams,
@@ -1938,7 +1946,6 @@ server_notification_definitions! {
     ThreadDeleted => "thread/deleted" (v2::ThreadDeletedNotification),
     ThreadUnarchived => "thread/unarchived" (v2::ThreadUnarchivedNotification),
     ThreadClosed => "thread/closed" (v2::ThreadClosedNotification),
-    #[experimental("thread/reverted")]
     ThreadReverted => "thread/reverted" (v2::ThreadRevertedNotification),
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
@@ -2013,6 +2020,8 @@ server_notification_definitions! {
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
+    AuthRecoveryStarted => "modelProvider/authRecoveryStarted" (v2::AuthRecoveryNotification),
+    AuthRecoveryCompleted => "modelProvider/authRecoveryCompleted" (v2::AuthRecoveryNotification),
     #[experimental("turn/moderationMetadata")]
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
     ModelSafetyBufferingUpdated => "model/safetyBuffering/updated" (v2::ModelSafetyBufferingUpdatedNotification),
@@ -3267,6 +3276,8 @@ mod tests {
                     project_id: None,
                     history_mode: Default::default(),
                     model_provider: "openai".to_string(),
+                    model: None,
+                    reasoning_effort: None,
                     created_at: 1,
                     updated_at: 2,
                     recency_at: Some(3),
@@ -3323,6 +3334,8 @@ mod tests {
                         "projectId": null,
                         "historyMode": "legacy",
                         "modelProvider": "openai",
+                        "model": null,
+                        "reasoningEffort": null,
                         "createdAt": 1,
                         "updatedAt": 2,
                         "recencyAt": 3,
@@ -4722,6 +4735,7 @@ mod tests {
     #[test]
     fn command_execution_request_approval_additional_permissions_is_marked_experimental() {
         let params = v2::CommandExecutionRequestApprovalParams {
+            kind: Default::default(),
             thread_id: "thr_123".to_string(),
             turn_id: "turn_123".to_string(),
             item_id: "call_123".to_string(),

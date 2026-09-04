@@ -35,6 +35,7 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::error::CodexErr;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::PermissionProfile;
@@ -400,11 +401,9 @@ async fn multi_agent_v2_spawn_fork_turns_all_applies_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    let turn = TurnContext {
-        config: Arc::new(config),
-        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
-        ..turn
-    };
+    let mut turn = turn;
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
 
     let session = Arc::new(session);
     let output = SpawnAgentHandlerV2::default()
@@ -490,7 +489,7 @@ async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
@@ -501,6 +500,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
         .await;
     let mut config = (*turn.config).clone();
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -511,7 +511,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
+    session.services.agent_control = root.thread.session.services.agent_control.clone();
     session.thread_id = root.thread_id;
     let session = Arc::new(session);
     let turn = Arc::new(turn);
@@ -523,12 +523,11 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "fork_with_tier",
-                "service_tier": ServiceTier::Fast.request_value()
+                "task_name": "fork_with_tier"
             })),
         ))
         .await
-        .expect("multi-agent v2 full-history fork should accept explicit service tier");
+        .expect("multi-agent v2 full-history fork should inherit the root service tier");
     let (content, _) = expect_text_output(output);
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
@@ -571,11 +570,10 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    let turn = TurnContext {
-        config: Arc::new(config),
-        multi_agent_version: codex_protocol::protocol::MultiAgentVersion::V2,
-        ..turn
-    };
+    let mut turn = turn;
+    turn.config = Arc::new(config);
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
+    let _parent_provider_id = turn.config.model_provider_id.clone();
 
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
@@ -793,7 +791,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         *id == child_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
@@ -820,7 +818,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         *id == child_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
@@ -1138,7 +1136,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         *id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == child_path
                         && communication.recipient == AgentPath::root()
                         && communication.other_recipients.is_empty()
@@ -1653,7 +1651,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
     assert!(!ops_for_agent.iter().any(|op| matches!(op, Op::Interrupt)));
     assert!(!ops_for_agent.iter().any(|op| matches!(
         op,
-        Op::InterAgentCommunication { communication }
+        Op::InterAgentCommunication { communication, .. }
             if communication.author == AgentPath::root()
                 && communication.recipient.as_str() == "/root/worker"
                 && communication.other_recipients.is_empty()
@@ -1740,7 +1738,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         *id == agent_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == AgentPath::root()
                         && communication.recipient == worker_path
                         && communication.encrypted_content.as_deref() == Some("continue")
@@ -1787,7 +1785,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
                     (id == root.thread_id)
                         .then_some(op)
                         .and_then(|op| match op {
-                            Op::InterAgentCommunication { communication }
+                            Op::InterAgentCommunication { communication, .. }
                                 if communication.author == worker_path
                                     && communication.recipient == AgentPath::root()
                                     && communication.other_recipients.is_empty()
@@ -1933,7 +1931,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
             (id == root.thread_id)
                 .then_some(op)
                 .and_then(|op| match op {
-                    Op::InterAgentCommunication { communication }
+                    Op::InterAgentCommunication { communication, .. }
                         if communication.author.as_str() == "/root/worker"
                             && communication.recipient == AgentPath::root()
                             && communication.other_recipients.is_empty()
@@ -2773,8 +2771,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 "hello from worker".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
 
@@ -2894,8 +2891,7 @@ async fn multi_agent_v2_wait_agent_returns_when_all_children_are_already_termina
                 "worker completed".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
     assert!(session.input_queue.has_pending_mailbox_items().await);
@@ -3394,8 +3390,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 "completed".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
 
@@ -3471,8 +3466,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 "already queued".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
 
@@ -3574,8 +3568,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 "from worker b".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
 
@@ -3666,8 +3659,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 "sensitive child output".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await;
 
@@ -4157,7 +4149,9 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     let (_session, mut turn) = make_session_and_context().await;
     let base_instructions = BaseInstructions {
         text: "base".to_string(),
-        provenance: None,
+        provenance: Some(BaseInstructionsProvenance::Model {
+            model: turn.model_info().slug.clone(),
+        }),
     };
     turn.developer_instructions = Some("dev".to_string());
     let mut config = (*turn.config).clone();
@@ -4203,10 +4197,11 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
     let mut expected = (*turn.config).clone();
     expected.base_instructions = Some(base_instructions.text);
-    expected.model = Some(turn.model_info.slug.clone());
+    expected.base_instructions_provenance = base_instructions.provenance;
+    expected.model = Some(turn.model_info().slug.clone());
     expected.model_provider = turn.provider.info().clone();
-    expected.model_reasoning_effort = turn.reasoning_effort.clone();
-    expected.model_reasoning_summary = Some(turn.reasoning_summary);
+    expected.model_reasoning_effort = turn.reasoning_effort().cloned();
+    expected.model_reasoning_summary = Some(turn.reasoning_summary());
     expected.developer_instructions = turn.developer_instructions.clone();
     expected
         .permissions
@@ -4244,7 +4239,11 @@ async fn build_agent_resume_config_clears_base_instructions() {
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
     base_config.base_instructions = Some("caller-base".to_string());
-    base_config
+    base_config.base_instructions_provenance = Some(BaseInstructionsProvenance::Model {
+        model: turn.model_info().slug.clone(),
+    });
+    turn.config = Arc::new(base_config.clone());
+    Arc::make_mut(&mut turn.config)
         .permissions
         .approval_policy
         .set(AskForApproval::OnRequest)
@@ -4255,10 +4254,11 @@ async fn build_agent_resume_config_clears_base_instructions() {
 
     let mut expected = (*turn.config).clone();
     expected.base_instructions = None;
-    expected.model = Some(turn.model_info.slug.clone());
+    expected.base_instructions_provenance = None;
+    expected.model = Some(turn.model_info().slug.clone());
     expected.model_provider = turn.provider.info().clone();
-    expected.model_reasoning_effort = turn.reasoning_effort.clone();
-    expected.model_reasoning_summary = Some(turn.reasoning_summary);
+    expected.model_reasoning_effort = turn.reasoning_effort().cloned();
+    expected.model_reasoning_summary = Some(turn.reasoning_summary());
     expected.developer_instructions = turn.developer_instructions.clone();
     #[allow(deprecated)]
     {

@@ -26,9 +26,23 @@ REPAIR_AGENTS = {"human", "model", "script"}
 MODEL_TIERS = {"budget", "frontier", "none"}
 ACCOUNTING_CONFIDENCE = {"explicit_zero", "provider_reported"}
 FORBIDDEN_KEYS = {
-    "command", "commands", "credential", "credentials", "exec", "execute",
-    "function", "process", "pr", "push", "secret", "secrets", "shell",
-    "subprocess", "test", "tests", "write",
+    "command",
+    "commands",
+    "credential",
+    "credentials",
+    "exec",
+    "execute",
+    "function",
+    "process",
+    "pr",
+    "push",
+    "secret",
+    "secrets",
+    "shell",
+    "subprocess",
+    "test",
+    "tests",
+    "write",
 }
 MONEY_PARTS = ("cost", "currency", "dollar", "money", "price")
 
@@ -41,7 +55,9 @@ def flat(value: object, limit: int) -> str:
     return str(value).replace("\r", " ").replace("\n", " ").replace("\x00", " ")[:limit]
 
 
-def read_object(path: Path, label: str, limit: int = MAX_LEDGER_BYTES) -> dict[str, object]:
+def read_object(
+    path: Path, label: str, limit: int = MAX_LEDGER_BYTES
+) -> dict[str, object]:
     try:
         if path.stat().st_size > limit:
             raise LedgerError(f"{label} exceeds {limit} bytes")
@@ -83,7 +99,10 @@ def evidence_refs(evidence: dict[str, object]) -> dict[str, str]:
     refs = evidence.get("refs")
     if not isinstance(refs, dict):
         raise LedgerError("candidate evidence has no refs object")
-    return {name: exact_ref(refs.get(name), f"evidence refs.{name}") for name in ("base", "upstream", "local")}
+    return {
+        name: exact_ref(refs.get(name), f"evidence refs.{name}")
+        for name in ("base", "upstream", "local")
+    }
 
 
 def workflow_info(evidence: dict[str, object]) -> dict[str, str]:
@@ -92,21 +111,38 @@ def workflow_info(evidence: dict[str, object]) -> dict[str, str]:
         return {"sha": evidence_refs(evidence)["local"], "runId": "unavailable"}
     sha = workflow.get("sha", evidence_refs(evidence)["local"])
     run_id = workflow.get("runId", "unavailable")
-    if not isinstance(run_id, str) or not run_id or len(run_id) > 128 or "\n" in run_id or "\r" in run_id:
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or len(run_id) > 128
+        or "\n" in run_id
+        or "\r" in run_id
+    ):
         raise LedgerError("workflow run id is invalid")
     return {"sha": exact_ref(sha, "workflow sha"), "runId": flat(run_id, 128)}
 
 
-def stage3c_units(packets_path: Path, telemetry_path: Path) -> tuple[list[str], list[str], list[str]]:
+def stage3c_units(
+    packets_path: Path, telemetry_path: Path
+) -> tuple[list[str], list[str], list[str]]:
     packets = read_object(packets_path, "model packets", MAX_INPUT_BYTES)
     telemetry = read_object(telemetry_path, "model telemetry", MAX_INPUT_BYTES)
     if packets.get("schemaVersion") != 1 or packets.get("stage") != "3c":
         raise LedgerError("model packets are not stage 3c schema 1")
     if telemetry.get("schemaVersion") != 1 or telemetry.get("stage") != "3c":
         raise LedgerError("model telemetry is not stage 3c schema 1")
-    if telemetry.get("modelFree") is not True or telemetry.get("invocation") != "not-invoked":
+    if (
+        telemetry.get("modelFree") is not True
+        or telemetry.get("invocation") != "not-invoked"
+    ):
         raise LedgerError("stage 3c telemetry claims model invocation")
-    for field in ("calls", "promptTokens", "completionTokens", "totalTokens", "actualTotalTokens"):
+    for field in (
+        "calls",
+        "promptTokens",
+        "completionTokens",
+        "totalTokens",
+        "actualTotalTokens",
+    ):
         value = telemetry.get(field)
         if not isinstance(value, int) or isinstance(value, bool) or value != 0:
             raise LedgerError("stage 3c telemetry must have explicit zero actual usage")
@@ -118,7 +154,9 @@ def stage3c_units(packets_path: Path, telemetry_path: Path) -> tuple[list[str], 
         if not isinstance(entries, list) or len(entries) > MAX_CYCLES:
             raise LedgerError(f"model packets {key} is invalid")
         for entry in entries:
-            if not isinstance(entry, dict) or not isinstance(entry.get("packetId"), str):
+            if not isinstance(entry, dict) or not isinstance(
+                entry.get("packetId"), str
+            ):
                 raise LedgerError("model packet has no bounded packetId")
             unit_id = entry["packetId"]
             if (
@@ -139,7 +177,11 @@ def stage3c_units(packets_path: Path, telemetry_path: Path) -> tuple[list[str], 
 
 def ledger_path(path: Path | None) -> Path:
     runner_temp = Path(os.environ.get("RUNNER_TEMP", "/tmp")).resolve()
-    selected = (runner_temp / "upstream-convergence-repair-ledger.json") if path is None else path
+    selected = (
+        (runner_temp / "upstream-convergence-repair-ledger.json")
+        if path is None
+        else path
+    )
     try:
         selected.resolve().relative_to(runner_temp)
     except ValueError as error:
@@ -153,16 +195,27 @@ def accounting(value: object, label: str) -> dict[str, int]:
     if not isinstance(value, dict):
         raise LedgerError(f"{label} accounting is invalid")
     result = {}
-    aliases = {"promptTokens": "actualPromptTokens", "completionTokens": "actualCompletionTokens", "totalTokens": "actualTotalTokens"}
+    aliases = {
+        "promptTokens": "actualPromptTokens",
+        "completionTokens": "actualCompletionTokens",
+        "totalTokens": "actualTotalTokens",
+    }
     for name in ("calls", "promptTokens", "completionTokens", "totalTokens"):
         number = value.get(name, value.get(aliases.get(name), 0))
-        if name in aliases and name in value and aliases[name] in value and value[name] != value[aliases[name]]:
+        if (
+            name in aliases
+            and name in value
+            and aliases[name] in value
+            and value[name] != value[aliases[name]]
+        ):
             raise LedgerError(f"{label} accounting aliases disagree for {name}")
         if not isinstance(number, int) or isinstance(number, bool) or number < 0:
             raise LedgerError(f"{label} accounting has invalid {name}")
         result[name] = number
     if result["totalTokens"] != result["promptTokens"] + result["completionTokens"]:
-        raise LedgerError(f"{label} accounting total does not equal prompt plus completion")
+        raise LedgerError(
+            f"{label} accounting total does not equal prompt plus completion"
+        )
     return result
 
 
@@ -173,7 +226,10 @@ def validate_ledger(
     if ledger.get("schemaVersion") != 1 or ledger.get("stage") != "3d":
         raise LedgerError("repair ledger is not schema 1 stage 3d")
     provenance = ledger.get("provenance")
-    if not isinstance(provenance, str) or provenance not in {"workflow-executor", "synthetic-fixture"}:
+    if not isinstance(provenance, str) or provenance not in {
+        "workflow-executor",
+        "synthetic-fixture",
+    }:
         raise LedgerError("repair ledger provenance is invalid")
     if require_live and provenance != "workflow-executor":
         raise LedgerError("live checkpoint requires workflow-executor provenance")
@@ -182,14 +238,18 @@ def validate_ledger(
         raise LedgerError("repair ledger refs do not match candidate evidence")
     for name, ref in refs.items():
         if ledger_refs.get(name) != ref:
-            raise LedgerError(f"repair ledger refs.{name} does not match candidate evidence")
+            raise LedgerError(
+                f"repair ledger refs.{name} does not match candidate evidence"
+            )
         exact_ref(ledger_refs.get(name), f"ledger refs.{name}")
     cycles = ledger.get("cycles", [])
     if not isinstance(cycles, list) or len(cycles) > MAX_CYCLES:
         raise LedgerError("repair ledger cycles are invalid or unbounded")
     normalized: list[dict[str, object]] = []
     seen_heads: set[str] = set()
-    totals = {name: 0 for name in ("calls", "promptTokens", "completionTokens", "totalTokens")}
+    totals = {
+        name: 0 for name in ("calls", "promptTokens", "completionTokens", "totalTokens")
+    }
     for index, cycle in enumerate(cycles):
         if not isinstance(cycle, dict):
             raise LedgerError(f"repair cycle {index} is not an object")
@@ -201,13 +261,25 @@ def validate_ledger(
             raise LedgerError(f"repair cycle {index} touchedPaths are invalid")
         clean_paths = []
         for path in paths:
-            if not isinstance(path, str) or not path or len(path) > 512 or "\n" in path or "\r" in path or "\x00" in path:
+            if (
+                not isinstance(path, str)
+                or not path
+                or len(path) > 512
+                or "\n" in path
+                or "\r" in path
+                or "\x00" in path
+            ):
                 raise LedgerError(f"repair cycle {index} has an unsafe touched path")
             clean_paths.append(path)
         status = cycle.get("status")
         invocation = cycle.get("invocation")
         not_invoked = status == "not-invoked" or invocation == "not-invoked"
-        if not isinstance(status, str) or len(status) > 64 or "\n" in status or "\r" in status:
+        if (
+            not isinstance(status, str)
+            or len(status) > 64
+            or "\n" in status
+            or "\r" in status
+        ):
             raise LedgerError(f"repair cycle {index} status is invalid")
         if not_invoked:
             raise LedgerError("not-invoked records are not repair cycles")
@@ -219,57 +291,91 @@ def validate_ledger(
         confidence = cycle.get("accountingConfidence")
         started_at, finished_at = cycle.get("startedAt"), cycle.get("finishedAt")
         duration_ms = cycle.get("durationMs")
-        if not isinstance(resolved, bool) or repair_agent not in REPAIR_AGENTS or model_tier not in MODEL_TIERS:
+        if (
+            not isinstance(resolved, bool)
+            or repair_agent not in REPAIR_AGENTS
+            or model_tier not in MODEL_TIERS
+        ):
             raise LedgerError(f"repair cycle {index} has invalid repair routing")
         if resolved != (status == "repaired"):
             raise LedgerError(f"repair cycle {index} resolution disagrees with status")
         if confidence not in ACCOUNTING_CONFIDENCE:
             raise LedgerError(f"repair cycle {index} has invalid accounting confidence")
-        if not all(isinstance(value, str) and value and len(value) <= 128 for value in (started_at, finished_at)):
+        if not all(
+            isinstance(value, str) and value and len(value) <= 128
+            for value in (started_at, finished_at)
+        ):
             raise LedgerError(f"repair cycle {index} has invalid timing")
-        if not isinstance(duration_ms, int) or isinstance(duration_ms, bool) or duration_ms < 0:
+        if (
+            not isinstance(duration_ms, int)
+            or isinstance(duration_ms, bool)
+            or duration_ms < 0
+        ):
             raise LedgerError(f"repair cycle {index} has invalid duration")
         cycle_accounting_value = cycle.get("accounting")
         if not isinstance(cycle_accounting_value, dict) or not all(
-            name in cycle_accounting_value for name in ("calls", "promptTokens", "completionTokens", "totalTokens")
+            name in cycle_accounting_value
+            for name in ("calls", "promptTokens", "completionTokens", "totalTokens")
         ):
             raise LedgerError(f"repair cycle {index} must carry explicit accounting")
         cycle_accounting = accounting(cycle_accounting_value, f"repair cycle {index}")
         for name, number in cycle_accounting.items():
             totals[name] += number
         head = cycle.get("repairHead")
-        if not isinstance(head, str) or not SHA_RE.fullmatch(head) or head in refs.values() or head in seen_heads:
+        if (
+            not isinstance(head, str)
+            or not SHA_RE.fullmatch(head)
+            or head in refs.values()
+            or head in seen_heads
+        ):
             raise LedgerError("real repair cycles require a changed exact repair head")
         seen_heads.add(head)
         if repair_agent == "model":
-            if model_tier == "none" or cycle_accounting["calls"] < 1 or confidence != "provider_reported":
-                raise LedgerError("model repair cycles require a model tier and reported accounting")
-        elif model_tier != "none" or any(cycle_accounting.values()) or confidence != "explicit_zero":
-            raise LedgerError("human and script repair cycles require explicit zero model accounting")
-        normalized.append({
-            "repairUnitId": unit_id,
-            "status": flat(status, 64),
-            "repairHead": head,
-            "touchedPaths": sorted(set(clean_paths)),
-            "resolved": resolved,
-            "repairAgent": repair_agent,
-            "modelTier": model_tier,
-            "accountingConfidence": confidence,
-            "startedAt": flat(started_at, 128),
-            "finishedAt": flat(finished_at, 128),
-            "durationMs": duration_ms,
-            "accounting": cycle_accounting,
-        })
+            if (
+                model_tier == "none"
+                or cycle_accounting["calls"] < 1
+                or confidence != "provider_reported"
+            ):
+                raise LedgerError(
+                    "model repair cycles require a model tier and reported accounting"
+                )
+        elif (
+            model_tier != "none"
+            or any(cycle_accounting.values())
+            or confidence != "explicit_zero"
+        ):
+            raise LedgerError(
+                "human and script repair cycles require explicit zero model accounting"
+            )
+        normalized.append(
+            {
+                "repairUnitId": unit_id,
+                "status": flat(status, 64),
+                "repairHead": head,
+                "touchedPaths": sorted(set(clean_paths)),
+                "resolved": resolved,
+                "repairAgent": repair_agent,
+                "modelTier": model_tier,
+                "accountingConfidence": confidence,
+                "startedAt": flat(started_at, 128),
+                "finishedAt": flat(finished_at, 128),
+                "durationMs": duration_ms,
+                "accounting": cycle_accounting,
+            }
+        )
     declared = accounting(ledger.get("accounting"), "ledger")
     if declared != totals and ledger.get("accounting") is not None:
         raise LedgerError("ledger accounting does not equal cycle accounting")
     claimed_repairs = ledger.get("repairsPerformed")
     if claimed_repairs is not None and (
-        not isinstance(claimed_repairs, bool) or claimed_repairs != any(cycle["repairHead"] for cycle in normalized)
+        not isinstance(claimed_repairs, bool)
+        or claimed_repairs != any(cycle["repairHead"] for cycle in normalized)
     ):
         raise LedgerError("repair ledger repairsPerformed claim is inconsistent")
     claimed_head = ledger.get("repairHead")
-    if (normalized and claimed_head != normalized[-1]["repairHead"]) or (not normalized and claimed_head is not None):
+    if (normalized and claimed_head != normalized[-1]["repairHead"]) or (
+        not normalized and claimed_head is not None
+    ):
         raise LedgerError("repair ledger repairHead claim is inconsistent")
     return provenance, normalized, totals
 
@@ -291,7 +397,9 @@ def components(cycles: list[dict[str, object]]) -> int:
     for left, first in enumerate(cycles):
         for right in range(left):
             second = cycles[right]
-            if first["repairUnitId"] == second["repairUnitId"] or set(first["touchedPaths"]) & set(second["touchedPaths"]):
+            if first["repairUnitId"] == second["repairUnitId"] or set(
+                first["touchedPaths"]
+            ) & set(second["touchedPaths"]):
                 union(left, right)
     return len({find(index) for index in range(len(cycles))})
 
@@ -321,11 +429,19 @@ def merge_evidence(path: Path, checkpoint: dict[str, object]) -> None:
         "checkpointSha": checkpoint["checkpointSha"],
         "unresolvedUnitTotal": checkpoint["unresolvedUnitTotal"],
     }
-    path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     text_path = path.with_name("candidate-evidence.txt")
     existing = text_path.read_text(encoding="utf-8") if text_path.exists() else ""
-    lines = [line for line in existing.splitlines() if not line.startswith("repair checkpoint:")]
-    lines.append(f"repair checkpoint: {checkpoint['decision']} at {checkpoint['checkpointSha']}")
+    lines = [
+        line
+        for line in existing.splitlines()
+        if not line.startswith("repair checkpoint:")
+    ]
+    lines.append(
+        f"repair checkpoint: {checkpoint['decision']} at {checkpoint['checkpointSha']}"
+    )
     write_text(text_path, "\n".join(lines) + "\n")
 
 
@@ -337,64 +453,145 @@ def emit(args: argparse.Namespace) -> int:
     refs_available = False
     try:
         selected_ledger = ledger_path(args.ledger)
-        if not args.evidence.exists() or not args.packets.exists() or not args.telemetry.exists():
+        if (
+            not args.evidence.exists()
+            or not args.packets.exists()
+            or not args.telemetry.exists()
+        ):
             input_unavailable = True
             if selected_ledger.exists():
-                raise LedgerError("stage 3c packet input is unavailable for an existing repair ledger")
-            evidence = read_object(args.evidence, "candidate evidence", MAX_INPUT_BYTES) if args.evidence.exists() else {}
+                raise LedgerError(
+                    "stage 3c packet input is unavailable for an existing repair ledger"
+                )
+            evidence = (
+                read_object(args.evidence, "candidate evidence", MAX_INPUT_BYTES)
+                if args.evidence.exists()
+                else {}
+            )
             if evidence:
                 refs = evidence_refs(evidence)
                 workflow = workflow_info(evidence)
                 refs_available = True
-            units, projected_units, packet_warnings = [], [], ["stage 3c packet input unavailable"]
-            provenance, cycles, totals, present = "unavailable", [], {name: 0 for name in ("calls", "promptTokens", "completionTokens", "totalTokens")}, False
+            units, projected_units, packet_warnings = (
+                [],
+                [],
+                ["stage 3c packet input unavailable"],
+            )
+            provenance, cycles, totals, present = (
+                "unavailable",
+                [],
+                {
+                    name: 0
+                    for name in (
+                        "calls",
+                        "promptTokens",
+                        "completionTokens",
+                        "totalTokens",
+                    )
+                },
+                False,
+            )
         else:
             input_unavailable = False
             evidence = read_object(args.evidence, "candidate evidence", MAX_INPUT_BYTES)
             refs = evidence_refs(evidence)
             workflow = workflow_info(evidence)
             refs_available = True
-            units, projected_units, packet_warnings = stage3c_units(args.packets, args.telemetry)
+            units, projected_units, packet_warnings = stage3c_units(
+                args.packets, args.telemetry
+            )
             if selected_ledger.exists():
                 ledger = read_object(selected_ledger, "repair ledger")
-                provenance, cycles, totals = validate_ledger(ledger, refs, set(units), args.require_live)
+                provenance, cycles, totals = validate_ledger(
+                    ledger, refs, set(units), args.require_live
+                )
                 present = True
             else:
-                provenance, cycles, totals, present = "absent", [], {name: 0 for name in ("calls", "promptTokens", "completionTokens", "totalTokens")}, False
+                provenance, cycles, totals, present = (
+                    "absent",
+                    [],
+                    {
+                        name: 0
+                        for name in (
+                            "calls",
+                            "promptTokens",
+                            "completionTokens",
+                            "totalTokens",
+                        )
+                    },
+                    False,
+                )
         resolved = {cycle["repairUnitId"] for cycle in cycles if cycle["resolved"]}
         unresolved = [unit_id for unit_id in projected_units if unit_id not in resolved]
         component_total = components(cycles)
         attempt_total = len(cycles)
         unique_total = len({cycle["repairUnitId"] for cycle in cycles})
-        max_attempts = max((sum(cycle["repairUnitId"] == unit_id for cycle in cycles) for unit_id in set(cycle["repairUnitId"] for cycle in cycles)), default=0)
+        max_attempts = max(
+            (
+                sum(cycle["repairUnitId"] == unit_id for cycle in cycles)
+                for unit_id in set(cycle["repairUnitId"] for cycle in cycles)
+            ),
+            default=0,
+        )
         if not cycles:
-            reason = "stage 3c packet input unavailable" if input_unavailable else "no repair ledger was present"
+            reason = (
+                "stage 3c packet input unavailable"
+                if input_unavailable
+                else "no repair ledger was present"
+            )
             decision, handoff_reason, kind = "no-cycles", "none", "pre-repair"
             checkpoint_sha = refs["local"] if refs_available else None
         elif component_total >= 2:
-            decision, handoff_reason, reason, kind = "handoff", "unrelated_cycle_cap", "two unrelated repair components reached", "post-repair"
+            decision, handoff_reason, reason, kind = (
+                "handoff",
+                "unrelated_cycle_cap",
+                "two unrelated repair components reached",
+                "post-repair",
+            )
             checkpoint_sha = cycles[-1]["repairHead"]
         elif max_attempts >= 3:
-            decision, handoff_reason, reason, kind = "handoff", "attempt_cap", "three repair attempts reached for one unit", "post-repair"
+            decision, handoff_reason, reason, kind = (
+                "handoff",
+                "attempt_cap",
+                "three repair attempts reached for one unit",
+                "post-repair",
+            )
             checkpoint_sha = cycles[-1]["repairHead"]
         elif totals["totalTokens"] >= TOKEN_BUDGET:
-            decision, handoff_reason, reason, kind = "handoff", "token_budget_exhausted", "repair token budget exceeded", "post-repair"
+            decision, handoff_reason, reason, kind = (
+                "handoff",
+                "token_budget_exhausted",
+                "repair token budget exceeded",
+                "post-repair",
+            )
             checkpoint_sha = cycles[-1]["repairHead"]
         else:
-            decision, handoff_reason, reason, kind, checkpoint_sha = "continue", "none", "within bounded repair-cycle caps", "post-repair", cycles[-1]["repairHead"]
+            decision, handoff_reason, reason, kind, checkpoint_sha = (
+                "continue",
+                "none",
+                "within bounded repair-cycle caps",
+                "post-repair",
+                cycles[-1]["repairHead"],
+            )
         repairs_performed = bool(cycles)
         confidences = {cycle["accountingConfidence"] for cycle in cycles}
         aggregate_confidence = (
             "unavailable"
             if input_unavailable
-            else ("provider_reported" if "provider_reported" in confidences else "explicit_zero")
+            else (
+                "provider_reported"
+                if "provider_reported" in confidences
+                else "explicit_zero"
+            )
         )
         attestation = (
             "No repair ran: this read-only workflow has no model credentials or write authority."
             if not repairs_performed
             else "Repair cycles are recorded; this checkpoint helper performed no repair and has no model credentials or write authority."
         )
-        warnings = sorted(set(packet_warnings + (["repair ledger absent"] if not present else [])))
+        warnings = sorted(
+            set(packet_warnings + (["repair ledger absent"] if not present else []))
+        )
         checkpoint = {
             "schemaVersion": 1,
             "stage": "3d",
@@ -412,7 +609,11 @@ def emit(args: argparse.Namespace) -> int:
             "unrelatedComponentTotal": component_total,
             "attemptTotal": attempt_total,
             "maxAttemptsPerUnit": max_attempts,
-            "caps": {"unrelatedComponents": 2, "attemptsPerUnit": 3, "tokens": TOKEN_BUDGET},
+            "caps": {
+                "unrelatedComponents": 2,
+                "attemptsPerUnit": 3,
+                "tokens": TOKEN_BUDGET,
+            },
             "accounting": {**totals, "accountingConfidence": aggregate_confidence},
             "unresolvedUnitTotal": len(unresolved),
             "unresolvedUnits": unresolved[:MAX_UNRESOLVED],
@@ -446,22 +647,53 @@ def emit(args: argparse.Namespace) -> int:
             f"repairs performed: {repairs_performed}",
             f"units: unique={unique_total} unrelated={component_total} attempts={attempt_total}",
             f"accounting: calls={totals['calls']} prompt={totals['promptTokens']} completion={totals['completionTokens']} total={totals['totalTokens']}",
-            f"unresolved: {len(unresolved)}" + (" (truncated)" if len(unresolved) > MAX_UNRESOLVED else ""),
-            "unresolved units: " + ", ".join(flat(unit_id, MAX_HANDOFF_UNIT_ID) for unit_id in unresolved[:MAX_UNRESOLVED]),
+            f"unresolved: {len(unresolved)}"
+            + (" (truncated)" if len(unresolved) > MAX_UNRESOLVED else ""),
+            "unresolved units: "
+            + ", ".join(
+                flat(unit_id, MAX_HANDOFF_UNIT_ID)
+                for unit_id in unresolved[:MAX_UNRESOLVED]
+            ),
             f"attestation: {attestation}",
         ]
         handoff = "\n".join(handoff_lines) + "\n"
-        write_text(output_dir / "repair-ledger.json", json.dumps(ledger_output, indent=2, sort_keys=True) + "\n")
-        write_text(output_dir / "repair-checkpoint.json", json.dumps(checkpoint, indent=2, sort_keys=True) + "\n")
+        write_text(
+            output_dir / "repair-ledger.json",
+            json.dumps(ledger_output, indent=2, sort_keys=True) + "\n",
+        )
+        write_text(
+            output_dir / "repair-checkpoint.json",
+            json.dumps(checkpoint, indent=2, sort_keys=True) + "\n",
+        )
         write_text(output_dir / "repair-handoff.txt", handoff, MAX_HANDOFF_BYTES)
         merge_evidence(args.evidence, checkpoint)
         return 0
     except LedgerError as error:
-        failure = {"schemaVersion": 1, "stage": "3d", "classification": "red", "decision": "error", "reason": flat(error, 512), "refs": refs, "workflow": workflow, "repairsPerformed": False, "attestation": "Trusted validation failed; no repair was run by this helper."}
+        failure = {
+            "schemaVersion": 1,
+            "stage": "3d",
+            "classification": "red",
+            "decision": "error",
+            "reason": flat(error, 512),
+            "refs": refs,
+            "workflow": workflow,
+            "repairsPerformed": False,
+            "attestation": "Trusted validation failed; no repair was run by this helper.",
+        }
         try:
-            write_text(output_dir / "repair-ledger.json", json.dumps(failure, indent=2, sort_keys=True) + "\n")
-            write_text(output_dir / "repair-checkpoint.json", json.dumps(failure, indent=2, sort_keys=True) + "\n")
-            write_text(output_dir / "repair-handoff.txt", f"Upstream convergence repair checkpoint\ndecision: error\nreason: {flat(error, 512)}\n", MAX_HANDOFF_BYTES)
+            write_text(
+                output_dir / "repair-ledger.json",
+                json.dumps(failure, indent=2, sort_keys=True) + "\n",
+            )
+            write_text(
+                output_dir / "repair-checkpoint.json",
+                json.dumps(failure, indent=2, sort_keys=True) + "\n",
+            )
+            write_text(
+                output_dir / "repair-handoff.txt",
+                f"Upstream convergence repair checkpoint\ndecision: error\nreason: {flat(error, 512)}\n",
+                MAX_HANDOFF_BYTES,
+            )
         except OSError:
             pass
         print(flat(error, 512), file=sys.stderr)
@@ -484,7 +716,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if not args.cycle_id or len(args.cycle_id) > 128 or "\n" in args.cycle_id or "\r" in args.cycle_id:
+    if (
+        not args.cycle_id
+        or len(args.cycle_id) > 128
+        or "\n" in args.cycle_id
+        or "\r" in args.cycle_id
+    ):
         print("cycle id is invalid", file=sys.stderr)
         return 1
     return emit(args)

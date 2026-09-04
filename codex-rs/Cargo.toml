@@ -2,7 +2,6 @@
 members = [
     "aws-auth",
     "analytics",
-    "auto-review",
     "agent-graph-store",
     "agent-identity",
     "agent-roles",
@@ -29,10 +28,6 @@ members = [
     "code-mode-protocol",
     "code-mode-runtime",
     "codex-home",
-    "browser",
-    "code-bridge-client",
-    "code-bridge-protocol",
-    "code-bridge-service",
     "cloud-config",
     "cloud-tasks",
     "cloud-tasks-client",
@@ -41,6 +36,7 @@ members = [
     "collaboration-mode-templates",
     "connectors",
     "config",
+    "config-schema",
     "context-fragments",
     "shell-command",
     "shell-escalation",
@@ -48,8 +44,8 @@ members = [
     "core",
     "core-api",
     "core-plugins",
-    "core-skills",
     "diagnostics",
+    "guardian-context",
     "hooks",
     "history",
     "http-client",
@@ -75,7 +71,6 @@ members = [
     "ext/skills",
     "ext/web-search",
     "external-agent-migration",
-    "external-agent-sessions",
     "keyring-store",
     "file-search",
     "file-watcher",
@@ -90,7 +85,12 @@ members = [
     "models-manager",
     "network-proxy",
     "ollama",
+    "owner-control-contract",
+    "owner-control-host",
+    "owner-control-ipc",
     "process-hardening",
+    "realtime-webrtc",
+    "voice-host",
     "protocol",
     "prompts",
     "rollout",
@@ -101,11 +101,12 @@ members = [
     "sandboxing",
     "stdio-to-uds",
     "otel",
+    "otel-trace-websocket",
     "tui",
     "tools",
     "v8-poc",
-    "version",
     "websocket-client",
+    "worktree",
     "workload-identity",
     "utils/absolute-path",
     "utils/audio",
@@ -113,6 +114,7 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
+    "utils/git-discovery",
     "utils/image",
     "utils/json-to-toml",
     "utils/home-dir",
@@ -144,9 +146,6 @@ members = [
     "codex-experimental-api-macros",
     "plugin",
     "model-provider",
-    "owner-control-contract",
-    "owner-control-host",
-    "owner-control-ipc",
 ]
 resolver = "2"
 
@@ -161,9 +160,9 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 # Internal
+codex-realtime-webrtc = { path = "realtime-webrtc" }
 app_test_support = { path = "app-server/tests/common" }
 codex-analytics = { path = "analytics" }
-codex-auto-review = { path = "auto-review" }
 codex-agent-graph-store = { path = "agent-graph-store" }
 codex-agent-identity = { path = "agent-identity" }
 codex-agent-roles = { path = "agent-roles" }
@@ -180,6 +179,7 @@ codex-app-server-test-client = { path = "app-server-test-client" }
 codex-apply-patch = { path = "apply-patch" }
 codex-arg0 = { path = "arg0" }
 codex-async-utils = { path = "async-utils" }
+codex-auto-review = { path = "auto-review" }
 codex-backend-client = { path = "backend-client" }
 codex-browser = { path = "browser" }
 codex-chatgpt = { path = "chatgpt" }
@@ -215,12 +215,12 @@ codex-exec-server-test-support = { path = "exec-server/tests/support" }
 codex-execpolicy = { path = "execpolicy" }
 codex-extension-api = { path = "ext/extension-api" }
 codex-extension-items = { path = "ext/items" }
+codex-external-agent-sessions = { path = "external-agent-sessions" }
 codex-goal-extension = { path = "ext/goal" }
 codex-git-attribution = { path = "ext/git-attribution" }
 codex-guardian-v2 = { path = "ext/guardian-v2" }
 codex-history-notes-extension = { path = "ext/history-notes" }
 codex-image-generation-extension = { path = "ext/image-generation" }
-codex-external-agent-sessions = { path = "external-agent-sessions" }
 codex-external-agent-migration = { path = "external-agent-migration" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }
 codex-features = { path = "features" }
@@ -229,6 +229,7 @@ codex-install-context = { path = "install-context" }
 codex-file-search = { path = "file-search" }
 codex-file-watcher = { path = "file-watcher" }
 codex-git-utils = { path = "git-utils" }
+codex-guardian-context = { path = "guardian-context" }
 codex-hooks = { path = "hooks" }
 codex-history = { path = "history" }
 codex-keyring-store = { path = "keyring-store" }
@@ -237,6 +238,8 @@ codex-lmstudio = { path = "lmstudio" }
 codex-login = { path = "login" }
 codex-message-history = { path = "message-history" }
 codex-memories-extension = { path = "ext/memories" }
+codex-owner-control-contract = { path = "owner-control-contract" }
+codex-owner-control-host = { path = "owner-control-host" }
 codex-web-search-extension = { path = "ext/web-search" }
 codex-memories-read = { path = "memories/read" }
 codex-memories-write = { path = "memories/write" }
@@ -248,8 +251,7 @@ codex-models-manager = { path = "models-manager" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
-codex-owner-control-contract = { path = "owner-control-contract" }
-codex-owner-control-host = { path = "owner-control-host" }
+codex-otel-trace-websocket = { path = "otel-trace-websocket" }
 codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
@@ -283,6 +285,7 @@ codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
 codex-utils-elapsed = { path = "utils/elapsed" }
 codex-utils-fuzzy-match = { path = "utils/fuzzy-match" }
+codex-utils-git-discovery = { path = "utils/git-discovery" }
 codex-utils-home-dir = { path = "utils/home-dir" }
 codex-utils-image = { path = "utils/image" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
@@ -299,8 +302,8 @@ codex-utils-sleep-inhibitor = { path = "utils/sleep-inhibitor" }
 codex-utils-stream-parser = { path = "utils/stream-parser" }
 codex-utils-string = { path = "utils/string" }
 codex-utils-template = { path = "utils/template" }
-codex-v8-poc = { path = "v8-poc" }
 codex-version = { path = "version" }
+codex-v8-poc = { path = "v8-poc" }
 codex-workload-identity = { path = "workload-identity" }
 codex-windows-sandbox = { path = "windows-sandbox-rs" }
 core_test_support = { path = "core/tests/common" }
@@ -310,6 +313,7 @@ mcp_test_support = { path = "mcp-server/tests/common" }
 age = "0.11.1"
 ansi-to-tui = "8.0.1"
 anyhow = "1"
+appcontainer_common = { git = "https://github.com/microsoft/mxc", rev = "6cd3d58f05d3447e67109cfb75e042803b843ca4" }
 arboard = { version = "3", features = ["wayland-data-control"] }
 arc-swap = "1.9.0"
 assert_cmd = "2"
@@ -359,10 +363,11 @@ ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 encoding_rs = "0.8.35"
 eventsource-stream = "0.2.3"
 flate2 = "1.1.8"
-fs2 = "0.4"
 futures = { version = "0.3", default-features = false }
+fs2 = "0.4"
 gethostname = "1.1.0"
 gix = { version = "0.81.0", default-features = false, features = ["sha1"] }
+gix-url = "0.35.2"
 glob = "0.3"
 globset = "0.4"
 hmac = "0.12.1"
@@ -598,11 +603,6 @@ strip = false
 
 # Balance parallel release code generation against binary size.
 codegen-units = 4
-
-[profile.ci-app]
-inherits = "release"
-codegen-units = 16
-lto = "off"
 
 [profile.profiling]
 inherits = "release"

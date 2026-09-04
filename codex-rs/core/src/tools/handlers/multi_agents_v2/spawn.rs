@@ -11,6 +11,7 @@ use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::session::multi_agents::resolve_usage_hints;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
@@ -19,6 +20,7 @@ use crate::turn_timing::now_unix_timestamp_ms;
 use codex_config::agent_defaults::agent_model_spec;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -41,7 +43,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_spawn_agent_tool_v2(self.options.clone())
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let analytics = invocation.session.services.analytics_events_client.clone();
             let sender_thread_id = invocation.session.thread_id;
@@ -194,13 +199,7 @@ async fn handle_spawn_agent(
     if let Some((role_name, role)) = preflighted_external_role {
         config.agent_roles.insert(role_name, role);
     }
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        args.service_tier.as_deref(),
-    )
-    .await?;
+    apply_spawn_agent_service_tier(&session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
@@ -236,6 +235,33 @@ async fn handle_spawn_agent(
         /*trigger_turn*/ true,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
+    let multi_agent_v2_usage_hints =
+        if is_full_history_fork && turn.multi_agent_version == MultiAgentVersion::V2 {
+            let child_model_info = match config.model.as_deref() {
+                Some(model) if model != turn.model_info().slug => Some(
+                    session
+                        .services
+                        .models_manager
+                        .get_model_info(model, &config.to_models_manager_config())
+                        .await,
+                ),
+                _ => None,
+            };
+            let child_catalog = child_model_info
+                .as_ref()
+                .unwrap_or(turn.model_info())
+                .model_messages
+                .as_ref()
+                .and_then(|messages| messages.multi_agent.as_ref())
+                .and_then(|messages| messages.role.as_ref());
+            Some(resolve_usage_hints(
+                &config.multi_agent_v2,
+                child_catalog,
+                !config.update_plan_enabled && config.model_catalog.is_none(),
+            ))
+        } else {
+            None
+        };
     let spawned_agent = Box::pin(
         session
             .services
@@ -254,6 +280,8 @@ async fn handle_spawn_agent(
                     environments: Some(step_context.environments.to_selections()),
                     external_agent_provider: routing.provider().cloned(),
                     external_agent_routing: Some(routing.summary()),
+                    multi_agent_v2_usage_hints,
+                    cyber_access_program: turn.cyber_access_program,
                 },
             ),
     )

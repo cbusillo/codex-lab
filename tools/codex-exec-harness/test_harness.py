@@ -65,7 +65,10 @@ class HarnessSafetyTest(unittest.TestCase):
         self.assertEqual(
             "",
             HARNESS.render_auto_review_summary(
-                {"target": {"branch": active_branch, "head_sha": active_head}, "findings": []},
+                {
+                    "target": {"branch": active_branch, "head_sha": active_head},
+                    "findings": [],
+                },
                 active_branch,
                 active_head,
             ),
@@ -293,7 +296,9 @@ class HarnessSafetyTest(unittest.TestCase):
             )
 
             paths = HARNESS.make_paths(output_root, "relative-output-root")
-            with unittest.mock.patch.object(HARNESS, "make_paths", return_value=paths) as make:
+            with unittest.mock.patch.object(
+                HARNESS, "make_paths", return_value=paths
+            ) as make:
                 with unittest.mock.patch.object(HARNESS, "materialize_workspace"):
                     with unittest.mock.patch.object(HARNESS, "save_config"):
                         with unittest.mock.patch.object(
@@ -519,7 +524,7 @@ class HarnessSafetyTest(unittest.TestCase):
                                 "cache_ratio_min": 0.7,
                             }
                         }
-                    ]
+                    ],
                 }
             },
             {
@@ -573,7 +578,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             paths.workspace.mkdir(parents=True)
 
             self.assertFalse(paths.workspace.is_relative_to(repository))
-            self.assertIsNone(HARNESS.collect_workspace_git_state(paths.workspace)["git_root"])
+            self.assertIsNone(
+                HARNESS.collect_workspace_git_state(paths.workspace)["git_root"]
+            )
 
             (external_root / "AGENTS.md").write_text(
                 "# Ancestor guidance\n", encoding="utf-8"
@@ -635,7 +642,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             tenant_root = paths.run_dir / "external" / "tenant"
             tenant_root.mkdir(parents=True)
 
-            with self.assertRaisesRegex(HARNESS.HarnessError, "sandbox=workspace-write"):
+            with self.assertRaisesRegex(
+                HARNESS.HarnessError, "sandbox=workspace-write"
+            ):
                 HARNESS.build_command(
                     {"sandbox": None, "workspace_roots": ["{external}/tenant"]},
                     {"prompt": "inspect"},
@@ -698,7 +707,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
                 ["--", "--dangerously-bypass-approvals-and-sandbox"],
             )
 
-    def test_workspace_path_assertions_follow_declared_links_without_escaping(self) -> None:
+    def test_workspace_path_assertions_follow_declared_links_without_escaping(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "workspace"
             external = Path(temporary_directory) / "external"
@@ -778,9 +789,7 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
         failures = HARNESS.evaluate_expectations(
             {
                 "expect": {
-                    "responses": [
-                        {"request": 1, "input_prefix_matches_request": 0}
-                    ]
+                    "responses": [{"request": 1, "input_prefix_matches_request": 0}]
                 }
             },
             {"returncode": 0, "events": [], "event_types": {}},
@@ -798,9 +807,7 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
         failures = HARNESS.evaluate_expectations(
             {
                 "expect": {
-                    "responses": [
-                        {"request": 1, "input_prefix_matches_request": 0}
-                    ]
+                    "responses": [{"request": 1, "input_prefix_matches_request": 0}]
                 }
             },
             {"returncode": 0, "events": [], "event_types": {}},
@@ -1098,7 +1105,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             self.assertIn("turn.started", (artifact_dir / "stdout.jsonl").read_text())
             self.assertIn("timed out", (artifact_dir / "stderr.log").read_text())
 
-    def test_run_codex_terminates_repeated_failed_tool_loop_before_timeout(self) -> None:
+    def test_run_codex_terminates_repeated_failed_tool_loop_before_timeout(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths = HARNESS.make_paths(Path(tmp), "tool-loop")
             paths.workspace.mkdir(parents=True)
@@ -1135,7 +1144,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             self.assertFalse(result["timed_out"])
             self.assertTrue(result["tool_loop_detected"])
             self.assertEqual("undefined-helper", result["tool_loop_command"])
-            self.assertEqual(("model_failed", "tool_loop"), (outcome.outcome, outcome.reason))
+            self.assertEqual(
+                ("model_failed", "tool_loop"), (outcome.outcome, outcome.reason)
+            )
 
     def test_failed_commands_only_include_failed_execution_events(self) -> None:
         events = [
@@ -1268,7 +1279,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
 
             self.assertEqual(0, result["returncode"])
             self.assertTrue((paths.codex_home / "auth.json").is_file())
-            self.assertTrue((paths.codex_home / "auth-profiles" / "default.json").is_file())
+            self.assertTrue(
+                (paths.codex_home / "auth-profiles" / "default.json").is_file()
+            )
             self.assertFalse((paths.codex_home / "config.toml").exists())
 
     def test_run_codex_can_inherit_host_home_for_external_provider_auth(self) -> None:
@@ -1304,8 +1317,18 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
         events = [
             {"msg": {"type": "agent_message", "message": "UNKNOWN result"}},
             {"item": {"type": "agent_message", "text": "OdooPyInspection missing"}},
-            {"msg": {"type": "exec_command_begin", "command": ["python3", "jb-inspect.py"]}},
-            {"item": {"type": "command_execution", "command": "inspect-closeout --repo x"}},
+            {
+                "msg": {
+                    "type": "exec_command_begin",
+                    "command": ["python3", "jb-inspect.py"],
+                }
+            },
+            {
+                "item": {
+                    "type": "command_execution",
+                    "command": "inspect-closeout --repo x",
+                }
+            },
         ]
 
         self.assertEqual(
@@ -1322,7 +1345,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             {
                 "expect": {
                     "agent_messages": {"contains_all": ["UNKNOWN", "OdooPyInspection"]},
-                    "commands": {"contains_all": ["jb-inspect.py", "inspect-closeout --repo"]},
+                    "commands": {
+                        "contains_all": ["jb-inspect.py", "inspect-closeout --repo"]
+                    },
                     "turns": [
                         {
                             "agent_messages": {"contains": "UNKNOWN"},
@@ -1424,7 +1449,9 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
         self.assertEqual(1, len(failures))
         self.assertIn("does not match workspace", failures[0])
 
-    def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(self) -> None:
+    def test_token_usage_snapshot_from_events_uses_last_turn_completed_usage(
+        self,
+    ) -> None:
         usage = HARNESS.token_usage_snapshot_from_events(
             [
                 {"type": "turn.started"},
@@ -1565,9 +1592,7 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
             },
         ]
         if not validation_in_tool_output:
-            requests[1]["body"]["input"].append(
-                {"role": "user", "content": summary}
-            )
+            requests[1]["body"]["input"].append({"role": "user", "content": summary})
         return requests
 
     def test_runtime_scenario_expresses_bounded_feedback_contract(self) -> None:
@@ -1603,14 +1628,10 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
             "[validation.providers.shellcheck]",
             self.provider_scenario["config_toml"],
         )
-        self.assertEqual(
-            3, self.provider_scenario["expect"]["responses_request_count"]
-        )
+        self.assertEqual(3, self.provider_scenario["expect"]["responses_request_count"])
         self.assertEqual(
             2,
-            self.provider_scenario["expect"]["event_types"][
-                "validation.completed"
-            ],
+            self.provider_scenario["expect"]["event_types"]["validation.completed"],
         )
 
     def test_runtime_scenario_rejects_unbounded_feedback(self) -> None:
@@ -1640,7 +1661,7 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
                             "request": 0,
                             "call_id": "call-function",
                             "contains": "prefix",
-                            "json_suffix": {"contains": "\"ok\":true"},
+                            "json_suffix": {"contains": '"ok":true'},
                         }
                     ]
                 }
@@ -1653,7 +1674,7 @@ class AutoValidationCharacterizationTest(unittest.TestCase):
                             {
                                 "type": "function_call_output",
                                 "call_id": "call-function",
-                                "output": "prefix\n{\"ok\":true}",
+                                "output": 'prefix\n{"ok":true}',
                             }
                         ]
                     }

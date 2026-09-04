@@ -99,7 +99,9 @@ def assignment_expressions(text: str, name: str) -> list[str]:
 
 
 def string_values(expression: str) -> set[str]:
-    return {decode_string(match.group(1)) for match in STRING_LITERAL.finditer(expression)}
+    return {
+        decode_string(match.group(1)) for match in STRING_LITERAL.finditer(expression)
+    }
 
 
 def keyword_argument_expressions(text: str, name: str) -> list[tuple[int, int, str]]:
@@ -314,7 +316,9 @@ def verify(repo_root: Path) -> dict[str, object]:
 
     for source in sorted(rust_root.rglob("*.rs")):
         relative_parts = source.relative_to(rust_root).parts
-        if any(part == "target" or part.startswith("target-") for part in relative_parts):
+        if any(
+            part == "target" or part.startswith("target-") for part in relative_parts
+        ):
             continue
         if source.name == "build.rs":
             continue
@@ -339,21 +343,29 @@ def verify(repo_root: Path) -> dict[str, object]:
                 requested = decode_string(match.group("path"))
             except (json.JSONDecodeError, ValueError) as error:
                 failures.append(
-                    Failure(source_relative, line_number(text, match.start()), f"invalid Rust path literal: {error}")
+                    Failure(
+                        source_relative,
+                        line_number(text, match.start()),
+                        f"invalid Rust path literal: {error}",
+                    )
                 )
                 continue
             target = (source.parent / requested).resolve()
             line = line_number(text, match.start())
             if not target.is_file():
                 failures.append(
-                    Failure(source_relative, line, f"compile-time file is missing: {target}")
+                    Failure(
+                        source_relative, line, f"compile-time file is missing: {target}"
+                    )
                 )
                 continue
             consumer = nearest_bazel_package(source, root)
             producer = nearest_bazel_package(target, root)
             if consumer is None or producer is None:
                 failures.append(
-                    Failure(source_relative, line, "cannot resolve Bazel package boundary")
+                    Failure(
+                        source_relative, line, "cannot resolve Bazel package boundary"
+                    )
                 )
                 continue
             if consumer == producer:
@@ -413,20 +425,30 @@ def verify(repo_root: Path) -> dict[str, object]:
             cargo_package = nearest_cargo_package(source, root)
             if consumer is None or cargo_package is None:
                 failures.append(
-                    Failure(source_relative, line, "cannot resolve Cargo and Bazel package boundaries")
+                    Failure(
+                        source_relative,
+                        line,
+                        "cannot resolve Cargo and Bazel package boundaries",
+                    )
                 )
                 continue
             try:
                 requested = decode_string(match.group("path"))
             except (json.JSONDecodeError, ValueError) as error:
                 failures.append(
-                    Failure(source_relative, line, f"invalid Rust path literal: {error}")
+                    Failure(
+                        source_relative, line, f"invalid Rust path literal: {error}"
+                    )
                 )
                 continue
             target = (cargo_package / requested).resolve()
             if not target.is_dir():
                 failures.append(
-                    Failure(source_relative, line, f"migration directory is missing: {target}")
+                    Failure(
+                        source_relative,
+                        line,
+                        f"migration directory is missing: {target}",
+                    )
                 )
                 continue
             try:
@@ -460,7 +482,10 @@ def verify(repo_root: Path) -> dict[str, object]:
 
     for source_relative, expected_count in ALLOWED_DYNAMIC_INCLUDE_COUNTS.items():
         source = root / source_relative
-        if source.is_file() and observed_dynamic_counts.get(source_relative, 0) != expected_count:
+        if (
+            source.is_file()
+            and observed_dynamic_counts.get(source_relative, 0) != expected_count
+        ):
             failures.append(
                 Failure(
                     source_relative,
@@ -472,7 +497,9 @@ def verify(repo_root: Path) -> dict[str, object]:
 
     errors = [
         f"{failure.source}:{failure.line}: {failure.message}"
-        for failure in sorted(failures, key=lambda item: (item.source, item.line, item.message))
+        for failure in sorted(
+            failures, key=lambda item: (item.source, item.line, item.message)
+        )
     ]
     return {
         "schemaVersion": 1,

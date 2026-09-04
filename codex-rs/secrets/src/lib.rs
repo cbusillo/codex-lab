@@ -243,6 +243,11 @@ pub fn compute_keyring_account_for_namespace(
     }
 }
 
+/// Computes the legacy OS keyring account name used by MCP OAuth storage.
+pub fn compute_keyring_account(codex_home: &Path) -> String {
+    compute_keyring_account_for_namespace(codex_home, LocalSecretsNamespace::ManagedSecrets)
+}
+
 pub(crate) fn keyring_service() -> &'static str {
     KEYRING_SERVICE
 }

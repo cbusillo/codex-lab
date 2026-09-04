@@ -91,7 +91,10 @@ def unregistered_tests(
                 continue
             # `unittest discover` only walks into importable subdirectories, so a
             # matching name inside a plain directory silently never runs.
-            if test_file.parent != base and not (test_file.parent / "__init__.py").is_file():
+            if (
+                test_file.parent != base
+                and not (test_file.parent / "__init__.py").is_file()
+            ):
                 problems.append(
                     (
                         relative,

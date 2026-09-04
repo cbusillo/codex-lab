@@ -30,6 +30,42 @@ impl AgentSettingsState {
 }
 
 impl App {
+    pub(super) async fn update_agent_selector_enabled(
+        &mut self,
+        app_server: &mut AppServerSession,
+        selector: &str,
+        enabled: bool,
+    ) {
+        let edit = crate::config_update::agent_selector_enabled_edit(selector, enabled);
+        let response =
+            match crate::config_update::write_config_batch(app_server.request_handle(), vec![edit])
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Failed to save `{selector}` enabled state: {err}"
+                    ));
+                    return;
+                }
+            };
+        if response.status == WriteStatus::OkOverridden {
+            self.chat_widget.add_error_message(format!(
+                "`{selector}` enabled state was saved but a higher-precedence setting remains effective."
+            ));
+            self.open_agents_settings(app_server).await;
+            return;
+        }
+        self.config
+            .agent_selector_overrides
+            .entry(selector.to_string())
+            .or_default()
+            .enabled = Some(enabled);
+        self.chat_widget
+            .set_agent_selector_enabled(selector, enabled);
+        self.open_agents_settings(app_server).await;
+    }
+
     pub(super) async fn open_agents_settings(&mut self, app_server: &mut AppServerSession) {
         if !self.agent_settings.open {
             self.agent_settings.refresh_status = None;

@@ -6,6 +6,7 @@ use crate::tui::FrameRequester;
 use app_test_support::create_fake_parented_rollout_with_source;
 use codex_app_server_protocol::ToolRequestUserInputOption;
 use codex_app_server_protocol::ToolRequestUserInputQuestion;
+use codex_utils_approval_presets::builtin_approval_presets;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -28,6 +29,105 @@ fn startup_bottom_pane() -> (BottomPane, UnboundedReceiver<AppEvent>) {
         }),
         app_event_rx,
     )
+}
+
+#[tokio::test]
+async fn terminal_color_probe_waits_for_startup_sandbox_choice() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.startup_protected_input_boundary = true;
+    while app_event_rx.try_recv().is_ok() {}
+
+    assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ true));
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+    app.chat_widget
+        .open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+    assert!(app_event_rx.try_recv().is_err());
+
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::BeginWindowsSandboxLegacySetup { .. })
+    ));
+    assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+}
+
+#[tokio::test]
+async fn terminal_color_probe_waits_for_delayed_world_writable_scan_failure() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.startup_protected_input_boundary = true;
+    app.windows_sandbox.startup_world_writable_scan_pending = true;
+    while app_event_rx.try_recv().is_ok() {}
+
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+
+    app.app_event_tx
+        .send(AppEvent::OpenWorldWritableWarningConfirmation {
+            preset: None,
+            profile_selection: None,
+            sample_paths: Vec::new(),
+            extra_count: 0,
+            failed_scan: true,
+        });
+    app.app_event_tx
+        .send(AppEvent::StartupWorldWritableScanCompleted);
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ true));
+
+    let warning = app_event_rx
+        .try_recv()
+        .expect("the delayed scan should queue its warning before completion");
+    let AppEvent::OpenWorldWritableWarningConfirmation {
+        preset,
+        profile_selection,
+        sample_paths,
+        extra_count,
+        failed_scan,
+    } = warning
+    else {
+        panic!("the delayed scan should open a protected warning before completion");
+    };
+    app.chat_widget.open_world_writable_warning_confirmation(
+        preset,
+        profile_selection,
+        sample_paths,
+        extra_count,
+        failed_scan,
+    );
+    assert!(matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::StartupWorldWritableScanCompleted)
+    ));
+    app.windows_sandbox.startup_world_writable_scan_pending = false;
+
+    assert!(!app.windows_sandbox.startup_world_writable_scan_pending);
+    assert!(!app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
+    for character in "20;rgb:2222/ffff/ffff".chars() {
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        assert!(app_event_rx.try_recv().is_err());
+    }
+
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::UpdateWorldWritableWarningAcknowledged(true))
+    ));
+    assert!(matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::PersistWorldWritableWarningAcknowledged)
+    ));
+    assert!(app.ready_for_terminal_color_probe(/*has_pending_app_events*/ false));
 }
 
 #[test]
@@ -101,26 +201,6 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
     assert!(!App::should_prompt_for_paused_goal_after_startup_resume(
         &fork, &None, &no_images
     ));
-}
-
-#[test]
-fn startup_auto_review_summary_gate_is_only_for_resume() {
-    let resume = SessionSelection::Resume(crate::resume_picker::SessionTarget {
-        path: Some(PathBuf::from("/tmp/restore")),
-        thread_id: ThreadId::new(),
-        history_mode: None,
-    });
-    let fork = SessionSelection::Fork(crate::resume_picker::SessionTarget {
-        path: Some(PathBuf::from("/tmp/fork")),
-        thread_id: ThreadId::new(),
-        history_mode: None,
-    });
-
-    assert!(App::should_fetch_auto_review_summary_after_startup(&resume));
-    assert!(!App::should_fetch_auto_review_summary_after_startup(
-        &SessionSelection::StartFresh
-    ));
-    assert!(!App::should_fetch_auto_review_summary_after_startup(&fork));
 }
 
 #[test]
@@ -385,6 +465,16 @@ async fn startup_draft_delayed_approval_becomes_protected_on_redraw() -> Result<
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
+    app.app_server_target = AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::WebSocket {
+            websocket_url: "ws://127.0.0.1:1".into(),
+            auth_token: None,
+        },
+    };
+    app.begin_reconnect();
+    assert!(app.startup_protected_input_boundary);
+    // The replacement connection replays the protected request after the old request was dropped.
+    app.reconnect.offline = false;
 
     let (mut startup_pane, _startup_app_event_rx) = startup_bottom_pane();
     startup_pane.set_composer_text("draft".to_string(), Vec::new(), Vec::new());
@@ -606,11 +696,7 @@ async fn auto_declined_mcp_elicitations_do_not_leave_startup_quarantine_armed() 
                 .note_server_request(&request);
             let event = ThreadBufferedEvent::Request(Box::new(request));
             if replay {
-                app.handle_thread_event_replay(
-                    event,
-                    &HashSet::new(),
-                    /*fetch_missing_auto_review_summaries*/ false,
-                );
+                app.handle_thread_event_replay(event, &HashSet::new(), false);
             } else {
                 app.handle_thread_event_now(event);
             }
@@ -847,6 +933,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
     );
     let notification = ThreadStartedNotification {
         thread: Thread {
+            session_provenance: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -859,6 +946,8 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             project_id: None,
             history_mode: Default::default(),
             model_provider: "notification-provider".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -869,7 +958,6 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
             thread_source: None,
-            session_provenance: None,
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             git_info: None,
@@ -974,6 +1062,7 @@ async fn startup_thread_started_discards_another_threads_buffered_events() {
     let request = ServerRequest::CommandExecutionRequestApproval {
         request_id: AppServerRequestId::Integer(1),
         params: CommandExecutionRequestApprovalParams {
+            kind: Default::default(),
             thread_id: other_thread_id.to_string(),
             turn_id: "turn-1".to_string(),
             item_id: "item-1".to_string(),
@@ -1156,7 +1245,7 @@ async fn startup_thread_start_failure_returns_error() {
     .await
     .expect("embedded app server");
     let err = app
-        .handle_startup_thread_started(&mut app_server, Err("boom".to_string()))
+        .handle_startup_thread_started(&mut app_server, Err(color_eyre::eyre::eyre!("boom")))
         .await
         .expect_err("startup thread failure should exit instead of leaving chat unconfigured");
 

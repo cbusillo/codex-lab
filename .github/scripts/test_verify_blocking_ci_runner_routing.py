@@ -91,9 +91,7 @@ class VerifyBlockingCiRunnerRoutingTest(unittest.TestCase):
         )
         self.write_workflow(
             "full-ci.yml",
-            "jobs:\n"
-            "  trusted:\n"
-            "    runs-on: [self-hosted, codex-lab-linux]\n",
+            "jobs:\n  trusted:\n    runs-on: [self-hosted, codex-lab-linux]\n",
         )
 
         self.assertEqual(routing.find_violations(self.workflows_dir), [])

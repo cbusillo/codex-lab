@@ -56,13 +56,13 @@ async fn codex_delegate_ignores_legacy_deltas() {
     // Kick off review (delegated).
     test.codex
         .submit(Op::Review {
+            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Please review".to_string(),
                 },
                 user_facing_hint: None,
             },
-            persistence: None,
         })
         .await
         .expect("submit review");
@@ -115,13 +115,13 @@ async fn codex_delegate_rejects_escalation_requests_when_parent_can_prompt() {
 
     test.codex
         .submit(Op::Review {
+            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review without requesting approval".to_string(),
                 },
                 user_facing_hint: None,
             },
-            persistence: None,
         })
         .await
         .expect("submit review");
@@ -213,13 +213,13 @@ default_tools_approval_mode = "prompt"
 
     test.codex
         .submit(Op::Review {
+            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review the [$calendar](app://calendar) integration".to_string(),
                 },
                 user_facing_hint: None,
             },
-            persistence: None,
         })
         .await
         .expect("submit review");
@@ -243,9 +243,9 @@ default_tools_approval_mode = "prompt"
         panic!("expected the model request and MCP-denial continuation");
     };
     let output = completion_request.function_call_output(call_id);
-    let response = output["output"]
+    let response = output["output"][1]["text"]
         .as_str()
-        .expect("MCP tool output should be a string");
+        .expect("MCP tool output should contain an input_text item");
     assert!(
         response.contains("approval policy is never"),
         "MCP tool should be rejected by the delegate's approval policy: {response}"
@@ -311,13 +311,13 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
 
     test.codex
         .submit(Op::Review {
+            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review with $dependency-skill".to_string(),
                 },
                 user_facing_hint: None,
             },
-            persistence: None,
         })
         .await
         .expect("submit review");

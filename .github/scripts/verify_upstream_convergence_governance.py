@@ -120,10 +120,14 @@ def load_policy(path: Path, repo_root: Path) -> ConvergencePolicy:
     try:
         resolved_policy.relative_to(root)
     except ValueError as error:
-        raise PolicyError(f"policy path escapes the repository: {resolved_policy}") from error
+        raise PolicyError(
+            f"policy path escapes the repository: {resolved_policy}"
+        ) from error
     try:
         if resolved_policy.stat().st_size > MAX_POLICY_BYTES:
-            raise PolicyError(f"policy exceeds {MAX_POLICY_BYTES} bytes: {resolved_policy}")
+            raise PolicyError(
+                f"policy exceeds {MAX_POLICY_BYTES} bytes: {resolved_policy}"
+            )
         document = json.loads(resolved_policy.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
         raise PolicyError(f"missing convergence policy: {path}") from error
@@ -248,7 +252,9 @@ def verify(repo_root: Path, policy_path: Path) -> dict[str, object]:
                     "AGENTS.md does not route refresh work to $upstream-convergence"
                 )
             if policy.contracts_path not in agents:
-                errors.append("AGENTS.md does not name the repository contract authority")
+                errors.append(
+                    "AGENTS.md does not name the repository contract authority"
+                )
 
     readme_path = repo_root / "upstream" / "README.md"
     if readme_path.is_file() and not readme_path.is_symlink():

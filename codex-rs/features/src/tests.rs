@@ -15,6 +15,20 @@ use toml::Table;
 use toml::Value as TomlValue;
 
 #[test]
+fn transcript_v2_resolves_explicit_config_overrides() {
+    let mut features = Features::with_defaults();
+    for enabled in [false, true, false] {
+        features.apply_map(&BTreeMap::from([("transcript_v2".to_string(), enabled)]));
+        assert_eq!(features.enabled(Feature::TranscriptV2), enabled);
+    }
+}
+
+#[test]
+fn sleep_tool_config_rejects_unknown_mode() {
+    assert!(toml::from_str::<FeaturesToml>("[sleep_tool]\nmode = 'off'").is_err());
+}
+
+#[test]
 fn under_development_features_are_disabled_by_default() {
     for spec in crate::FEATURES {
         if matches!(spec.stage, Stage::UnderDevelopment) {
@@ -94,18 +108,6 @@ fn default_enabled_features_are_stable() {
 }
 
 #[test]
-fn multi_agent_v2_is_enabled_by_default() {
-    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
-}
-
-#[test]
-fn multi_agent_v2_cannot_be_disabled() {
-    let mut features = Features::with_defaults();
-    features.disable(Feature::MultiAgentV2);
-    assert!(features.enabled(Feature::MultiAgentV2));
-}
-
-#[test]
 fn removed_apps_mcp_path_override_shapes_are_ignored() {
     let features = [
         toml::from_str::<FeaturesToml>("apps_mcp_path_override = true")
@@ -166,6 +168,8 @@ fn guardian_v2_feature_config_deserializes_classifier_and_transcript_settings() 
         r#"
 [guardianv2]
 enabled = true
+free_guardian = true
+persist_scores = true
 classifier_instructions = "Review this action"
 review_threshold = 0.65
 max_tool_call_lag = 2
@@ -195,6 +199,8 @@ max_recent_non_user_entries = 12
         features.guardianv2,
         Some(FeatureToml::Config(crate::GuardianV2ConfigToml {
             enabled: Some(true),
+            free_guardian: Some(true),
+            persist_scores: Some(true),
             classifier_instructions: Some("Review this action".to_owned()),
             review_threshold: Some(0.65),
             max_tool_call_lag: Some(2),

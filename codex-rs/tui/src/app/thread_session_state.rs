@@ -410,6 +410,7 @@ mod tests {
             ..test_thread_session(primary_thread_id, test_path_buf("/tmp/primary"))
         };
         let read_thread = Thread {
+            session_provenance: None,
             id: read_thread_id.to_string(),
             extra: None,
             session_id: read_thread_id.to_string(),
@@ -422,6 +423,8 @@ mod tests {
             project_id: None,
             history_mode: Default::default(),
             model_provider: "read-provider".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 1,
             updated_at: 2,
             recency_at: Some(2),
@@ -432,7 +435,6 @@ mod tests {
             source: codex_app_server_protocol::SessionSource::Unknown,
             can_accept_direct_input: None,
             thread_source: None,
-            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

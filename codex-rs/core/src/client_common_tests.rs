@@ -135,6 +135,7 @@ fn serializes_text_verbosity_when_set() {
         }),
         max_output_tokens: None,
         client_metadata: None,
+        access_programs: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -180,6 +181,7 @@ fn serializes_text_schema_with_strict_format() {
         text: Some(text_controls),
         max_output_tokens: None,
         client_metadata: None,
+        access_programs: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -242,6 +244,7 @@ fn omits_text_when_not_set() {
         text: None,
         max_output_tokens: None,
         client_metadata: None,
+        access_programs: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");
@@ -267,6 +270,7 @@ fn serializes_flex_service_tier_when_set() {
         text: None,
         max_output_tokens: None,
         client_metadata: None,
+        access_programs: None,
     };
 
     let v = serde_json::to_value(&req).expect("json");

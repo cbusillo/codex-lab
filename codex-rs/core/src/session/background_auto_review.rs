@@ -141,7 +141,7 @@ impl Session {
             .config
             .review_model
             .clone()
-            .unwrap_or_else(|| turn_context.model_info.slug.clone());
+            .unwrap_or_else(|| turn_context.model_info().slug.clone());
         let codex_home = self.codex_home().await;
         let persistence = ReviewPersistenceContext::new(
             uuid::Uuid::new_v4().to_string(),

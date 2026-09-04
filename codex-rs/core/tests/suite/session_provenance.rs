@@ -9,21 +9,13 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_core::CodexThread;
 use codex_core::StartThreadOptions;
-use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use core_test_support::test_codex::turn_permission_fields;
-use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 
 /// Mirrors what `session_provenance_from_agent_env` produces for a launcher that
@@ -45,15 +37,6 @@ async fn agent_launched_cli_session_records_provenance_without_changing_session_
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    responses::mount_sse_once(
-        &server,
-        responses::sse(vec![
-            responses::ev_response_created("resp-1"),
-            responses::ev_assistant_message("msg-1", "done"),
-            responses::ev_completed("resp-1"),
-        ]),
-    )
-    .await;
 
     let mut builder = test_codex();
     let test = Box::pin(builder.build(&server)).await?;
@@ -63,18 +46,14 @@ async fn agent_launched_cli_session_records_provenance_without_changing_session_
         .start_thread(StartThreadOptions {
             session_source: Some(SessionSource::Cli),
             session_provenance: Some(provenance.clone()),
-            environments: Some(Vec::new()),
+            environments: None,
             ..StartThreadOptions::new(test.config.clone())
         })
         .await?
         .thread;
 
-    // The rollout file is only materialized once the thread records a turn.
-    Box::pin(submit_turn(&started, &test.config.cwd)).await?;
-    Box::pin(wait_for_event(&started, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    }))
-    .await;
+    started.ensure_rollout_materialized().await;
+    started.flush_rollout().await?;
 
     let rollout_path = started.rollout_path().context("rollout path")?;
     let first_line = std::fs::read_to_string(&rollout_path)?
@@ -93,31 +72,5 @@ async fn agent_launched_cli_session_records_provenance_without_changing_session_
     assert_eq!(session_meta.meta.source, SessionSource::Cli);
     assert_eq!(session_meta.meta.session_provenance, Some(provenance));
 
-    Ok(())
-}
-
-async fn submit_turn(
-    codex: &CodexThread,
-    cwd: &codex_utils_absolute_path::AbsolutePathBuf,
-) -> Result<()> {
-    let (sandbox_policy, permission_profile) =
-        turn_permission_fields(PermissionProfile::Disabled, cwd.as_path());
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "say hello".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                approval_policy: Some(AskForApproval::Never),
-                sandbox_policy: Some(sandbox_policy),
-                permission_profile,
-                ..Default::default()
-            },
-        })
-        .await?;
     Ok(())
 }

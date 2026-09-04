@@ -9,13 +9,11 @@ use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeInput;
 use codex_mcp::McpStartupPolicy;
-use codex_mcp::McpStartupReconnectPolicy;
 use codex_mcp::ToolInfo;
 use codex_mcp::effective_mcp_servers;
 use codex_mcp::host_owned_codex_apps_enabled;
 use codex_mcp::tool_is_model_visible;
 use codex_protocol::mcp::ClientMcpExtensions;
-use codex_protocol::models::PermissionProfile;
 
 #[cfg(test)]
 #[path = "installed_tests.rs"]
@@ -58,12 +56,10 @@ impl AppsRequestProcessor {
                 .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend));
 
             let mcp_manager = self.thread_manager.mcp_manager();
-            let mut mcp_config = mcp_manager.runtime_config(&config).await;
-            // Installed-app discovery has no active turn or reviewer.
-            mcp_config.permission_profile = PermissionProfile::default();
-            let mcp_config = Arc::new(mcp_config);
+            let mcp_config = mcp_manager.runtime_config(&config).await;
             let mut mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());
             mcp_servers.retain(|name, _| name == CODEX_APPS_MCP_SERVER_NAME);
+            let mcp_config = Arc::new(mcp_config.for_threadless_operations(&mcp_servers));
             let cache_key = connector_runtime_context_key(auth.as_ref());
             let previous_snapshot = mcp_manager
                 .codex_apps_tools_cache()
@@ -83,17 +79,11 @@ impl AppsRequestProcessor {
                         config.cwd.to_path_buf(),
                     );
                     let cancellation_token = CancellationToken::new();
-                    let codex_apps_auth =
-                        if host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()) {
-                            codex_mcp::CodexAppsAuth::ControlPlaneManager(Arc::clone(
-                                &self.auth_manager,
-                            ))
-                        } else {
-                            codex_mcp::CodexAppsAuth::ControlPlane
-                        };
+                    let codex_apps_auth_manager =
+                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
+                            .then(|| Arc::clone(&self.auth_manager));
                     let runtime = McpRuntime::new(McpRuntimeInput {
                         startup_policy: McpStartupPolicy::Eager,
-                        startup_reconnect_policy: McpStartupReconnectPolicy::FailureIsFinal,
                         config: Arc::clone(&mcp_config),
                         plugins_available: false,
                         ready_selected_capability_roots: Vec::new(),
@@ -104,9 +94,10 @@ impl AppsRequestProcessor {
                         runtime_context,
                         codex_apps_tools_cache: mcp_manager.codex_apps_tools_cache(),
                         tool_catalog_cache: mcp_manager.tool_catalog_cache(),
+                        codex_apps_tools_cache_key: cache_key.clone(),
                         client_mcp_extensions: ClientMcpExtensions::default(),
                         auth: auth.clone(),
-                        codex_apps_auth,
+                        auth_manager: codex_apps_auth_manager,
                         elicitation_reviewer: None,
                         elicitation_lifecycle: None,
                     })

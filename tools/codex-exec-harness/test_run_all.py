@@ -29,7 +29,8 @@ def expected_scenario_total() -> int:
     return sum(
         1
         for scenario in scenarios
-        if json.loads(scenario.read_text(encoding="utf-8")).get("skip_run_all") is not True
+        if json.loads(scenario.read_text(encoding="utf-8")).get("skip_run_all")
+        is not True
     )
 
 
@@ -38,8 +39,7 @@ def expected_skipped_scenarios() -> list[str]:
     return [
         scenario.stem
         for scenario in scenarios
-        if json.loads(scenario.read_text(encoding="utf-8")).get("skip_run_all")
-        is True
+        if json.loads(scenario.read_text(encoding="utf-8")).get("skip_run_all") is True
     ]
 
 

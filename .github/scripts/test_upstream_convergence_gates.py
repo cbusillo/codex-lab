@@ -70,13 +70,13 @@ class GateManifestTest(unittest.TestCase):
         self.root = Path(self._tmp.name)
         (self.root / "proof.rs").write_text("fn proof() {}\n", encoding="utf-8")
         (self.root / "baseline.json").write_text(
-            json.dumps({"schemaVersion": 1, "contracts": {"HOME-1": {"maxWaivers": 1}}}),
+            json.dumps(
+                {"schemaVersion": 1, "contracts": {"HOME-1": {"maxWaivers": 1}}}
+            ),
             encoding="utf-8",
         )
 
-    def verify_fixture(
-        self, manifest: Path, contracts: Path
-    ) -> dict[str, object]:
+    def verify_fixture(self, manifest: Path, contracts: Path) -> dict[str, object]:
         return gates.verify(self.root, manifest, contracts)
 
     def test_accepts_file_backed_and_narrative_evidence(self) -> None:
@@ -134,7 +134,10 @@ class GateManifestTest(unittest.TestCase):
         report = self.verify_fixture(manifest, contracts)
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
+            any(
+                "feature.rs is not reachable from Rust module root lib.rs" in error
+                for error in report["errors"]
+            )
         )
 
     def test_reports_token_edge_in_unreachable_rust_module(self) -> None:
@@ -161,7 +164,10 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("feature.rs is not reachable from Rust module root lib.rs" in error for error in report["errors"])
+            any(
+                "feature.rs is not reachable from Rust module root lib.rs" in error
+                for error in report["errors"]
+            )
         )
 
     def test_issue_backed_semantic_waiver_clears_matching_edge(self) -> None:
@@ -249,9 +255,7 @@ class GateManifestTest(unittest.TestCase):
     def test_reports_missing_file_evidence(self) -> None:
         manifest, contracts = write_fixture(
             self.root,
-            evidence=[
-                {"kind": "file", "path": "missing.rs", "ciTier": "nightly"}
-            ],
+            evidence=[{"kind": "file", "path": "missing.rs", "ciTier": "nightly"}],
         )
 
         report = self.verify_fixture(manifest, contracts)
@@ -302,9 +306,7 @@ class GateManifestTest(unittest.TestCase):
     def test_rejects_path_escape(self) -> None:
         manifest, contracts = write_fixture(
             self.root,
-            evidence=[
-                {"kind": "file", "path": "../proof.rs", "ciTier": "nightly"}
-            ],
+            evidence=[{"kind": "file", "path": "../proof.rs", "ciTier": "nightly"}],
         )
 
         report = self.verify_fixture(manifest, contracts)
@@ -346,7 +348,10 @@ class GateManifestTest(unittest.TestCase):
 
         self.assertFalse(report["passed"])
         self.assertTrue(
-            any("must retain at least one file-backed" in error for error in report["errors"])
+            any(
+                "must retain at least one file-backed" in error
+                for error in report["errors"]
+            )
         )
 
     def test_rejects_unknown_schema_version(self) -> None:

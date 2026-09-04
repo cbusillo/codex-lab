@@ -1491,14 +1491,26 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         },
         responses::sse(vec![
             responses::ev_response_created("child-response"),
-            responses::ev_assistant_message("child-message", "done"),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "child-message",
+                    "content": [{"type": "output_text", "text": "done"}],
+                    "phase": "final_answer"
+                }
+            }),
             responses::ev_completed("child-response"),
         ]),
     )
     .await;
     responses::mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
+        |request: &wiremock::Request| {
+            request_body_contains(request, SPAWN_CALL_ID)
+                && !request.headers.contains_key("x-openai-subagent")
+        },
         responses::sse(vec![
             responses::ev_response_created("spawn-follow-up-response"),
             responses::ev_assistant_message("spawn-follow-up-message", "child started"),
