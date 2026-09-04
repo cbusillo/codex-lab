@@ -501,8 +501,7 @@ def remove_path(path: Path) -> None:
 
 
 def absolute_path(path: Path) -> Path:
-    path = path.expanduser()
-    return path if path.is_absolute() else Path.cwd() / path
+    return Path(os.path.abspath(path.expanduser()))
 
 
 def shell_quote(value: str) -> str:

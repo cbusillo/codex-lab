@@ -19,6 +19,7 @@ from codex_lab_package.code_route import recover_code_route_transaction
 from codex_lab_package.code_route import require_active_code_route
 from codex_lab_package.code_route import sha256_file
 from codex_lab_package.code_route_transaction import journal_path_for_state
+from codex_lab_package.code_route_transaction import lock_path_for_state
 import codex_lab_package.code_route_transaction as code_route_transaction
 
 
@@ -28,6 +29,19 @@ TEAM_IDENTIFIER = "MM5YXC7T6E"
 
 
 class CodeRouteTest(unittest.TestCase):
+    def test_state_path_aliases_share_one_transaction_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            canonical = root / "state" / "install-state.json"
+            alias = root / "state" / ".." / "state" / "install-state.json"
+
+            self.assertEqual(
+                lock_path_for_state(
+                    code_route_transaction.code_route.absolute_path(alias)
+                ),
+                lock_path_for_state(canonical),
+            )
+
     def test_regular_route_is_captured_launched_and_restored_exactly(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()

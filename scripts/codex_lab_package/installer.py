@@ -31,6 +31,7 @@ from .distribution_manifest import MANIFEST_NAME
 from .distribution_manifest import SHIM_ZIP
 from .distribution_manifest import is_https_url
 from .distribution_manifest import read_sha256sums
+from .distribution_manifest import sha256_file
 from .distribution_manifest import validate_manifest
 from .engine_contract import CODE_MODE_HOST_ARCHIVE_PATH
 from .engine_contract import ENGINE_CLI_ARCHIVE_PATH
@@ -99,11 +100,13 @@ class CodexLabInstallStatus:
     bundle_version: str
     code_route: CodeRouteState | None
     code_mode_host_backup_path: Path | None
+    code_mode_host_backup_sha256: str | None
     code_mode_host_path: Path | None
     code_mode_host_sha256: str | None
     code_mode_host_signing_identifier: str | None
     code_mode_host_team_identifier: str | None
     engine_backup_path: Path | None
+    engine_backup_sha256: str | None
     engine_path: Path | None
     engine_sha256: str | None
     engine_signing_identifier: str | None
@@ -737,6 +740,7 @@ def require_recorded_install(
         raise ValueError(
             "Recorded app or shim is not a managed Codex Lab install"
         ) from exc
+    require_recorded_backups(status)
     if status.engine_path is None:
         return
     if status.engine_path != supervisor_paths.managed_cli:
@@ -836,9 +840,38 @@ def default_code_mode_host_backup_path(state_path: Path) -> Path:
     return state_path.parent / "engine-backup" / "codex-code-mode-host"
 
 
-def require_engine_backup(path: Path) -> None:
+def require_recorded_backups(status: CodexLabInstallStatus) -> None:
+    recorded_backups = (
+        (
+            status.engine_backup_path,
+            default_engine_backup_path(status.state_path),
+            status.engine_backup_sha256,
+            "engine",
+        ),
+        (
+            status.code_mode_host_backup_path,
+            default_code_mode_host_backup_path(status.state_path),
+            status.code_mode_host_backup_sha256,
+            "Code Mode host",
+        ),
+    )
+    for path, expected_path, expected_sha256, description in recorded_backups:
+        if path is None:
+            if expected_sha256 is not None:
+                raise ValueError(
+                    f"Recorded {description} backup digest has no backup path"
+                )
+            continue
+        if path != expected_path:
+            raise ValueError(f"Recorded {description} backup path is unsafe: {path}")
+        require_engine_backup(path, expected_sha256=expected_sha256)
+
+
+def require_engine_backup(path: Path, *, expected_sha256: str | None = None) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"Recorded engine backup is not a regular file: {path}")
+    if expected_sha256 is not None and sha256_file(path) != expected_sha256:
+        raise ValueError(f"Recorded engine backup digest has changed: {path}")
 
 
 def preflight_new_backup_path(path: Path) -> None:
@@ -928,9 +961,15 @@ def read_install_state(
             f"Install state field shimPath must be a string or null: {state_path}"
         )
     engine_backup_path = optional_state_path(state, "engineBackupPath", state_path)
+    engine_backup_sha256 = optional_state_sha256(
+        state, "engineBackupSha256", state_path
+    )
     engine_path = optional_state_path(state, "enginePath", state_path)
     code_mode_host_backup_path = optional_state_path(
         state, "codeModeHostBackupPath", state_path
+    )
+    code_mode_host_backup_sha256 = optional_state_sha256(
+        state, "codeModeHostBackupSha256", state_path
     )
     code_mode_host_path = optional_state_path(state, "codeModeHostPath", state_path)
     lab_home = optional_state_path(state, "labHome", state_path)
@@ -960,11 +999,13 @@ def read_install_state(
         bundle_version=required_state_string(state, "bundleVersion", state_path),
         code_route=code_route,
         code_mode_host_backup_path=code_mode_host_backup_path,
+        code_mode_host_backup_sha256=code_mode_host_backup_sha256,
         code_mode_host_path=code_mode_host_path,
         code_mode_host_sha256=code_mode_host_sha256,
         code_mode_host_signing_identifier=code_mode_host_signing_identifier,
         code_mode_host_team_identifier=code_mode_host_team_identifier,
         engine_backup_path=engine_backup_path,
+        engine_backup_sha256=engine_backup_sha256,
         engine_path=engine_path,
         engine_sha256=engine_sha256,
         engine_signing_identifier=engine_signing_identifier,
@@ -1767,10 +1808,16 @@ def write_install_state(
         "codeModeHostBackupPath": str(code_mode_host_backup_path)
         if code_mode_host_backup_path is not None
         else None,
+        "codeModeHostBackupSha256": sha256_file(code_mode_host_backup_path)
+        if code_mode_host_backup_path is not None
+        else None,
         "codeModeHostPath": str(code_mode_host_path)
         if code_mode_host_path is not None
         else None,
         "engineBackupPath": str(engine_backup_path)
+        if engine_backup_path is not None
+        else None,
+        "engineBackupSha256": sha256_file(engine_backup_path)
         if engine_backup_path is not None
         else None,
         "enginePath": str(supervisor_paths.managed_cli),

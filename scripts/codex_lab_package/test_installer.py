@@ -900,6 +900,10 @@ class CodexLabInstallerTest(unittest.TestCase):
             status = read_install_state(result.state_path)
             assert status.engine_backup_path is not None
             self.assertEqual(status.engine_backup_path.read_bytes(), prior_engine)
+            self.assertEqual(
+                status.engine_backup_sha256,
+                sha256_file(status.engine_backup_path),
+            )
 
             uninstall = uninstall_codex_lab(state_path=result.state_path)
 
@@ -912,6 +916,37 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(self.supervisor_uninstalls, [self.supervisor_paths])
             self.assertFalse(self.supervisor_paths.runner.exists())
             self.assertFalse(self.supervisor_paths.plist.exists())
+
+    def test_uninstall_rejects_unbound_engine_backup_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            self.supervisor_paths.managed_cli.parent.mkdir(parents=True)
+            self.supervisor_paths.managed_cli.write_bytes(b"prior managed engine")
+            os.chmod(self.supervisor_paths.managed_cli, 0o755)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                force=True,
+                download=release.download,
+            )
+            victim_path = root / "unrelated-user-file"
+            victim_path.write_text("preserved", encoding="utf-8")
+            state = json.loads(result.state_path.read_text(encoding="utf-8"))
+            state["engineBackupPath"] = str(victim_path)
+            state["engineBackupSha256"] = sha256_file(victim_path)
+            result.state_path.write_text(
+                json.dumps(state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "backup path is unsafe"):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertEqual(victim_path.read_text(encoding="utf-8"), "preserved")
+            self.assertTrue(result.engine_path.exists())
 
     def test_uninstall_failure_restores_install_and_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
