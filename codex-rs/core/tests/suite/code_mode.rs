@@ -815,7 +815,7 @@ async fn code_mode_exec_holds_captured_result_during_elicitation() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
+async fn code_mode_only_keeps_multi_agent_tools_model_visible() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -842,9 +842,23 @@ async fn code_mode_only_restricts_prompt_tools() -> Result<()> {
             "exec".to_string(),
             "wait".to_string(),
             "request_user_input".to_string(),
+            "agents".to_string(),
             "web_search".to_string()
         ]
     );
+    for tool_name in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ] {
+        assert!(
+            namespace_child_tool(&first_body, "agents", tool_name).is_some(),
+            "expected agents.{tool_name} to remain model-visible in code-mode-only"
+        );
+    }
 
     Ok(())
 }
@@ -1293,6 +1307,7 @@ if (!tool) {
             "exec".to_string(),
             "wait".to_string(),
             "request_user_input".to_string(),
+            "agents".to_string(),
             "web_search".to_string()
         ]
     );
