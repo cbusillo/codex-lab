@@ -1234,7 +1234,7 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses() 
     );
 
     let headers = model_client
-        .build_websocket_headers(&responses_metadata)
+        .build_websocket_headers("gpt-6-astra", &responses_metadata)
         .await;
 
     assert_eq!(
