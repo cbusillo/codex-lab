@@ -51,6 +51,7 @@ class SupervisorTools:
 class EngineIdentity:
     build_channel: str
     build_profile: str
+    release_version: str
     sha256: str
     signing_identifier: str
     source_commit: str
@@ -150,6 +151,7 @@ def inspect_engine(
     return EngineIdentity(
         build_channel=provenance["build_channel"],
         build_profile=provenance["build_profile"],
+        release_version=provenance["release_version"],
         sha256=_sha256_file(managed_cli),
         signing_identifier=signing_identifier,
         source_commit=provenance["source_commit"],
@@ -284,6 +286,7 @@ LISTEN_PORT={paths.listen_port}
 LISTEN_URL={quote(paths.listen_url)}
 EXPECTED_SHA256={quote(identity.sha256)}
 EXPECTED_SOURCE_COMMIT={quote(identity.source_commit)}
+EXPECTED_RELEASE_VERSION={quote(identity.release_version)}
 EXPECTED_VERSION={quote(identity.version)}
 EXPECTED_SIGNING_IDENTIFIER={quote(identity.signing_identifier)}
 EXPECTED_TEAM_IDENTIFIER={quote(identity.team_identifier)}
@@ -387,12 +390,14 @@ verify_engine() {{
   fi
   schema_version=$(json_field "$PROVENANCE_FILE" schema_version)
   version=$(json_field "$PROVENANCE_FILE" version)
+  release_version=$(json_field "$PROVENANCE_FILE" release_version)
   source_commit=$(json_field "$PROVENANCE_FILE" source_commit)
   dirty_state=$(json_field "$PROVENANCE_FILE" dirty_state)
   executable_path=$(json_field "$PROVENANCE_FILE" executable_path)
   discard_provenance
   [ "$schema_version" = 2 ] \
     && [ "$version" = "$EXPECTED_VERSION" ] \
+    && [ "$release_version" = "$EXPECTED_RELEASE_VERSION" ] \
     && [ "$source_commit" = "$EXPECTED_SOURCE_COMMIT" ] \
     && [ "$dirty_state" = clean ] \
     && [ "$executable_path" -ef "$MANAGED_CLI" ] \
@@ -454,6 +459,7 @@ def install_supervisor(
     *,
     expected_sha256: str,
     expected_source_commit: str,
+    expected_release_version: str,
     expected_version: str,
     expected_code_mode_host_sha256: str | None = None,
     expected_code_mode_host_signing_identifier: str | None = None,
@@ -469,6 +475,7 @@ def install_supervisor(
         identity,
         expected_sha256=expected_sha256,
         expected_source_commit=expected_source_commit,
+        expected_release_version=expected_release_version,
         expected_version=expected_version,
     )
     code_mode_host_identity = None
@@ -647,10 +654,21 @@ def _require_expected_identity(
     *,
     expected_sha256: str,
     expected_source_commit: str,
+    expected_release_version: str,
     expected_version: str,
 ) -> None:
-    actual = (identity.sha256, identity.source_commit, identity.version)
-    expected = (expected_sha256, expected_source_commit, expected_version)
+    actual = (
+        identity.sha256,
+        identity.source_commit,
+        identity.release_version,
+        identity.version,
+    )
+    expected = (
+        expected_sha256,
+        expected_source_commit,
+        expected_release_version,
+        expected_version,
+    )
     if actual != expected:
         raise ValueError(
             "managed Codex Lab engine does not match the expected candidate"

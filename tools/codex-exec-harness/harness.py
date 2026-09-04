@@ -1218,6 +1218,16 @@ def scoped_request_body(request: dict[str, Any], scope: str) -> Any:
     if scope == "body":
         return body
     if isinstance(body, dict):
+        if scope == "input_tools":
+            input_items = body.get("input")
+            if not isinstance(input_items, list):
+                return None
+            return [
+                tool
+                for item in input_items
+                if isinstance(item, dict) and isinstance(item.get("tools"), list)
+                for tool in item["tools"]
+            ]
         return body.get(scope)
     return None
 

@@ -958,6 +958,45 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
 
         self.assertEqual([], failures)
 
+    def test_response_input_tools_scope_excludes_usage_hint_text(self) -> None:
+        requests = [
+            {
+                "body": {
+                    "input": [
+                        {
+                            "role": "developer",
+                            "content": "agents spawn_agent send_message",
+                            "tools": [
+                                {
+                                    "name": "agents",
+                                    "tools": [{"name": "spawn_agent"}],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        ]
+        failures = HARNESS.evaluate_expectations(
+            {
+                "expect": {
+                    "responses": [
+                        {
+                            "request": 0,
+                            "scope": "input_tools",
+                            "contains_all": ["agents", "spawn_agent", "send_message"],
+                        }
+                    ]
+                }
+            },
+            {"returncode": 0, "events": [], "event_types": {}, "turns": []},
+            requests,
+        )
+
+        self.assertEqual(
+            ["responses[0].input_tools: missing 'send_message'"], failures
+        )
+
     def test_response_prefix_assertion_reports_mismatch(self) -> None:
         failures = HARNESS.evaluate_expectations(
             {

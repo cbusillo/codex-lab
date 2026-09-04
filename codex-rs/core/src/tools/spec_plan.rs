@@ -105,6 +105,9 @@ use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use tracing::instrument;
 
+const MAX_AGENT_TYPE_DESCRIPTION_BYTES: usize = 4 * 1024;
+const AGENT_TYPE_DESCRIPTION_TRUNCATION_MARKER: &str =
+    "\n... [agent type description truncated] ...\n";
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
@@ -791,11 +794,37 @@ fn agent_type_description(
             &turn_context.config,
             &discovered_selectors,
         );
-    if agent_type_description.is_empty() {
+    let agent_type_description = if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {
         agent_type_description
+    };
+    bounded_agent_type_description(agent_type_description)
+}
+
+fn bounded_agent_type_description(description: String) -> String {
+    if description.len() <= MAX_AGENT_TYPE_DESCRIPTION_BYTES {
+        return description;
     }
+
+    let content_budget = MAX_AGENT_TYPE_DESCRIPTION_BYTES
+        .saturating_sub(AGENT_TYPE_DESCRIPTION_TRUNCATION_MARKER.len());
+    let mut head_end = content_budget / 2;
+    while !description.is_char_boundary(head_end) {
+        head_end = head_end.saturating_sub(1);
+    }
+    let tail_budget = content_budget.saturating_sub(head_end);
+    let mut tail_start = description.len().saturating_sub(tail_budget);
+    while !description.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+
+    format!(
+        "{}{}{}",
+        &description[..head_end],
+        AGENT_TYPE_DESCRIPTION_TRUNCATION_MARKER,
+        &description[tail_start..]
+    )
 }
 
 fn is_hidden_by_code_mode_only(

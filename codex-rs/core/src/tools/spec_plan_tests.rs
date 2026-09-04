@@ -62,10 +62,33 @@ use crate::tools::registry::RegisteredTool;
 use crate::tools::router::ToolRouter;
 use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
+use crate::tools::spec_plan::AGENT_TYPE_DESCRIPTION_TRUNCATION_MARKER;
+use crate::tools::spec_plan::MAX_AGENT_TYPE_DESCRIPTION_BYTES;
 use crate::tools::spec_plan::append_source_tools;
+use crate::tools::spec_plan::bounded_agent_type_description;
 use crate::tools::spec_plan::build_core_tool_registry;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+
+#[test]
+fn agent_type_description_is_utf8_bounded_and_preserves_tail_selectors() {
+    let suffix = "antigravity-gemini-3.6-flash-high";
+    let description = format!(
+        "{}{}",
+        "🦀".repeat(MAX_AGENT_TYPE_DESCRIPTION_BYTES),
+        suffix
+    );
+
+    let bounded = bounded_agent_type_description(description);
+
+    assert!(bounded.len() <= MAX_AGENT_TYPE_DESCRIPTION_BYTES);
+    assert!(bounded.contains(AGENT_TYPE_DESCRIPTION_TRUNCATION_MARKER));
+    assert!(bounded.ends_with(suffix));
+    assert_eq!(
+        bounded_agent_type_description("short role description".to_string()),
+        "short role description"
+    );
+}
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -2807,6 +2830,62 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
         ToolExposure::DirectModelOnly
     );
+    let code_mode_nested = probe(|turn| {
+        set_features(turn, &[Feature::CodeMode, Feature::MultiAgentV2]);
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_nested.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
+    );
+
+    let code_mode_only = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::CodeMode,
+                Feature::CodeModeOnly,
+                Feature::MultiAgentV2,
+            ],
+        );
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = true;
+        });
+    })
+    .await;
+    code_mode_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    code_mode_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
+    assert_eq!(
+        code_mode_only
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::DirectModelOnly
+    );
+
+    let code_mode_only_nested = probe(|turn| {
+        set_features(
+            turn,
+            &[
+                Feature::CodeMode,
+                Feature::CodeModeOnly,
+                Feature::MultiAgentV2,
+            ],
+        );
+        update_config(turn, |config| {
+            config.multi_agent_v2.non_code_mode_only = false;
+        });
+    })
+    .await;
+    code_mode_only_nested.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE]);
+    assert_eq!(
+        code_mode_only_nested
+            .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
+        ToolExposure::Direct
+    );
 }
 
 #[tokio::test]
@@ -3247,7 +3326,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
             codex_code_mode::PUBLIC_TOOL_NAME,
             codex_code_mode::WAIT_TOOL_NAME,
             "request_user_input",
-            // Multi-agent v2 tools.
+            // Multi-agent v2 tools remain directly model-visible.
             MULTI_AGENT_V2_NAMESPACE,
             // Hosted Responses tools.
             "web_search",
