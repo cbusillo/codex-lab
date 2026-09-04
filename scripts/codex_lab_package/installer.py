@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -46,6 +47,7 @@ from .release_tag import codex_lab_release_order
 from .release_tag import release_identity_from_tag
 from .smoke import smoke_check
 from .supervisor import CodeModeHostIdentity
+from .supervisor import CODE_MODE_HOST_NAME
 from .supervisor import EngineIdentity
 from .supervisor import SupervisorPaths
 from .supervisor import default_supervisor_paths
@@ -283,9 +285,35 @@ def install_from_manifest_url(
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabInstallResult:
     state_path = resolve_destination(state_path)
+    app_dir = resolve_destination(app_dir)
+    shim_dir = resolve_destination(shim_dir) if shim_dir is not None else None
+    supervisor_paths = supervisor_paths or default_supervisor_paths()
+    (
+        allowed_targets,
+        required_targets,
+        expected_engine_path,
+        expected_host_path,
+    ) = install_transaction_target_scope(
+        state_path=state_path,
+        app_path=app_dir,
+        shim_path=resolve_destination(shim_dir / "codex-lab")
+        if shim_dir is not None
+        else None,
+        engine_path=supervisor_paths.managed_cli,
+        code_mode_host_path=None,
+    )
     with transaction_lock(state_path):
         recover_code_route_transaction(state_path, lock_held=True)
-        recover_install_transaction(state_path, lock_held=True)
+        recover_install_transaction(
+            state_path,
+            lock_held=True,
+            expected_targets=(
+                allowed_targets,
+                required_targets,
+                expected_engine_path,
+                expected_host_path,
+            ),
+        )
         return _install_from_manifest_url_locked(
             manifest_url,
             app_dir=app_dir,
@@ -529,16 +557,6 @@ def _install_from_manifest_url_locked(
         targets.append(
             transaction_target(state_path, transaction_id, preserve_backup=False)
         )
-        if installed_shim is not None:
-            installed_shim_source = install_transaction.staged_path_for(
-                installed_shim, transaction_id
-            )
-            installed_shim_source.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(shim_source, installed_shim_source)
-            installed_shim_source.write_text(
-                build_shim_script(app_dir), encoding="utf-8"
-            )
-            make_executable(installed_shim_source)
         journal = {
             "operation": "install",
             "pendingStateSha256": document_sha256(state_document),
@@ -554,8 +572,18 @@ def _install_from_manifest_url_locked(
         try:
             for source, target, _preserve_backup in planned_sources:
                 if source is not None:
-                    if target != shim_path:
-                        stage_transaction_source(source, target, transaction_id)
+                    stage_transaction_source(source, target, transaction_id)
+                    if target == shim_path:
+                        staged_shim_path = install_transaction.staged_path_for(
+                            target,
+                            transaction_id,
+                        )
+                        staged_shim_path.write_text(
+                            build_shim_script(app_dir),
+                            encoding="utf-8",
+                        )
+                        make_executable(staged_shim_path)
+                        fsync_staged_path(staged_shim_path)
                     apply_install_transaction_target(
                         transaction_target_for(targets, target), force=force
                     )
@@ -573,16 +601,12 @@ def _install_from_manifest_url_locked(
                 replace=False,
             )
             apply_install_transaction_target(state_target, force=True)
-            journal["phase"] = "state-pending"
-            install_transaction.rewrite_journal(state_path, journal)
             engine_operations.install_supervisor(supervisor_paths, engine_release)
             write_state_document(state_path, completed_state_document)
-            journal["phase"] = "supervisor-reconciled"
-            install_transaction.rewrite_journal(state_path, journal)
         except Exception as install_error:
             try:
                 rollback_install_transaction(journal)
-                rollback_replacements([])
+                install_transaction.clear_journal(state_path)
             except Exception as rollback_error:
                 raise CodexLabRollbackError(
                     "Codex Lab installation failed and file rollback did not complete: "
@@ -931,25 +955,148 @@ def preflight_new_backup_path(path: Path) -> None:
         raise FileExistsError(f"Engine backup path already exists: {path}")
 
 
-def recover_install_transaction(state_path: Path, *, lock_held: bool = False) -> None:
+def install_transaction_target_scope(
+    *,
+    state_path: Path,
+    app_path: Path,
+    shim_path: Path | None,
+    engine_path: Path,
+    code_mode_host_path: Path | None,
+) -> tuple[set[Path], set[Path], Path, Path]:
+    state_path = resolve_destination(state_path)
+    app_path = resolve_destination(app_path)
+    engine_path = resolve_destination(engine_path)
+    derived_host_path = engine_path.with_name(CODE_MODE_HOST_NAME)
+    allowed_targets = {state_path, app_path, engine_path, derived_host_path}
+    required_targets = {state_path, app_path, engine_path}
+    if shim_path is not None:
+        shim_path = resolve_destination(shim_path)
+        allowed_targets.add(shim_path)
+        required_targets.add(shim_path)
+    if code_mode_host_path is not None:
+        code_mode_host_path = resolve_destination(code_mode_host_path)
+        if code_mode_host_path != derived_host_path:
+            raise install_transaction.InstallTransactionRecoveryError(
+                "Recorded Code Mode host path does not match the managed engine"
+            )
+        required_targets.add(code_mode_host_path)
+    return allowed_targets, required_targets, engine_path, derived_host_path
+
+
+def install_transaction_target_scope_from_journal_state(
+    state_path: Path,
+    journal: dict,
+) -> tuple[set[Path], set[Path], Path, Path]:
+    state_target = next(
+        (
+            target
+            for target in journal["targets"]
+            if target["targetPath"] == str(state_path)
+        ),
+        None,
+    )
+    if state_target is None:
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction does not contain its state path"
+        )
+    candidate_path = (
+        state_path if path_exists(state_path) else Path(state_target["backupPath"])
+    )
+    if not path_exists(candidate_path):
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Interrupted first install requires retrying the exact installer command"
+        )
+    candidate_sha256 = install_transaction.state_sha256(candidate_path)
+    expected_digests = {
+        journal.get("stateBeforeSha256"),
+        journal.get("pendingStateSha256"),
+        journal.get("stateAfterSha256"),
+    }
+    if candidate_sha256 not in expected_digests:
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction state identity is ambiguous"
+        )
+    try:
+        state = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction state document is unreadable"
+        ) from exc
+    if not isinstance(state, dict):
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction state document is malformed"
+        )
+    app_value = state.get("appPath")
+    engine_value = state.get("enginePath")
+    if not isinstance(app_value, str) or not isinstance(engine_value, str):
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction state paths are malformed"
+        )
+    shim_value = state.get("shimPath")
+    host_value = state.get("codeModeHostPath")
+    if shim_value is not None and not isinstance(shim_value, str):
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction shim path is malformed"
+        )
+    if host_value is not None and not isinstance(host_value, str):
+        raise install_transaction.InstallTransactionRecoveryError(
+            "Codex Lab installer transaction Code Mode host path is malformed"
+        )
+    return install_transaction_target_scope(
+        state_path=state_path,
+        app_path=Path(app_value),
+        shim_path=Path(shim_value) if shim_value is not None else None,
+        engine_path=Path(engine_value),
+        code_mode_host_path=Path(host_value) if host_value is not None else None,
+    )
+
+
+def recover_install_transaction(
+    state_path: Path,
+    *,
+    lock_held: bool = False,
+    expected_targets: tuple[set[Path], set[Path], Path, Path] | None = None,
+) -> None:
     state_path = resolve_destination(state_path)
     if not lock_held:
         with transaction_lock(state_path):
-            recover_install_transaction(state_path, lock_held=True)
+            recover_install_transaction(
+                state_path,
+                lock_held=True,
+                expected_targets=expected_targets,
+            )
         return
     if not install_transaction.journal_exists(state_path):
         return
     try:
         journal = install_transaction.read_journal(state_path)
+        (
+            allowed_targets,
+            required_targets,
+            expected_engine_path,
+            expected_host_path,
+        ) = (
+            expected_targets
+            if expected_targets is not None
+            else install_transaction_target_scope_from_journal_state(
+                state_path,
+                journal,
+            )
+        )
+        install_transaction.validate_journal_targets(
+            journal,
+            state_path=state_path,
+            allowed_targets=allowed_targets,
+            required_targets=required_targets,
+            expected_engine_path=expected_engine_path,
+            expected_code_mode_host_path=expected_host_path,
+        )
         current_sha256 = install_transaction.state_sha256(state_path)
         rolled_back = False
         if journal["operation"] == "install":
             if current_sha256 == journal["stateAfterSha256"]:
                 cleanup_install_transaction(journal)
-            elif (
-                journal.get("phase") == "state-pending"
-                and current_sha256 == journal["pendingStateSha256"]
-            ):
+            elif current_sha256 == journal["pendingStateSha256"]:
                 cleanup_install_transaction(journal)
             elif current_sha256 == journal["stateBeforeSha256"]:
                 rollback_install_transaction(journal)
@@ -1381,11 +1528,13 @@ def _update_from_latest_release_locked(
         lock_held=True,
         validate_install=False,
     )
-    if not check.update_available:
+    if not check.update_available and check.installed.supervisor_reconciled:
         return CodexLabUpdateResult(check=check, install=None)
 
     manifest_url = manifest_url_for_release_tag(
-        check.latest_release_tag,
+        check.latest_release_tag
+        if check.update_available
+        else check.installed.release_tag,
         repository=repository,
     )
     installed = check.installed
@@ -1515,16 +1664,30 @@ def _uninstall_codex_lab_locked(
         for target in targets:
             apply_uninstall_transaction_target(target)
         if manages_engine and status.engine_backup_path is not None:
-            safe_rename(status.engine_backup_path, supervisor_paths.managed_cli)
-            restored_engine_path = supervisor_paths.managed_cli
+            try:
+                safe_rename(status.engine_backup_path, supervisor_paths.managed_cli)
+            except Exception:
+                if path_exists(supervisor_paths.managed_cli) and not path_exists(
+                    status.engine_backup_path
+                ):
+                    restored_engine_path = supervisor_paths.managed_cli
+                raise
+            else:
+                restored_engine_path = supervisor_paths.managed_cli
         if manages_engine and status.code_mode_host_backup_path is not None:
-            safe_rename(
-                status.code_mode_host_backup_path,
-                supervisor_paths.code_mode_host,
-            )
-            restored_code_mode_host_path = supervisor_paths.code_mode_host
-        journal["phase"] = "state-removed"
-        install_transaction.rewrite_journal(status.state_path, journal)
+            try:
+                safe_rename(
+                    status.code_mode_host_backup_path,
+                    supervisor_paths.code_mode_host,
+                )
+            except Exception:
+                if path_exists(supervisor_paths.code_mode_host) and not path_exists(
+                    status.code_mode_host_backup_path
+                ):
+                    restored_code_mode_host_path = supervisor_paths.code_mode_host
+                raise
+            else:
+                restored_code_mode_host_path = supervisor_paths.code_mode_host
     except Exception as uninstall_error:
         try:
             if restored_code_mode_host_path is not None:
@@ -1885,13 +2048,6 @@ def backup_path_for(target: Path) -> Path:
     raise FileExistsError(f"Could not allocate backup path for {target}")
 
 
-def rollback_replacements(replacements: list[Replacement]) -> None:
-    for replacement in reversed(replacements):
-        remove_path(replacement.target)
-        if path_exists(replacement.backup_path):
-            shutil.move(str(replacement.backup_path), str(replacement.target))
-
-
 def cleanup_replacements(replacements: list[Replacement]) -> None:
     for replacement in replacements:
         if not replacement.preserve_backup:
@@ -2061,7 +2217,6 @@ def transaction_target(
     preserve_backup: bool,
 ) -> dict:
     target = resolve_destination(target)
-    clear_stale_transaction_debris(target)
     return {
         "backupPath": str(install_transaction.backup_path_for(target, transaction_id)),
         "parentWasPresent": path_exists(target.parent),
@@ -2080,12 +2235,6 @@ def transaction_target_for(targets: list[dict], target: Path) -> dict:
     raise ValueError(f"Installer transaction does not contain target: {target}")
 
 
-def clear_stale_transaction_debris(target: Path) -> None:
-    for prefix in (".codex-lab-staged-", ".codex-lab-backup-"):
-        for path in target.parent.glob(f".{target.name}{prefix}*"):
-            install_transaction.remove_path(path)
-
-
 def stage_transaction_source(source: Path, target: Path, transaction_id: str) -> None:
     staged_path = install_transaction.staged_path_for(target, transaction_id)
     preflight_install_parent(staged_path.parent)
@@ -2098,6 +2247,45 @@ def stage_transaction_source(source: Path, target: Path, transaction_id: str) ->
         shutil.copytree(source, staged_path)
     else:
         shutil.copy2(source, staged_path)
+    fsync_staged_path(staged_path)
+
+
+def fsync_staged_path(path: Path) -> None:
+    if path.is_symlink():
+        raise ValueError(f"Installer transaction staging path is unsafe: {path}")
+    if path.is_file():
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        install_transaction.fsync_directory(path.parent)
+        return
+    if not path.is_dir():
+        raise ValueError(f"Installer transaction staging path is invalid: {path}")
+    for root, directories, files in os.walk(path, topdown=False):
+        root_path = Path(root)
+        for file_name in files:
+            file_path = root_path / file_name
+            if file_path.is_symlink() or not file_path.is_file():
+                raise ValueError(
+                    f"Installer transaction staged file is unsafe: {file_path}"
+                )
+            descriptor = os.open(file_path, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        for directory_name in directories:
+            directory_path = root_path / directory_name
+            if directory_path.is_symlink() or not directory_path.is_dir():
+                raise ValueError(
+                    "Installer transaction staged directory is unsafe: "
+                    f"{directory_path}"
+                )
+            install_transaction.fsync_directory(directory_path)
+        install_transaction.fsync_directory(root_path)
+    install_transaction.fsync_directory(path.parent)
 
 
 def apply_install_transaction_target(target: dict, *, force: bool) -> None:

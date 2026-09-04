@@ -1,6 +1,7 @@
 """Durable journal primitives for Codex Lab install and uninstall operations."""
 
 import json
+import os
 from pathlib import Path
 import stat
 import uuid
@@ -51,12 +52,6 @@ def write_journal(state_path: Path, journal: dict) -> None:
     durable_write(journal_path, document_bytes(journal), mode=0o600, replace=False)
 
 
-def rewrite_journal(state_path: Path, journal: dict) -> None:
-    durable_write(
-        journal_path_for_state(state_path), document_bytes(journal), mode=0o600
-    )
-
-
 def clear_journal(state_path: Path) -> None:
     journal_path = journal_path_for_state(state_path)
     if code_route.path_exists(journal_path):
@@ -67,16 +62,20 @@ def read_journal(state_path: Path) -> dict:
     state_path = code_route.absolute_path(state_path)
     journal_path = journal_path_for_state(state_path)
     try:
-        mode = journal_path.lstat().st_mode
+        journal_stat = journal_path.lstat()
     except FileNotFoundError as exc:
         raise InstallTransactionRecoveryError(
             f"Codex Lab installer transaction journal disappeared: {journal_path}"
         ) from exc
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+    if stat.S_ISLNK(journal_stat.st_mode) or not stat.S_ISREG(journal_stat.st_mode):
         raise InstallTransactionRecoveryError(
             f"Codex Lab installer transaction journal is unsafe: {journal_path}"
         )
-    if stat.S_IMODE(mode) != 0o600 or journal_path.stat().st_size > MAX_JOURNAL_BYTES:
+    if (
+        stat.S_IMODE(journal_stat.st_mode) != 0o600
+        or journal_stat.st_uid != os.getuid()
+        or journal_stat.st_size > MAX_JOURNAL_BYTES
+    ):
         raise InstallTransactionRecoveryError(
             f"Codex Lab installer transaction journal is unsafe: {journal_path}"
         )
@@ -190,6 +189,57 @@ def validate_journal(value: object, state_path: Path) -> None:
                 raise InstallTransactionRecoveryError(
                     f"Codex Lab installer transaction field {field} is malformed"
                 )
+
+
+def validate_journal_targets(
+    journal: dict,
+    *,
+    state_path: Path,
+    allowed_targets: set[Path],
+    required_targets: set[Path],
+    expected_engine_path: Path,
+    expected_code_mode_host_path: Path,
+) -> None:
+    target_paths = [Path(target["targetPath"]) for target in journal["targets"]]
+    target_set = set(target_paths)
+    if len(target_set) != len(target_paths):
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction contains duplicate targets"
+        )
+    if not target_set <= allowed_targets or not required_targets <= target_set:
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction targets do not match the managed install"
+        )
+    if state_path not in target_set:
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction does not contain its state path"
+        )
+    if journal["operation"] != "uninstall":
+        return
+    expected_engine_backup = state_path.parent / "engine-backup" / "codex"
+    expected_host_backup = state_path.parent / "engine-backup" / "codex-code-mode-host"
+    if journal.get("engineBackupPath") not in {None, str(expected_engine_backup)}:
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction engine backup path is unsafe"
+        )
+    if journal.get("codeModeHostBackupPath") not in {
+        None,
+        str(expected_host_backup),
+    }:
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction Code Mode host backup path is unsafe"
+        )
+    if journal.get("enginePath") != str(expected_engine_path):
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction engine path is unsafe"
+        )
+    if journal.get("codeModeHostPath") not in {
+        None,
+        str(expected_code_mode_host_path),
+    }:
+        raise InstallTransactionRecoveryError(
+            "Codex Lab installer transaction Code Mode host path is unsafe"
+        )
 
 
 def remove_path(path: Path) -> None:
