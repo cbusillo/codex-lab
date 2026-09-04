@@ -153,13 +153,6 @@
     {
       "disposition": "converged_with_upstream",
       "issue": 428,
-      "path": "codex-rs/models-manager/Cargo.toml",
-      "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "converged_with_upstream",
-      "issue": 428,
       "path": "codex-rs/models-manager/prompt.md",
       "reason": "Issue #428 adopts the current upstream/provider-owned models-manager implementation under MODEL-1; the pre-anchor delta was mechanical or targeted deleted APIs, while live backend metadata and explicit user selections remain authoritative.",
       "violation": "reverted_to_upstream"
