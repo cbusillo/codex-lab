@@ -58,6 +58,29 @@ const DESKTOP_UPDATE_URL: &str =
 /// warning instead of failing doctor outright; update freshness is useful
 /// support context but should not mask more direct install/config failures.
 pub(super) fn updates_check(config: &Config) -> DoctorCheck {
+    updates_check_for_build(config, codex_version::is_lab_build())
+}
+
+fn updates_check_for_build(config: &Config, is_lab_build: bool) -> DoctorCheck {
+    if is_lab_build {
+        return DoctorCheck::new(
+            "updates.status",
+            "updates",
+            CheckStatus::Ok,
+            "Codex Lab updates are managed by the release installer",
+        )
+        .details(vec![
+            format!(
+                "startup update check: disabled for Codex Lab (configured: {})",
+                config.check_for_update_on_startup
+            ),
+            "update discovery: use the supported Codex Lab release installer with --check"
+                .to_string(),
+            "installed status: use the supported Codex Lab release installer with --status"
+                .to_string(),
+        ]);
+    }
+
     let current_exe = std::env::current_exe().ok();
     let install_context = doctor_install_context(current_exe.as_deref());
     let mut details = vec![
@@ -140,6 +163,21 @@ pub(super) async fn append_desktop_update(
     config: Option<&Config>,
     application: &InstalledApp,
 ) {
+    append_desktop_update_for_build(checks, config, application, codex_version::is_lab_build())
+        .await;
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn append_desktop_update_for_build(
+    checks: &mut [DoctorCheck],
+    config: Option<&Config>,
+    application: &InstalledApp,
+    is_lab_build: bool,
+) {
+    if is_lab_build {
+        return;
+    }
+
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     #[cfg(target_os = "macos")]
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
@@ -507,6 +545,38 @@ struct VersionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doctor::DoctorReport;
+    use crate::doctor::output::HumanOutputOptions;
+    use crate::doctor::output::render_human_report;
+    use codex_core::config::ConfigBuilder;
+
+    #[tokio::test]
+    async fn codex_lab_disabled_update_ui_snapshot() {
+        let codex_home = tempfile::tempdir().expect("temporary Codex home should be created");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config should load");
+        let report = DoctorReport {
+            schema_version: 1,
+            generated_at: "0s since unix epoch".to_string(),
+            overall_status: CheckStatus::Ok,
+            codex_version: "0.1.0-lab.6".to_string(),
+            checks: vec![updates_check_for_build(&config, /*is_lab_build*/ true)],
+        };
+
+        let rendered = render_human_report(
+            &report,
+            HumanOutputOptions {
+                show_details: true,
+                show_all: false,
+                ascii: false,
+                color_enabled: false,
+            },
+        );
+        insta::assert_snapshot!("codex_lab_updates_disabled", rendered);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -544,6 +614,36 @@ mod tests {
             format!(
                 "{BACKEND_DESKTOP_UPDATE_URL}?installation_id=028e90f8-5f2a-47db-a05c-6a48f548d728&arch={arch}&app_version=26.623.10000&beta=false&os-version=26.6.0&plan_type=unknown"
             )
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn codex_lab_skips_desktop_update_enrichment() {
+        let config = ConfigBuilder::default()
+            .build()
+            .await
+            .expect("config should load");
+        let application = InstalledApp {
+            identity: "com.openai.codex",
+            version: "26.623.10000".to_string(),
+            bundle: PathBuf::new(),
+            build: 6139,
+        };
+        let mut checks = vec![updates_check_for_build(&config, /*is_lab_build*/ true)];
+        let before = serde_json::to_value(&checks).expect("checks should serialize");
+
+        append_desktop_update_for_build(
+            &mut checks,
+            Some(&config),
+            &application,
+            /*is_lab_build*/ true,
+        )
+        .await;
+
+        assert_eq!(
+            serde_json::to_value(&checks).expect("checks should serialize"),
+            before
         );
     }
 

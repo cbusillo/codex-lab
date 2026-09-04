@@ -1,0 +1,17 @@
+---
+source: cli/src/doctor/updates.rs
+expression: "render_human_report(&report, HumanOutputOptions\n{ show_details: true, show_all: false, ascii: false, color_enabled: false, },)"
+---
+Codex Doctor v0.1.0-lab.6
+
+Updates
+  ✓ updates      Codex Lab updates are managed by the release installer
+      startup update check     disabled for Codex Lab (configured: true)
+      update discovery         use the supported Codex Lab release installer with --check
+      installed status         use the supported Codex Lab release installer with --status
+
+─────────────────────────────────────────────────────────────
+1 ok · 0 warn · 0 fail ok
+
+--summary compact output           --all expand truncated lists
+--json redacted report

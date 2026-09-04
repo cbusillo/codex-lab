@@ -1,4 +1,4 @@
-#![cfg(not(debug_assertions))]
+#![cfg(any(not(debug_assertions), test))]
 
 use crate::legacy_core::config::Config;
 use crate::npm_registry;
@@ -20,12 +20,26 @@ use codex_login::default_client::default_headers;
 use serde::Deserialize;
 use std::path::Path;
 
+#[cfg(not(debug_assertions))]
 use crate::version::CODEX_CLI_VERSION;
 
+#[cfg(not(debug_assertions))]
 pub(crate) use crate::updates_cache::dismiss_version;
 
+#[cfg(not(debug_assertions))]
 pub fn get_upgrade_version(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    get_upgrade_version_for_build(config, codex_version::is_lab_build(), CODEX_CLI_VERSION)
+}
+
+fn get_upgrade_version_for_build(
+    config: &Config,
+    is_lab_build: bool,
+    current_version: &str,
+) -> Option<String> {
+    if is_lab_build {
+        return None;
+    }
+    if !config.check_for_update_on_startup || is_source_build_version(current_version) {
         return None;
     }
 
@@ -49,7 +63,7 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     }
 
     info.and_then(|info| {
-        if is_newer(&info.latest_version, CODEX_CLI_VERSION).unwrap_or(false) {
+        if is_newer(&info.latest_version, current_version).unwrap_or(false) {
             Some(info.latest_version)
         } else {
             None
@@ -147,13 +161,29 @@ async fn fetch_latest_github_release_version(
 
 /// Returns the latest version to show in a popup, if it should be shown.
 /// This respects the user's dismissal choice for the current latest version.
+#[cfg(not(debug_assertions))]
 pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
-    if !config.check_for_update_on_startup || is_source_build_version(CODEX_CLI_VERSION) {
+    get_upgrade_version_for_popup_for_build(
+        config,
+        codex_version::is_lab_build(),
+        CODEX_CLI_VERSION,
+    )
+}
+
+fn get_upgrade_version_for_popup_for_build(
+    config: &Config,
+    is_lab_build: bool,
+    current_version: &str,
+) -> Option<String> {
+    if is_lab_build {
+        return None;
+    }
+    if !config.check_for_update_on_startup || is_source_build_version(current_version) {
         return None;
     }
 
     let version_file = version_filepath(config);
-    let latest = get_upgrade_version(config)?;
+    let latest = get_upgrade_version_for_build(config, is_lab_build, current_version)?;
     // If the user dismissed this exact version previously, do not show the popup.
     if let Ok(info) = read_version_info(&version_file)
         && info.dismissed_version.as_deref() == Some(latest.as_str())
@@ -162,3 +192,7 @@ pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
     }
     Some(latest)
 }
+
+#[cfg(test)]
+#[path = "updates_tests.rs"]
+mod tests;

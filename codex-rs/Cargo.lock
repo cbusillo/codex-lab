@@ -2222,6 +2222,7 @@ dependencies = [
  "codex-http-client",
  "codex-uds",
  "codex-utils-home-dir",
+ "codex-version",
  "futures",
  "libc",
  "pretty_assertions",
