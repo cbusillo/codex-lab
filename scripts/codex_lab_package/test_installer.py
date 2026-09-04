@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -34,6 +35,7 @@ from codex_lab_package.installer import CodexLabUpdateError
 from codex_lab_package.installer import activate_code_route
 from codex_lab_package.installer import check_for_update
 from codex_lab_package.installer import codex_lab_release_order
+from codex_lab_package.installer import deactivate_code_route
 from codex_lab_package.installer import download_json_url
 from codex_lab_package.installer import download_url
 from codex_lab_package.installer import github_releases_url
@@ -55,6 +57,7 @@ from codex_lab_package.layout import build_codex_lab_app
 from codex_lab_package.supervisor import CodeModeHostIdentity
 from codex_lab_package.supervisor import EngineIdentity
 from codex_lab_package.supervisor import SupervisorPaths
+import codex_lab_package.installer as installer_module
 import install_codex_lab as install_codex_lab_cli
 
 
@@ -454,7 +457,83 @@ class CodexLabInstallerTest(unittest.TestCase):
                     update_from_latest_release(state_path=result.state_path)
             releases.assert_not_called()
 
-    def test_uninstall_deactivates_route_and_restores_prior_file(self) -> None:
+    def test_install_serializes_with_code_route_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            old_release = build_test_release(root / "old")
+            new_release = build_test_release(
+                root / "new",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            result = install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=old_release.download,
+            )
+            install_started = threading.Event()
+            allow_install = threading.Event()
+            activation_done = threading.Event()
+            errors: list[BaseException] = []
+
+            def blocking_download(url: str, destination: Path) -> None:
+                if not install_started.is_set():
+                    install_started.set()
+                    if not allow_install.wait(timeout=10):
+                        raise TimeoutError("test install was not released")
+                new_release.download(url, destination)
+
+            def run_install() -> None:
+                try:
+                    install_from_manifest_url(
+                        new_release.manifest_url,
+                        app_dir=result.app_dir,
+                        shim_dir=result.shim_path.parent
+                        if result.shim_path is not None
+                        else None,
+                        state_path=result.state_path,
+                        supervisor_paths=self.supervisor_paths,
+                        force=True,
+                        download=blocking_download,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            route_path = root / "route" / "code"
+
+            def run_activation() -> None:
+                try:
+                    activate_code_route(
+                        state_path=result.state_path,
+                        code_route_path=route_path,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    activation_done.set()
+
+            install_thread = threading.Thread(target=run_install)
+            activation_thread = threading.Thread(target=run_activation)
+            install_thread.start()
+            self.assertTrue(install_started.wait(timeout=10))
+            activation_thread.start()
+            self.assertFalse(activation_done.wait(timeout=0.2))
+            allow_install.set()
+            install_thread.join(timeout=30)
+            activation_thread.join(timeout=30)
+
+            self.assertFalse(install_thread.is_alive())
+            self.assertFalse(activation_thread.is_alive())
+            self.assertEqual(errors, [])
+            status = read_install_state(result.state_path)
+            self.assertEqual(status.release_tag, new_release.manifest["release"]["tag"])
+            self.assertIsNotNone(status.code_route)
+
+    def test_uninstall_requires_route_deactivation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
             release = build_test_release(root)
@@ -474,12 +553,126 @@ class CodexLabInstallerTest(unittest.TestCase):
                 code_route_path=route_path,
             )
 
+            with self.assertRaisesRegex(
+                ValueError, "Deactivate the explicit code route"
+            ):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertTrue(result.state_path.exists())
+            deactivate_code_route(
+                state_path=result.state_path,
+                code_route_path=route_path,
+            )
             uninstalled = uninstall_codex_lab(state_path=result.state_path)
 
-            self.assertEqual(uninstalled.restored_code_route_path, route_path)
+            self.assertIsNone(uninstalled.restored_code_route_path)
             self.assertEqual(route_path.read_text(encoding="utf-8"), "prior code route")
             self.assertEqual(route_path.stat().st_mode & 0o777, 0o751)
             self.assertFalse(result.state_path.exists())
+
+    def test_uninstall_rejects_replaced_code_mode_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            assert result.code_mode_host_path is not None
+            result.code_mode_host_path.write_text("replacement", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "host identity"):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertTrue(result.state_path.exists())
+            self.assertTrue(result.app_dir.exists())
+
+    def test_uninstall_cleanup_failure_is_best_effort(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            real_remove_path = installer_module.remove_path
+
+            def fail_backup_cleanup(path: Path) -> None:
+                if ".codex-lab-backup-" in path.name:
+                    raise OSError("cleanup failed")
+                real_remove_path(path)
+
+            with mock.patch(
+                "codex_lab_package.installer.remove_path",
+                side_effect=fail_backup_cleanup,
+            ):
+                uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertFalse(result.state_path.exists())
+            self.assertFalse(result.app_dir.exists())
+
+    def test_update_verifies_legacy_identity_from_published_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            old_release = build_test_release(root / "old")
+            new_release = build_test_release(
+                root / "new",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+                bundle_version="43",
+                commit="def456",
+            )
+            result = install_from_manifest_url(
+                old_release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=old_release.download,
+            )
+            state = json.loads(result.state_path.read_text(encoding="utf-8"))
+            state["managedEngine"] = None
+            state["managedCodeModeHost"] = None
+            result.state_path.write_text(
+                json.dumps(state, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            def download(url: str, destination: Path) -> None:
+                if f"/{old_release.manifest['release']['tag']}/" in url:
+                    old_release.download(url, destination)
+                else:
+                    new_release.download(url, destination)
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries",
+                return_value=[
+                    CodexLabReleaseSummary(
+                        published_at="2026-01-01T00:00:00Z",
+                        tag_name=old_release.manifest["release"]["tag"],
+                    ),
+                    CodexLabReleaseSummary(
+                        published_at="2026-01-02T00:00:00Z",
+                        tag_name=new_release.manifest["release"]["tag"],
+                    ),
+                ],
+            ):
+                update = update_from_latest_release(
+                    state_path=result.state_path,
+                    download=download,
+                )
+            assert update.install is not None
+            updated = update.install
+
+            status = read_install_state(updated.state_path)
+            self.assertEqual(status.release_tag, new_release.manifest["release"]["tag"])
+            self.assertIsNotNone(status.engine_sha256)
+            self.assertIsNotNone(status.code_mode_host_sha256)
 
     def test_downgrades_to_schema_two_release_and_removes_managed_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -769,21 +962,14 @@ class CodexLabInstallerTest(unittest.TestCase):
                 download=release.download,
             )
 
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve().parents[1] / "install_codex_lab.py"),
-                    "--status",
-                    "--state-path",
-                    str(result.state_path),
-                ],
-                check=True,
-                stdout=subprocess.PIPE,
-                text=True,
+            exit_code, stdout, stderr = run_install_cli(
+                "--status", "--state-path", str(result.state_path)
             )
 
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stderr, "")
             self.assertEqual(
-                completed.stdout,
+                stdout,
                 f"Codex Lab 1.2.3 from codex-lab-v1.2.3-lab.1\n"
                 "Release version: 1.2.3-lab.1\n"
                 "Bundle version: 42\n"
@@ -795,6 +981,27 @@ class CodexLabInstallerTest(unittest.TestCase):
                 f"Supervisor: {result.supervisor_label}\n"
                 f"State: {result.state_path}\n",
             )
+
+    def test_status_command_rejects_replaced_code_mode_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            assert result.code_mode_host_path is not None
+            result.code_mode_host_path.write_text("replacement", encoding="utf-8")
+
+            exit_code, _stdout, stderr = run_install_cli(
+                "--status", "--state-path", str(result.state_path)
+            )
+
+            self.assertEqual(exit_code, 1)
+            self.assertIn("Code Mode host identity", stderr)
 
     def test_status_command_reports_missing_install_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -105,9 +105,10 @@ no source build or discovery fallback, uses `~/.codex-lab`, and never modifies
 Install and update are refused while the explicit route is active; deactivate
 it first so a release replacement cannot silently retarget `code`. Status,
 activation, deactivation, and uninstall recover any durable route transaction
-journal before proceeding. Deactivation and uninstall restore the exact
-captured symlink, regular file, or absent state and fail closed if the active
-launcher or preserved route changed.
+journal before proceeding. Deactivation restores the exact captured symlink,
+regular file, or absent state and fails closed if the active launcher or
+preserved route changed. Uninstall also refuses an active route instead of
+combining route restoration with the installer rollback transaction.
 
 ```shell
 scripts/install_codex_lab.py \
@@ -145,10 +146,14 @@ scripts/install_codex_lab.py --update
 `--update` reads the recorded install state, preserves the installed app path and
 shim path, installs the matching engine, and restarts the pinned supervisor only
 when a newer published Lab release is available. It does not enable the upstream
-standalone updater.
+standalone updater. Current state records pin the Code Mode host digest and
+Developer ID identity. When upgrading an older state that predates those fields,
+the installer first verifies the installed engine and host against that state's
+published release manifest before replacing either binary.
 
 To remove the recorded install and restore any managed engine that predated the
-first supported installer run, use:
+first supported installer run, first deactivate any explicit `code` route, then
+use:
 
 ```shell
 scripts/install_codex_lab.py --uninstall

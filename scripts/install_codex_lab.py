@@ -22,8 +22,7 @@ from codex_lab_package.installer import deactivate_code_route
 from codex_lab_package.installer import install_from_manifest_url
 from codex_lab_package.installer import manifest_url_for_latest_release
 from codex_lab_package.installer import manifest_url_for_release_tag
-from codex_lab_package.installer import read_install_state
-from codex_lab_package.installer import require_recorded_code_route
+from codex_lab_package.installer import read_verified_install_status
 from codex_lab_package.installer import update_from_latest_release
 from codex_lab_package.installer import uninstall_codex_lab
 
@@ -119,12 +118,11 @@ def main() -> int:
     args = parse_args()
     if args.status:
         try:
-            status = read_install_state(args.state_path)
-            require_recorded_code_route(status)
+            status = read_verified_install_status(args.state_path)
         except CodexLabInstallStateError as exc:
             return print_install_state_error(exc)
         except ValueError as exc:
-            return print_command_error("Code route is invalid", exc)
+            return print_command_error("Codex Lab install is invalid", exc)
         print(f"Codex Lab {status.version} from {status.release_tag}")
         print(f"Release version: {status.release_version}")
         print(f"Bundle version: {status.bundle_version}")

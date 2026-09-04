@@ -23,6 +23,7 @@ from .code_route import read_code_route_state
 from .code_route import recover_code_route_transaction
 from .code_route import require_active_code_route
 from .code_route import serialize_code_route_state
+from .code_route_transaction import transaction_lock
 from .distribution_manifest import APP_ZIP
 from .distribution_manifest import ARTIFACTS
 from .distribution_manifest import ENGINE_ZIP
@@ -99,6 +100,9 @@ class CodexLabInstallStatus:
     code_route: CodeRouteState | None
     code_mode_host_backup_path: Path | None
     code_mode_host_path: Path | None
+    code_mode_host_sha256: str | None
+    code_mode_host_signing_identifier: str | None
+    code_mode_host_team_identifier: str | None
     engine_backup_path: Path | None
     engine_path: Path | None
     engine_sha256: str | None
@@ -112,6 +116,7 @@ class CodexLabInstallStatus:
     release_version: str
     shim_path: Path | None
     source_commit: str | None
+    source_repository: str | None
     state_path: Path
     supervisor_label: str | None
     version: str
@@ -268,6 +273,32 @@ def install_from_manifest_url(
     download: DownloadFunc | None = None,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabInstallResult:
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        recover_code_route_transaction(state_path, lock_held=True)
+        return _install_from_manifest_url_locked(
+            manifest_url,
+            app_dir=app_dir,
+            shim_dir=shim_dir,
+            state_path=state_path,
+            supervisor_paths=supervisor_paths,
+            force=force,
+            download=download,
+            engine_operations=engine_operations,
+        )
+
+
+def _install_from_manifest_url_locked(
+    manifest_url: str,
+    *,
+    app_dir: Path = DEFAULT_APP_DIR,
+    shim_dir: Path | None = DEFAULT_SHIM_DIR,
+    state_path: Path = DEFAULT_STATE_PATH,
+    supervisor_paths: SupervisorPaths | None = None,
+    force: bool = False,
+    download: DownloadFunc | None = None,
+    engine_operations: EngineProvisioningOperations | None = None,
+) -> CodexLabInstallResult:
     if not is_https_url(manifest_url):
         raise ValueError(f"manifest URL must be an HTTPS URL: {manifest_url}")
     download = download or download_url
@@ -277,7 +308,7 @@ def install_from_manifest_url(
     app_dir = resolve_destination(app_dir)
     shim_path = resolve_destination(shim_dir / "codex-lab") if shim_dir else None
     state_path = resolve_destination(state_path)
-    previous_status = read_optional_install_state(state_path)
+    previous_status = read_optional_install_state(state_path, lock_held=True)
     require_code_route_inactive_for_install(previous_status)
 
     with tempfile.TemporaryDirectory(prefix="codex-lab-install-") as temp_dir_name:
@@ -311,6 +342,16 @@ def install_from_manifest_url(
 
         checksums = read_sha256sums(sha256sums_path)
         validate_manifest(manifest, dist_dir=dist_dir, checksums=checksums)
+
+        legacy_release = None
+        if previous_status is not None and install_state_lacks_exact_identity(
+            previous_status
+        ):
+            legacy_release = download_recorded_release_identity(
+                previous_status,
+                download=download,
+                destination=temp_dir / "recorded-release-manifest.json",
+            )
 
         app_source = extract_artifact(
             dist_dir / APP_ZIP,
@@ -366,6 +407,7 @@ def install_from_manifest_url(
                 previous_status,
                 supervisor_paths=supervisor_paths,
                 engine_operations=engine_operations,
+                legacy_release=legacy_release,
             )
         if (
             previous_status is not None
@@ -604,11 +646,73 @@ def require_code_mode_host_release_identity(
         )
 
 
-def read_optional_install_state(state_path: Path) -> CodexLabInstallStatus | None:
-    recover_code_route_transaction(state_path)
+def install_state_lacks_exact_identity(status: CodexLabInstallStatus) -> bool:
+    engine_identity = (
+        status.engine_sha256,
+        status.engine_signing_identifier,
+        status.engine_team_identifier,
+    )
+    host_identity = (
+        status.code_mode_host_sha256,
+        status.code_mode_host_signing_identifier,
+        status.code_mode_host_team_identifier,
+    )
+    return (
+        status.engine_path is not None
+        and any(value is None for value in engine_identity)
+    ) or (
+        status.code_mode_host_path is not None
+        and any(value is None for value in host_identity)
+    )
+
+
+def download_recorded_release_identity(
+    status: CodexLabInstallStatus,
+    *,
+    download: DownloadFunc,
+    destination: Path,
+) -> ManagedEngineRelease:
+    if status.source_repository is None or status.source_commit is None:
+        raise ValueError(
+            "Install state lacks the published source identity required to verify "
+            "this legacy installation"
+        )
+    manifest_url = manifest_url_for_release_tag(
+        status.release_tag,
+        repository=status.source_repository,
+    )
+    download(manifest_url, destination)
+    manifest = json.loads(destination.read_text(encoding="utf-8"))
+    validate_manifest(manifest)
+    release = manifest.get("release")
+    source = manifest.get("source")
+    if (
+        not isinstance(release, dict)
+        or release.get("tag") != status.release_tag
+        or manifest.get("version") != status.version
+        or manifest_release_version(manifest) != status.release_version
+        or not isinstance(source, dict)
+        or source.get("commit") != status.source_commit
+        or source.get("repository") != status.source_repository
+    ):
+        raise ValueError(
+            "Published release identity does not match the legacy install state"
+        )
+    return managed_engine_release_from_manifest(manifest)
+
+
+def read_optional_install_state(
+    state_path: Path,
+    *,
+    lock_held: bool = False,
+) -> CodexLabInstallStatus | None:
+    if not lock_held:
+        with transaction_lock(state_path):
+            return read_optional_install_state(state_path, lock_held=True)
+    recover_code_route_transaction(state_path, lock_held=True)
     if not path_exists(state_path):
         return None
-    return read_install_state(state_path)
+    return read_install_state(state_path, lock_held=True)
 
 
 def require_code_route_inactive_for_install(
@@ -625,6 +729,7 @@ def require_recorded_install(
     *,
     supervisor_paths: SupervisorPaths,
     engine_operations: EngineProvisioningOperations,
+    legacy_release: ManagedEngineRelease | None = None,
 ) -> None:
     try:
         smoke_check(status.app_path, status.shim_path)
@@ -641,9 +746,21 @@ def require_recorded_install(
         )
     identity = engine_operations.inspect(status.engine_path)
     expected_signed_identity = (
-        status.engine_sha256,
-        status.engine_signing_identifier,
-        status.engine_team_identifier,
+        status.engine_sha256
+        if status.engine_sha256 is not None
+        else legacy_release.sha256
+        if legacy_release is not None
+        else None,
+        status.engine_signing_identifier
+        if status.engine_signing_identifier is not None
+        else legacy_release.signing_identifier
+        if legacy_release is not None
+        else None,
+        status.engine_team_identifier
+        if status.engine_team_identifier is not None
+        else legacy_release.team_identifier
+        if legacy_release is not None
+        else None,
     )
     actual_signed_identity = (
         identity.sha256,
@@ -675,7 +792,40 @@ def require_recorded_install(
             )
         if engine_operations.inspect_code_mode_host is None:
             raise ValueError("Code Mode host inspection is unavailable")
-        engine_operations.inspect_code_mode_host(status.code_mode_host_path)
+        identity = engine_operations.inspect_code_mode_host(status.code_mode_host_path)
+        legacy_host = (
+            legacy_release.code_mode_host if legacy_release is not None else None
+        )
+        expected_identity = (
+            status.code_mode_host_sha256
+            if status.code_mode_host_sha256 is not None
+            else legacy_host.sha256
+            if legacy_host is not None
+            else None,
+            status.code_mode_host_signing_identifier
+            if status.code_mode_host_signing_identifier is not None
+            else legacy_host.signing_identifier
+            if legacy_host is not None
+            else None,
+            status.code_mode_host_team_identifier
+            if status.code_mode_host_team_identifier is not None
+            else legacy_host.team_identifier
+            if legacy_host is not None
+            else None,
+        )
+        if any(value is None for value in expected_identity):
+            raise ValueError(
+                "Install state lacks the exact Code Mode host identity; reinstall "
+                "the recorded release before updating or uninstalling"
+            )
+        if (
+            identity.sha256,
+            identity.signing_identifier,
+            identity.team_identifier,
+        ) != expected_identity:
+            raise ValueError(
+                "Recorded Code Mode host identity does not match the install state"
+            )
 
 
 def default_engine_backup_path(state_path: Path) -> Path:
@@ -697,9 +847,16 @@ def preflight_new_backup_path(path: Path) -> None:
         raise FileExistsError(f"Engine backup path already exists: {path}")
 
 
-def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstallStatus:
+def read_install_state(
+    state_path: Path = DEFAULT_STATE_PATH,
+    *,
+    lock_held: bool = False,
+) -> CodexLabInstallStatus:
     state_path = resolve_destination(state_path)
-    recover_code_route_transaction(state_path)
+    if not lock_held:
+        with transaction_lock(state_path):
+            return read_install_state(state_path, lock_held=True)
+    recover_code_route_transaction(state_path, lock_held=True)
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -717,10 +874,14 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
 
     source = state.get("source")
     source_commit = None
+    source_repository = None
     if isinstance(source, dict):
         commit = source.get("commit")
         if isinstance(commit, str):
             source_commit = commit
+        repository = source.get("repository")
+        if isinstance(repository, str):
+            source_repository = repository
 
     managed_engine = state.get("managedEngine")
     if managed_engine is not None and not isinstance(managed_engine, dict):
@@ -737,6 +898,28 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
         )
         engine_team_identifier = optional_state_string(
             managed_engine, "teamIdentifier", state_path
+        )
+
+    managed_code_mode_host = state.get("managedCodeModeHost")
+    if managed_code_mode_host is not None and not isinstance(
+        managed_code_mode_host, dict
+    ):
+        raise CodexLabInstallStateError(
+            "Install state field managedCodeModeHost must be an object or null: "
+            f"{state_path}"
+        )
+    code_mode_host_sha256 = None
+    code_mode_host_signing_identifier = None
+    code_mode_host_team_identifier = None
+    if isinstance(managed_code_mode_host, dict):
+        code_mode_host_sha256 = optional_state_sha256(
+            managed_code_mode_host, "sha256", state_path
+        )
+        code_mode_host_signing_identifier = optional_state_string(
+            managed_code_mode_host, "signingIdentifier", state_path
+        )
+        code_mode_host_team_identifier = optional_state_string(
+            managed_code_mode_host, "teamIdentifier", state_path
         )
 
     shim_path = state.get("shimPath")
@@ -778,6 +961,9 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
         code_route=code_route,
         code_mode_host_backup_path=code_mode_host_backup_path,
         code_mode_host_path=code_mode_host_path,
+        code_mode_host_sha256=code_mode_host_sha256,
+        code_mode_host_signing_identifier=code_mode_host_signing_identifier,
+        code_mode_host_team_identifier=code_mode_host_team_identifier,
         engine_backup_path=engine_backup_path,
         engine_path=engine_path,
         engine_sha256=engine_sha256,
@@ -791,6 +977,7 @@ def read_install_state(state_path: Path = DEFAULT_STATE_PATH) -> CodexLabInstall
         release_version=release_version,
         shim_path=Path(shim_path) if isinstance(shim_path, str) else None,
         source_commit=source_commit,
+        source_repository=source_repository,
         state_path=state_path,
         supervisor_label=supervisor_label,
         version=required_state_string(state, "version", state_path),
@@ -803,7 +990,22 @@ def activate_code_route(
     code_route_path: Path = DEFAULT_CODE_ROUTE_PATH,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodeRouteResult:
-    status = read_install_state(state_path)
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        return _activate_code_route_locked(
+            state_path=state_path,
+            code_route_path=code_route_path,
+            engine_operations=engine_operations,
+        )
+
+
+def _activate_code_route_locked(
+    *,
+    state_path: Path,
+    code_route_path: Path,
+    engine_operations: EngineProvisioningOperations | None,
+) -> CodeRouteResult:
+    status = read_install_state(state_path, lock_held=True)
     engine_operations = engine_operations or DEFAULT_ENGINE_OPERATIONS
     expected_paths = default_supervisor_paths()
     if status.lab_home != expected_paths.lab_home:
@@ -864,6 +1066,7 @@ def activate_code_route(
             lab_home=status.lab_home,
         ),
         active_path=code_route_path,
+        lock_held=True,
     )
 
 
@@ -872,13 +1075,16 @@ def deactivate_code_route(
     state_path: Path = DEFAULT_STATE_PATH,
     code_route_path: Path = DEFAULT_CODE_ROUTE_PATH,
 ) -> CodeRouteResult:
-    status = read_install_state(state_path)
-    if status.code_route is not None:
-        require_active_code_route(status.code_route, expected_path=code_route_path)
-    return deactivate_installed_code_route(
-        status.state_path,
-        active_path=code_route_path,
-    )
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        status = read_install_state(state_path, lock_held=True)
+        if status.code_route is not None:
+            require_active_code_route(status.code_route, expected_path=code_route_path)
+        return deactivate_installed_code_route(
+            status.state_path,
+            active_path=code_route_path,
+            lock_held=True,
+        )
 
 
 def require_recorded_code_route(status: CodexLabInstallStatus) -> None:
@@ -889,12 +1095,53 @@ def require_recorded_code_route(status: CodexLabInstallStatus) -> None:
         )
 
 
+def require_recorded_install_status(
+    status: CodexLabInstallStatus,
+    *,
+    engine_operations: EngineProvisioningOperations | None = None,
+) -> None:
+    require_recorded_install(
+        status,
+        supervisor_paths=supervisor_paths_from_status(status),
+        engine_operations=engine_operations or DEFAULT_ENGINE_OPERATIONS,
+    )
+    require_recorded_code_route(status)
+
+
+def read_verified_install_status(
+    state_path: Path = DEFAULT_STATE_PATH,
+    *,
+    engine_operations: EngineProvisioningOperations | None = None,
+) -> CodexLabInstallStatus:
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        status = read_install_state(state_path, lock_held=True)
+        require_recorded_install_status(
+            status,
+            engine_operations=engine_operations,
+        )
+        return status
+
+
 def check_for_update(
     *,
     repository: str = DEFAULT_REPOSITORY,
     state_path: Path = DEFAULT_STATE_PATH,
+    lock_held: bool = False,
+    validate_install: bool = True,
 ) -> CodexLabUpdateCheck:
-    installed = read_install_state(state_path)
+    state_path = resolve_destination(state_path)
+    if not lock_held:
+        with transaction_lock(state_path):
+            return check_for_update(
+                repository=repository,
+                state_path=state_path,
+                lock_held=True,
+                validate_install=validate_install,
+            )
+    installed = read_install_state(state_path, lock_held=lock_held)
+    if validate_install:
+        require_recorded_install_status(installed)
     releases = lab_distribution_release_summaries(repository=repository)
     if not any(release.tag_name == installed.release_tag for release in releases):
         raise CodexLabUpdateError(
@@ -922,8 +1169,32 @@ def update_from_latest_release(
     download: DownloadFunc | None = None,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabUpdateResult:
-    require_code_route_inactive_for_install(read_install_state(state_path))
-    check = check_for_update(repository=repository, state_path=state_path)
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        return _update_from_latest_release_locked(
+            repository=repository,
+            state_path=state_path,
+            download=download,
+            engine_operations=engine_operations,
+        )
+
+
+def _update_from_latest_release_locked(
+    *,
+    repository: str,
+    state_path: Path,
+    download: DownloadFunc | None,
+    engine_operations: EngineProvisioningOperations | None,
+) -> CodexLabUpdateResult:
+    require_code_route_inactive_for_install(
+        read_install_state(state_path, lock_held=True)
+    )
+    check = check_for_update(
+        repository=repository,
+        state_path=state_path,
+        lock_held=True,
+        validate_install=False,
+    )
     if not check.update_available:
         return CodexLabUpdateResult(check=check, install=None)
 
@@ -935,7 +1206,7 @@ def update_from_latest_release(
     supervisor_paths = supervisor_paths_from_status(installed)
     return CodexLabUpdateResult(
         check=check,
-        install=install_from_manifest_url(
+        install=_install_from_manifest_url_locked(
             manifest_url,
             app_dir=installed.app_path,
             shim_dir=installed.shim_path.parent
@@ -955,8 +1226,29 @@ def uninstall_codex_lab(
     state_path: Path = DEFAULT_STATE_PATH,
     engine_operations: EngineProvisioningOperations | None = None,
 ) -> CodexLabUninstallResult:
+    state_path = resolve_destination(state_path)
+    with transaction_lock(state_path):
+        return _uninstall_codex_lab_locked(
+            state_path=state_path,
+            engine_operations=engine_operations,
+        )
+
+
+def _uninstall_codex_lab_locked(
+    *,
+    state_path: Path,
+    engine_operations: EngineProvisioningOperations | None,
+) -> CodexLabUninstallResult:
     engine_operations = engine_operations or DEFAULT_ENGINE_OPERATIONS
-    status = read_install_state(state_path)
+    status = read_install_state(state_path, lock_held=True)
+    if status.code_route is not None:
+        require_active_code_route(
+            status.code_route,
+            expected_path=status.code_route.active_path,
+        )
+        raise ValueError(
+            "Deactivate the explicit code route before uninstalling Codex Lab"
+        )
     supervisor_paths = supervisor_paths_from_status(status)
     require_recorded_install(
         status,
@@ -996,20 +1288,9 @@ def uninstall_codex_lab(
         )
 
     removals: list[Replacement] = []
-    code_route_was_active = False
     restored_engine_path = None
     restored_code_mode_host_path = None
-    restored_code_route_path = None
-    recorded_code_route = status.code_route
     try:
-        if recorded_code_route is not None:
-            route_result = deactivate_installed_code_route(
-                status.state_path,
-                active_path=recorded_code_route.active_path,
-            )
-            code_route_was_active = route_result.changed
-            if recorded_code_route.prior.kind != "absent":
-                restored_code_route_path = recorded_code_route.active_path
         for target in (status.app_path, status.shim_path):
             if target is not None and path_exists(target):
                 removals.append(stage_path_removal(target))
@@ -1053,12 +1334,6 @@ def uninstall_codex_lab(
                     str(status.engine_backup_path),
                 )
             rollback_replacements(removals)
-            if code_route_was_active and recorded_code_route is not None:
-                activate_installed_code_route(
-                    status.state_path,
-                    recorded_code_route.engine,
-                    active_path=recorded_code_route.active_path,
-                )
             if current_engine_release is not None:
                 engine_operations.install_supervisor(
                     supervisor_paths,
@@ -1071,7 +1346,7 @@ def uninstall_codex_lab(
             ) from uninstall_error
         raise
 
-    cleanup_replacements(removals)
+    cleanup_replacements_best_effort(removals)
     return CodexLabUninstallResult(
         app_path=status.app_path,
         code_mode_host_path=status.code_mode_host_path
@@ -1079,7 +1354,7 @@ def uninstall_codex_lab(
         else None,
         engine_path=status.engine_path if manages_engine else None,
         restored_code_mode_host_path=restored_code_mode_host_path,
-        restored_code_route_path=restored_code_route_path,
+        restored_code_route_path=None,
         restored_engine_path=restored_engine_path,
         shim_path=status.shim_path,
         state_path=status.state_path,
@@ -1418,6 +1693,16 @@ def cleanup_replacements(replacements: list[Replacement]) -> None:
             remove_path(replacement.backup_path)
 
 
+def cleanup_replacements_best_effort(replacements: list[Replacement]) -> None:
+    for replacement in replacements:
+        if replacement.preserve_backup:
+            continue
+        try:
+            remove_path(replacement.backup_path)
+        except OSError:
+            continue
+
+
 def remove_path(path: Path) -> None:
     if path.is_dir() and not path.is_symlink():
         shutil.rmtree(path)
@@ -1464,6 +1749,9 @@ def write_install_state(
     code_route: CodeRouteState | None,
 ) -> None:
     state_path = resolve_destination(state_path)
+    code_mode_host_release = managed_engine_release_from_manifest(
+        manifest
+    ).code_mode_host
     state = {
         "appPath": str(app_dir),
         "artifacts": {
@@ -1491,6 +1779,13 @@ def write_install_state(
             "signingIdentifier": manifest["managedEngine"]["signingIdentifier"],
             "teamIdentifier": manifest["managedEngine"]["teamIdentifier"],
         },
+        "managedCodeModeHost": {
+            "sha256": code_mode_host_release.sha256,
+            "signingIdentifier": code_mode_host_release.signing_identifier,
+            "teamIdentifier": code_mode_host_release.team_identifier,
+        }
+        if code_mode_host_release is not None
+        else None,
         "labHome": str(supervisor_paths.lab_home),
         "launchAgentsDir": str(supervisor_paths.launch_agents_dir),
         "listenHost": supervisor_paths.listen_host,

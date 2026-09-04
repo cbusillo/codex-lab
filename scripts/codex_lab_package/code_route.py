@@ -184,6 +184,7 @@ def activate_code_route(
     *,
     active_path: Path = DEFAULT_CODE_ROUTE_PATH,
     tools: LauncherTools = LauncherTools(),
+    lock_held: bool = False,
 ) -> CodeRouteResult:
     from .code_route_transaction import activate_code_route as activate_transaction
 
@@ -192,6 +193,7 @@ def activate_code_route(
         engine,
         active_path=active_path,
         tools=tools,
+        lock_held=lock_held,
     )
 
 
@@ -199,18 +201,32 @@ def deactivate_code_route(
     state_path: Path,
     *,
     active_path: Path = DEFAULT_CODE_ROUTE_PATH,
+    lock_held: bool = False,
 ) -> CodeRouteResult:
     from .code_route_transaction import deactivate_code_route as deactivate_transaction
 
-    return deactivate_transaction(state_path, active_path=active_path)
+    return deactivate_transaction(
+        state_path,
+        active_path=active_path,
+        lock_held=lock_held,
+    )
 
 
-def recover_code_route_transaction(state_path: Path) -> None:
+def recover_code_route_transaction(
+    state_path: Path,
+    *,
+    active_path: Path = DEFAULT_CODE_ROUTE_PATH,
+    lock_held: bool = False,
+) -> None:
     from .code_route_transaction import (
         recover_code_route_transaction as recover_transaction,
     )
 
-    recover_transaction(state_path)
+    recover_transaction(
+        state_path,
+        active_path=active_path,
+        lock_held=lock_held,
+    )
 
 
 def require_active_code_route(
@@ -409,10 +425,16 @@ def write_state_code_route(
 
 
 def read_state_document(state_path: Path) -> dict:
-    value = json.loads(state_path.read_text(encoding="utf-8"))
+    value, _sha256 = read_state_document_with_sha256(state_path)
+    return value
+
+
+def read_state_document_with_sha256(state_path: Path) -> tuple[dict, str]:
+    content = state_path.read_bytes()
+    value = json.loads(content)
     if not isinstance(value, dict):
         raise ValueError(f"Install state must be a JSON object: {state_path}")
-    return value
+    return value, hashlib.sha256(content).hexdigest()
 
 
 def require_exact_engine_path(path: Path) -> None:

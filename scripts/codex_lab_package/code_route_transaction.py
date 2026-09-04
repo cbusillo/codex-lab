@@ -25,174 +25,210 @@ def activate_code_route(
     *,
     active_path: Path,
     tools: code_route.LauncherTools,
+    lock_held: bool = False,
 ) -> code_route.CodeRouteResult:
     state_path = code_route.absolute_path(state_path)
     active_path = code_route.absolute_path(active_path)
-    with transaction_lock(state_path):
-        recover_code_route_transaction(state_path, lock_held=True)
-        state = code_route.read_state_document(state_path)
-        existing = code_route.read_code_route_state(state, state_path)
-        if existing is not None:
-            code_route.require_active_code_route(existing, expected_path=active_path)
-            if existing.engine != engine:
-                raise ValueError(
-                    "Recorded code route engine metadata does not match the verified "
-                    "managed engine"
-                )
-            return code_route.CodeRouteResult(
-                active_path=active_path,
-                changed=False,
-                restored_prior=False,
-                state_path=state_path,
-            )
-
-        code_route.require_safe_parent(active_path.parent)
-        code_route.require_safe_parent(state_path.parent)
-        code_route.require_exact_engine_path(engine.path)
-        transaction_id = uuid.uuid4().hex
-        prior_backup_path = active_path.parent / (
-            f"{code_route.PRIOR_BACKUP_PREFIX}{transaction_id}"
-        )
-        launcher_source_path = active_path.parent / (
-            f".code.codex-lab-launcher-{transaction_id}"
-        )
-        prior = code_route.capture_prior_metadata(
-            active_path,
-            backup_path=prior_backup_path,
-        )
-        launcher = code_route.build_code_route_launcher_script(engine, tools=tools)
-        launcher_sha256 = hashlib.sha256(launcher.encode()).hexdigest()
-        route = code_route.CodeRouteState(
-            active_path=active_path,
-            engine=engine,
-            launcher_sha256=launcher_sha256,
-            prior=prior,
-        )
-        before_sha256 = state_sha256(state_path)
-        after_state = updated_state(state, route)
-        after_sha256 = document_sha256(after_state)
-        journal = {
-            "activeBackupPath": None,
-            "activePath": str(active_path),
-            "launcherSourcePath": str(launcher_source_path),
-            "operation": "activate",
-            "routeAfter": code_route.serialize_code_route_state(route),
-            "routeBefore": None,
-            "schemaVersion": JOURNAL_SCHEMA_VERSION,
-            "stateAfterSha256": after_sha256,
-            "stateBeforeSha256": before_sha256,
-            "statePath": str(state_path),
-            "transactionId": transaction_id,
-        }
-        write_journal(state_path, journal)
-        try:
-            write_launcher(launcher_source_path, launcher)
-            if prior.kind != "absent":
-                assert prior.backup_path is not None
-                safe_rename(active_path, prior.backup_path)
-            safe_rename(launcher_source_path, active_path)
-            code_route.write_state_code_route(
+    if not lock_held:
+        with transaction_lock(state_path):
+            return activate_code_route(
                 state_path,
-                state,
-                route,
-                expected_sha256=before_sha256,
+                engine,
+                active_path=active_path,
+                tools=tools,
+                lock_held=True,
             )
-        except Exception:
-            recover_code_route_transaction(state_path, lock_held=True)
-            raise
-        finish_committed_cleanup(state_path, journal)
-        require_transaction_clear(state_path)
+    recover_code_route_transaction(
+        state_path,
+        active_path=active_path,
+        lock_held=True,
+    )
+    state, before_sha256 = code_route.read_state_document_with_sha256(state_path)
+    existing = code_route.read_code_route_state(state, state_path)
+    if existing is not None:
+        code_route.require_active_code_route(existing, expected_path=active_path)
+        if existing.engine != engine:
+            raise ValueError(
+                "Recorded code route engine metadata does not match the verified "
+                "managed engine"
+            )
         return code_route.CodeRouteResult(
             active_path=active_path,
-            changed=True,
+            changed=False,
             restored_prior=False,
             state_path=state_path,
         )
+
+    code_route.require_safe_parent(active_path.parent)
+    code_route.require_safe_parent(state_path.parent)
+    code_route.require_exact_engine_path(engine.path)
+    transaction_id = uuid.uuid4().hex
+    prior_backup_path = active_path.parent / (
+        f"{code_route.PRIOR_BACKUP_PREFIX}{transaction_id}"
+    )
+    launcher_source_path = active_path.parent / (
+        f".code.codex-lab-launcher-{transaction_id}"
+    )
+    prior = code_route.capture_prior_metadata(
+        active_path,
+        backup_path=prior_backup_path,
+    )
+    launcher = code_route.build_code_route_launcher_script(engine, tools=tools)
+    launcher_sha256 = hashlib.sha256(launcher.encode()).hexdigest()
+    route = code_route.CodeRouteState(
+        active_path=active_path,
+        engine=engine,
+        launcher_sha256=launcher_sha256,
+        prior=prior,
+    )
+    after_state = updated_state(state, route)
+    after_sha256 = document_sha256(after_state)
+    journal = {
+        "activeBackupPath": None,
+        "activePath": str(active_path),
+        "launcherSourcePath": str(launcher_source_path),
+        "operation": "activate",
+        "routeAfter": code_route.serialize_code_route_state(route),
+        "routeBefore": None,
+        "schemaVersion": JOURNAL_SCHEMA_VERSION,
+        "stateAfterSha256": after_sha256,
+        "stateBeforeSha256": before_sha256,
+        "statePath": str(state_path),
+        "transactionId": transaction_id,
+    }
+    write_journal(state_path, journal)
+    try:
+        write_launcher(launcher_source_path, launcher)
+        if prior.kind != "absent":
+            assert prior.backup_path is not None
+            safe_rename(active_path, prior.backup_path)
+        safe_rename(launcher_source_path, active_path)
+        code_route.write_state_code_route(
+            state_path,
+            state,
+            route,
+            expected_sha256=before_sha256,
+        )
+    except Exception:
+        recover_code_route_transaction(
+            state_path,
+            active_path=active_path,
+            lock_held=True,
+        )
+        raise
+    finish_committed_cleanup(state_path, journal)
+    require_transaction_clear(state_path)
+    return code_route.CodeRouteResult(
+        active_path=active_path,
+        changed=True,
+        restored_prior=False,
+        state_path=state_path,
+    )
 
 
 def deactivate_code_route(
     state_path: Path,
     *,
     active_path: Path,
+    lock_held: bool = False,
 ) -> code_route.CodeRouteResult:
     state_path = code_route.absolute_path(state_path)
     active_path = code_route.absolute_path(active_path)
-    with transaction_lock(state_path):
-        recover_code_route_transaction(state_path, lock_held=True)
-        state = code_route.read_state_document(state_path)
-        route = code_route.read_code_route_state(state, state_path)
-        if route is None:
-            return code_route.CodeRouteResult(
-                active_path=active_path,
-                changed=False,
-                restored_prior=False,
-                state_path=state_path,
-            )
-        code_route.require_active_code_route(route, expected_path=active_path)
-        code_route.require_safe_parent(state_path.parent)
-        transaction_id = uuid.uuid4().hex
-        active_backup_path = active_path.parent / (
-            f"{code_route.ACTIVE_BACKUP_PREFIX}{transaction_id}"
-        )
-        before_sha256 = state_sha256(state_path)
-        after_state = updated_state(state, None)
-        after_sha256 = document_sha256(after_state)
-        journal = {
-            "activeBackupPath": str(active_backup_path),
-            "activePath": str(active_path),
-            "launcherSourcePath": None,
-            "operation": "deactivate",
-            "routeAfter": None,
-            "routeBefore": code_route.serialize_code_route_state(route),
-            "schemaVersion": JOURNAL_SCHEMA_VERSION,
-            "stateAfterSha256": after_sha256,
-            "stateBeforeSha256": before_sha256,
-            "statePath": str(state_path),
-            "transactionId": transaction_id,
-        }
-        write_journal(state_path, journal)
-        try:
-            safe_rename(active_path, active_backup_path)
-            if route.prior.kind != "absent":
-                assert route.prior.backup_path is not None
-                safe_rename(route.prior.backup_path, active_path)
-            code_route.write_state_code_route(
+    if not lock_held:
+        with transaction_lock(state_path):
+            return deactivate_code_route(
                 state_path,
-                state,
-                None,
-                expected_sha256=before_sha256,
+                active_path=active_path,
+                lock_held=True,
             )
-        except Exception:
-            recover_code_route_transaction(state_path, lock_held=True)
-            raise
-        finish_committed_cleanup(state_path, journal)
-        require_transaction_clear(state_path)
+    recover_code_route_transaction(
+        state_path,
+        active_path=active_path,
+        lock_held=True,
+    )
+    state, before_sha256 = code_route.read_state_document_with_sha256(state_path)
+    route = code_route.read_code_route_state(state, state_path)
+    if route is None:
         return code_route.CodeRouteResult(
             active_path=active_path,
-            changed=True,
-            restored_prior=route.prior.kind != "absent",
+            changed=False,
+            restored_prior=False,
             state_path=state_path,
         )
+    code_route.require_active_code_route(route, expected_path=active_path)
+    code_route.require_safe_parent(state_path.parent)
+    transaction_id = uuid.uuid4().hex
+    active_backup_path = active_path.parent / (
+        f"{code_route.ACTIVE_BACKUP_PREFIX}{transaction_id}"
+    )
+    after_state = updated_state(state, None)
+    after_sha256 = document_sha256(after_state)
+    journal = {
+        "activeBackupPath": str(active_backup_path),
+        "activePath": str(active_path),
+        "launcherSourcePath": None,
+        "operation": "deactivate",
+        "routeAfter": None,
+        "routeBefore": code_route.serialize_code_route_state(route),
+        "schemaVersion": JOURNAL_SCHEMA_VERSION,
+        "stateAfterSha256": after_sha256,
+        "stateBeforeSha256": before_sha256,
+        "statePath": str(state_path),
+        "transactionId": transaction_id,
+    }
+    write_journal(state_path, journal)
+    try:
+        safe_rename(active_path, active_backup_path)
+        if route.prior.kind != "absent":
+            assert route.prior.backup_path is not None
+            safe_rename(route.prior.backup_path, active_path)
+        code_route.write_state_code_route(
+            state_path,
+            state,
+            None,
+            expected_sha256=before_sha256,
+        )
+    except Exception:
+        recover_code_route_transaction(
+            state_path,
+            active_path=active_path,
+            lock_held=True,
+        )
+        raise
+    finish_committed_cleanup(state_path, journal)
+    require_transaction_clear(state_path)
+    return code_route.CodeRouteResult(
+        active_path=active_path,
+        changed=True,
+        restored_prior=route.prior.kind != "absent",
+        state_path=state_path,
+    )
 
 
 def recover_code_route_transaction(
     state_path: Path,
     *,
+    active_path: Path,
     lock_held: bool = False,
 ) -> None:
     state_path = code_route.absolute_path(state_path)
+    active_path = code_route.absolute_path(active_path)
     if not lock_held:
         if not code_route.path_exists(state_path.parent):
             return
         if not state_path.parent.is_dir() and not state_path.parent.is_symlink():
             return
         with transaction_lock(state_path):
-            recover_code_route_transaction(state_path, lock_held=True)
+            recover_code_route_transaction(
+                state_path,
+                active_path=active_path,
+                lock_held=True,
+            )
         return
     journal_path = journal_path_for_state(state_path)
     if not code_route.path_exists(journal_path):
         return
-    journal = read_journal(state_path)
+    journal = read_journal(state_path, active_path=active_path)
     current_sha256 = state_sha256(state_path) if state_path.exists() else None
     if current_sha256 == journal["stateBeforeSha256"]:
         rollback_uncommitted(journal)
@@ -339,7 +375,7 @@ def read_journal_route(
         raise code_route.CodeRouteRecoveryError(str(exc)) from exc
 
 
-def read_journal(state_path: Path) -> dict:
+def read_journal(state_path: Path, *, active_path: Path) -> dict:
     journal_path = journal_path_for_state(state_path)
     try:
         mode = journal_path.lstat().st_mode
@@ -365,11 +401,11 @@ def read_journal(state_path: Path) -> dict:
         raise code_route.CodeRouteRecoveryError(
             f"Could not read code route transaction journal: {journal_path}"
         ) from exc
-    validate_journal(value, state_path)
+    validate_journal(value, state_path, active_path=active_path)
     return value
 
 
-def validate_journal(value: object, state_path: Path) -> None:
+def validate_journal(value: object, state_path: Path, *, active_path: Path) -> None:
     if (
         not isinstance(value, dict)
         or value.get("schemaVersion") != JOURNAL_SCHEMA_VERSION
@@ -413,16 +449,20 @@ def validate_journal(value: object, state_path: Path) -> None:
             raise code_route.CodeRouteRecoveryError(
                 f"Code route transaction field {field} is malformed"
             )
-    active_path = Path(value["activePath"])
-    if not active_path.is_absolute():
+    journal_active_path = Path(value["activePath"])
+    if not journal_active_path.is_absolute():
         raise code_route.CodeRouteRecoveryError(
             "Code route transaction active path must be absolute"
         )
+    if journal_active_path != active_path:
+        raise code_route.CodeRouteRecoveryError(
+            "Code route transaction journal belongs to a different active path"
+        )
     transaction_id = value["transactionId"]
-    expected_launcher_source = active_path.parent / (
+    expected_launcher_source = journal_active_path.parent / (
         f".code.codex-lab-launcher-{transaction_id}"
     )
-    expected_active_backup = active_path.parent / (
+    expected_active_backup = journal_active_path.parent / (
         f"{code_route.ACTIVE_BACKUP_PREFIX}{transaction_id}"
     )
     if value["operation"] == "activate":
@@ -451,12 +491,12 @@ def validate_journal(value: object, state_path: Path) -> None:
                 "Code route deactivation journal is malformed"
             )
         route = read_journal_route(value.get("routeBefore"), state_path)
-    if route is None or route.active_path != active_path:
+    if route is None or route.active_path != journal_active_path:
         raise code_route.CodeRouteRecoveryError(
             "Code route transaction route metadata is inconsistent"
         )
     if route.prior.backup_path is not None:
-        expected_prior_backup = active_path.parent / (
+        expected_prior_backup = journal_active_path.parent / (
             f"{code_route.PRIOR_BACKUP_PREFIX}{transaction_id}"
         )
         if route.prior.backup_path != expected_prior_backup:
@@ -468,10 +508,18 @@ def validate_journal(value: object, state_path: Path) -> None:
 @contextmanager
 def transaction_lock(state_path: Path):
     state_path = code_route.absolute_path(state_path)
-    parent = state_path.parent
-    code_route.require_safe_parent(parent)
-    parent.mkdir(parents=True, exist_ok=True)
-    code_route.require_safe_parent(parent)
+    lock_root = lock_root_path()
+    code_route.require_safe_parent(lock_root.parent)
+    lock_root.mkdir(mode=0o700, exist_ok=True)
+    lock_root_mode = lock_root.lstat()
+    if (
+        not stat.S_ISDIR(lock_root_mode.st_mode)
+        or stat.S_IMODE(lock_root_mode.st_mode) != 0o700
+        or lock_root_mode.st_uid != os.getuid()
+    ):
+        raise code_route.CodeRouteRecoveryError(
+            f"Code route transaction lock directory is unsafe: {lock_root}"
+        )
     lock_path = lock_path_for_state(state_path)
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
@@ -479,7 +527,11 @@ def transaction_lock(state_path: Path):
     descriptor = os.open(lock_path, flags, 0o600)
     try:
         lock_mode = os.fstat(descriptor).st_mode
-        if not stat.S_ISREG(lock_mode) or stat.S_IMODE(lock_mode) & 0o077:
+        if (
+            not stat.S_ISREG(lock_mode)
+            or stat.S_IMODE(lock_mode) & 0o077
+            or os.fstat(descriptor).st_uid != os.getuid()
+        ):
             raise code_route.CodeRouteRecoveryError(
                 f"Code route transaction lock is unsafe: {lock_path}"
             )
@@ -615,7 +667,14 @@ def journal_path_for_state(state_path: Path) -> Path:
 
 
 def lock_path_for_state(state_path: Path) -> Path:
-    return state_path.with_name(f".{state_path.name}{LOCK_SUFFIX}")
+    state_digest = hashlib.sha256(str(state_path).encode()).hexdigest()
+    return lock_root_path() / f"{state_digest}{LOCK_SUFFIX}"
+
+
+def lock_root_path() -> Path:
+    return Path(tempfile.gettempdir()).resolve() / (
+        f"codex-lab-code-route-locks-{os.getuid()}"
+    )
 
 
 def optional_journal_path(journal: dict, field: str) -> Path | None:

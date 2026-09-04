@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from codex_lab_package.code_route import CodeRouteEngine
+from codex_lab_package.code_route import CodeRouteRecoveryError
 from codex_lab_package.code_route import LauncherTools
 from codex_lab_package.code_route import activate_code_route
 from codex_lab_package.code_route import deactivate_code_route
@@ -214,7 +215,7 @@ class CodeRouteTest(unittest.TestCase):
                     )
 
             self.assertTrue(journal_path_for_state(state_path).is_file())
-            recover_code_route_transaction(state_path)
+            recover_code_route_transaction(state_path, active_path=route_path)
 
             self.assertEqual(route_path.read_text(encoding="utf-8"), "prior")
             self.assertFalse(journal_path_for_state(state_path).exists())
@@ -243,13 +244,89 @@ class CodeRouteTest(unittest.TestCase):
                     )
 
             self.assertTrue(journal_path_for_state(state_path).is_file())
-            recover_code_route_transaction(state_path)
+            recover_code_route_transaction(state_path, active_path=route_path)
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
             route = read_code_route_state(state, state_path)
             assert route is not None
             require_active_code_route(route, expected_path=route_path)
             self.assertFalse(journal_path_for_state(state_path).exists())
+
+    def test_recovery_rejects_journal_for_different_active_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            victim_path = root / "do-not-delete"
+            victim_path.write_text("preserved", encoding="utf-8")
+
+            with mock.patch.object(
+                code_route_transaction,
+                "clear_journal",
+                side_effect=KeyboardInterrupt,
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    activate_code_route(
+                        state_path,
+                        engine,
+                        active_path=route_path,
+                        tools=tools,
+                    )
+
+            journal_path = journal_path_for_state(state_path)
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            journal["activePath"] = str(victim_path)
+            journal_path.write_text(json.dumps(journal), encoding="utf-8")
+            journal_path.chmod(0o600)
+
+            with self.assertRaisesRegex(
+                CodeRouteRecoveryError, "different active path"
+            ):
+                recover_code_route_transaction(state_path, active_path=route_path)
+
+            self.assertEqual(victim_path.read_text(encoding="utf-8"), "preserved")
+            self.assertTrue(journal_path.exists())
+
+    def test_activation_cas_uses_exact_state_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            state_path = write_state(root)
+            engine, tools = write_engine_fixture(root)
+            route_path = root / "bin" / "code"
+            original_read = (
+                code_route_transaction.code_route.read_state_document_with_sha256
+            )
+
+            def read_then_change_state(path: Path) -> tuple[dict, str]:
+                state, digest = original_read(path)
+                changed_state = dict(state)
+                changed_state["concurrent"] = "preserved"
+                path.write_text(
+                    json.dumps(changed_state, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                return state, digest
+
+            with (
+                mock.patch.object(
+                    code_route_transaction.code_route,
+                    "read_state_document_with_sha256",
+                    side_effect=read_then_change_state,
+                ),
+                self.assertRaisesRegex(CodeRouteRecoveryError, "ambiguous"),
+            ):
+                activate_code_route(
+                    state_path,
+                    engine,
+                    active_path=route_path,
+                    tools=tools,
+                )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["concurrent"], "preserved")
+            self.assertIsNone(state["codeRoute"])
+            self.assertTrue(journal_path_for_state(state_path).exists())
 
     def test_rejects_unsafe_state_parent_without_touching_route(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
