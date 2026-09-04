@@ -31,6 +31,7 @@ from codex_lab_package.installer import DOWNLOAD_TIMEOUT_SECONDS
 from codex_lab_package.installer import CodexLabRollbackError
 from codex_lab_package.installer import CodexLabReleaseSummary
 from codex_lab_package.installer import CodexLabUpdateError
+from codex_lab_package.installer import activate_code_route
 from codex_lab_package.installer import check_for_update
 from codex_lab_package.installer import codex_lab_release_order
 from codex_lab_package.installer import download_json_url
@@ -60,7 +61,7 @@ import install_codex_lab as install_codex_lab_cli
 class CodexLabInstallerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.supervisor_temp_dir = tempfile.TemporaryDirectory()
-        supervisor_root = Path(self.supervisor_temp_dir.name)
+        supervisor_root = Path(self.supervisor_temp_dir.name).resolve()
         self.supervisor_paths = SupervisorPaths(
             lab_home=supervisor_root / "lab-home",
             launch_agents_dir=supervisor_root / "LaunchAgents",
@@ -289,6 +290,7 @@ class CodexLabInstallerTest(unittest.TestCase):
                 release.manifest["managedEngine"]["sha256"],
             )
             self.assertEqual(installed_release.source_commit, "abc123")
+            self.assertEqual(installed_release.release_version, "1.2.3-lab.1")
             self.assertEqual(installed_release.version, "1.2.3")
 
             assert result.shim_path is not None
@@ -348,6 +350,136 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(status.state_path, result.state_path)
             self.assertEqual(status.supervisor_label, self.supervisor_paths.label)
             self.assertEqual(status.version, "1.2.3")
+
+    def test_reads_legacy_install_state_without_release_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            state = json.loads(result.state_path.read_text(encoding="utf-8"))
+            state.pop("releaseVersion")
+            state.pop("managedEngine")
+            result.state_path.write_text(json.dumps(state), encoding="utf-8")
+
+            status = read_install_state(result.state_path)
+
+            self.assertEqual(status.release_version, "1.2.3-lab.1")
+            uninstall_codex_lab(state_path=result.state_path)
+            self.assertFalse(result.state_path.exists())
+
+    def test_rejects_engine_release_version_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            release = build_test_release(root)
+
+            def inspect_wrong_release_version(path: Path) -> EngineIdentity:
+                identity = fake_inspect_engine(path)
+                return EngineIdentity(
+                    build_channel=identity.build_channel,
+                    build_profile=identity.build_profile,
+                    release_version="1.2.3-lab.99",
+                    sha256=identity.sha256,
+                    signing_identifier=identity.signing_identifier,
+                    source_commit=identity.source_commit,
+                    team_identifier=identity.team_identifier,
+                    version=identity.version,
+                )
+
+            operations = EngineProvisioningOperations(
+                inspect=inspect_wrong_release_version,
+                install_supervisor=self._install_supervisor,
+                uninstall_supervisor=self._uninstall_supervisor,
+                inspect_code_mode_host=fake_inspect_code_mode_host,
+            )
+            with self.assertRaisesRegex(ValueError, "release version"):
+                install_from_manifest_url(
+                    release.manifest_url,
+                    app_dir=root / "install" / "Codex Lab.app",
+                    shim_dir=root / "install" / "bin",
+                    state_path=root / "install" / "install-state.json",
+                    download=release.download,
+                    engine_operations=operations,
+                )
+
+            self.assertFalse((root / "install").exists())
+
+    def test_active_code_route_refuses_install_and_update_before_download(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root / "current")
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            route_path = root / "route" / "code"
+            activate_code_route(
+                state_path=result.state_path,
+                code_route_path=route_path,
+            )
+            replacement = build_test_release(
+                root / "replacement",
+                release_tag="codex-lab-v1.2.4-lab.1",
+                version="1.2.4",
+            )
+            download = mock.Mock(side_effect=replacement.download)
+
+            with self.assertRaisesRegex(
+                ValueError, "Deactivate the explicit code route"
+            ):
+                install_from_manifest_url(
+                    replacement.manifest_url,
+                    app_dir=result.app_dir,
+                    shim_dir=result.shim_path.parent if result.shim_path else None,
+                    state_path=result.state_path,
+                    force=True,
+                    download=download,
+                )
+            download.assert_not_called()
+
+            with mock.patch(
+                "codex_lab_package.installer.lab_distribution_release_summaries"
+            ) as releases:
+                with self.assertRaisesRegex(
+                    ValueError, "Deactivate the explicit code route"
+                ):
+                    update_from_latest_release(state_path=result.state_path)
+            releases.assert_not_called()
+
+    def test_uninstall_deactivates_route_and_restores_prior_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            release = build_test_release(root)
+            result = install_from_manifest_url(
+                release.manifest_url,
+                app_dir=root / "install" / "Codex Lab.app",
+                shim_dir=root / "install" / "bin",
+                state_path=root / "install" / "install-state.json",
+                download=release.download,
+            )
+            route_path = root / "route" / "code"
+            route_path.parent.mkdir()
+            route_path.write_text("prior code route", encoding="utf-8")
+            route_path.chmod(0o751)
+            activate_code_route(
+                state_path=result.state_path,
+                code_route_path=route_path,
+            )
+
+            uninstalled = uninstall_codex_lab(state_path=result.state_path)
+
+            self.assertEqual(uninstalled.restored_code_route_path, route_path)
+            self.assertEqual(route_path.read_text(encoding="utf-8"), "prior code route")
+            self.assertEqual(route_path.stat().st_mode & 0o777, 0o751)
+            self.assertFalse(result.state_path.exists())
 
     def test_downgrades_to_schema_two_release_and_removes_managed_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -653,6 +785,7 @@ class CodexLabInstallerTest(unittest.TestCase):
             self.assertEqual(
                 completed.stdout,
                 f"Codex Lab 1.2.3 from codex-lab-v1.2.3-lab.1\n"
+                "Release version: 1.2.3-lab.1\n"
                 "Bundle version: 42\n"
                 "Source commit: abc123\n"
                 f"App: {result.app_dir}\n"
@@ -1669,6 +1802,7 @@ def fake_inspect_engine(path: Path) -> EngineIdentity:
     return EngineIdentity(
         build_channel="release",
         build_profile="release",
+        release_version=metadata["releaseVersion"],
         sha256=sha256_file(path),
         signing_identifier=ENGINE_SIGNING_IDENTIFIER,
         source_commit=metadata["sourceCommit"],
@@ -1717,7 +1851,13 @@ def build_test_release(
     engine_bin.parent.mkdir()
     write_file(
         engine_bin,
-        json.dumps({"sourceCommit": commit, "version": version}),
+        json.dumps(
+            {
+                "releaseVersion": release_tag.removeprefix("codex-lab-v"),
+                "sourceCommit": commit,
+                "version": version,
+            }
+        ),
     )
     os.chmod(engine_bin, 0o755)
     code_mode_host_bin = engine_bin.with_name("codex-code-mode-host")

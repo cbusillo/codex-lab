@@ -56,7 +56,10 @@ def parse_args() -> argparse.Namespace:
     source.add_argument(
         "--update",
         action="store_true",
-        help="Update the recorded Codex Lab install to the newest release.",
+        help=(
+            "Update the recorded Codex Lab install after the explicit code route "
+            "has been deactivated."
+        ),
     )
     source.add_argument(
         "--uninstall",
@@ -104,7 +107,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Replace existing app, shim, or engine paths after verification succeeds.",
+        help=(
+            "Replace existing app, shim, or engine paths after verification succeeds; "
+            "does not override an active code route."
+        ),
     )
     return parser.parse_args()
 
@@ -120,6 +126,7 @@ def main() -> int:
         except ValueError as exc:
             return print_command_error("Code route is invalid", exc)
         print(f"Codex Lab {status.version} from {status.release_tag}")
+        print(f"Release version: {status.release_version}")
         print(f"Bundle version: {status.bundle_version}")
         if status.source_commit:
             print(f"Source commit: {status.source_commit}")
@@ -134,6 +141,10 @@ def main() -> int:
             print(f"Code route: active at {status.code_route.active_path}")
             print(f"Code route engine: {status.code_route.engine.path}")
             print(f"Code route release: {status.code_route.engine.release_tag}")
+            print(
+                "Code route release version: "
+                f"{status.code_route.engine.release_version}"
+            )
             print(f"Code route prior: {status.code_route.prior.kind}")
         if status.engine_path is not None:
             print(f"Engine: {status.engine_path}")

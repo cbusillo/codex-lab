@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-import uuid
 
 from .layout import MAX_PROVENANCE_BYTES
 
@@ -16,6 +15,10 @@ DEFAULT_CODE_ROUTE_PATH = Path.home() / ".local" / "bin" / "code"
 CODE_ROUTE_SCHEMA_VERSION = 1
 PRIOR_BACKUP_PREFIX = ".code.codex-lab-prior-"
 ACTIVE_BACKUP_PREFIX = ".code.codex-lab-active-"
+
+
+class CodeRouteRecoveryError(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -68,24 +71,6 @@ class LauncherTools:
     shasum: Path = Path("/usr/bin/shasum")
     tr: Path = Path("/usr/bin/tr")
     wc: Path = Path("/usr/bin/wc")
-
-
-@dataclass
-class StagedCodeRouteDeactivation:
-    route: CodeRouteState
-    active_backup_path: Path
-
-    def rollback(self) -> None:
-        prior = self.route.prior
-        active_path = self.route.active_path
-        if prior.kind != "absent" and path_exists(active_path):
-            assert prior.backup_path is not None
-            active_path.rename(prior.backup_path)
-        if path_exists(self.active_backup_path):
-            self.active_backup_path.rename(active_path)
-
-    def commit(self) -> None:
-        remove_path(self.active_backup_path)
 
 
 def build_code_route_launcher_script(
@@ -200,78 +185,13 @@ def activate_code_route(
     active_path: Path = DEFAULT_CODE_ROUTE_PATH,
     tools: LauncherTools = LauncherTools(),
 ) -> CodeRouteResult:
-    state_path = absolute_path(state_path)
-    active_path = absolute_path(active_path)
-    state = read_state_document(state_path)
-    existing = read_code_route_state(state, state_path)
-    if existing is not None:
-        require_active_code_route(existing, expected_path=active_path)
-        return CodeRouteResult(
-            active_path=active_path,
-            changed=False,
-            restored_prior=False,
-            state_path=state_path,
-        )
+    from .code_route_transaction import activate_code_route as activate_transaction
 
-    require_safe_parent(active_path.parent)
-    require_exact_engine_path(engine.path)
-    prior = capture_prior_metadata(active_path)
-    launcher_source = write_launcher_source(
-        active_path.parent,
-        build_code_route_launcher_script(engine, tools=tools),
-    )
-    launcher_sha256 = sha256_file(launcher_source)
-    route = CodeRouteState(
+    return activate_transaction(
+        state_path,
+        engine,
         active_path=active_path,
-        engine=engine,
-        launcher_sha256=launcher_sha256,
-        prior=prior,
-    )
-    captured_prior = False
-    installed_launcher = False
-    try:
-        if prior.kind != "absent":
-            assert prior.backup_path is not None
-            active_path.rename(prior.backup_path)
-            captured_prior = True
-        launcher_source.replace(active_path)
-        installed_launcher = True
-        write_state_code_route(state_path, state, route)
-    except Exception:
-        if installed_launcher:
-            remove_path(active_path)
-        if captured_prior:
-            assert prior.backup_path is not None
-            prior.backup_path.rename(active_path)
-        remove_path(launcher_source)
-        raise
-    return CodeRouteResult(
-        active_path=active_path,
-        changed=True,
-        restored_prior=False,
-        state_path=state_path,
-    )
-
-
-def refreshed_code_route(
-    route: CodeRouteState,
-    engine: CodeRouteEngine,
-    output_dir: Path,
-) -> tuple[CodeRouteState, Path]:
-    require_active_code_route(route, expected_path=route.active_path)
-    require_exact_engine_path(engine.path)
-    source = write_launcher_source(
-        output_dir,
-        build_code_route_launcher_script(engine),
-    )
-    return (
-        CodeRouteState(
-            active_path=route.active_path,
-            engine=engine,
-            launcher_sha256=sha256_file(source),
-            prior=route.prior,
-        ),
-        source,
+        tools=tools,
     )
 
 
@@ -280,53 +200,17 @@ def deactivate_code_route(
     *,
     active_path: Path = DEFAULT_CODE_ROUTE_PATH,
 ) -> CodeRouteResult:
-    state_path = absolute_path(state_path)
-    active_path = absolute_path(active_path)
-    state = read_state_document(state_path)
-    route = read_code_route_state(state, state_path)
-    if route is None:
-        return CodeRouteResult(
-            active_path=active_path,
-            changed=False,
-            restored_prior=False,
-            state_path=state_path,
-        )
-    staged = stage_code_route_deactivation(route, expected_path=active_path)
-    try:
-        write_state_code_route(state_path, state, None)
-    except Exception:
-        staged.rollback()
-        raise
-    staged.commit()
-    return CodeRouteResult(
-        active_path=active_path,
-        changed=True,
-        restored_prior=route.prior.kind != "absent",
-        state_path=state_path,
-    )
+    from .code_route_transaction import deactivate_code_route as deactivate_transaction
+
+    return deactivate_transaction(state_path, active_path=active_path)
 
 
-def stage_code_route_deactivation(
-    route: CodeRouteState,
-    *,
-    expected_path: Path,
-) -> StagedCodeRouteDeactivation:
-    require_active_code_route(route, expected_path=expected_path)
-    active_backup_path = allocate_backup_path(
-        route.active_path.parent, ACTIVE_BACKUP_PREFIX
+def recover_code_route_transaction(state_path: Path) -> None:
+    from .code_route_transaction import (
+        recover_code_route_transaction as recover_transaction,
     )
-    route.active_path.rename(active_backup_path)
-    try:
-        if route.prior.kind != "absent":
-            assert route.prior.backup_path is not None
-            route.prior.backup_path.rename(route.active_path)
-    except Exception:
-        active_backup_path.rename(route.active_path)
-        raise
-    return StagedCodeRouteDeactivation(
-        route=route,
-        active_backup_path=active_backup_path,
-    )
+
+    recover_transaction(state_path)
 
 
 def require_active_code_route(
@@ -351,11 +235,17 @@ def require_active_code_route(
     require_prior_route(route.prior, route.active_path)
 
 
-def capture_prior_metadata(active_path: Path) -> PriorCodeRoute:
+def capture_prior_metadata(
+    active_path: Path,
+    *,
+    backup_path: Path | None = None,
+) -> PriorCodeRoute:
     if not path_exists(active_path):
         return PriorCodeRoute(kind="absent")
     mode = lstat_mode(active_path, "existing code route")
-    backup_path = allocate_backup_path(active_path.parent, PRIOR_BACKUP_PREFIX)
+    backup_path = backup_path or allocate_backup_path(
+        active_path.parent, PRIOR_BACKUP_PREFIX
+    )
     if stat.S_ISLNK(mode):
         return PriorCodeRoute(
             kind="symlink",
@@ -482,10 +372,14 @@ def write_state_code_route(
     state_path: Path,
     state: dict,
     route: CodeRouteState | None,
+    *,
+    expected_sha256: str | None = None,
 ) -> None:
     updated = dict(state)
     updated["codeRoute"] = serialize_code_route_state(route)
+    require_safe_parent(state_path.parent)
     state_path.parent.mkdir(parents=True, exist_ok=True)
+    require_safe_parent(state_path.parent)
     with tempfile.NamedTemporaryFile(
         "w",
         dir=state_path.parent,
@@ -500,7 +394,15 @@ def write_state_code_route(
         handle.flush()
         os.fsync(handle.fileno())
     try:
+        require_safe_parent(state_path.parent)
+        if expected_sha256 is not None and sha256_file(state_path) != expected_sha256:
+            raise CodeRouteRecoveryError(
+                "Install state changed while the code route transaction was in progress"
+            )
         temp_path.replace(state_path)
+        from .code_route_transaction import fsync_directory
+
+        fsync_directory(state_path.parent)
     except Exception:
         remove_path(temp_path)
         raise
@@ -511,25 +413,6 @@ def read_state_document(state_path: Path) -> dict:
     if not isinstance(value, dict):
         raise ValueError(f"Install state must be a JSON object: {state_path}")
     return value
-
-
-def write_launcher_source(parent: Path, script: str) -> Path:
-    require_safe_parent(parent)
-    parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w",
-        dir=parent,
-        encoding="utf-8",
-        prefix=".code.codex-lab-launcher-",
-        suffix=".tmp",
-        delete=False,
-    ) as handle:
-        path = Path(handle.name)
-        handle.write(script)
-        handle.flush()
-        os.fsync(handle.fileno())
-    path.chmod(0o755)
-    return path
 
 
 def require_exact_engine_path(path: Path) -> None:
@@ -562,6 +445,8 @@ def require_safe_parent(parent: Path) -> None:
 
 
 def allocate_backup_path(parent: Path, prefix: str) -> Path:
+    import uuid
+
     for _ in range(100):
         candidate = parent / f"{prefix}{uuid.uuid4().hex}"
         if not path_exists(candidate):
