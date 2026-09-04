@@ -463,6 +463,38 @@ D delete.txt
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn apply_patch_cli_appends_structural_validation_feedback() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = apply_patch_harness().await?;
+    let patch = "*** Begin Patch\n*** Add File: invalid.json\n+{ invalid\n*** End Patch";
+    let call_id = "apply-invalid-json";
+    mount_apply_patch(&harness, call_id, patch, "done").await;
+
+    harness.submit("please add invalid JSON").await?;
+
+    let out = harness.apply_patch_output(call_id).await;
+    let summary: serde_json::Value = serde_json::from_str(
+        out.lines()
+            .last()
+            .expect("validation summary should be appended"),
+    )?;
+    assert_eq!(summary["validation"]["checks"], json!(["json-parse"]));
+    assert_eq!(summary["validation"]["issue_count"], json!(1));
+    assert_eq!(summary["validation"]["truncated"], json!(false));
+    assert_eq!(summary["validation"]["issues"][0]["file"], "invalid.json");
+    assert_eq!(summary["validation"]["issues"][0]["tool"], "json-parse");
+    assert!(
+        summary["validation"]["issues"][0]["msg"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid JSON:"))
+    );
+    assert_eq!(harness.read_file_text("invalid.json").await?, "{ invalid\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_patch_cli_preserves_distinct_updated_paths() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

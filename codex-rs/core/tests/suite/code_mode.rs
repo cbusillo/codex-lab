@@ -4698,7 +4698,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     let expected_second_reviewer_images = if reviewer_constraint == Some("large_prompt") {
         vec![PRIVATE_IMAGE.to_string()]
     } else if check_image_cap {
-        let mut images = reviewer_image_urls.clone();
+        let mut images = reviewer_image_urls;
         images.push(PRIVATE_IMAGE.to_string());
         images
     } else {

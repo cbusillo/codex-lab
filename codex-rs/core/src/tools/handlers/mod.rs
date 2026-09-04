@@ -1,6 +1,5 @@
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
-mod apply_patch_validation;
 mod auto_review_disposition;
 pub(crate) mod auto_review_disposition_spec;
 mod browser;

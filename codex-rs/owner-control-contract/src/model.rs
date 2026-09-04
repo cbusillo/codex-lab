@@ -140,11 +140,21 @@ impl ReviewItem {
             self.key.as_bytes(),
             "key",
             is_review_key,
-            64,
+            /*maximum*/ 64,
             "a canonical review key",
         )?;
-        validate_text_length(&self.label, "label", 1, 120)?;
-        validate_text_length(&self.value, "value", 1, 4000)?;
+        validate_text_length(
+            &self.label,
+            "label",
+            /*minimum*/ 1,
+            /*maximum*/ 120,
+        )?;
+        validate_text_length(
+            &self.value,
+            "value",
+            /*minimum*/ 1,
+            /*maximum*/ 4000,
+        )?;
         if has_python_surrounding_whitespace(&self.label)
             || has_python_surrounding_whitespace(&self.value)
         {
@@ -171,8 +181,18 @@ impl ServerReviewPayload {
             });
         }
         validate_identifier(&self.review_id, "review_id")?;
-        validate_text_length(&self.title, "title", 1, 200)?;
-        validate_text_length(&self.summary, "summary", 1, 4000)?;
+        validate_text_length(
+            &self.title,
+            "title",
+            /*minimum*/ 1,
+            /*maximum*/ 200,
+        )?;
+        validate_text_length(
+            &self.summary,
+            "summary",
+            /*minimum*/ 1,
+            /*maximum*/ 4000,
+        )?;
         if !(1..=32).contains(&self.items.len()) {
             return Err(ValidationError::Field {
                 field: "items",
@@ -339,7 +359,7 @@ pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<()
         value.as_bytes(),
         field,
         is_identifier,
-        128,
+        /*maximum*/ 128,
         "a canonical identifier",
     )
 }

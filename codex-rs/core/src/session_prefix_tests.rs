@@ -8,7 +8,8 @@ use super::ERROR_NEXT_ACTION;
 use super::bounded_completion_payload;
 use super::bounded_status;
 use super::format_inter_agent_completion_message;
-use super::format_subagent_notification_message;
+use crate::context::ContextualUserFragment;
+use crate::context::SubagentNotification;
 
 fn completion_message(status: AgentStatus) -> String {
     format_inter_agent_completion_message(
@@ -56,7 +57,7 @@ fn subagent_notification_bounds_completed_and_errored_payloads() {
         AgentStatus::Completed(Some("final answer ".repeat(2_000))),
         AgentStatus::Errored("boom ".repeat(2_000)),
     ] {
-        let message = format_subagent_notification_message("/root/worker", &status);
+        let message = SubagentNotification::new("/root/worker", bounded_status(&status)).render();
         assert!(
             approx_token_count(&message) < COMPLETION_MESSAGE_MAX_TOKENS,
             "{} tokens for {status:?}",

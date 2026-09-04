@@ -58,6 +58,10 @@ use codex_utils_path_uri::PathUri;
 
 const APPLY_PATCH_ARGUMENT_DIFF_BUFFER_INTERVAL: Duration = Duration::from_millis(500);
 
+#[path = "apply_patch_validation.rs"]
+mod validation;
+use validation::append_validation_feedback;
+
 fn apply_patch_file_update_mode(turn: &TurnContext) -> ApplyPatchFileUpdateMode {
     if turn
         .config
@@ -616,7 +620,13 @@ async fn execute_verified_patch(
         &tool_ctx.call_id,
         tracker,
     );
-    emitter.finish(event_ctx, result, delta.as_ref()).await
+    let content = emitter.finish(event_ctx, result, delta.as_ref()).await?;
+    Ok(append_validation_feedback(
+        content,
+        delta.as_ref(),
+        &tool_ctx.step_context.turn.config.validation,
+        cwd,
+    ))
 }
 
 fn require_environment_id(
