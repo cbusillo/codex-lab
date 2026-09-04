@@ -5,7 +5,26 @@ description: Babysit a GitHub pull request after creation by continuously pollin
 
 # PR Babysitter
 
+## Workflow selection
+
+For Codex Lab, prefer the shared `babysit-pr` skill's full installed catalog path.
+If discovery is missing, check `skills/babysit-pr/SKILL.md` under `CODE_HOME`,
+then `CODEX_HOME`, then `~/.code`. It owns the fork's automation identity,
+readiness, and monitoring workflow. Read that exact source and resolve its helper
+relative to that skill directory, keeping the target repo as the working
+directory. Do not start this watcher too. The instructions below are the
+standalone fallback only when the shared skill is unavailable. If the shared
+workflow is installed but lacks credentials or denies an action, report that
+blocker and continue authorized independent work; do not switch identities or
+use this fallback to bypass its safeguards.
+
+Reuse explicit authorization already given for the same action and scope.
+Exact-response approval for human-facing comments remains required. If missing
+authorization blocks an action, report its source and continue independent
+monitoring or fixes that are already authorized.
+
 ## Objective
+
 Babysit a PR persistently until one of these terminal outcomes occurs:
 
 - The PR is merged or closed.
@@ -15,6 +34,7 @@ Babysit a PR persistently until one of these terminal outcomes occurs:
 Do not stop merely because a single snapshot returns `idle` while checks are still pending.
 
 ## Inputs
+
 Accept any of the following:
 
 - No PR argument: infer the PR from the current branch (`--pr auto`)
@@ -66,6 +86,7 @@ python3 .codex/skills/babysit-pr/scripts/gh_pr_watch.py --pr <number-or-url> --o
 ```
 
 ## CI Failure Classification
+
 Use `gh` commands to inspect failed runs before deciding to rerun.
 
 - `gh run view <run-id> --json jobs,name,workflowName,conclusion,status,url,headSha`
@@ -86,6 +107,7 @@ If classification is ambiguous, perform one manual diagnosis attempt before choo
 Read `.codex/skills/babysit-pr/references/heuristics.md` for a concise checklist.
 
 ## Review Comment Handling
+
 The watcher surfaces review items from:
 
 - PR issue comments
@@ -129,22 +151,38 @@ output.
 
 Unless explicitly asked, do not:
 
-* comment on other humans' review threads, communicate with the user in chat instead
-* resolve review threads from humans other than the user
-* interact with humans other than the user
-* mark PRs as drafts or ready for review
-* close or reopen PRs
+- comment on other humans' review threads, communicate with the user in chat instead
+- resolve review threads from humans other than the user
+- interact with humans other than the user
+- mark PRs as drafts or ready for review
+- close or reopen PRs
 
 In general, never act on GitHub in ways that would make it hard to tell whether you or the user did
 something visible to other humans. When in doubt, ask the user for clarification in chat.
 
 ## Git Safety Rules
 
-- Work only on the PR head branch.
+- Work on the PR head branch, or an isolated task branch from its exact head
+  when that branch is already checked out elsewhere. Never patch a protected
+  head directly; push a task branch and open a replacement PR, then report the
+  new PR. Do not push to the protected head.
 - Avoid destructive git commands.
 - Do not switch branches unless necessary to recover context.
-- Before editing, check for unrelated uncommitted changes. If present, stop and ask the user.
-- After each successful fix, commit and `git push`, then re-run the watcher.
+- Before editing, inspect uncommitted changes and preserve unrelated work.
+  Use an isolated worktree for the PR head when the current checkout is dirty;
+  do not reset, stash, clean, or copy unrelated changes into the fix. If the head
+  branch is already checked out, prepare the fix on a focused task branch from
+  the exact PR head and recheck the remote head before updating that PR. Ask
+  only when edits overlap, ownership is unclear, or the PR cannot be updated
+  without overwriting concurrent work.
+- In an isolated task branch, pin the PR number and verified head repository,
+  remote, and branch. Push the fix explicitly to that PR head with a normal
+  fast-forward push; never rely on the task branch's default upstream. Never
+  force-push the PR head. If a concurrent update rejects the push, re-read the
+  head and integrate it only when safe; ask if edits conflict or ownership is
+  unclear. Restart the watcher with `--pr <number>`, not `--pr auto`.
+- After each successful fix, commit, push to the verified PR head, then re-run
+  the watcher.
 - If you interrupted a live `--watch` session to make the fix, restart `--watch` immediately after the push in the same turn.
 - Do not run multiple concurrent `--watch` processes for the same PR/state file; keep one watcher session active and reuse it until it stops or you intentionally restart it.
 - A push is not a terminal outcome; continue the monitoring loop unless a strict stop condition is met.
@@ -155,6 +193,7 @@ Commit message defaults:
 - `codex: address PR review feedback (#<n>)`
 
 ## Monitoring Loop Pattern
+
 Use this loop in a live Codex session:
 
 1. Run `--once`.
@@ -177,6 +216,7 @@ Do not hand control back to the user after a review-fix push just because a new 
 If a `--watch` process is still running and no strict stop condition has been reached, the babysitting task is still in progress; keep streaming/consuming watcher output instead of ending the turn.
 
 ## Polling Cadence
+
 Keep review polling aggressive and continue monitoring even after CI turns green:
 
 - While CI is not green (pending/running/queued or failing): poll every 1 minute.
@@ -186,6 +226,7 @@ Keep review polling aggressive and continue monitoring even after CI turns green
 - If any poll shows the PR is merged or otherwise closed: stop polling immediately and report the terminal state.
 
 ## Stop Conditions (Strict)
+
 Stop only when one of the following is true:
 
 - PR merged or closed (stop as soon as a poll/snapshot confirms this).
@@ -201,6 +242,7 @@ Keep polling when:
 - The PR is green but blocked on review approval (`REVIEW_REQUIRED` / similar); continue polling at the base cadence and surface any new review comments without asking for confirmation to keep watching.
 
 ## Output Expectations
+
 Provide concise progress updates while monitoring and a final summary that includes:
 
 - During long unchanged monitoring periods, avoid emitting a full update on every poll; summarize only status changes plus occasional heartbeat updates.
