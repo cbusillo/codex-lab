@@ -993,9 +993,7 @@ class GeneratedWorkspaceFixtureTest(unittest.TestCase):
             requests,
         )
 
-        self.assertEqual(
-            ["responses[0].input_tools: missing 'send_message'"], failures
-        )
+        self.assertEqual(["responses[0].input_tools: missing 'send_message'"], failures)
 
     def test_response_prefix_assertion_reports_mismatch(self) -> None:
         failures = HARNESS.evaluate_expectations(

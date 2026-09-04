@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-ARTIFACT = ROOT / "codex-rs/owner-control-contract/contracts/owner-control-contract.json"
+ARTIFACT = (
+    ROOT / "codex-rs/owner-control-contract/contracts/owner-control-contract.json"
+)
 RUST_SOURCE = ROOT / "codex-rs/owner-control-contract/src/artifact.rs"
 README = ROOT / "codex-rs/owner-control-contract/README.md"
 EXPECTED_SCHEMA_VERSION = 5
