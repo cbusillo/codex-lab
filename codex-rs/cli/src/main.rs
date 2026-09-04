@@ -825,6 +825,8 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
 
 /// Run the update action and print the result.
 fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
+    ensure_update_action_allowed(codex_version::is_lab_build())?;
+
     println!();
     let cmd_str = action.command_str();
     println!("Updating Codex via `{cmd_str}`...");
@@ -873,6 +875,15 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn ensure_update_action_allowed(is_lab_build: bool) -> anyhow::Result<()> {
+    if is_lab_build {
+        anyhow::bail!(
+            "Codex Lab cannot execute the upstream OpenAI Codex updater. Use the supported Codex Lab release installer with `--check` or `--status`."
+        );
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn resolve_windows_update_command_from_path(
     command: &str,
@@ -893,7 +904,7 @@ fn resolve_windows_update_command_from_path(
 fn run_update_command() -> anyhow::Result<()> {
     if codex_version::is_lab_build() {
         anyhow::bail!(
-            "`codex update` does not manage Codex Lab releases. Use the Codex Lab release installer instead."
+            "`codex update` does not manage Codex Lab releases. Use the supported Codex Lab release installer with `--check` or `--status`."
         );
     }
 
@@ -2923,6 +2934,22 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_tui::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn codex_lab_rejects_upstream_update_actions_before_execution() {
+        assert_eq!(
+            (
+                ensure_update_action_allowed(/*is_lab_build*/ true)
+                    .expect_err("Lab update action should be rejected")
+                    .to_string(),
+                ensure_update_action_allowed(/*is_lab_build*/ false).is_ok(),
+            ),
+            (
+                "Codex Lab cannot execute the upstream OpenAI Codex updater. Use the supported Codex Lab release installer with `--check` or `--status`.".to_string(),
+                true,
+            )
+        );
+    }
 
     #[test]
     fn interactive_tui_future_stays_bounded() {
