@@ -67,6 +67,8 @@ use tracing::Instrument;
 use tracing_test::traced_test;
 
 const MODEL: &str = "gpt-5.4";
+#[path = "astra_websocket_tests.rs"]
+mod astra_compatibility;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const USER_AGENT_HEADER: &str = "user-agent";
 const WS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";
@@ -1765,8 +1767,12 @@ async fn responses_websocket_connection_limit_error_reconnects_and_completes() {
     assert_eq!(
         handshake_user_agents,
         vec![
-            Some(codex_login::default_client::get_codex_user_agent()),
-            Some(codex_login::default_client::get_codex_user_agent()),
+            Some(codex_login::default_client::get_codex_user_agent_for_model(
+                &test.session_configured.model
+            )),
+            Some(codex_login::default_client::get_codex_user_agent_for_model(
+                &test.session_configured.model
+            )),
         ]
     );
 

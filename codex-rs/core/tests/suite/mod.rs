@@ -106,6 +106,8 @@ mod apply_patch_cli;
 mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
+#[path = "astra_compatibility_tests.rs"]
+mod astra_compatibility;
 mod audio_truncation;
 mod auto_review;
 mod background_review;

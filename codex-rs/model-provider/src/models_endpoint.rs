@@ -107,8 +107,13 @@ impl OpenAiModelsEndpoint {
                 .await?;
             let client = ModelsClient::new(transport, api_provider, api_auth)
                 .with_telemetry(Some(request_telemetry));
+            let headers = if self.provider_info.is_openai() {
+                codex_login::default_client::requested_version_headers(client_version)
+            } else {
+                HeaderMap::new()
+            };
             client
-                .list_models(request_url, HeaderMap::new())
+                .list_models(request_url, headers)
                 .await
                 .map_err(map_api_error)
         })

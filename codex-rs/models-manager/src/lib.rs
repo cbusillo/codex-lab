@@ -12,15 +12,25 @@ pub use config::ModelsManagerConfig;
 /// Load the bundled model catalog shipped with `codex-models-manager`.
 pub fn bundled_models_response()
 -> std::result::Result<codex_protocol::openai_models::ModelsResponse, serde_json::Error> {
-    serde_json::from_str(include_str!("../models.json"))
+    let mut response: serde_json::Value = serde_json::from_str(include_str!("../models.json"))?;
+    // The bundled Astra entry contains capability data, not a second copy of the
+    // upstream prompt stack. Reuse the existing local fallback until discovery
+    // supplies account-specific instructions from the remote catalog.
+    if let Some(models) = response["models"].as_array_mut() {
+        for model in models {
+            if model["slug"] == "gpt-6-astra" && model["model_messages"].is_null() {
+                model["base_instructions"] = model_info::BASE_INSTRUCTIONS.into();
+            }
+        }
+    }
+    serde_json::from_value(response)
 }
 
-/// Convert the client version string to a whole version string (e.g. "1.2.3-alpha.4" -> "1.2.3").
+/// Whole compatibility version used for model discovery and cache eligibility.
 pub fn client_version_to_whole() -> String {
-    format!(
-        "{}.{}.{}",
-        env!("CARGO_PKG_VERSION_MAJOR"),
-        env!("CARGO_PKG_VERSION_MINOR"),
-        env!("CARGO_PKG_VERSION_PATCH")
-    )
+    codex_version::models_discovery_version()
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
