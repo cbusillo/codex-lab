@@ -16,9 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from build_storage import MAX_PATH_COUNT, parse_path_spec
+from feedback_context import build_context
+from feedback_storage import StorageSampler
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_JSON_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4 * 1024
 MACHINE_ID_SALT = "codex-lab-feedback-latency-v1"
@@ -144,6 +148,7 @@ def parse_sccache_stats(output: str) -> dict[str, int | None]:
         "cacheWrites": "cache_writes",
         "cacheWriteErrors": "cache_write_errors",
         "cacheErrors": "cache_errors",
+        "nonCacheableRequests": "requests_not_cacheable",
     }
     metrics = {
         name: integer_total(stats.get(source)) for name, source in fields.items()
@@ -344,6 +349,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("cold", "warm-cache", "warm-noop", "warm-edit"),
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--configuration",
+        default="unspecified",
+        help="Public-safe build configuration label; caller-declared, not inferred",
+    )
+    parser.add_argument(
+        "--storage-path",
+        type=parse_path_spec,
+        action="append",
+        default=[],
+        metavar="ROLE=PATH",
+        help="Sample filesystem free space for at most eight explicit paths; no directory walk",
+    )
+    parser.add_argument(
+        "--concurrent-builds",
+        action="store_true",
+        help="Uncontrolled other builds may contaminate this sample; mark it non-comparable",
+    )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--require-helper", action="append", default=[])
     parser.add_argument("--verify-rusty-v8", action="store_true")
@@ -357,6 +380,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error(
             "--lane must be a public-safe name using letters, digits, ., _, or -"
         )
+    if SAFE_LANE.fullmatch(args.configuration) is None:
+        parser.error("--configuration must be a public-safe label")
+    if len(args.storage_path) > MAX_PATH_COUNT:
+        parser.error("too many --storage-path arguments")
+    paths = {}
+    for role, path in args.storage_path:
+        if role in paths:
+            parser.error("--storage-path requires a unique public-safe ROLE=PATH")
+        paths[role] = path
+    args.storage_paths = paths
     return args
 
 
@@ -385,6 +418,12 @@ def main(argv: list[str]) -> int:
         preflight_duration_ms = round((time.monotonic() - preflight_started) * 1000)
         telemetry_started = time.monotonic()
         before_cache = read_sccache_stats()
+        try:
+            context = build_context(REPO_ROOT, args.command, args.configuration)
+        except Exception:
+            context = {"status": "unavailable"}
+        sampler = StorageSampler(args.storage_paths)
+        sampler.start()
         telemetry_duration_ms = round((time.monotonic() - telemetry_started) * 1000)
         command_started = time.monotonic()
         if preflight_ready:
@@ -412,6 +451,7 @@ def main(argv: list[str]) -> int:
             command_status = "not-run"
         command_duration_ms = round((time.monotonic() - command_started) * 1000)
         telemetry_started = time.monotonic()
+        storage = sampler.finish()
         cache = sccache_delta(before_cache, read_sccache_stats())
         telemetry_duration_ms += round((time.monotonic() - telemetry_started) * 1000)
         duration_ms = round((time.monotonic() - wall_started) * 1000)
@@ -423,6 +463,10 @@ def main(argv: list[str]) -> int:
             "scenario": args.scenario,
             "source": source,
             "environment": machine_identity(),
+            "buildContext": context,
+            "storage": storage,
+            "concurrentBuildsDeclared": args.concurrent_builds,
+            "cacheAttribution": "shared-server",
             "startedAt": started_at,
             "finishedAt": finished_at,
             "durationMs": duration_ms,
@@ -437,7 +481,11 @@ def main(argv: list[str]) -> int:
             "sccache": cache,
             "comparable": not source["dirty"]
             and preflight_ready
-            and cache["status"] != "counter-reset",
+            and cache["status"] != "counter-reset"
+            and not args.concurrent_builds
+            and exit_code == 0
+            and storage["status"] in {"available", "not-requested"}
+            and context.get("status") != "unavailable",
         }
         output = args.output or Path(tempfile.gettempdir()) / (
             f"codex-feedback-{hashlib.sha256(args.lane.encode()).hexdigest()[:12]}.json"
