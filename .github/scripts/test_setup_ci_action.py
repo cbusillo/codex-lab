@@ -63,11 +63,11 @@ class SetupCiActionTests(unittest.TestCase):
 
         self.assertIn('if [[ "${RUNNER_OS:-}" == "Windows" ]]', action)
         self.assertIn('tmp="$CI_BUILD_ROOT/tmp"', action)
-        self.assertIn('job_tmp="$RUNNER_TEMP/codex-ci-tmp"', action)
-        self.assertIn('short_tmp="/tmp/codex-ci-$runner_checksum"', action)
+        self.assertIn('job_tmp="$RUNNER_TEMP/codexcitemp"', action)
+        self.assertIn('short_tmp="/tmp/codexci$runner_checksum"', action)
         self.assertIn('ln -sfn "$job_tmp" "$short_tmp"', action)
         self.assertIn('tmp="$short_tmp"', action)
-        self.assertIn('tmp="$RUNNER_TEMP/codex-ci-tmp"', action)
+        self.assertIn('tmp="$RUNNER_TEMP/codexcitemp"', action)
 
 
 if __name__ == "__main__":
