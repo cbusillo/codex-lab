@@ -1546,22 +1546,12 @@ async fn run_auto_compact(
                 "remote_v2",
                 /*manual*/ false,
             );
-            let CompactionJobConfig {
-                initial_context_injection,
-                model_request_history_mode,
-                reason,
-                phase,
-                ..
-            } = config;
             run_inline_remote_auto_compact_task_v2(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
                 client_session,
-                initial_context_injection,
-                model_request_history_mode,
-                reason,
-                phase,
+                config,
             )
             .await?;
         }

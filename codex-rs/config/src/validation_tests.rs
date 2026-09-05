@@ -49,6 +49,17 @@ fn validation_groups_deserialize_explicit_values() {
 }
 
 #[test]
+fn validation_groups_default_matches_deserialization_defaults() {
+    assert_eq!(
+        ValidationGroups::default(),
+        ValidationGroups {
+            functional: true,
+            stylistic: false,
+        }
+    );
+}
+
+#[test]
 fn explicit_groups_table_defaults_functional_checks_on() {
     assert_eq!(
         groups("[validation.groups]\nstylistic = true\n"),

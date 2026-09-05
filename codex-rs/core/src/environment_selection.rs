@@ -407,15 +407,6 @@ impl ThreadEnvironments {
             .collect()
     }
 
-    pub(crate) fn primary_workspace_roots(&self) -> Vec<AbsolutePathBuf> {
-        self.environments
-            .load()
-            .first()
-            .map_or_else(Vec::new, |environment| {
-                Self::primary_workspace_roots_for(std::slice::from_ref(&environment.selection))
-            })
-    }
-
     /// Returns installed owner configuration without treating pending attachments as ready.
     pub(crate) fn primary_config_for(
         selections: &[TurnEnvironmentSelection],

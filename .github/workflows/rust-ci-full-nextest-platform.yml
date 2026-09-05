@@ -568,7 +568,7 @@ jobs:
           fi
         env:
           RUST_BACKTRACE: 1
-          RUST_MIN_STACK: "8388608" # 8 MiB
+          RUST_MIN_STACK: "16777216" # 16 MiB
           NEXTEST_STATUS_LEVEL: leak
           REMOTE_TEST_FILTER: ${{ inputs.remote_test_filter }}
 

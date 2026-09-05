@@ -76,7 +76,11 @@ impl ChannelBindingRecord {
             });
         }
         validate_signature_algorithm(&self.signature_algorithm)?;
-        validate_base64url_field(&self.owner_public_key, "owner_public_key", 43)?;
+        validate_base64url_field(
+            &self.owner_public_key,
+            "owner_public_key",
+            /*encoded_length*/ 43,
+        )?;
         decode_canonical_base64url::<32>(&self.owner_public_key, "owner_public_key")?;
         let session_issued_at = parse_timestamp(&self.session_issued_at, "session_issued_at")?;
         let session_expires_at = parse_timestamp(&self.session_expires_at, "session_expires_at")?;
@@ -137,7 +141,7 @@ impl OwnerControlConfirmationEnvelope {
             .validate()
             .map_err(|error| error.at_field("challenge_response"))?;
         validate_signature_algorithm(&self.signature_algorithm)?;
-        validate_base64url_field(&self.signature, "signature", 86)?;
+        validate_base64url_field(&self.signature, "signature", /*encoded_length*/ 86)?;
         decode_canonical_base64url::<64>(&self.signature, "signature")?;
         if self.challenge_response.channel_binding_sha256
             != channel_binding_sha256(&self.channel_binding)?
