@@ -18,7 +18,7 @@ class MacosSigningWrapperTest(unittest.TestCase):
             arguments_file = root / "codesign-arguments"
             fake_codesign = bin_dir / "codesign"
             fake_codesign.write_text(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CODESIGN_ARGUMENTS_FILE\"\n",
+                '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$CODESIGN_ARGUMENTS_FILE"\n',
                 encoding="utf-8",
             )
             fake_codesign.chmod(0o755)
@@ -80,7 +80,9 @@ class MacosSigningWrapperTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 2)
-            self.assertIn("supported only by the native codesign backend", result.stderr)
+            self.assertIn(
+                "supported only by the native codesign backend", result.stderr
+            )
 
 
 if __name__ == "__main__":

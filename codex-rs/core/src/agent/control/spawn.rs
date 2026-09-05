@@ -10,6 +10,7 @@ use crate::context::DeveloperInstructions;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
+use crate::context::world_state::PersistentModeState;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::session::multi_agents::resolve_usage_hints;
@@ -21,7 +22,7 @@ use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_utils_path_uri::PathUri;
 
-const AGENT_NAMES: &str = include_str!("../agent_names.txt");
+const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
 
 struct SpawnAgentThreadInheritance {
     environments: Option<TurnEnvironmentSnapshot>,
@@ -85,34 +86,38 @@ pub(super) fn agent_nickname_candidates(config: &Config, role_name: Option<&str>
         .collect()
 }
 
+fn keep_forked_response_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, phase, .. } => match role.as_str() {
+            "system" | "developer" | "user" => true,
+            "assistant" => *phase == Some(MessagePhase::FinalAnswer),
+            _ => false,
+        },
+        ResponseItem::FunctionCallOutput { call_id: None, .. } => true,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput {
+            call_id: Some(_), ..
+        }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => false,
+    }
+}
+
 fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item: bool) -> bool {
     match item {
-        RolloutItem::ResponseItem(envelope) => match &envelope.item {
-            ResponseItem::Message { role, phase, .. } => match role.as_str() {
-                "system" | "developer" | "user" => true,
-                "assistant" => *phase == Some(MessagePhase::FinalAnswer),
-                _ => false,
-            },
-            ResponseItem::FunctionCallOutput { call_id: None, .. } => true,
-            ResponseItem::AdditionalTools { .. }
-            | ResponseItem::AgentMessage { .. }
-            | ResponseItem::Reasoning { .. }
-            | ResponseItem::LocalShellCall { .. }
-            | ResponseItem::FunctionCall { .. }
-            | ResponseItem::ToolSearchCall { .. }
-            | ResponseItem::FunctionCallOutput {
-                call_id: Some(_), ..
-            }
-            | ResponseItem::CustomToolCall { .. }
-            | ResponseItem::CustomToolCallOutput { .. }
-            | ResponseItem::ToolSearchOutput { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::ImageGenerationCall { .. }
-            | ResponseItem::Compaction { .. }
-            | ResponseItem::CompactionTrigger { .. }
-            | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => false,
-        },
+        RolloutItem::ResponseItem(envelope) => keep_forked_response_item(&envelope.item),
         RolloutItem::RealtimeItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -121,6 +126,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
+        // Child threads inherit model context, not the parent's cumulative usage state.
+        RolloutItem::TokenUsageRecord(_) => false,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
     }
 }
@@ -451,6 +458,7 @@ impl AgentControl {
         } else {
             true
         };
+        config.service_tier = self.root_service_tier();
         if restore_persisted_model_settings && stored_model_provider_id == config.model_provider_id
         {
             config.model = stored_model;
@@ -498,10 +506,10 @@ impl AgentControl {
                     let owner_environment = parent_environments
                         .turn_environments()
                         .find(|environment| {
-                            environment.selection.environment_id == *environment_id
-                                && environment.cwd() == &selection.cwd
-                                && environment.workspace_roots()
-                                    == selection.workspace_roots.as_slice()
+                            let parent_selection = &environment.selection;
+                            parent_selection.environment_id == selection.environment_id
+                                && parent_selection.cwd == selection.cwd
+                                && parent_selection.workspace_roots == selection.workspace_roots
                         })
                         .ok_or_else(|| {
                             invalid_environment("no longer matches a ready parent environment")
@@ -536,8 +544,8 @@ impl AgentControl {
                     let cwd = selection.cwd.to_abs_path().map_err(|_| {
                         invalid_environment("working directory is not a local absolute path")
                     })?;
-                    let roots = selection
-                        .workspace_roots
+                    let roots = owner_environment
+                        .workspace_roots()
                         .iter()
                         .map(PathUri::to_abs_path)
                         .collect::<Result<Vec<_>, _>>()
@@ -818,15 +826,16 @@ impl AgentControl {
         )
         .await;
 
+        let start_options = TurnStartOptions {
+            parent_turn_id: options.parent_turn_id,
+            root_turn_id: options.root_turn_id,
+            cyber_access_program: options.cyber_access_program,
+            ..Default::default()
+        };
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
-                self.send_input(
-                    new_thread.thread_id,
-                    input,
-                    options.parent_turn_id,
-                    options.root_turn_id,
-                )
-                .await?;
+                self.send_input(new_thread.thread_id, input, start_options)
+                    .await?;
             }
             SpawnInitialInput::InterAgentCommunication(communication) => {
                 let (communication, context) = *communication;
@@ -835,8 +844,7 @@ impl AgentControl {
                     &state,
                     communication,
                     context,
-                    options.parent_turn_id,
-                    options.root_turn_id,
+                    start_options,
                 )
                 .await?;
             }
@@ -953,19 +961,16 @@ impl AgentControl {
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
-                [
-                    parent_config
-                        .multi_agent_v2
-                        .root_agent_usage_hint_text
-                        .clone(),
-                    parent_config
-                        .multi_agent_v2
-                        .subagent_usage_hint_text
-                        .clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect()
+                let parent_usage_hints = resolve_usage_hints(
+                    &parent_config.multi_agent_v2,
+                    /*catalog*/ None,
+                    !parent_config.update_plan_enabled,
+                );
+                [parent_usage_hints.root, parent_usage_hints.subagent]
+                    .into_iter()
+                    .flatten()
+                    .map(|instructions| instructions.render())
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -992,7 +997,7 @@ impl AgentControl {
             |response_item: &mut ResponseItem,
              replaced: &mut bool,
              allow_legacy_mixed_fragment: bool| {
-                if matches!(response_item, ResponseItem::AgentMessage { .. }) {
+                if !keep_forked_response_item(response_item) {
                     return false;
                 }
                 if !retain_forked_developer_message(
@@ -1011,7 +1016,9 @@ impl AgentControl {
                         let ContentItem::InputText { text } = content_item.content_mut() else {
                             return true;
                         };
-                        if ManagedDeveloperInstructions::matches_text(text) {
+                        if ManagedDeveloperInstructions::matches_text(text)
+                            || PersistentModeState::matches_text(text)
+                        {
                             return preserve_reference_context_item;
                         }
                         let (
@@ -1092,6 +1099,11 @@ impl AgentControl {
                     false,
                 ),
                 RolloutItem::Compacted(compacted) => {
+                    // This checkpoint belongs to the inherited parent prefix.
+                    compacted.latest_token_usage_record = None;
+                    // Parent-local review evidence must not become the child's authorization.
+                    // Root user authorization is collected separately by the host.
+                    compacted.guardian_history = None;
                     if let Some(replacement_history) = compacted.replacement_history.as_mut() {
                         // Matches before this checkpoint cannot survive its replacement history.
                         replaced_parent_developer_instructions = false;
@@ -1119,7 +1131,7 @@ impl AgentControl {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => true,
-                RolloutItem::SecurityRiskScore(_) => false,
+                RolloutItem::TokenUsageRecord(_) | RolloutItem::SecurityRiskScore(_) => false,
             }
         });
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
@@ -1142,8 +1154,18 @@ impl AgentControl {
         }
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
-            && let Some(subagent_usage_hint) =
-                resolve_usage_hints(&config.multi_agent_v2, /*catalog*/ None).subagent
+            && let Some(subagent_usage_hint) = options
+                .multi_agent_v2_usage_hints
+                .as_ref()
+                .map(|hints| hints.subagent.clone())
+                .unwrap_or_else(|| {
+                    resolve_usage_hints(
+                        &config.multi_agent_v2,
+                        /*catalog*/ None,
+                        !config.update_plan_enabled,
+                    )
+                    .subagent
+                })
         {
             let subagent_usage_hint_message = ContextualUserFragment::into(subagent_usage_hint);
             forked_rollout_items.push(RolloutItem::ResponseItem(

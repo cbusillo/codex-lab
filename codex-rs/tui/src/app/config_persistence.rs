@@ -53,52 +53,12 @@ pub(super) fn resume_model_settings_for_overrides(
 }
 
 impl App {
-    pub(super) async fn update_agent_selector_enabled(
-        &mut self,
-        app_server: &mut AppServerSession,
-        selector: &str,
-        enabled: bool,
-    ) {
-        let write_response = match crate::config_update::write_config_batch(
-            app_server.request_handle(),
-            vec![crate::config_update::agent_selector_enabled_edit(
-                selector, enabled,
-            )],
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                self.chat_widget.add_error_message(format!(
-                    "Failed to save `{selector}` selector setting: {err}"
-                ));
-                return;
-            }
-        };
-        if write_response.status == WriteStatus::OkOverridden {
-            self.chat_widget.add_error_message(format!(
-                "`{selector}` was saved but a higher-precedence setting remains effective."
-            ));
-            self.open_agents_settings(app_server).await;
-            return;
-        }
-        self.config
-            .agent_selector_overrides
-            .entry(selector.to_string())
-            .or_default()
-            .enabled = Some(enabled);
-        self.chat_widget
-            .set_agent_selector_enabled(selector, enabled);
-        self.open_agents_settings(app_server).await;
-    }
-
     pub(super) async fn rebuild_config_for_cwd(&self, cwd: PathBuf) -> Result<Config> {
         let mut overrides = self.harness_overrides.clone();
         overrides.cwd = Some(cwd.clone());
         let cwd_display = cwd.display().to_string();
         let builder = ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())
-            .auth_home(self.config.auth_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
@@ -121,7 +81,6 @@ impl App {
         overrides.default_permissions = Some(profile_id.to_string());
         let builder = ConfigBuilder::default()
             .codex_home(self.config.codex_home.to_path_buf())
-            .auth_home(self.config.auth_home.to_path_buf())
             .cli_overrides(self.cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
@@ -224,7 +183,8 @@ impl App {
         self.config = config;
 
         if let Some(policy) = approval_policy {
-            self.runtime_approval_policy_override = Some(policy);
+            self.runtime_approval_policy_override =
+                Some(RuntimeApprovalPolicyOverride::Explicit(policy));
             self.chat_widget.set_approval_policy(policy);
         }
         if let Err(err) = self.chat_widget.set_permission_profile_with_active_profile(
@@ -277,7 +237,7 @@ impl App {
         let mut config = self
             .rebuild_config_for_cwd(self.chat_widget.config_ref().cwd.to_path_buf())
             .await?;
-        self.apply_runtime_policy_overrides(&mut config);
+        self.apply_runtime_policy_overrides(&mut config, RuntimePolicyOverrideScope::All);
         self.config = config;
         self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
@@ -338,16 +298,40 @@ impl App {
         }
     }
 
-    pub(super) fn apply_runtime_policy_overrides(&mut self, config: &mut Config) {
-        if let Some(policy) = self.runtime_approval_policy_override.as_ref()
-            && let Err(err) = config.permissions.approval_policy.set(policy.to_core())
+    pub(super) fn apply_runtime_policy_overrides(
+        &mut self,
+        config: &mut Config,
+        scope: RuntimePolicyOverrideScope,
+    ) {
+        if let Some(policy) = self.runtime_approval_policy_override
+            && (scope == RuntimePolicyOverrideScope::All
+                || matches!(policy, RuntimeApprovalPolicyOverride::Explicit(_)))
+            && let Err(err) = config
+                .permissions
+                .approval_policy
+                .set(policy.policy().to_core())
         {
             tracing::warn!(%err, "failed to carry forward approval policy override");
             self.chat_widget.add_error_message(format!(
                 "Failed to carry forward approval policy override: {err}"
             ));
         }
-        if let Some(profile_override) = self.runtime_permission_profile_override.as_ref() {
+        if let Some(profile_override) = self.runtime_permission_profile_override.as_ref()
+            && (scope == RuntimePolicyOverrideScope::All
+                || profile_override.turn_override
+                    == RuntimePermissionProfileTurnOverride::LegacySandbox)
+        {
+            match config
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&profile_override.approvals_reviewer)
+            {
+                Ok(()) => config.approvals_reviewer = profile_override.approvals_reviewer,
+                Err(error) => self.chat_widget.add_error_message(format!(
+                    "Failed to carry forward approvals reviewer: {error}"
+                )),
+            }
             match config
                 .permissions
                 .set_permission_profile_from_session_snapshot(

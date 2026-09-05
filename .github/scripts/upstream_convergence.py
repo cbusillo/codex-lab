@@ -198,7 +198,9 @@ def require_read_safety(state: dict[str, object]) -> None:
     if state["replacementRefs"]:
         raise ConvergenceError("Git replacement refs make commit provenance ambiguous")
     if state["shallow"]:
-        raise ConvergenceError("complete Git history is required for convergence inspection")
+        raise ConvergenceError(
+            "complete Git history is required for convergence inspection"
+        )
 
 
 def require_record_safety(state: dict[str, object]) -> None:
@@ -298,9 +300,7 @@ def optional_remote_identity(
     }
 
 
-def exact_refs(
-    repo: Path, base: str, upstream: str, local: str
-) -> dict[str, str]:
+def exact_refs(repo: Path, base: str, upstream: str, local: str) -> dict[str, str]:
     resolved = {
         "base": resolve_exact_commit(repo, base, "base"),
         "upstream": resolve_exact_commit(repo, upstream, "upstream"),
@@ -349,7 +349,9 @@ def recorded_upstream_tip(
         if snapshot.name.startswith("."):
             continue
         if snapshot.is_symlink():
-            raise ConvergenceError(f"snapshot directory must not be a symlink: {snapshot}")
+            raise ConvergenceError(
+                f"snapshot directory must not be a symlink: {snapshot}"
+            )
         try:
             document = read_snapshot_inventory(snapshot)
             upstream = str(document["refs"]["upstream"])
@@ -407,9 +409,7 @@ def inspect(
             "laneCounts": result["laneCounts"],
             "residualLaneCounts": result["residualLaneCounts"],
         },
-        "governanceChanges": governance_changes(
-            repo, refs["base"], refs["upstream"]
-        ),
+        "governanceChanges": governance_changes(repo, refs["base"], refs["upstream"]),
         "nextAction": "Review non-green paths before applying the upstream merge.",
     }
 
@@ -447,7 +447,9 @@ def record(
     no_snapshot_error = f"no snapshots found under {policy.evidence_root}"
     existing_errors = existing_snapshots["errors"]
     if existing_snapshots["count"] == 0:
-        unexpected_errors = [error for error in existing_errors if error != no_snapshot_error]
+        unexpected_errors = [
+            error for error in existing_errors if error != no_snapshot_error
+        ]
         if unexpected_errors:
             raise ConvergenceError(unexpected_errors[0])
     elif not existing_snapshots["passed"] or existing_snapshots["historyUnavailable"]:
@@ -504,7 +506,9 @@ def record(
         temporary.rename(destination)
         if run_git(repo, "rev-parse", "HEAD").stdout.strip() != head:
             shutil.rmtree(destination, ignore_errors=True)
-            raise ConvergenceError("HEAD changed while the snapshot was being published")
+            raise ConvergenceError(
+                "HEAD changed while the snapshot was being published"
+            )
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise
@@ -553,7 +557,10 @@ def snapshot_directories(repo: Path, evidence_root: str) -> list[Path]:
 
 
 def commit_exists(repo: Path, commit: str) -> bool:
-    return run_git(repo, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode == 0
+    return (
+        run_git(repo, "cat-file", "-e", f"{commit}^{{commit}}", check=False).returncode
+        == 0
+    )
 
 
 def read_snapshot_inventory(snapshot: Path) -> dict[str, object]:
@@ -570,7 +577,9 @@ def read_snapshot_inventory(snapshot: Path) -> dict[str, object]:
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
-        raise ConvergenceError(f"cannot open snapshot inventory {path}: {error}") from error
+        raise ConvergenceError(
+            f"cannot open snapshot inventory {path}: {error}"
+        ) from error
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
@@ -594,7 +603,9 @@ def read_snapshot_inventory(snapshot: Path) -> dict[str, object]:
             )
         document = json.loads(contents.decode("utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeError) as error:
-        raise ConvergenceError(f"cannot read snapshot inventory {path}: {error}") from error
+        raise ConvergenceError(
+            f"cannot read snapshot inventory {path}: {error}"
+        ) from error
     finally:
         os.close(descriptor)
     if not isinstance(document, dict):
@@ -639,7 +650,9 @@ def validate_snapshots(
             errors.append(f"{relative} contains symbolic links: {symlinks}")
             continue
         names = sorted(path.name for path in entries)
-        if names != sorted(SNAPSHOT_FILES) or not all(path.is_file() for path in entries):
+        if names != sorted(SNAPSHOT_FILES) or not all(
+            path.is_file() for path in entries
+        ):
             errors.append(
                 f"{relative} contains {names}, expected {sorted(SNAPSHOT_FILES)}"
             )
@@ -664,9 +677,13 @@ def validate_snapshots(
             errors.append(str(error))
             continue
         refs = document.get("refs")
-        if not isinstance(refs, dict) or set(refs) != {"base", "upstream", "local"} or any(
-            FULL_SHA.fullmatch(str(refs.get(name, ""))) is None
-            for name in ("base", "upstream", "local")
+        if (
+            not isinstance(refs, dict)
+            or set(refs) != {"base", "upstream", "local"}
+            or any(
+                FULL_SHA.fullmatch(str(refs.get(name, ""))) is None
+                for name in ("base", "upstream", "local")
+            )
         ):
             errors.append(f"{relative} does not contain exact base/upstream/local refs")
             continue
@@ -686,7 +703,9 @@ def validate_snapshots(
             or not isinstance(policy_version, int)
             or policy_version not in inventory.SUPPORTED_POLICY_VERSIONS
         ):
-            errors.append(f"{relative} uses unsupported policy version {policy_version}")
+            errors.append(
+                f"{relative} uses unsupported policy version {policy_version}"
+            )
             continue
         if not all(commit_exists(repo, str(refs[name])) for name in refs):
             unavailable.append(relative)
@@ -756,7 +775,9 @@ def snapshot_change_analysis(
     if changes and not changes[-1]:
         changes.pop()
     if len(changes) % 2 != 0:
-        raise ConvergenceError("git diff --name-status -z returned an incomplete record")
+        raise ConvergenceError(
+            "git diff --name-status -z returned an incomplete record"
+        )
     errors = []
     added = set()
     prefix = f"{policy.evidence_root}/"
@@ -803,7 +824,9 @@ def canonical_policy_state_at(repo: Path, commit: str) -> str:
             f"cannot parse comparison-base policy entry: {lines[0]!r}"
         ) from error
     if path != CANONICAL_POLICY_PATH.as_posix():
-        raise ConvergenceError(f"comparison-base policy resolved to unexpected path {path}")
+        raise ConvergenceError(
+            f"comparison-base policy resolved to unexpected path {path}"
+        )
     if object_type != "blob" or mode not in {"100644", "100755"}:
         raise ConvergenceError(
             f"comparison-base policy must be a regular file: mode={mode} type={object_type}"
@@ -914,7 +937,9 @@ def validate_new_snapshot_provenance(
         try:
             document = snapshot_document_at(repo, policy, snapshot, against)
             upstream = str(document["refs"]["upstream"])
-            if FULL_SHA.fullmatch(upstream) is None or not commit_exists(repo, upstream):
+            if FULL_SHA.fullmatch(upstream) is None or not commit_exists(
+                repo, upstream
+            ):
                 raise ConvergenceError(f"recorded upstream is unavailable: {upstream}")
             previous_upstreams.append(upstream)
         except (KeyError, TypeError, ConvergenceError) as error:
@@ -933,7 +958,9 @@ def validate_new_snapshot_provenance(
         try:
             document = snapshot_document_at(repo, policy, snapshot)
             raw_policy = document.get("policy")
-            policy_version = raw_policy.get("version") if isinstance(raw_policy, dict) else None
+            policy_version = (
+                raw_policy.get("version") if isinstance(raw_policy, dict) else None
+            )
             if policy_version != inventory.POLICY_VERSION:
                 raise ConvergenceError(
                     f"new snapshot must use policy version {inventory.POLICY_VERSION}"
@@ -958,7 +985,9 @@ def validate_new_snapshot_provenance(
                     "candidate HEAD does not contain both local and upstream snapshot inputs"
                 )
             if previous_tip == refs["upstream"]:
-                raise ConvergenceError("new snapshot does not advance the recorded upstream")
+                raise ConvergenceError(
+                    "new snapshot does not advance the recorded upstream"
+                )
             if previous_tip is not None and not ref_is_ancestor(
                 repo, previous_tip, refs["upstream"]
             ):
@@ -1171,7 +1200,10 @@ def main(argv: list[str]) -> int:
             )
             print()
         else:
-            print(f"upstream convergence {args.operation} failed: {error}", file=sys.stderr)
+            print(
+                f"upstream convergence {args.operation} failed: {error}",
+                file=sys.stderr,
+            )
         return 2
 
     if args.json:

@@ -72,7 +72,9 @@ def load_manifest(path: Path, repo_root: Path) -> dict[str, object]:
     try:
         resolved.relative_to(repo_root.resolve())
     except ValueError as error:
-        raise GateManifestError(f"manifest path escapes the repository: {resolved}") from error
+        raise GateManifestError(
+            f"manifest path escapes the repository: {resolved}"
+        ) from error
     try:
         if path.is_symlink():
             raise GateManifestError(f"manifest must not be a symlink: {path}")
@@ -126,7 +128,9 @@ def verify_evidence(
         return None
     try:
         if kind == "semantic_reachability":
-            return verify_semantic_reachability(repo_root, contract_id, evidence, location, errors)
+            return verify_semantic_reachability(
+                repo_root, contract_id, evidence, location, errors
+            )
         expected = (
             {"kind", "description", "issue", "ciTier"}
             if kind == "narrative"
@@ -144,7 +148,9 @@ def verify_evidence(
             require_string(evidence["description"], f"{location}.description")
             issue = evidence["issue"]
             if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
-                raise GateManifestError(f"{location}.issue: expected a positive integer")
+                raise GateManifestError(
+                    f"{location}.issue: expected a positive integer"
+                )
             if tier not in {"narrative", "release"}:
                 raise GateManifestError(
                     f"{location}.ciTier: narrative evidence must be narrative or release"
@@ -159,7 +165,9 @@ def verify_evidence(
         if not path.is_file():
             raise GateManifestError(f"{location}.path: file is missing: {relative}")
         if path.is_symlink():
-            raise GateManifestError(f"{location}.path: file must not be a symlink: {relative}")
+            raise GateManifestError(
+                f"{location}.path: file must not be a symlink: {relative}"
+            )
         relative_path = PurePosixPath(relative)
         parts = relative_path.parts
         if (
@@ -187,7 +195,9 @@ def verify_evidence(
             try:
                 contents = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError) as error:
-                raise GateManifestError(f"{location}.path: cannot read {relative}: {error}") from error
+                raise GateManifestError(
+                    f"{location}.path: cannot read {relative}: {error}"
+                ) from error
             if token not in contents:
                 raise GateManifestError(
                     f"{location}.token: {token!r} is absent from {relative}"
@@ -275,7 +285,9 @@ def semantic_waivers(
         expires = require_string(waiver["expires"], f"{waiver_location}.expires")
         issue = waiver["issue"]
         if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
-            raise GateManifestError(f"{waiver_location}.issue: expected a positive integer")
+            raise GateManifestError(
+                f"{waiver_location}.issue: expected a positive integer"
+            )
         try:
             expiry = datetime.strptime(expires, "%Y-%m-%d").date()
         except ValueError as error:
@@ -283,9 +295,13 @@ def semantic_waivers(
                 f"{waiver_location}.expires: expected YYYY-MM-DD"
             ) from error
         if expiry < date.today():
-            raise GateManifestError(f"{waiver_location}.expires: waiver expired on {expires}")
+            raise GateManifestError(
+                f"{waiver_location}.expires: waiver expired on {expires}"
+            )
         if edge in indexed:
-            raise GateManifestError(f"{waiver_location}.edge: duplicate waiver for {edge}")
+            raise GateManifestError(
+                f"{waiver_location}.edge: duplicate waiver for {edge}"
+            )
         indexed[edge] = waiver
     return indexed
 
@@ -295,9 +311,13 @@ def baseline_waiver_limit(
 ) -> int:
     path = repo_root / baseline_path
     if path.is_symlink() or not path.is_file():
-        raise GateManifestError(f"{location}: baseline file is missing: {baseline_path}")
+        raise GateManifestError(
+            f"{location}: baseline file is missing: {baseline_path}"
+        )
     if path.stat().st_size > MAX_MANIFEST_BYTES:
-        raise GateManifestError(f"{location}: baseline file exceeds {MAX_MANIFEST_BYTES} bytes")
+        raise GateManifestError(
+            f"{location}: baseline file exceeds {MAX_MANIFEST_BYTES} bytes"
+        )
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         limit = document["contracts"][contract_id]["maxWaivers"]
@@ -305,7 +325,12 @@ def baseline_waiver_limit(
         raise GateManifestError(
             f"{location}: baseline must define contracts.{contract_id}.maxWaivers"
         ) from error
-    if document.get("schemaVersion") != 1 or not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+    if (
+        document.get("schemaVersion") != 1
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit < 0
+    ):
         raise GateManifestError(f"{location}: invalid semantic reachability baseline")
     return limit
 
@@ -363,21 +388,33 @@ def verify_semantic_reachability(
     )
     tier = require_string(evidence["ciTier"], f"{location}.ciTier")
     if tier not in CI_TIERS - {"narrative"}:
-        raise GateManifestError(f"{location}.ciTier: expected blocking, nightly, or release")
+        raise GateManifestError(
+            f"{location}.ciTier: expected blocking, nightly, or release"
+        )
     require_string(evidence["description"], f"{location}.description")
     baseline = evidence["baseline"]
     if not isinstance(baseline, dict):
         raise GateManifestError(f"{location}.baseline: expected an object")
-    require_exact_keys(baseline, {"derivedFrom", "issue", "maxWaivers"}, f"{location}.baseline")
+    require_exact_keys(
+        baseline, {"derivedFrom", "issue", "maxWaivers"}, f"{location}.baseline"
+    )
     baseline_path = validate_repo_path(
         repo_root, baseline["derivedFrom"], f"{location}.baseline.derivedFrom"
     )
     issue = baseline["issue"]
     max_waivers = baseline["maxWaivers"]
     if not isinstance(issue, int) or isinstance(issue, bool) or issue <= 0:
-        raise GateManifestError(f"{location}.baseline.issue: expected a positive integer")
-    if not isinstance(max_waivers, int) or isinstance(max_waivers, bool) or max_waivers < 0:
-        raise GateManifestError(f"{location}.baseline.maxWaivers: expected a non-negative integer")
+        raise GateManifestError(
+            f"{location}.baseline.issue: expected a positive integer"
+        )
+    if (
+        not isinstance(max_waivers, int)
+        or isinstance(max_waivers, bool)
+        or max_waivers < 0
+    ):
+        raise GateManifestError(
+            f"{location}.baseline.maxWaivers: expected a non-negative integer"
+        )
     baseline_limit = baseline_waiver_limit(
         repo_root, contract_id, baseline_path, f"{location}.baseline.derivedFrom"
     )
@@ -419,7 +456,9 @@ def verify_semantic_reachability(
         if edge_id in waivers:
             used_waivers.add(edge_id)
         else:
-            errors.append(f"{location}: {contract_id} semantic reachability failed: {failure}")
+            errors.append(
+                f"{location}: {contract_id} semantic reachability failed: {failure}"
+            )
     for edge_id in sorted(set(waivers) - used_waivers - invalid_edges):
         errors.append(f"{location}.waivers: stale waiver for reachable edge {edge_id}")
     return tier
@@ -470,9 +509,13 @@ def verify(
             require_exact_keys(contract, {"id", "evidence"}, location)
             contract_id = require_string(contract["id"], f"{location}.id")
             if CONTRACT_ID.fullmatch(contract_id) is None:
-                raise GateManifestError(f"{location}.id: invalid contract ID {contract_id!r}")
+                raise GateManifestError(
+                    f"{location}.id: invalid contract ID {contract_id!r}"
+                )
             if contract_id in manifest_ids:
-                raise GateManifestError(f"{location}.id: duplicate contract ID {contract_id}")
+                raise GateManifestError(
+                    f"{location}.id: duplicate contract ID {contract_id}"
+                )
             manifest_ids.add(contract_id)
             evidence_items = contract["evidence"]
             if not isinstance(evidence_items, list) or not evidence_items:

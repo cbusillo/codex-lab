@@ -145,7 +145,9 @@ class LocalCleanupSpaceTest(unittest.TestCase):
             )
 
             self.assertEqual(0, completed.returncode, completed.stderr)
-            self.assertIn("artifact temp outside expected artifact root", completed.stdout)
+            self.assertIn(
+                "artifact temp outside expected artifact root", completed.stdout
+            )
             self.assertTrue(escaped_tmp.exists())
 
     def test_local_cleanup_space_skips_unbounded_exec_harness_output(self) -> None:
@@ -166,7 +168,9 @@ class LocalCleanupSpaceTest(unittest.TestCase):
 
     def test_local_cleanup_space_rejects_repo_output_traversal(self) -> None:
         with copied_cleanup_workspace() as workspace:
-            output_root = workspace / ".tmp" / "codex-exec-harness" / ".." / ".." / "codex-rs"
+            output_root = (
+                workspace / ".tmp" / "codex-exec-harness" / ".." / ".." / "codex-rs"
+            )
 
             completed = run_local_cleanup(
                 workspace,
@@ -577,7 +581,9 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 ),
                 env.stdout,
             )
-            self.assertIn("/exec-harness", exported_value(env.stdout, "CARGO_TARGET_DIR"))
+            self.assertIn(
+                "/exec-harness", exported_value(env.stdout, "CARGO_TARGET_DIR")
+            )
             self.assertEqual(
                 str(workspace / ".tmp" / "codex-exec-harness"),
                 exported_value(env.stdout, "CODEX_EXEC_HARNESS_OUTPUT_ROOT"),
@@ -606,6 +612,7 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 self.assertNotIn("/local/codex-lab/", env_one.stdout)
                 self.assertNotIn("/local/codex-lab/", env_two.stdout)
 
+
 def run_local_cleanup(
     workspace: Path, *args: str, **env_overrides: str
 ) -> subprocess.CompletedProcess[str]:
@@ -616,9 +623,7 @@ def run_local_cleanup(
     env["CODEX_EXEC_HARNESS_CARGO_TARGET_DIR"] = str(
         workspace / ".tmp" / "exec-harness-target"
     )
-    env["CODEX_LAB_CARGO_TARGET_DIR"] = str(
-        workspace / ".tmp" / "local-cargo-target"
-    )
+    env["CODEX_LAB_CARGO_TARGET_DIR"] = str(workspace / ".tmp" / "local-cargo-target")
     env.update(env_overrides)
     return subprocess.run(
         [

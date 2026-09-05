@@ -6,6 +6,7 @@ use crate::config_manager::ConfigManager;
 use crate::config_manager::ConfigManagerArgs;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::AppServerTransport;
 use anyhow::Result;
 use app_test_support::create_mock_responses_server_repeating_assistant;
@@ -272,7 +273,7 @@ async fn build_test_processor(
         code_mode_session_provider: None,
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
-        plugin_startup_tasks: crate::PluginStartupTasks::Start,
+        plugin_startup_tasks: Some(PluginStartupConfig::Current),
     }));
     (processor, outgoing_rx)
 }
@@ -669,6 +670,8 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                         text: "hello".to_string(),
                         text_elements: Vec::new(),
                     }],
+                    turn_trigger: None,
+                    tool_output: None,
                     responsesapi_client_metadata: None,
                     additional_context: None,
                     cwd: None,
@@ -679,12 +682,14 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                     approvals_reviewer: None,
                     model: None,
                     service_tier: None,
+                    service_tier_for_turn: None,
                     effort: None,
                     summary: None,
                     personality: None,
                     output_schema: None,
                     collaboration_mode: None,
                     multi_agent_mode: None,
+                    cyber_access_program: None,
                 },
             },
             Some(remote_trace),

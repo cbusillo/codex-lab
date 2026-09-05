@@ -1,13 +1,9 @@
 use super::thread_processor::thread_extra_from_snapshot;
 use super::*;
 use crate::extensions::send_thread_warning;
-use crate::realtime_event_handling::apply_realtime_event_effects;
-use crate::realtime_event_handling::persist_realtime_items;
-use crate::realtime_history::RealtimeEventEffects;
 use codex_app_server_protocol::ThreadQueueChangedNotification;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::protocol::ThreadHistoryMode;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
 
@@ -248,8 +244,6 @@ pub(super) async fn ensure_listener_task_running(
         )
         .await;
     let config_snapshot = conversation.config_snapshot().await;
-    let realtime_history_enabled =
-        matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated);
     let thread_settings_baseline = thread_settings_from_config_snapshot(&config_snapshot);
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
@@ -332,20 +326,10 @@ pub(super) async fn ensure_listener_task_running(
                     // Track the event before emitting any typed translations
                     // so thread-local state such as raw event opt-in stays
                     // synchronized with the conversation.
-                    let (raw_events_enabled, realtime_effects) = {
+                    let raw_events_enabled = {
                         let mut thread_state = thread_state.lock().await;
                         thread_state.track_current_turn_event(&event.id, &event.msg);
-                        let realtime_effects = if realtime_history_enabled
-                            && thread_state.realtime_history.should_observe(&event.msg)
-                        {
-                            let active_turn_id = thread_state.active_turn_snapshot().map(|turn| turn.id);
-                            thread_state
-                                .realtime_history
-                                .observe(&event.msg, active_turn_id.as_deref())
-                        } else {
-                            RealtimeEventEffects::default()
-                        };
-                        (thread_state.experimental_raw_events, realtime_effects)
+                        thread_state.experimental_raw_events
                     };
                     if matches!(
                         &event.msg,
@@ -362,14 +346,6 @@ pub(super) async fn ensure_listener_task_running(
                         subscribed_connection_ids,
                         conversation_id,
                     );
-
-                    apply_realtime_event_effects(
-                        conversation.as_ref(),
-                        &thread_outgoing,
-                        conversation_id,
-                        realtime_effects,
-                    )
-                    .await;
 
                     apply_bespoke_event_handling(
                         event.clone(),
@@ -582,32 +558,6 @@ pub(super) async fn handle_thread_listener_command(
             )
             .await;
             let _ = completion_tx.send(());
-        }
-        ThreadListenerCommand::SealRealtimeUserInput {
-            input,
-            completion_tx,
-        } => {
-            let items = thread_state
-                .lock()
-                .await
-                .realtime_history
-                .seal_user_input(&input);
-            let subscribed_connection_ids = thread_state_manager
-                .subscribed_connection_ids(conversation_id)
-                .await;
-            let thread_outgoing = ThreadScopedOutgoingMessageSender::new(
-                outgoing.clone(),
-                subscribed_connection_ids,
-                conversation_id,
-            );
-            let result = persist_realtime_items(
-                conversation.as_ref(),
-                &thread_outgoing,
-                &conversation_id.to_string(),
-                items,
-            )
-            .await;
-            let _ = completion_tx.send(result);
         }
     }
 }

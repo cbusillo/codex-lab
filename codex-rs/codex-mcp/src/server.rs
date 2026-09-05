@@ -15,8 +15,10 @@ use codex_connectors::ConnectorRuntimeContextKey;
 use codex_exec_server::Environment;
 use codex_login::CodexAuth;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_rmcp_client::McpOAuthRefreshMode;
 use codex_rmcp_client::StoredOAuthCredentialSnapshot;
 use codex_rmcp_client::StoredOAuthTokens;
+use codex_utils_path_uri::PathUri;
 use rmcp::model::ElicitationCapability;
 use tracing::warn;
 
@@ -93,9 +95,12 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 /// those belong to a publication and can change without reconnecting.
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
+    auth: McpServerAuth,
     transport: McpServerTransportConfig,
     environment_id: String,
+    host_plugin_root: Option<PathUri>,
     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
+    oauth_refresh_mode: Option<McpOAuthRefreshMode>,
     oauth_credentials: Result<Option<StoredOAuthCredentialSnapshot>, String>,
     pub(crate) oauth_store_was_contended: bool,
     resolved_environment: Result<Option<Arc<Environment>>, String>,
@@ -103,26 +108,10 @@ pub(crate) struct McpServerConnectionIdentity {
     referenced_environment_variables: Vec<(String, Option<OsString>)>,
     runtime_auth: Option<CodexAuth>,
     runtime_auth_token: Option<String>,
-    codex_apps_cache_identity: Option<CodexAppsCacheIdentity>,
-    codex_apps_execution_discriminator: Option<String>,
+    codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
     agent_plugin: bool,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct CodexAppsCacheIdentity {
-    codex_home: PathBuf,
-    tools_cache_key: ConnectorRuntimeContextKey,
-}
-
-impl CodexAppsCacheIdentity {
-    pub(crate) fn new(codex_home: PathBuf, tools_cache_key: ConnectorRuntimeContextKey) -> Self {
-        Self {
-            codex_home,
-            tools_cache_key,
-        }
-    }
 }
 
 impl McpServerConnectionIdentity {
@@ -130,14 +119,15 @@ impl McpServerConnectionIdentity {
     pub(crate) fn new(
         server_name: &str,
         server: &EffectiveMcpServer,
+        host_plugin_root: Option<&PathUri>,
         store_mode: OAuthCredentialsStoreMode,
         keyring_backend_kind: AuthKeyringBackendKind,
+        oauth_refresh_mode: McpOAuthRefreshMode,
         resolved_environment: &Result<Option<Arc<Environment>>, String>,
         runtime_context: &McpRuntimeContext,
         runtime_auth_provider: Option<&SharedAuthProvider>,
         auth: Option<&CodexAuth>,
-        codex_apps_cache_identity: Option<CodexAppsCacheIdentity>,
-        codex_apps_execution_discriminator: Option<String>,
+        codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
         client_elicitation_capability: ElicitationCapability,
         client_mcp_extensions: ClientMcpExtensions,
         previous_identity: Option<&Self>,
@@ -223,11 +213,14 @@ impl McpServerConnectionIdentity {
             .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
 
         Self {
+            auth: config.auth.clone(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
+            host_plugin_root: host_plugin_root.cloned(),
             oauth_store: stored_oauth_url
                 .is_some()
                 .then_some((store_mode, keyring_backend_kind)),
+            oauth_refresh_mode: stored_oauth_url.is_some().then_some(oauth_refresh_mode),
             oauth_credentials,
             oauth_store_was_contended,
             resolved_environment: resolved_environment.clone(),
@@ -236,7 +229,6 @@ impl McpServerConnectionIdentity {
             runtime_auth,
             runtime_auth_token,
             codex_apps_cache_identity,
-            codex_apps_execution_discriminator,
             client_elicitation_capability,
             client_mcp_extensions,
             agent_plugin: server.is_agent_plugin(),
@@ -257,16 +249,18 @@ impl McpServerConnectionIdentity {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
-        self.transport == other.transport
+        self.auth == other.auth
+            && self.transport == other.transport
             && self.environment_id == other.environment_id
+            && self.host_plugin_root == other.host_plugin_root
             && self.oauth_store == other.oauth_store
+            && self.oauth_refresh_mode == other.oauth_refresh_mode
             && same_resolved_environment(&self.resolved_environment, &other.resolved_environment)
             && self.local_stdio_fallback_cwd == other.local_stdio_fallback_cwd
             && self.referenced_environment_variables == other.referenced_environment_variables
             && same_runtime_auth
             && self.runtime_auth_token == other.runtime_auth_token
             && self.codex_apps_cache_identity == other.codex_apps_cache_identity
-            && self.codex_apps_execution_discriminator == other.codex_apps_execution_discriminator
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
             && self.agent_plugin == other.agent_plugin

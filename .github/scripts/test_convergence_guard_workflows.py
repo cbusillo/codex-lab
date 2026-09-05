@@ -73,9 +73,7 @@ class RepoCheckWiringTest(unittest.TestCase):
     def test_repo_checks_runs_the_convergence_guard(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "python3 .github/scripts/upstream_convergence_guard.py", contents
-        )
+        self.assertIn("python3 .github/scripts/upstream_convergence_guard.py", contents)
 
     def test_repo_checks_runs_the_governance_bootstrap(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
@@ -88,9 +86,7 @@ class RepoCheckWiringTest(unittest.TestCase):
     def test_repo_checks_runs_the_contract_gate_verifier(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
 
-        self.assertIn(
-            "python3 .github/scripts/upstream_convergence_gates.py", contents
-        )
+        self.assertIn("python3 .github/scripts/upstream_convergence_gates.py", contents)
 
     def test_repo_checks_runs_the_bazel_data_edge_verifier(self) -> None:
         contents = (WORKFLOWS / "repo-checks.yml").read_text(encoding="utf-8")
@@ -106,7 +102,9 @@ class RepoCheckWiringTest(unittest.TestCase):
             "python3 .github/scripts/upstream_convergence.py validate", contents
         )
         self.assertIn("fetch-depth: 0", contents)
-        self.assertIn("git remote add openai https://github.com/openai/codex.git", contents)
+        self.assertIn(
+            "git remote add openai https://github.com/openai/codex.git", contents
+        )
         self.assertIn('--against "$CONVERGENCE_BASE_SHA"', contents)
         self.assertIn('--json | tee "$report"', contents)
         self.assertIn("Convergence comparison base:", contents)
@@ -219,17 +217,24 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn('} >> "$GITHUB_OUTPUT"', inspection)
         self.assertIn('INSPECTION_STARTED_AT="$started_at"', inspection)
         self.assertIn('INSPECTION_DURATION_MS="$duration_ms"', inspection)
-        self.assertIn('"inspectionStartedAt": os.environ["INSPECTION_STARTED_AT"]', inspection)
-        self.assertIn('"inspectionDurationMs": int(os.environ["INSPECTION_DURATION_MS"])', inspection)
+        self.assertIn(
+            '"inspectionStartedAt": os.environ["INSPECTION_STARTED_AT"]', inspection
+        )
+        self.assertIn(
+            '"inspectionDurationMs": int(os.environ["INSPECTION_DURATION_MS"])',
+            inspection,
+        )
         for step in (diagnostics, clean_check, raw_upload, failure):
             self.assertIn("always() && !cancelled()", step)
             self.assertIn("steps.inspection.outcome != 'skipped'", step)
-        self.assertIn('test -f "$RUNNER_TEMP/upstream-convergence/report.json"', diagnostics)
-        self.assertIn('cat "$RUNNER_TEMP/upstream-convergence/diagnostics.json"', diagnostics)
-        self.assertIn("if-no-files-found: error", raw_upload)
         self.assertIn(
-            "steps.inspection.outputs.status != '0'", failure
+            'test -f "$RUNNER_TEMP/upstream-convergence/report.json"', diagnostics
         )
+        self.assertIn(
+            'cat "$RUNNER_TEMP/upstream-convergence/diagnostics.json"', diagnostics
+        )
+        self.assertIn("if-no-files-found: error", raw_upload)
+        self.assertIn("steps.inspection.outputs.status != '0'", failure)
         self.assertNotIn("continue-on-error: true", self.contents)
 
     def test_compact_report_only_runs_after_success(self) -> None:
@@ -237,22 +242,20 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         upload = self.step("Upload compact report")
 
         for step in (self.step("Find newest successful report"), publish, upload):
-            self.assertIn(
-                "success() && steps.inspection.outputs.status == '0'", step
-            )
+            self.assertIn("success() && steps.inspection.outputs.status == '0'", step)
         self.assertIn(
-            'PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}', publish
+            "PREVIOUS_SUCCESS_AT: ${{ steps.previous.outputs.updated_at }}", publish
         )
         self.assertIn(
-            'INSPECTION_STARTED_AT: ${{ steps.inspection.outputs.started_at }}',
+            "INSPECTION_STARTED_AT: ${{ steps.inspection.outputs.started_at }}",
             publish,
         )
         self.assertIn(
-            'INSPECTION_FINISHED_AT: ${{ steps.inspection.outputs.finished_at }}',
+            "INSPECTION_FINISHED_AT: ${{ steps.inspection.outputs.finished_at }}",
             publish,
         )
         self.assertIn(
-            'INSPECTION_DURATION_MS: ${{ steps.inspection.outputs.duration_ms }}',
+            "INSPECTION_DURATION_MS: ${{ steps.inspection.outputs.duration_ms }}",
             publish,
         )
         self.assertIn('--previous-success-at "$PREVIOUS_SUCCESS_AT"', publish)
@@ -281,12 +284,14 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
             "candidate_local",
             "candidate_snapshot",
         ):
-            self.assertIn(f"{output}: ${{{{ steps.summary.outputs.{output} }}}}", inspect_contents)
+            self.assertIn(
+                f"{output}: ${{{{ steps.summary.outputs.{output} }}}}", inspect_contents
+            )
             self.assertIn(f"{output}=", publish)
         self.assertIn("id: summary", publish)
         self.assertIn("exact_ref = re.compile", publish)
         self.assertIn("[0-9a-f]{40}", publish)
-        self.assertIn("snapshot[\"snapshot\"][:512]", publish)
+        self.assertIn('snapshot["snapshot"][:512]', publish)
         self.assertIn('"\\n" in status', publish)
         self.assertIn('"\\n" in snapshot_path', publish)
 
@@ -307,29 +312,53 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn("runs-on: macos-26", contents)
         self.assertIn("permissions:\n      contents: read", contents)
         self.assertNotIn("actions: read", contents)
-        self.assertIn("group: upstream-convergence-candidate-${{ github.ref }}", contents)
+        self.assertIn(
+            "group: upstream-convergence-candidate-${{ github.ref }}", contents
+        )
         self.assertIn("persist-credentials: false", contents)
         self.assertNotIn("GH_TOKEN", contents)
         self.assertNotIn("secrets.", contents)
 
     def test_candidate_stage_uses_trusted_data_only_preflight_and_cleanup(self) -> None:
-        candidate = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        candidate = self.step(
+            "Re-fetch canonical refs and run data-only candidate preflight"
+        )
         verify = self.step("Verify candidate cleanup and primary checkout")
         upload = self.step("Upload candidate evidence")
 
         self.assertIn("https://github.com/cbusillo/codex-lab.git", candidate)
         self.assertIn("https://github.com/openai/codex.git", candidate)
-        self.assertIn("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main", candidate)
-        self.assertIn("git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main", candidate)
-        self.assertIn('cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"', candidate)
-        self.assertIn("git remote set-url origin https://github.com/cbusillo/codex-lab.git", candidate)
-        self.assertIn('worktree add --detach "$candidate_dir" "$EXPECTED_UPSTREAM"', candidate)
-        self.assertIn('core.hooksPath=/dev/null merge --no-commit --no-ff "$EXPECTED_LOCAL"', candidate)
-        self.assertIn('all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"', candidate)
-        self.assertNotIn('$evidence_dir/all-conflict-paths.txt', candidate)
+        self.assertIn(
+            "git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main",
+            candidate,
+        )
+        self.assertIn(
+            "git fetch --no-tags openai +refs/heads/main:refs/remotes/openai/main",
+            candidate,
+        )
+        self.assertIn(
+            'cp .github/scripts/upstream_candidate_preflight.py "$trusted_helper"',
+            candidate,
+        )
+        self.assertIn(
+            "git remote set-url origin https://github.com/cbusillo/codex-lab.git",
+            candidate,
+        )
+        self.assertIn(
+            'worktree add --detach "$candidate_dir" "$EXPECTED_UPSTREAM"', candidate
+        )
+        self.assertIn(
+            'core.hooksPath=/dev/null merge --no-commit --no-ff "$EXPECTED_LOCAL"',
+            candidate,
+        )
+        self.assertIn(
+            'all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"',
+            candidate,
+        )
+        self.assertNotIn("$evidence_dir/all-conflict-paths.txt", candidate)
         self.assertIn("sed -n '1,200p'", candidate)
         self.assertIn('python3 "$trusted_helper" preflight', candidate)
-        self.assertNotIn('python3 .github/scripts/', candidate)
+        self.assertNotIn("python3 .github/scripts/", candidate)
         self.assertNotIn("GITHUB_WORKSPACE", candidate)
         self.assertNotIn("rusty_v8_bazel.py", candidate)
         self.assertNotIn("cargo check", candidate)
@@ -347,10 +376,10 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         )
         self.assertLess(
             candidate.index('worktree add --detach "$candidate_dir"'),
-            candidate.index('core.hooksPath=/dev/null merge --no-commit --no-ff'),
+            candidate.index("core.hooksPath=/dev/null merge --no-commit --no-ff"),
         )
         self.assertLess(
-            candidate.index('core.hooksPath=/dev/null merge --no-commit --no-ff'),
+            candidate.index("core.hooksPath=/dev/null merge --no-commit --no-ff"),
             candidate.index('python3 "$trusted_helper" preflight'),
         )
 
@@ -361,40 +390,86 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         ]
 
         for candidate in candidates:
-            for forbidden in ("git push", "git commit", "gh pr", "gh issue", "create-pull-request", "code exec", "codex exec", "claude", "gemini", "npm ", "just test"):
+            for forbidden in (
+                "git push",
+                "git commit",
+                "gh pr",
+                "gh issue",
+                "create-pull-request",
+                "code exec",
+                "codex exec",
+                "claude",
+                "gemini",
+                "npm ",
+                "just test",
+            ):
                 self.assertNotIn(forbidden, candidate)
         self.assertNotIn("cargo ", candidates[0])
 
     def test_candidate_stage3b_is_clean_path_only_and_ordered(self) -> None:
-        preflight = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        preflight = self.step(
+            "Re-fetch canonical refs and run data-only candidate preflight"
+        )
         toolchain = self.step("Install pinned Rust toolchain")
         checks = self.step("Run bounded candidate checks and select affected contracts")
 
         self.assertIn("classification=clean", preflight)
         self.assertIn('echo "stage3b_ready=true"', preflight)
         self.assertIn("stage3b_ready == 'true'", toolchain)
-        self.assertIn("dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582", toolchain)
+        self.assertIn(
+            "dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582", toolchain
+        )
         self.assertIn("toolchain: 1.95.0", toolchain)
-        self.assertIn("python3 .github/scripts/upstream_convergence_gates.py --json", checks)
-        self.assertIn("python3 .github/scripts/upstream_convergence_guard.py --json", checks)
-        self.assertIn("python3 .github/scripts/verify_upstream_convergence_governance.py --json", checks)
-        self.assertIn("python3 .github/scripts/verify_repo_checks_test_registration.py", checks)
-        self.assertIn('(cd "$candidate_dir" && sandbox-exec -f "$sandbox_profile"', checks)
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence_gates.py --json", checks
+        )
+        self.assertIn(
+            "python3 .github/scripts/upstream_convergence_guard.py --json", checks
+        )
+        self.assertIn(
+            "python3 .github/scripts/verify_upstream_convergence_governance.py --json",
+            checks,
+        )
+        self.assertIn(
+            "python3 .github/scripts/verify_repo_checks_test_registration.py", checks
+        )
+        self.assertIn(
+            '(cd "$candidate_dir" && sandbox-exec -f "$sandbox_profile"', checks
+        )
         self.assertIn("cargo check --workspace --tests --locked", checks)
         self.assertEqual(checks.count("cargo check --workspace --tests --locked"), 3)
-        self.assertLess(checks.index("verify_repo_checks_test_registration.py"), checks.index("cargo check --workspace --tests --locked"))
+        self.assertLess(
+            checks.index("verify_repo_checks_test_registration.py"),
+            checks.index("cargo check --workspace --tests --locked"),
+        )
         self.assertIn('CARGO_INCREMENTAL: "0"', checks)
         self.assertIn('RUSTFLAGS: "-C debuginfo=0"', checks)
-        self.assertIn("CARGO_TARGET_DIR: ${{ runner.temp }}/upstream-convergence-cargo-target", checks)
-        self.assertIn("RUSTY_V8_ARCHIVE: ${{ runner.temp }}/upstream-convergence-candidate-downloads/", checks)
-        self.assertIn("RUSTY_V8_SRC_BINDING_PATH: ${{ runner.temp }}/upstream-convergence-candidate-downloads/", checks)
-        self.assertLess(checks.index("cargo check --workspace --tests --locked"), checks.index("select-affected-contracts"))
+        self.assertIn(
+            "CARGO_TARGET_DIR: ${{ runner.temp }}/upstream-convergence-cargo-target",
+            checks,
+        )
+        self.assertIn(
+            "RUSTY_V8_ARCHIVE: ${{ runner.temp }}/upstream-convergence-candidate-downloads/",
+            checks,
+        )
+        self.assertIn(
+            "RUSTY_V8_SRC_BINDING_PATH: ${{ runner.temp }}/upstream-convergence-candidate-downloads/",
+            checks,
+        )
+        self.assertLess(
+            checks.index("cargo check --workspace --tests --locked"),
+            checks.index("select-affected-contracts"),
+        )
         self.assertIn("sandbox-exec -f", checks)
         self.assertIn("verify_trusted", checks)
 
-    def test_candidate_stage3b_bounds_evidence_and_uses_trusted_extractors(self) -> None:
+    def test_candidate_stage3b_bounds_evidence_and_uses_trusted_extractors(
+        self,
+    ) -> None:
         checks = self.step("Run bounded candidate checks and select affected contracts")
-        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        helper = self.step(
+            "Re-fetch canonical refs and run data-only candidate preflight"
+        )
 
         self.assertIn("bound-log", checks)
         self.assertIn("--max-input-bytes 65536", checks)
@@ -417,7 +492,9 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn('evidence["primaryCheckoutClean"]', verify)
 
     def test_stage3c_runs_on_live_conflicts_and_plumbs_guard_digest(self) -> None:
-        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        helper = self.step(
+            "Re-fetch canonical refs and run data-only candidate preflight"
+        )
         checks = self.step("Run bounded candidate checks and select affected contracts")
         packets = self.step("Build bounded model packets")
 
@@ -431,19 +508,27 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn("root-failure-outcome.json", packets)
         self.assertIn("always() && !cancelled()", packets)
         self.assertNotIn("stage3b_ready", packets)
-        self.assertLess(self.contents.index("Build bounded model packets"), self.contents.index("Verify candidate cleanup"))
+        self.assertLess(
+            self.contents.index("Build bounded model packets"),
+            self.contents.index("Verify candidate cleanup"),
+        )
 
     def test_stage3d_is_trusted_ordered_and_live_read_only(self) -> None:
-        helper = self.step("Re-fetch canonical refs and run data-only candidate preflight")
+        helper = self.step(
+            "Re-fetch canonical refs and run data-only candidate preflight"
+        )
         packets = self.step("Build bounded model packets")
         checkpoint = self.step("Checkpoint repair cycles and build handoff")
         upload = self.step("Upload candidate evidence")
-        self.assertIn('cp .github/scripts/upstream_convergence_repair_ledger.py "$trusted_repair_ledger"', helper)
+        self.assertIn(
+            'cp .github/scripts/upstream_convergence_repair_ledger.py "$trusted_repair_ledger"',
+            helper,
+        )
         self.assertIn("trusted_repair_ledger_sha", helper)
         self.assertIn("always() && !cancelled()", checkpoint)
         self.assertNotIn("stage3b_ready", checkpoint)
         self.assertIn("--require-live", checkpoint)
-        self.assertIn('RUNNER_TEMP/upstream-convergence-repair-ledger.json', checkpoint)
+        self.assertIn("RUNNER_TEMP/upstream-convergence-repair-ledger.json", checkpoint)
         self.assertIn("model-packets.json", checkpoint)
         self.assertIn("model-telemetry.json", checkpoint)
         self.assertIn("repair-handoff.txt", checkpoint)
@@ -452,7 +537,10 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertNotIn("GH_TOKEN", checkpoint)
         self.assertNotIn("git push", checkpoint)
         self.assertNotIn("gh ", checkpoint)
-        self.assertLess(self.contents.index("Checkpoint repair cycles and build handoff"), self.contents.index("Verify candidate cleanup and primary checkout"))
+        self.assertLess(
+            self.contents.index("Checkpoint repair cycles and build handoff"),
+            self.contents.index("Verify candidate cleanup and primary checkout"),
+        )
         self.assertIn("retention-days: 90", upload)
 
     def test_stage3d_artifacts_are_bounded_and_evidence_is_preserved(self) -> None:
@@ -461,13 +549,28 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn('test -f "$evidence_dir/repair-checkpoint.json"', checkpoint)
         self.assertIn('wc -c < "$evidence_dir/repair-handoff.txt"', checkpoint)
         self.assertIn("<= 8192", checkpoint)
-        self.assertLess(self.contents.index("Checkpoint repair cycles and build handoff"), self.contents.index("Upload candidate evidence"))
-        self.assertIn("${{ runner.temp }}/upstream-convergence-candidate-evidence", self.step("Upload candidate evidence"))
+        self.assertLess(
+            self.contents.index("Checkpoint repair cycles and build handoff"),
+            self.contents.index("Upload candidate evidence"),
+        )
+        self.assertIn(
+            "${{ runner.temp }}/upstream-convergence-candidate-evidence",
+            self.step("Upload candidate evidence"),
+        )
 
     def test_stage3c_preserves_model_free_read_only_controls(self) -> None:
         packets = self.step("Build bounded model packets")
 
-        for forbidden in ("git push", "git commit", "gh pr", "gh issue", "code exec", "codex exec", "just test", "cargo "):
+        for forbidden in (
+            "git push",
+            "git commit",
+            "gh pr",
+            "gh issue",
+            "code exec",
+            "codex exec",
+            "just test",
+            "cargo ",
+        ):
             self.assertNotIn(forbidden, packets)
         self.assertIn("model-packets.json", packets)
         self.assertIn("model-packets.txt", packets)

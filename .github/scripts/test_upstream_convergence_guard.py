@@ -121,13 +121,17 @@ class GuardViolationTest(GuardFixture):
     def test_passes_when_owned_path_keeps_local_content(self) -> None:
         upstream_blob = guard.blob_id(b"upstream\n")
         self.write_file("codex-rs/auto-review/src/lib.rs", "local\n")
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", upstream_blob)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", upstream_blob)], []
+        )
 
         self.assertTrue(report["passed"])
         self.assertEqual([], report["violations"])
 
     def test_fails_when_owned_path_is_absent(self) -> None:
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", None)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", None)], []
+        )
 
         self.assertFalse(report["passed"])
         self.assertEqual(
@@ -137,20 +141,26 @@ class GuardViolationTest(GuardFixture):
 
     def test_fails_when_owned_path_reverts_to_upstream_blob(self) -> None:
         upstream_blob = self.write_file("codex-rs/auto-review/src/lib.rs", "upstream\n")
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", upstream_blob)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", upstream_blob)], []
+        )
 
         self.assertFalse(report["passed"])
         self.assertEqual(guard.REVERTED, report["violations"][0]["violation"])
 
     def test_passes_when_upstream_lacks_the_path_and_local_keeps_it(self) -> None:
         self.write_file("codex-rs/auto-review/src/lib.rs", "local\n")
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", None)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", None)], []
+        )
 
         self.assertTrue(report["passed"])
 
     def test_directory_at_owned_path_counts_as_absent(self) -> None:
         (self.root / "codex-rs/auto-review/src/lib.rs").mkdir(parents=True)
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", None)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", None)], []
+        )
 
         self.assertEqual(guard.ABSENT, report["violations"][0]["violation"])
 
@@ -161,7 +171,9 @@ class GuardViolationTest(GuardFixture):
         candidate.parent.mkdir(parents=True)
         candidate.symlink_to(target)
 
-        report = self.check([manifest_entry("codex-rs/auto-review/src/lib.rs", None)], [])
+        report = self.check(
+            [manifest_entry("codex-rs/auto-review/src/lib.rs", None)], []
+        )
 
         self.assertEqual(guard.ABSENT, report["violations"][0]["violation"])
         self.assertIn("symbolic link", report["violations"][0]["detail"])
@@ -502,7 +514,9 @@ class CheckedInLedgerTest(unittest.TestCase):
                 self.assertIsNone(guard.evaluate(entry, guard.REPO_ROOT))
 
     def test_every_waiver_names_a_guarded_path(self) -> None:
-        guarded = {entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)}
+        guarded = {
+            entry["path"] for entry in guard.load_manifest(guard.DEFAULT_MANIFEST)
+        }
         waived = {path for path, _ in guard.load_waivers(guard.DEFAULT_WAIVERS)}
 
         self.assertEqual(set(), waived - guarded)

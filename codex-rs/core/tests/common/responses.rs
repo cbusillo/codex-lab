@@ -604,6 +604,7 @@ impl WebSocketTestServer {
         request_index: usize,
     ) -> WebSocketRequest {
         loop {
+            let notified = self.request_log_updated.notified();
             if let Some(request) = self
                 .connections
                 .lock()
@@ -614,7 +615,7 @@ impl WebSocketTestServer {
             {
                 return request;
             }
-            self.request_log_updated.notified().await;
+            notified.await;
         }
     }
 
@@ -707,16 +708,6 @@ impl Match for ResponseMock {
 
         // Enforce invariant checks on every request body captured by the mock.
         // Panic on orphan tool outputs or calls to catch regressions early.
-        validate_request_body_invariants(request);
-        true
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ResponseBodyInvariantMatcher;
-
-impl Match for ResponseBodyInvariantMatcher {
-    fn matches(&self, request: &wiremock::Request) -> bool {
         validate_request_body_invariants(request);
         true
     }
@@ -1087,12 +1078,10 @@ where
 
 fn base_mock() -> (MockBuilder, ResponseMock) {
     let response_mock = ResponseMock::new();
-    let mock = responses_mock().and(response_mock.clone());
+    let mock = Mock::given(method("POST"))
+        .and(path_regex(".*/(responses|guardian)$"))
+        .and(response_mock.clone());
     (mock, response_mock)
-}
-
-fn responses_mock() -> MockBuilder {
-    Mock::given(method("POST")).and(path_regex(".*/responses$"))
 }
 
 fn compact_mock() -> (MockBuilder, ResponseMock) {
@@ -1133,8 +1122,8 @@ where
     M: wiremock::Match + Send + Sync + 'static,
 {
     let response_mock = ResponseMock::new();
-    responses_mock()
-        .and(ResponseBodyInvariantMatcher)
+    Mock::given(method("POST"))
+        .and(path_regex(".*/(responses|guardian)$"))
         .and(matcher)
         .and(response_mock.clone())
         .respond_with(sse_response(body))
@@ -1694,10 +1683,11 @@ pub async fn mount_compact_response_sequence(
 
 /// Validate invariants on the request body sent to `/v1/responses`.
 ///
-/// - No `function_call_output`/`custom_tool_call_output` with missing/empty `call_id`.
+/// - A `function_call_output` with missing/empty `call_id` must have a nonempty `name`.
+/// - No `custom_tool_call_output` with missing/empty `call_id`.
 /// - `tool_search_output` must have a `call_id` unless it is a server-executed legacy item.
-/// - Every `function_call_output` must match a prior `function_call` or
-///   `local_shell_call` with the same `call_id` in the same `input`.
+/// - Every `function_call_output` with a `call_id` must match a prior `function_call`
+///   or `local_shell_call` with the same `call_id` in the same `input`.
 /// - Every `custom_tool_call_output` must match a prior `custom_tool_call`.
 /// - Every `tool_search_output` must match a prior `tool_search_call`.
 /// - Additionally, enforce symmetry: every `function_call`/`custom_tool_call`/
@@ -1743,9 +1733,19 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
         items
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some(kind))
-            .map(|item| {
-                let id = get_call_id(item).expect(missing_msg);
-                id.to_string()
+            .filter_map(|item| {
+                if let Some(id) = get_call_id(item) {
+                    return Some(id.to_string());
+                }
+                if kind == "function_call_output"
+                    && item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.is_empty())
+                {
+                    return None;
+                }
+                panic!("{missing_msg}");
             })
             .collect()
     }

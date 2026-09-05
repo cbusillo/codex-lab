@@ -79,6 +79,8 @@ use codex_core::read_session_meta_line;
 use codex_feedback::CodexFeedback;
 use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
@@ -100,8 +102,6 @@ pub use codex_protocol::protocol::ProjectValidationSkipReason;
 pub use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -1126,8 +1126,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     request_id: request_ids.next(),
                     params: TurnStartParams {
                         thread_id: primary_thread_id_for_span.clone(),
+                        turn_trigger: None,
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
+                        tool_output: None,
                         responsesapi_client_metadata: None,
                         additional_context: None,
                         environments: None,
@@ -1139,12 +1141,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         permissions: None,
                         model: None,
                         service_tier: None,
+                        service_tier_for_turn: None,
                         effort: default_effort,
                         summary: None,
                         personality: None,
                         output_schema,
                         collaboration_mode: None,
                         multi_agent_mode: None,
+                        cyber_access_program: None,
                     },
                 },
                 "turn/start",
@@ -1697,6 +1701,10 @@ fn should_process_notification(
             .thread_id
             .as_deref()
             .is_none_or(|candidate| candidate == thread_id),
+        ServerNotification::AuthRecoveryStarted(notification)
+        | ServerNotification::AuthRecoveryCompleted(notification) => {
+            notification.thread_id == thread_id && notification.turn_id == turn_id
+        }
         ServerNotification::Error(notification) => {
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
@@ -1840,20 +1848,24 @@ async fn latest_thread_cwd(thread: &AppServerThread) -> PathBuf {
 }
 
 async fn parse_latest_turn_context_cwd(path: &Path) -> Option<PathBuf> {
-    let text = tokio::fs::read_to_string(path).await.ok()?;
-    for line in text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let reader = codex_rollout::open_rollout_seekable_reader(&path).ok()?;
+        let mut scanner = codex_rollout::ReverseJsonlScanner::new(reader).ok()?;
+        while let Some(outcome) = scanner.scan_next::<RolloutLine>().ok()? {
+            if let codex_rollout::ScanOutcome::Parsed(RolloutLine {
+                item: RolloutItem::TurnContext(item),
+                ..
+            }) = outcome
+            {
+                return Some(item.cwd.into_path_buf());
+            }
         }
-        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
-            continue;
-        };
-        if let RolloutItem::TurnContext(item) = rollout_line.item {
-            return Some(item.cwd.into_path_buf());
-        }
-    }
-    None
+        None
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {

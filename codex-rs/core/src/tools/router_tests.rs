@@ -26,7 +26,6 @@ use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -42,15 +41,6 @@ use super::ToolCall;
 use super::ToolCallSource;
 use super::ToolRouter;
 use super::tool_log_payload;
-
-const MULTI_AGENT_V2_TOOL_NAMES: [&str; 6] = [
-    "spawn_agent",
-    "send_message",
-    "followup_task",
-    "wait_agent",
-    "interrupt_agent",
-    "list_agents",
-];
 
 struct ExtensionEchoContributor;
 
@@ -69,37 +59,19 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
-#[test]
-fn direct_source_redacts_plaintext_multi_agent_messages_in_any_namespace() {
-    for namespace in [Some("agents"), Some("collaboration"), None] {
-        for tool_name in ["spawn_agent", "send_message", "followup_task"] {
-            let call = ToolCall {
-                tool_name: ToolName::new(namespace.map(str::to_string), tool_name),
-                call_id: "call-plaintext-message".to_string(),
-                payload: ToolPayload::Function {
-                    arguments: json!({"message": "secret message"}).to_string(),
-                },
-                encrypted_function_args: Some(Vec::new()),
-            };
-
-            assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
-        }
-    }
-}
-
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,
         _session_store: &ExtensionData,
         _thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ExtensionToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> {
         vec![Arc::new(ExtensionEchoExecutor)]
     }
 }
 
 struct ExtensionEchoExecutor;
 
-impl ToolExecutor<ExtensionToolCall> for ExtensionEchoExecutor {
+impl<'call> ToolExecutor<ExtensionToolCall<'call>> for ExtensionEchoExecutor {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced("extension/", "echo")
     }
@@ -127,7 +99,10 @@ impl ToolExecutor<ExtensionToolCall> for ExtensionEchoExecutor {
         })
     }
 
-    fn handle(&self, call: ExtensionToolCall) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ExtensionToolCall<'call>) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(self.handle_call(call))
     }
 }
@@ -135,7 +110,7 @@ impl ToolExecutor<ExtensionToolCall> for ExtensionEchoExecutor {
 impl ExtensionEchoExecutor {
     async fn handle_call(
         &self,
-        call: ExtensionToolCall,
+        call: ExtensionToolCall<'_>,
     ) -> Result<Box<dyn codex_tools::ToolOutput>, codex_tools::FunctionCallError> {
         let arguments: serde_json::Value =
             serde_json::from_str(call.function_arguments()?).expect("test arguments should parse");
@@ -157,11 +132,14 @@ fn extension_tool_test_registry() -> Arc<ExtensionRegistry<Config>> {
 fn test_tool_router(
     step_context: &StepContext,
     mcp_tools: Vec<RegisteredTool>,
-    extension_tool_executors: impl IntoIterator<Item = Arc<dyn ToolExecutor<ExtensionToolCall>>>,
+    extension_tool_executors: impl IntoIterator<
+        Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>,
+    >,
     dynamic_tools: &[DynamicToolSpec],
 ) -> ToolRouter {
     let mut registry = build_core_tool_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &step_context.environments,
         step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -169,6 +147,7 @@ fn test_tool_router(
     );
     let hosted_specs = append_source_tools(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         &mut registry,
         mcp_tools,
         extension_tool_executors,
@@ -176,6 +155,7 @@ fn test_tool_router(
     );
     ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        step_context.turn.model_info(),
         registry,
         hosted_specs,
         &Default::default(),
@@ -210,14 +190,7 @@ async fn parallel_support_does_not_match_namespaced_local_tool_names() -> anyhow
 
     assert_eq!(
         router
-            .tool_runtime(&ToolCall {
-                tool_name: ToolName::plain(parallel_tool_name),
-                call_id: "call-local-tool".to_string(),
-                payload: ToolPayload::Function {
-                    arguments: "{}".to_string(),
-                },
-                encrypted_function_args: None,
-            })
+            .tool_runtime(&ToolName::plain(parallel_tool_name))
             .map(|runtime| runtime.tool_name()),
         Some(ToolName::plain(parallel_tool_name))
     );
@@ -261,55 +234,6 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
             assert_eq!(arguments, "{}");
         }
         other => panic!("expected function payload, got {other:?}"),
-    }
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn legacy_multi_agent_v2_calls_use_the_registered_namespace() -> anyhow::Result<()> {
-    for configured_namespace in ["agents", "delegation"] {
-        let (_, mut turn) = make_session_and_context().await;
-        let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(codex_features::Feature::MultiAgentV2)
-            .expect("test feature should be enableable in config");
-        config.multi_agent_v2.tool_namespace = Some(configured_namespace.to_string());
-        turn.multi_agent_version = config.multi_agent_version_from_features();
-        turn.config = Arc::new(config);
-        let turn = Arc::new(turn);
-        let step_context = StepContext::for_test(Arc::clone(&turn));
-        let router = test_tool_router(
-            step_context.as_ref(),
-            Vec::new(),
-            Vec::new(),
-            &turn.dynamic_tools,
-        );
-
-        for tool_name in MULTI_AGENT_V2_TOOL_NAMES {
-            let call = ToolRouter::build_tool_call(ResponseItem::FunctionCall {
-                id: None,
-                name: tool_name.to_string(),
-                namespace: Some("collaboration".to_string()),
-                arguments: "{}".to_string(),
-                encrypted_function_args: None,
-                call_id: format!("call-{tool_name}"),
-                internal_chat_message_metadata_passthrough: None,
-            })?
-            .expect("function_call should produce a tool call");
-
-            assert_eq!(
-                call.tool_name,
-                ToolName::namespaced("collaboration", tool_name)
-            );
-            assert_eq!(
-                router
-                    .tool_runtime(&call)
-                    .map(|runtime| runtime.tool_name()),
-                Some(ToolName::namespaced("collaboration", tool_name))
-            );
-        }
     }
 
     Ok(())
@@ -438,7 +362,7 @@ async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     assert!(router.tool_supports_parallel(&call));
     assert_eq!(
         router
-            .tool_runtime(&call)
+            .tool_runtime(&call.tool_name)
             .map(|runtime| runtime.tool_name()),
         Some(call.tool_name.clone())
     );
@@ -454,7 +378,7 @@ async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
     assert!(!router.tool_supports_parallel(&different_server_call));
     assert_eq!(
         router
-            .tool_runtime(&different_server_call)
+            .tool_runtime(&different_server_call.tool_name)
             .map(|runtime| runtime.tool_name()),
         Some(different_server_call.tool_name.clone())
     );
@@ -468,7 +392,7 @@ async fn mcp_parallel_support_uses_handler_data() -> anyhow::Result<()> {
         encrypted_function_args: None,
     };
     assert!(!router.tool_supports_parallel(&hidden_call));
-    assert!(router.tool_runtime(&hidden_call).is_some());
+    assert!(router.tool_runtime(&hidden_call.tool_name).is_some());
 
     let nested_only_call = ToolCall {
         tool_name: ToolName::namespaced("mcp__nested_echo__", "query_with_delay"),
@@ -672,10 +596,12 @@ async fn extension_tool_executors_are_model_visible_and_dispatchable() -> anyhow
         )
         .await?;
 
-    let response = result.into_response();
+    let response = result.into_response().item;
     match response {
-        ResponseInputItem::FunctionCallOutput { call_id, output } => {
-            assert_eq!(call_id, "call-extension");
+        ResponseItem::FunctionCallOutput {
+            call_id, output, ..
+        } => {
+            assert_eq!(call_id.as_deref(), Some("call-extension"));
             let FunctionCallOutputBody::Text(text) = output.body else {
                 panic!("expected text function call output")
             };

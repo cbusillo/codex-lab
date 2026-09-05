@@ -167,7 +167,9 @@ async fn run_review_task(
     for item in input {
         match item {
             TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
-            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
+            TurnInput::ResponseItem(_)
+            | TurnInput::FunctionCallOutput(_)
+            | TurnInput::InterAgentCommunication(_) => {}
         }
     }
 
@@ -442,7 +444,7 @@ async fn start_review_conversation(
     let model = config
         .review_model
         .clone()
-        .unwrap_or_else(|| ctx.model_info.slug.clone());
+        .unwrap_or_else(|| ctx.model_info().slug.clone());
     sub_agent_config.model = Some(model);
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
     if let Some(budget_gate) = budget_gate.clone() {
@@ -451,7 +453,7 @@ async fn start_review_conversation(
     run_codex_thread_one_shot(
         sub_agent_config,
         Arc::clone(&session.services.auth_manager),
-        Arc::clone(&session.services.models_manager),
+        Arc::clone(&session.services.control_models_manager),
         input,
         Arc::clone(&session),
         ctx.clone(),

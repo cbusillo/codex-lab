@@ -244,15 +244,9 @@ deny = [
         # upstream HTTP transport independently of Codex.
         "codex-responses-api-proxy",
         # Temporary migration exceptions.
-        "codex-app-server",
-        "codex-browser",
-        "codex-code-bridge-client",
-        "codex-code-bridge-service",
-        "codex-core",
         "codex-otel",
         # Third-party crates that own their reqwest integration. These are not part of the
         # first-party migration count above.
-        "chromiumoxide",
         "oauth2",
         "opentelemetry-http",
         "opentelemetry-otlp",
@@ -319,6 +313,7 @@ allow-git = [
     "https://github.com/dzbarsky/rules_rust",
     "https://github.com/helix-editor/nucleo.git",
     "https://github.com/juberti-oai/rust-sdks.git",
+    "https://github.com/microsoft/mxc",
     "https://github.com/openai-oss-forks/crossterm",
     "https://github.com/openai-oss-forks/tokio-tungstenite",
     "https://github.com/openai-oss-forks/tungstenite-rs",

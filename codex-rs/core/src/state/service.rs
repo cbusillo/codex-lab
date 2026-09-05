@@ -43,6 +43,7 @@ use codex_rollout_trace::ThreadTraceContext;
 use codex_skills_extension::HostSkillsService;
 use codex_thread_store::LiveThread;
 use codex_thread_store::ThreadStore;
+use codex_utils_git_discovery::GitRootDiscovery;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
@@ -68,7 +69,10 @@ pub(crate) struct SessionServices {
     pub(crate) execution_account: ExecutionAccountLease,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
+    /// Stable control-plane catalog used to scope child-session model managers.
+    pub(crate) control_models_manager: SharedModelsManager,
     pub(crate) models_manager: SharedModelsManager,
+    pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) tool_approvals: Mutex<ApprovalStore>,
     pub(crate) guardian_rejection_circuit_breaker: Mutex<GuardianRejectionCircuitBreaker>,

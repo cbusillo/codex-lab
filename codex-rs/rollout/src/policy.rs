@@ -17,6 +17,7 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, history_mode: ThreadHistory
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
         RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
+        | RolloutItem::TokenUsageRecord(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::SessionMeta(_) => true,
@@ -96,7 +97,9 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
             matches!(history_mode, ThreadHistoryMode::Paginated)
                 || matches!(
                     event.item,
-                    TurnItem::Plan(_) | TurnItem::Extension(ExtensionItem::Sleep(_))
+                    TurnItem::FunctionCallOutput(_)
+                        | TurnItem::Plan(_)
+                        | TurnItem::Extension(ExtensionItem::Sleep(_))
                 )
                 || matches!(
                     &event.item,
@@ -110,7 +113,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
-        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ThreadSettingsApplied(_) => true,
 
         // Only persist these legacy events when the thread's history mode is Legacy.
@@ -135,7 +137,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
 
         // Transient, non-durable events.
         EventMsg::Error(_)
-        | EventMsg::BackgroundAutoReviewStatus(_)
         | EventMsg::ThreadQueueChanged(_)
         | EventMsg::GuardianAssessment(_)
         | EventMsg::ExecCommandEnd(_)
@@ -148,6 +149,8 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::DynamicToolCallRequest(_)
         | EventMsg::DynamicToolCallResponse(_)
         | EventMsg::Warning(_)
+        | EventMsg::AuthRecoveryStarted(_)
+        | EventMsg::AuthRecoveryCompleted(_)
         | EventMsg::GuardianWarning(_)
         | EventMsg::RealtimeConversationStarted(_)
         | EventMsg::RealtimeConversationSdp(_)
@@ -195,10 +198,8 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::CollabAgentInteractionBegin(_)
         | EventMsg::CollabWaitingBegin(_)
         | EventMsg::CollabCloseBegin(_)
-        | EventMsg::CollabResumeBegin(_) => false,
+        | EventMsg::CollabResumeBegin(_)
+        | EventMsg::BackgroundAutoReviewStatus(_)
+        | EventMsg::ProjectValidationCompleted(_) => false,
     }
 }
-
-#[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;

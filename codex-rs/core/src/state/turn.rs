@@ -9,7 +9,6 @@ use tokio_util::task::AbortOnDropHandle;
 
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
-use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
@@ -21,7 +20,9 @@ use tokio::sync::oneshot;
 use crate::agent::control::AgentExecutionGuard;
 use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::session::TurnInputQueue;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnEnvironment;
 use crate::tasks::AnySessionTask;
 use crate::tasks::TaskStart;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -75,7 +76,6 @@ pub(crate) enum TaskKind {
 pub(crate) struct RunningTask {
     pub(crate) done: Arc<Notify>,
     pub(crate) kind: TaskKind,
-    pub(crate) background_review_trigger_eligible: bool,
     pub(crate) task: Arc<dyn AnySessionTask>,
     pub(crate) start: TaskStart,
     pub(crate) cancellation_token: CancellationToken,
@@ -104,12 +104,15 @@ pub(crate) struct TurnState {
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
     pub(crate) completed_turn_diff: Option<String>,
+    /// The last step captured for execution or selected from a speculative fallback.
+    /// Remains absent until a step is captured; standalone local compaction has no step.
+    pub(crate) last_known_step_context: Option<Arc<StepContext>>,
 }
 
 pub(crate) struct PendingRequestPermissions {
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
-    pub(crate) environment: TurnEnvironmentSelection,
+    pub(crate) environment: TurnEnvironment,
 }
 
 impl TurnState {

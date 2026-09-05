@@ -64,19 +64,23 @@ use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
 use codex_analytics::AppServerRpcTransport;
+use codex_app_server_protocol::AgentMessageDelivery;
 use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadItem;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
@@ -110,9 +114,18 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
     matches!(
         notification,
         ServerNotification::TurnCompleted(_)
+            | ServerNotification::ProjectValidationCompleted(_)
+            | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
+            | ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    delivery: Some(AgentMessageDelivery::Async),
+                    ..
+                },
+                ..
+            })
     )
 }
 
@@ -483,7 +496,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
-                plugin_startup_tasks: crate::PluginStartupTasks::Start,
+                plugin_startup_tasks: Some(PluginStartupConfig::Current),
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
@@ -784,11 +797,17 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_app_server_protocol::AgentMessageDelivery;
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::InitializeCapabilities;
+    use codex_app_server_protocol::ItemCompletedNotification;
+    use codex_app_server_protocol::ProjectValidationCompletedNotification;
+    use codex_app_server_protocol::ProjectValidationSkipReason;
+    use codex_app_server_protocol::ProjectValidationStatus;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+    use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;
@@ -1013,12 +1032,46 @@ mod tests {
             })
         ));
         assert!(server_notification_requires_delivery(
+            &ServerNotification::ProjectValidationCompleted(
+                ProjectValidationCompletedNotification {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: None,
+                    command: Vec::new(),
+                    command_truncated: false,
+                    cwd: None,
+                    status: ProjectValidationStatus::Skipped,
+                    skip_reason: Some(ProjectValidationSkipReason::ValidationDisabled),
+                    changed_file_count: None,
+                    exit_code: None,
+                    output: "validation disabled".to_string(),
+                    output_truncated: false,
+                    duration_ms: 0,
+                },
+            )
+        ));
+        assert!(server_notification_requires_delivery(
             &ServerNotification::ExternalAgentConfigImportCompleted(
                 ExternalAgentConfigImportCompletedNotification {
                     import_id: "import".to_string(),
                     item_type_results: Vec::new(),
                 },
             )
+        ));
+        assert!(server_notification_requires_delivery(
+            &ServerNotification::ItemCompleted(ItemCompletedNotification {
+                item: ThreadItem::AgentMessage {
+                    id: "item-1".to_string(),
+                    text: "Still working".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    delivery: Some(AgentMessageDelivery::Async),
+                    questions: None,
+                },
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                completed_at_ms: 0,
+            })
         ));
     }
 }

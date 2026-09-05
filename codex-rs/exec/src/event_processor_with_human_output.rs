@@ -41,6 +41,19 @@ pub(crate) struct EventProcessorWithHumanOutput {
 }
 
 impl EventProcessorWithHumanOutput {
+    pub(crate) fn create_with_ansi(
+        with_ansi: bool,
+        config: &Config,
+        last_message_path: Option<PathBuf>,
+    ) -> Self {
+        Self::create_with_ansi_and_identity(
+            with_ansi,
+            config,
+            last_message_path,
+            ProductIdentity::Codex,
+        )
+    }
+
     pub(crate) fn create_with_ansi_and_identity(
         with_ansi: bool,
         config: &Config,
@@ -242,6 +255,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 CodexStatus::Running
             }
             ServerNotification::Warning(notification) => self.process_warning(notification.message),
+            ServerNotification::AuthRecoveryStarted(notification) => {
+                eprintln!("{}", notification.message);
+                CodexStatus::Running
+            }
+            ServerNotification::AuthRecoveryCompleted(notification) => {
+                eprintln!("{}", notification.message.style(self.green));
+                CodexStatus::Running
+            }
             ServerNotification::Error(notification) => {
                 eprintln!(
                     "{} {}",

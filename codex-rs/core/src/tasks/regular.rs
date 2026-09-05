@@ -67,7 +67,7 @@ impl SessionTask for RegularTask {
             trace_id: ctx.trace_id.clone(),
             started_at: ctx.turn_timing_state.started_at_unix_secs().await,
             model_context_window: ctx.model_context_window(),
-            collaboration_mode_kind: ctx.mode,
+            collaboration_mode_kind: ctx.mode(),
         });
         sess.send_event(ctx.as_ref(), event).await;
         sess.set_server_reasoning_included(/*included*/ false).await;
@@ -81,7 +81,6 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
-        // `SessionTask::start` emits `TurnStarted` before startup prewarm resolution.
         let prewarmed_client_session = sess
             .consume_startup_prewarm_for_regular_turn(&cancellation_token)
             .instrument(trace_span!("regular_task.prepare_run_turn"))
@@ -142,6 +141,12 @@ impl SessionTask for RegularTask {
             let validation_eligible = turn_result.project_validation_eligibility
                 == ProjectValidationEligibility::Eligible;
             project_validation_model_used_tools |= turn_result.model_used_tools;
+            if ctx.terminal_error.lock().await.is_some() {
+                self.initial_input_recorder
+                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .await;
+                return Ok(None);
+            }
             if sess.input_queue.has_pending_input(&sess.active_turn).await {
                 next_input = Vec::new();
                 continue;

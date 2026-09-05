@@ -3,6 +3,7 @@ use codex_config::Constrained;
 use codex_core::EnvironmentConfig;
 use codex_core::TurnInputRequest;
 use codex_core::config::Config;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::McpServerContribution;
@@ -17,13 +18,13 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
@@ -209,6 +210,7 @@ fn format_labeled_requests_snapshot(
 }
 
 fn enable_deferred_tool_world_state_without_agents(config: &mut Config) {
+    config.update_plan_enabled = true;
     config.agents_enabled = false;
     config
         .features
@@ -269,7 +271,7 @@ fn config_with_mcp_marker(base: &Config, marker: &str) -> Config {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Result<()> {
+async fn root_and_resident_subagent_reuse_root_mcp_session_source() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const PARENT_PROMPT: &str = "spawn an agent to verify its MCP session source";
@@ -277,8 +279,7 @@ async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Res
     const SPAWN_CALL_ID: &str = "mcp-session-source-spawn";
 
     let server = responses::start_mock_server().await;
-    let spawn_args =
-        serde_json::to_string(&json!({ "message": CHILD_PROMPT, "task_name": "child" }))?;
+    let spawn_args = serde_json::to_string(&json!({ "message": CHILD_PROMPT }))?;
     mount_sse_once_match(
         &server,
         |request: &Request| {
@@ -287,7 +288,12 @@ async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Res
         },
         sse(vec![
             ev_response_created("resp-parent-spawn"),
-            ev_function_call_with_namespace(SPAWN_CALL_ID, "agents", "spawn_agent", &spawn_args),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                "multi_agent_v1",
+                "spawn_agent",
+                &spawn_args,
+            ),
             ev_completed("resp-parent-spawn"),
         ]),
     )
@@ -344,14 +350,15 @@ async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Res
     let observed_sources = observed_sources
         .lock()
         .expect("observed sources lock should not be poisoned");
-    assert!(observed_sources.contains(&SessionSource::Exec));
-    assert!(observed_sources.iter().any(|source| matches!(
-        source,
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id,
-            ..
-        }) if *parent_thread_id == test.session_configured.thread_id
-    )));
+    assert!(
+        observed_sources.len() >= 2,
+        "expected root and resident-child MCP projections: {observed_sources:?}"
+    );
+    assert!(
+        observed_sources
+            .iter()
+            .all(|source| source == &SessionSource::Exec)
+    );
 
     Ok(())
 }
@@ -483,10 +490,17 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
             &selection,
             EnvironmentConfig {
                 allow_login_shell: false,
+                workspace_roots: selection.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(
                     test.config.permissions.permission_profile().clone(),
                 ),
                 shell_environment_policy: Default::default(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                windows_sandbox_private_desktop: test
+                    .config
+                    .permissions
+                    .windows_sandbox_private_desktop,
+                use_legacy_landlock: test.config.features.use_legacy_landlock(),
                 exec_policy: None,
                 mcp_policy: None,
                 network_policy: None,
@@ -551,6 +565,98 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
         "shared Apps tools should remain model-visible after root reconciliation: {body}"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timeout_refresh_replaces_pending_startup_and_reuses_ready_connection() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let pending_mock = responses::start_mock_server().await;
+    let (pending_server, pending_startup) =
+        AppsTestServer::mount_with_startup_control(&pending_mock).await?;
+    let release_startup = pending_startup.hold_next_successful_initialize();
+    let ready_mock = responses::start_mock_server().await;
+    let (ready_server, ready_startup) =
+        AppsTestServer::mount_with_startup_control(&ready_mock).await?;
+    let test = core_test_support::test_codex::test_codex()
+        .with_config(move |config| {
+            config
+                .mcp_servers
+                .set(
+                    [("pending", pending_server), ("ready", ready_server)]
+                        .into_iter()
+                        .map(|(name, server)| {
+                            (
+                                name.to_string(),
+                                serde_json::from_value(json!({
+                                    "url": format!("{}/api/codex/ps/mcp", server.chatgpt_base_url),
+                                    "startup_timeout_sec": 60,
+                                }))
+                                .expect("valid MCP config"),
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("test config should allow MCP servers");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while pending_startup.initialize_attempts() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pending startup should begin before refresh");
+    let ready_result = test
+        .codex
+        .call_mcp_tool(
+            "ready",
+            "calendar_list_events",
+            /*arguments*/ None,
+            /*meta*/ None,
+        )
+        .await?;
+
+    let mut refresh_config = test.config.clone();
+    let mut servers = refresh_config.mcp_servers.get().clone();
+    for config in servers.values_mut() {
+        config.startup_timeout_sec = None;
+    }
+    refresh_config.mcp_servers.set(servers)?;
+    test.codex.refresh_mcp_config(refresh_config).await;
+    // Publish without waiting for the held initialize to finish.
+    let error = test
+        .codex
+        .read_mcp_resource("unknown", ReadResourceRequestParams::new("test://resource"))
+        .await
+        .expect_err("the unknown server should not exist");
+    assert_eq!(error.to_string(), "unknown MCP server 'unknown'");
+    release_startup
+        .send(())
+        .expect("the mock initialize should remain held until publication");
+
+    for name in ["pending", "ready"] {
+        let result = test
+            .codex
+            .call_mcp_tool(
+                name,
+                "calendar_list_events",
+                /*arguments*/ None,
+                /*meta*/ None,
+            )
+            .await?;
+        assert_eq!(result, ready_result);
+    }
+    assert_eq!(
+        (
+            pending_startup.initialize_attempts(),
+            ready_startup.initialize_attempts(),
+        ),
+        (2, 1)
+    );
     Ok(())
 }
 
@@ -1043,6 +1149,7 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
+            config.update_plan_enabled = true;
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
@@ -1083,8 +1190,8 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
         initial_request
             .message_input_texts("developer")
             .iter()
-            .all(|text| !text.contains(SEARCH_CALENDAR_NAMESPACE)),
-        "Calendar namespace should not be advertised before recovery"
+            .all(|text| !text.contains("<tools>")),
+        "empty deferred tool world state should not render before recovery"
     );
 
     release_apps_recovery
@@ -1131,13 +1238,13 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let recovered_tools_state = requests[1]
         .message_input_texts("developer")
         .into_iter()
-        .find(|text| text.contains(SEARCH_CALENDAR_NAMESPACE))
-        .expect("recovered request should contain the Calendar tools world state");
+        .find(|text| text.contains("<tools>"))
+        .expect("recovered request should contain deferred tools world state");
     assert!(
         recovered_tools_state.contains(&format!(
             "- {SEARCH_CALENDAR_NAMESPACE}: Plan events and manage your calendar."
         )),
-        "Calendar namespace and description should be added after recovery: {recovered_tools_state}"
+        "Calendar namespace and description should be available after recovery: {recovered_tools_state}"
     );
     let recovered_body = requests[1].body_json();
     assert!(

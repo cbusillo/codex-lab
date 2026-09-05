@@ -197,6 +197,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::ExecApprovalRequest(ev) => {
                         let approval_id = ev.effective_approval_id();
                         let ExecApprovalRequestEvent {
+                            kind: _,
                             turn_id: _,
                             environment_id: _,
                             started_at_ms: _,
@@ -216,7 +217,7 @@ async fn run_codex_tool_session_inner(
                         } = ev;
                         handle_exec_approval_request(
                             command,
-                            cwd.to_path_buf(),
+                            std::path::PathBuf::from(cwd.into_string()),
                             outgoing.clone(),
                             thread.clone(),
                             request_id.clone(),
@@ -246,6 +247,8 @@ async fn run_codex_tool_session_inner(
                         break;
                     }
                     EventMsg::Warning(_)
+                    | EventMsg::AuthRecoveryStarted(_)
+                    | EventMsg::AuthRecoveryCompleted(_)
                     | EventMsg::GuardianWarning(_)
                     | EventMsg::ModelVerification(_)
                     | EventMsg::SafetyBuffering(_)
@@ -355,6 +358,8 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::DynamicToolCallResponse(_)
                     | EventMsg::ContextCompacted(_)
                     | EventMsg::ModelReroute(_)
+                    | EventMsg::BackgroundAutoReviewStatus(_)
+                    | EventMsg::ProjectValidationCompleted(_)
                     | EventMsg::ThreadRolledBack(_)
                     | EventMsg::CollabAgentSpawnBegin(_)
                     | EventMsg::CollabAgentSpawnEnd(_)
@@ -371,8 +376,6 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::RealtimeConversationSdp(_)
                     | EventMsg::RealtimeConversationRealtime(_)
                     | EventMsg::RealtimeConversationClosed(_)
-                    | EventMsg::BackgroundAutoReviewStatus(_)
-                    | EventMsg::ProjectValidationCompleted(_)
                     | EventMsg::DeprecationNotice(_) => {
                         // For now, we do not do anything extra for these
                         // events. Note that

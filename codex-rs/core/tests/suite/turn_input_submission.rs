@@ -11,9 +11,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
@@ -22,6 +20,7 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -29,6 +28,7 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+use test_case::test_case;
 use tokio::sync::Barrier;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -47,171 +47,45 @@ async fn submit_user_message(
     codex.start_or_steer_turn(user_message_request(text)).await
 }
 
+#[test_case(ModeKind::Default, ModeKind::Plan; "automatic input cannot enter Plan")]
+#[test_case(ModeKind::Plan, ModeKind::Default; "automatic input cannot leave Plan")]
 #[tokio::test]
-async fn legacy_user_input_operation_starts_a_turn() {
-    let server = responses::start_mock_server().await;
-    let response_mock = responses::mount_sse_once(
-        &server,
-        responses::sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    )
-    .await;
-    let test = test_codex()
-        .build_with_auto_env(&server)
-        .await
-        .expect("build legacy user-input session");
-
-    test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "legacy input".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides::default(),
-        })
-        .await
-        .expect("legacy user input should be accepted");
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-
-    let legacy_input = response_mock
-        .single_request()
-        .message_input_texts("user")
-        .into_iter()
-        .filter(|text| text == "legacy input")
-        .collect::<Vec<_>>();
-    assert_eq!(legacy_input, vec!["legacy input"]);
-}
-
-#[tokio::test]
-async fn legacy_user_input_operation_reports_typed_rejections_as_errors() {
-    let (release_response, response_gate) = oneshot::channel();
-    let (server, _completions) = start_streaming_sse_server(vec![vec![
-        StreamingSseChunk {
-            gate: None,
-            body: responses::sse(vec![ev_response_created("resp-1")]),
-        },
-        StreamingSseChunk {
-            gate: Some(response_gate),
-            body: responses::sse(vec![ev_completed("resp-1")]),
-        },
-    ]])
-    .await;
-    let test = test_codex()
-        .build_with_streaming_server(&server)
-        .await
-        .expect("build legacy user-input rejection session");
-
-    submit_user_message(&test.codex, "start turn")
-        .await
-        .expect("first message should start a turn");
-    timeout(
-        Duration::from_secs(5),
-        server.wait_for_request_count(/*count*/ 1),
-    )
-    .await
-    .expect("started turn should reach its first model request");
-
-    test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "mismatched schema".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: Some(serde_json::json!({"type": "string"})),
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides::default(),
-        })
-        .await
-        .expect("legacy schema mismatch should reach the session loop");
-    let event = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
-    let EventMsg::Error(error) = event else {
-        unreachable!("waited for an error event");
-    };
-
-    assert_eq!(error.message, "active turn uses a different output schema");
-    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::BadRequest));
-
-    release_response
-        .send(())
-        .expect("response gate should remain open");
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn legacy_user_input_operation_preserves_bad_request_classification() {
-    let server = responses::start_mock_server().await;
-    let test = test_codex()
-        .with_config(|config| {
-            config.permissions.approval_policy = Constrained::allow_only(AskForApproval::OnRequest);
-        })
-        .build_with_auto_env(&server)
-        .await
-        .expect("build constrained legacy user-input session");
-
-    test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "invalid settings".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: ThreadSettingsOverrides {
-                approval_policy: Some(AskForApproval::Never),
-                ..Default::default()
-            },
-        })
-        .await
-        .expect("legacy invalid settings should reach the session loop");
-    let event = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
-    let EventMsg::Error(error) = event else {
-        unreachable!("waited for an error event");
-    };
-
-    assert_eq!(error.codex_error_info, Some(CodexErrorInfo::BadRequest));
-}
-
-#[tokio::test]
-async fn start_turn_if_idle_rejects_non_user_input_that_requests_plan_mode() {
+async fn start_turn_if_idle_keeps_automatic_plan_rejections_atomic(
+    current_mode: ModeKind,
+    proposed_mode: ModeKind,
+) {
     let server = responses::start_mock_server().await;
     let test = test_codex()
         .build_with_auto_env(&server)
         .await
         .expect("build turn-input submission session");
-    let original_collaboration_mode = test.codex.config_snapshot().await.collaboration_mode;
-
+    let mut collaboration_mode = test.codex.config_snapshot().await.collaboration_mode;
+    collaboration_mode.mode = current_mode;
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            collaboration_mode: Some(collaboration_mode.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("set the current collaboration mode");
+    let current_settings = test.codex.thread_settings_snapshot().await;
+    collaboration_mode.mode = proposed_mode;
+    let overrides = ThreadSettingsOverrides {
+        collaboration_mode: Some(collaboration_mode.clone()),
+        ..Default::default()
+    };
     let submission = test
         .codex
         .start_turn_if_idle(
             TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
-                "automatic input",
+                "rejected automatic input",
             )))
-            .with_thread_settings(ThreadSettingsOverrides {
-                collaboration_mode: Some(CollaborationMode {
-                    mode: ModeKind::Plan,
-                    settings: Settings {
-                        model: test.session_configured.model.clone(),
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            }),
+            .with_thread_settings(overrides.clone()),
         )
         .await
-        .expect("idle turn submission should return a typed rejection");
-
+        .expect("automatic Plan admission should return a typed rejection");
     assert_eq!(
         submission,
         StartIfIdleSubmission::NotSubmitted {
@@ -219,19 +93,43 @@ async fn start_turn_if_idle_rejects_non_user_input_that_requests_plan_mode() {
         }
     );
     assert_eq!(
-        test.codex.config_snapshot().await.collaboration_mode,
-        original_collaboration_mode
+        test.codex.thread_settings_snapshot().await,
+        current_settings
     );
-}
 
-#[tokio::test]
-async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
-    let server = responses::start_mock_server().await;
+    // Rejection releases the idle reservation, and an explicit user can make
+    // either transition without receiving the rejected automatic input.
     let response_mock = responses::mount_sse_once(
         &server,
         responses::sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
     )
     .await;
+    let started = test
+        .codex
+        .start_turn_if_idle(
+            user_message_request("explicit user input").with_thread_settings(overrides),
+        )
+        .await
+        .expect("rejection must release the idle reservation for explicit user input");
+    assert!(matches!(started, StartIfIdleSubmission::Started { .. }));
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        test.codex.config_snapshot().await.collaboration_mode,
+        collaboration_mode
+    );
+    let request = response_mock.single_request();
+    assert!(request.body_contains_text("explicit user input"));
+    assert!(!request.body_contains_text("rejected automatic input"));
+}
+
+#[tokio::test]
+async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+    let server = responses::start_mock_server().await;
+    let response_mock =
+        responses::mount_sse_once(&server, responses::sse_completed("resp-1")).await;
     let test = test_codex()
         .build_with_auto_env(&server)
         .await
@@ -254,6 +152,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
                 ..Default::default()
             },
             trace: None,
+            cyber_access_program: None,
         })
         .await
         .expect("recovered turn should start");
@@ -262,6 +161,10 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
         StartIfIdleSubmission::Started {
             turn_id: turn_id.to_string(),
         }
+    );
+    assert_eq!(
+        test.codex.config_snapshot().await.collaboration_mode.mode,
+        ModeKind::Plan
     );
 
     let started = wait_for_event(&test.codex, |event| {
@@ -277,9 +180,16 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
     })
     .await;
 
-    let user_input_groups = response_mock
-        .single_request()
-        .message_input_text_groups("user");
+    let request = response_mock.single_request();
+    let turn_metadata: Value = serde_json::from_str(
+        request
+            .header("x-codex-turn-metadata")
+            .as_deref()
+            .expect("recovered turn should include turn metadata"),
+    )
+    .expect("recovered turn metadata should be valid JSON");
+    assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("retry"));
+    let user_input_groups = request.message_input_text_groups("user");
     assert_eq!(user_input_groups.len(), 1);
     assert_eq!(user_input_groups[0].len(), 1);
     assert!(user_input_groups[0][0].starts_with("<environment_context>"));

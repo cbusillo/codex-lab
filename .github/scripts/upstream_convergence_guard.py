@@ -193,9 +193,10 @@ def load_manifest(path: Path) -> list[dict[str, object]]:
     policy = document.get("policy")
     if not isinstance(policy, dict):
         raise WaiverError(f"{path}: policy must be an object")
-    if policy.get("guardedLanes") != list(EXPECTED_GUARDED_LANES) or policy.get(
-        "rule"
-    ) != EXPECTED_MANIFEST_RULE:
+    if (
+        policy.get("guardedLanes") != list(EXPECTED_GUARDED_LANES)
+        or policy.get("rule") != EXPECTED_MANIFEST_RULE
+    ):
         raise WaiverError(f"{path}: guard policy changed unexpectedly")
     allowed_policy_keys = {"guardedLanes", "rule", "sources"}
     if not set(policy) <= allowed_policy_keys:
@@ -256,14 +257,19 @@ def load_manifest(path: Path) -> list[dict[str, object]]:
         if not isinstance(reason, str) or not reason.strip():
             raise WaiverError(f"{location}: reason must be a non-empty string")
         baseline_blob = entry.get("baselineBlob")
-        if not isinstance(baseline_blob, str) or OBJECT_ID.fullmatch(baseline_blob) is None:
+        if (
+            not isinstance(baseline_blob, str)
+            or OBJECT_ID.fullmatch(baseline_blob) is None
+        ):
             raise WaiverError(f"{location}: baselineBlob must be a Git object ID")
         upstream_blob = entry.get("upstreamBlob")
         if upstream_blob is not None and (
             not isinstance(upstream_blob, str)
             or OBJECT_ID.fullmatch(upstream_blob) is None
         ):
-            raise WaiverError(f"{location}: upstreamBlob must be null or a Git object ID")
+            raise WaiverError(
+                f"{location}: upstreamBlob must be null or a Git object ID"
+            )
         source = entry.get("source")
         if current is not None and source not in EXPECTED_ENTRY_SOURCES:
             raise WaiverError(
@@ -307,9 +313,7 @@ def candidate_path(repo_root: Path, guarded_path: str) -> tuple[Path, str | None
     return candidate, None
 
 
-def evaluate(
-    entry: dict[str, object], repo_root: Path
-) -> tuple[str, str] | None:
+def evaluate(entry: dict[str, object], repo_root: Path) -> tuple[str, str] | None:
     """Return the violation for one guarded path, or `None` when it is intact."""
 
     path = str(entry["path"])

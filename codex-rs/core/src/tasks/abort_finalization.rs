@@ -58,7 +58,7 @@ pub(super) async fn finalize_aborted_turn(
     }
 
     if reason == TurnAbortReason::Interrupted {
-        run_turn_interrupt_hooks(&session, &task.turn_context).await;
+        run_turn_interrupt_hooks(&session, &task.turn_context, &active_turn.turn_state).await;
     }
 
     let started_at = task
@@ -96,7 +96,7 @@ pub(super) async fn finalize_aborted_turn(
         warn!("failed to flush rollout after emitting terminal turn event: {err}");
     }
     session
-        .emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
+        .emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
         .await;
     session.input_queue.clear_pending(&active_turn).await;
     if let Some(generation) = interrupt_generation {

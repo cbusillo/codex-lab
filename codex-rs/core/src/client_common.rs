@@ -37,6 +37,8 @@ pub struct Prompt {
 
     /// Optional provider-side ceiling for generated output, including reasoning.
     pub max_output_tokens: Option<u64>,
+
+    pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
 }
 
 impl Default for Prompt {
@@ -49,6 +51,7 @@ impl Default for Prompt {
             output_schema: None,
             output_schema_strict: true,
             max_output_tokens: None,
+            cyber_access_program: None,
         }
     }
 }

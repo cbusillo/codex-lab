@@ -42,14 +42,9 @@ assemble-codex-package *args:
     {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py {args}
 
 # Build the CLI and run the app-server test client
-[unix]
 app-server-test-client *args:
     cargo build -p codex-cli
-    cargo run -p codex-app-server-test-client -- --codex-bin "$CARGO_TARGET_DIR/debug/codex" {args}
-
-[windows]
-app-server-test-client *args:
-    cargo build -p codex-cli; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex.exe {args}
+    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
 
 # Remove rebuildable local build and harness artifacts. Defaults to a dry run.
 [no-cd]
@@ -88,17 +83,6 @@ install:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cargo fetch
     exit $LASTEXITCODE
-
-[doc('Measure a named local feedback lane and emit bounded JSON evidence')]
-[no-cd]
-feedback-latency *args:
-    {{ python }} {{ justfile_directory() }}/scripts/local/feedback_latency.py {args}
-
-[doc('Resolve or inspect checksum-verified local rusty_v8 artifacts')]
-[no-cd]
-[unix]
-local-rusty-v8 *args:
-    {{ python }} {{ justfile_directory() }}/scripts/local/rusty_v8_env.py {args}
 
 # Run nextest with --no-fail-fast so all tests are run.
 #
@@ -197,7 +181,7 @@ mcp-server-run *args:
 
 # Regenerate the json schema for config.toml from the current config types.
 write-config-schema:
-    cargo run -p codex-core --bin codex-write-config-schema
+    cargo run -p codex-config-schema --bin codex-write-config-schema
 
 # Regenerate vendored app-server protocol schema artifacts.
 write-app-server-schema *args:

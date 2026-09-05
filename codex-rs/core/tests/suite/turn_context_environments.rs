@@ -14,8 +14,8 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
+use codex_history::RolloutItem;
+use codex_history::RolloutLine;
 use codex_protocol::protocol::TurnContextEnvironmentItem;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;

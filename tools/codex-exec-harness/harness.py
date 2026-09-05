@@ -410,7 +410,9 @@ def response_sse_body(response: dict[str, Any]) -> str:
     for event in response.get("events", []):
         if not isinstance(event, dict):
             raise HarnessError("responses_api events must be objects")
-        event_type = str(event.get("event", event.get("type", "response.output_item.done")))
+        event_type = str(
+            event.get("event", event.get("type", "response.output_item.done"))
+        )
         payload = event.get("payload")
         if payload is None and "item" in event:
             payload = {"type": "response.output_item.done", "item": event["item"]}
@@ -488,7 +490,9 @@ class FakeResponsesServer:
         if self._httpd is None:
             raise HarnessError("fake responses server is not running")
         host_value, port = self._httpd.server_address[:2]
-        host = host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+        host = (
+            host_value.decode("utf-8") if isinstance(host_value, bytes) else host_value
+        )
         return f"http://{host}:{port}/v1"
 
 
@@ -499,12 +503,16 @@ def make_paths(
     safe_name = safe_path_component(scenario_name)
     run_name = f"{stamp}-{safe_name}"
     run_dir = output_root / run_name
-    external_workspace_root = Path(
-        os.environ.get(
-            "CODEX_EXEC_HARNESS_EXTERNAL_WORKSPACE_ROOT",
-            Path.home() / ".codex-exec-harness-workspaces",
+    external_workspace_root = (
+        Path(
+            os.environ.get(
+                "CODEX_EXEC_HARNESS_EXTERNAL_WORKSPACE_ROOT",
+                Path.home() / ".codex-exec-harness-workspaces",
+            )
         )
-    ).expanduser().resolve()
+        .expanduser()
+        .resolve()
+    )
     workspace = (
         external_workspace_root / run_name
         if workspace_outside_git
@@ -555,7 +563,9 @@ def materialize_workspace(scenario: dict[str, Any], paths: RunPaths) -> None:
         if not isinstance(rel_path, str):
             raise HarnessError("external file paths must be strings")
         file_text = str(content).replace("{workspace}", str(paths.workspace))
-        save_text(resolve_under(external_root, rel_path, "external file path"), file_text)
+        save_text(
+            resolve_under(external_root, rel_path, "external file path"), file_text
+        )
 
     files = scenario.get("files", {})
     if not isinstance(files, dict):
@@ -633,7 +643,9 @@ def inherit_auth_home(scenario: dict[str, Any], paths: RunPaths) -> None:
     copy_auth_files(source, paths.codex_home)
 
 
-def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None) -> None:
+def save_config(
+    scenario: dict[str, Any], paths: RunPaths, base_url: str | None
+) -> None:
     config = str(scenario.get("config_toml", ""))
     config = config.replace("{workspace}", str(paths.workspace)).replace(
         "{home}", str(paths.home)
@@ -645,7 +657,9 @@ def save_config(scenario: dict[str, Any], paths: RunPaths, base_url: str | None)
     uses_responses_base_url = "{responses_base_url}" in config
     if uses_responses_base_url:
         if base_url is None:
-            raise HarnessError("config_toml uses {responses_base_url} without responses_api")
+            raise HarnessError(
+                "config_toml uses {responses_base_url} without responses_api"
+            )
         config = config.replace("{responses_base_url}", base_url)
     if base_url is not None:
         if not uses_responses_base_url:
@@ -900,7 +914,9 @@ def run_codex(
 
 def extract_thread_id(events: list[dict[str, Any]]) -> str | None:
     for event in events:
-        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+        if event.get("type") == "thread.started" and isinstance(
+            event.get("thread_id"), str
+        ):
             return event["thread_id"]
     return None
 
@@ -986,7 +1002,9 @@ def classify_execution_outcome(run: dict[str, Any]) -> TerminalOutcome | None:
     if run.get("timed_out") is True:
         return runner_failed(
             "provider_timeout",
-            truncate_utf8(f"command timed out after {run.get('timeout_seconds', 'unknown')}s", 240),
+            truncate_utf8(
+                f"command timed out after {run.get('timeout_seconds', 'unknown')}s", 240
+            ),
         )
 
     if run.get("tool_loop_detected") is True:
@@ -1011,13 +1029,20 @@ def classify_execution_outcome(run: dict[str, Any]) -> TerminalOutcome | None:
         )
 
     returncode = run.get("returncode")
-    if isinstance(returncode, int) and returncode != 0 and isinstance(stderr, str) and stderr:
+    if (
+        isinstance(returncode, int)
+        and returncode != 0
+        and isinstance(stderr, str)
+        and stderr
+    ):
         return runner_failed("harness_error", truncate_utf8(stderr, 240))
 
     if not agent_has_final_message(run):
         detail = "scenario ended without a final assistant message"
         if isinstance(returncode, int) and returncode != 0:
-            detail = f"model process exited with status {returncode} without a final message"
+            detail = (
+                f"model process exited with status {returncode} without a final message"
+            )
         return model_failed(
             "malformed_output" if returncode else "missing_final_message",
             truncate_utf8(detail, 240),
@@ -1069,7 +1094,9 @@ def normalize_token_usage(usage: Any) -> dict[str, int]:
 
 
 def add_token_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
-    return {field: left.get(field, 0) + right.get(field, 0) for field in TOKEN_USAGE_FIELDS}
+    return {
+        field: left.get(field, 0) + right.get(field, 0) for field in TOKEN_USAGE_FIELDS
+    }
 
 
 def subtract_token_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
@@ -1118,7 +1145,9 @@ def run_turns(
         agent_messages = agent_messages_from_events(result["events"])
         commands = commands_from_events(result["events"])
         token_usage_snapshot = token_usage_snapshot_from_events(result["events"])
-        token_usage_delta = subtract_token_usage(token_usage_snapshot, previous_token_usage)
+        token_usage_delta = subtract_token_usage(
+            token_usage_snapshot, previous_token_usage
+        )
         previous_token_usage = token_usage_snapshot
         turn_results.append(
             {
@@ -1154,10 +1183,10 @@ def run_turns(
         "turns": turn_results,
         "thread_id": thread_id,
         "token_usage": previous_token_usage,
-        "stdout_parse_errors": sum(int(turn.get("stdout_parse_errors", 0)) for turn in turn_results),
-        "stderr": "".join(
-            str(turn.get("stderr", "")) for turn in turn_results
+        "stdout_parse_errors": sum(
+            int(turn.get("stdout_parse_errors", 0)) for turn in turn_results
         ),
+        "stderr": "".join(str(turn.get("stderr", "")) for turn in turn_results),
         "launch_error": next(
             (
                 turn.get("launch_error")
@@ -1370,9 +1399,7 @@ def add_background_review_assertion_failures(
     if not runs:
         return
     if len(runs) != 1:
-        failures.append(
-            "auto review field assertions require exactly one durable run"
-        )
+        failures.append("auto review field assertions require exactly one durable run")
         return
 
     durable_run = runs[0]
@@ -1422,7 +1449,10 @@ def add_background_review_assertion_failures(
                     )
 
     if assertion.get("worktree_clean") is True:
-        if not isinstance(workspace_git, dict) or workspace_git.get("clean") is not True:
+        if (
+            not isinstance(workspace_git, dict)
+            or workspace_git.get("clean") is not True
+        ):
             failures.append("auto review: expected a clean workspace")
         if not isinstance(target, dict):
             failures.append("auto review: missing target metadata")
@@ -1457,7 +1487,9 @@ def add_prefix_assertion_failures(
     if prefix_request is None:
         return
 
-    other_request_index = scenario_int(prefix_request, f"{label}.prefix_matches_request")
+    other_request_index = scenario_int(
+        prefix_request, f"{label}.prefix_matches_request"
+    )
     assert_not_self_prefix_match(request_index, other_request_index, label)
     if other_request_index < 0:
         failures.append(f"{label}: missing prefix request {other_request_index}")
@@ -1466,7 +1498,9 @@ def add_prefix_assertion_failures(
         failures.append(f"{label}: missing prefix request {other_request_index}")
         return
 
-    prefix_length = scenario_int(assertion.get("prefix_length", 0), f"{label}.prefix_length")
+    prefix_length = scenario_int(
+        assertion.get("prefix_length", 0), f"{label}.prefix_length"
+    )
     if prefix_length <= 0:
         raise HarnessError(f"{label} prefix_length must be a positive integer")
 
@@ -1558,7 +1592,9 @@ def add_workspace_path_assertion_failures(
         if type(expected_exists) is not bool:
             raise HarnessError(f"expect.{label}.exists must be boolean")
         if exists != expected_exists:
-            failures.append(f"{label}: expected exists={expected_exists}, found {exists}")
+            failures.append(
+                f"{label}: expected exists={expected_exists}, found {exists}"
+            )
             continue
         if not exists:
             continue
@@ -1591,7 +1627,9 @@ def evaluate_expectations(
     if not isinstance(expect, dict):
         raise HarnessError("expect must be an object")
 
-    expected_returncode = maybe_scenario_int(expect.get("returncode"), "expect.returncode")
+    expected_returncode = maybe_scenario_int(
+        expect.get("returncode"), "expect.returncode"
+    )
     if expected_returncode is not None and run["returncode"] != expected_returncode:
         failures.append(
             f"expected returncode {expected_returncode}, found {run['returncode']}"
@@ -1605,8 +1643,13 @@ def evaluate_expectations(
             f"expected {expected_count} responses requests, found {len(requests)}"
         )
 
-    expected_turn_count = maybe_scenario_int(expect.get("turn_count"), "expect.turn_count")
-    if expected_turn_count is not None and len(run.get("turns", [])) != expected_turn_count:
+    expected_turn_count = maybe_scenario_int(
+        expect.get("turn_count"), "expect.turn_count"
+    )
+    if (
+        expected_turn_count is not None
+        and len(run.get("turns", [])) != expected_turn_count
+    ):
         failures.append(
             f"expected {expected_turn_count} turns, found {len(run.get('turns', []))}"
         )
@@ -1696,7 +1739,9 @@ def evaluate_expectations(
             raise HarnessError("event assertions must be objects")
         event_type = assertion.get("type")
         if not isinstance(event_type, str) or not event_type:
-            raise HarnessError(f"expect.events[{index}].type must be a non-empty string")
+            raise HarnessError(
+                f"expect.events[{index}].type must be a non-empty string"
+            )
         matching_events = [
             event
             for event in actual_events
@@ -1748,7 +1793,9 @@ def evaluate_expectations(
                 failures.append(
                     f"turn {index}: expected {key} {expected}, found {actual_turn.get(key)}"
                 )
-        if assertion.get("thread_id") == "required" and not actual_turn.get("thread_id"):
+        if assertion.get("thread_id") == "required" and not actual_turn.get(
+            "thread_id"
+        ):
             failures.append(f"turn {index}: expected a captured thread_id")
         add_list_text_assertion_failures(
             failures,
@@ -1800,9 +1847,13 @@ def evaluate_expectations(
     for index, assertion in enumerate(response_assertions):
         if not isinstance(assertion, dict):
             raise HarnessError("response assertions must be objects")
-        request_index = scenario_int(assertion.get("request", index), f"responses[{index}].request")
+        request_index = scenario_int(
+            assertion.get("request", index), f"responses[{index}].request"
+        )
         if request_index < 0 or request_index >= len(requests):
-            failures.append(f"response assertion {index}: missing request {request_index}")
+            failures.append(
+                f"response assertion {index}: missing request {request_index}"
+            )
             continue
         scope = str(assertion.get("scope", "body"))
         subject = scoped_request_body(requests[request_index], scope)
@@ -1844,7 +1895,9 @@ def evaluate_expectations(
             continue
         call_id = assertion.get("call_id")
         if not isinstance(call_id, str) or not call_id:
-            raise HarnessError(f"tool_outputs[{index}].call_id must be a non-empty string")
+            raise HarnessError(
+                f"tool_outputs[{index}].call_id must be a non-empty string"
+            )
         outputs = request_tool_outputs(requests[request_index], call_id)
         label = f"tool_outputs[{index}] request {request_index} call_id {call_id!r}"
         if not outputs:

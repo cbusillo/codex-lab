@@ -337,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn command_auth_provider_reports_configured_credentials_without_cached_auth() {
+    fn command_auth_provider_reports_command_auth_without_cached_auth() {
         let endpoint = OpenAiModelsEndpoint::new(
             provider_info_with_command_auth(),
             /*auth_manager*/ None,
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_without_command_auth_reports_no_configured_credentials() {
+    fn provider_without_command_auth_reports_no_command_auth() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,

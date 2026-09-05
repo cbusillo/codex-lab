@@ -178,6 +178,22 @@ async fn slash_compact_eagerly_queues_follow_up_before_turn_start() {
 }
 
 #[tokio::test]
+async fn slash_recap_requests_generation_for_current_thread() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.dispatch_command(SlashCommand::Recap);
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::GenerateRecap {
+            thread_id: requested_thread_id,
+        }) if requested_thread_id == thread_id
+    );
+}
+
+#[tokio::test]
 async fn queued_slash_compact_dispatches_after_active_turn() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
@@ -807,8 +823,12 @@ async fn goal_control_slash_commands_emit_goal_events() {
         chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
         let thread_id = ThreadId::new();
         chat.thread_id = Some(thread_id);
+        chat.bottom_pane.set_vim_enabled(/*enabled*/ true);
 
-        submit_composer_text(&mut chat, command);
+        chat.bottom_pane
+            .set_composer_text(command.into(), Vec::new(), Vec::new());
+        chat.handle_key_event(KeyCode::Esc.into());
+        chat.handle_key_event(KeyCode::Enter.into());
 
         match status {
             Some(status) => {
@@ -834,6 +854,11 @@ async fn goal_control_slash_commands_emit_goal_events() {
                 assert_eq!(actual_thread_id, thread_id);
             }
         }
+        chat.handle_key_event(KeyCode::Char('x').into());
+        chat.handle_key_event(KeyCode::Right.into());
+        chat.handle_key_event(KeyCode::Esc.into());
+        chat.handle_key_event(KeyCode::Char('.').into());
+        assert_eq!(chat.bottom_pane.composer_text(), "xx");
     }
 }
 
@@ -1623,7 +1648,6 @@ async fn completed_token_activity_refresh_waits_for_active_hook() {
         ),
     );
 
-    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
     assert_matches!(rx.try_recv(), Ok(AppEvent::CommitPendingUsageOutput));
 }
 
@@ -1784,54 +1808,6 @@ async fn slash_logout_requests_app_server_logout() {
     chat.dispatch_command(SlashCommand::Logout);
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Logout));
-}
-
-#[tokio::test]
-async fn slash_login_opens_account_manager() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.dispatch_command(SlashCommand::Login);
-
-    assert_matches!(rx.try_recv(), Ok(AppEvent::ShowLoginAccounts));
-}
-
-#[tokio::test]
-async fn login_account_manager_uses_selected_auth_home() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    let codex_home = tempdir().expect("create temporary Codex home");
-    let auth_home = tempdir().expect("create temporary auth home");
-    chat.config.codex_home = AbsolutePathBuf::try_from(codex_home.path().to_path_buf())
-        .expect("temporary Codex home should be absolute");
-    chat.config.auth_home = AbsolutePathBuf::try_from(auth_home.path().to_path_buf())
-        .expect("temporary auth home should be absolute");
-    chat.config.cli_auth_credentials_store_mode =
-        codex_config::types::AuthCredentialsStoreMode::File;
-    codex_login::upsert_api_key_account(
-        codex_home.path(),
-        codex_config::types::AuthCredentialsStoreMode::File,
-        "sk-default".to_string(),
-        Some("Default account".to_string()),
-        /*make_active*/ false,
-    )
-    .expect("store default account");
-    codex_login::upsert_api_key_account(
-        auth_home.path(),
-        codex_config::types::AuthCredentialsStoreMode::File,
-        "sk-profile".to_string(),
-        Some("Profile account".to_string()),
-        /*make_active*/ false,
-    )
-    .expect("store profile account");
-
-    chat.show_login_accounts_view_with_feedback(/*feedback*/ None);
-
-    let mut popup = render_bottom_popup(&chat, /*width*/ 80);
-    let connected_marker = "connected ";
-    if let Some(marker_start) = popup.find(connected_marker) {
-        let timestamp_start = marker_start + connected_marker.len();
-        popup.replace_range(timestamp_start..timestamp_start + 16, "YYYY-MM-DD HH:MM");
-    }
-    assert_chatwidget_snapshot!("login_account_manager_uses_selected_auth_home", popup);
 }
 
 #[tokio::test]

@@ -17,6 +17,7 @@ use codex_config::RequirementSource;
 use codex_config::TomlValue;
 use codex_config::version_for_toml;
 use codex_plugin::PluginHookSource;
+use codex_plugin::is_allowlisted_bundled_cleanup_hook;
 use codex_protocol::protocol::HookEventName;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use serde::Deserialize;
@@ -670,7 +671,7 @@ fn append_matcher_groups(
                 status_message,
                 additional_context_limit,
             } = normalized;
-            let current_hash = hook_hash(event_name, matcher, &group, config);
+            let current_hash = hook_hash(event_name, matcher, &group, &config);
             let requested_key = crate::hook_key(
                 &source.key_source,
                 event_name,
@@ -695,9 +696,19 @@ fn append_matcher_groups(
                 )
             };
             let state = source.hook_states.get(&key);
-            let enabled = hook_enabled(source.is_managed, state);
+            let builtin = source.plugin_id.as_deref().is_some_and(|plugin_id| {
+                is_allowlisted_bundled_cleanup_hook(
+                    plugin_id,
+                    event_name,
+                    group.matcher.as_deref(),
+                    &config,
+                    /*app_connector_id*/ None,
+                )
+            });
+            let enabled = hook_enabled(source.is_managed, builtin, state);
             let trusted_hash = hook_trusted_hash(source.is_managed, state);
-            let trust_status = hook_trust_status(source.is_managed, &current_hash, trusted_hash);
+            let trust_status =
+                hook_trust_status(source.is_managed, builtin, &current_hash, trusted_hash);
             let handler = match &kind {
                 ConfiguredHandlerKind::Command {
                     command, r#async, ..
@@ -714,6 +725,7 @@ fn append_matcher_groups(
             };
 
             hook_entries.push(HookListEntry {
+                builtin,
                 key,
                 event_name,
                 handler,
@@ -738,6 +750,7 @@ fn append_matcher_groups(
                     ))
             {
                 handlers.push(ConfiguredHandler {
+                    builtin,
                     event_name,
                     matcher: matcher.map(ToOwned::to_owned),
                     timeout_sec,
@@ -795,11 +808,11 @@ fn hook_hash(
     event_name: codex_protocol::protocol::HookEventName,
     matcher: Option<&str>,
     group: &MatcherGroup,
-    normalized_handler: HookHandlerConfig,
+    normalized_handler: &HookHandlerConfig,
 ) -> String {
     let mut group = group.clone();
     group.matcher = matcher.map(ToOwned::to_owned);
-    group.hooks = vec![normalized_handler];
+    group.hooks = vec![normalized_handler.clone()];
     let identity = NormalizedHookIdentity {
         event_name: crate::hook_event_key_label(event_name),
         group,
@@ -812,10 +825,13 @@ fn hook_hash(
 
 fn hook_trust_status(
     is_managed: bool,
+    is_builtin: bool,
     current_hash: &str,
     trusted_hash: Option<&str>,
 ) -> HookTrustStatus {
-    if is_managed {
+    if is_builtin {
+        HookTrustStatus::Trusted
+    } else if is_managed {
         HookTrustStatus::Managed
     } else {
         match trusted_hash {
@@ -826,8 +842,8 @@ fn hook_trust_status(
     }
 }
 
-fn hook_enabled(is_managed: bool, state: Option<&HookStateToml>) -> bool {
-    is_managed || state.and_then(|state| state.enabled) != Some(false)
+fn hook_enabled(is_managed: bool, is_builtin: bool, state: Option<&HookStateToml>) -> bool {
+    is_builtin || is_managed || state.and_then(|state| state.enabled) != Some(false)
 }
 
 fn hook_trusted_hash(is_managed: bool, state: Option<&HookStateToml>) -> Option<&str> {
@@ -1273,6 +1289,7 @@ mod tests {
         assert_eq!(
             handlers,
             vec![ConfiguredHandler {
+                builtin: false,
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
                 timeout_sec: 600,
@@ -1312,6 +1329,7 @@ mod tests {
         assert_eq!(
             handlers,
             vec![ConfiguredHandler {
+                builtin: false,
                 event_name: HookEventName::PreToolUse,
                 matcher: Some("^Bash$".to_string()),
                 timeout_sec: 600,
