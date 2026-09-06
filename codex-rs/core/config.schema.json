@@ -5518,7 +5518,7 @@
             }
           ],
           "default": {
-            "functional": false,
+            "functional": true,
             "stylistic": false
           }
         },
