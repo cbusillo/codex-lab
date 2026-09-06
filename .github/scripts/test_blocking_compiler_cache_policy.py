@@ -6,7 +6,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_TEXT = (REPO_ROOT / ".github/workflows/rust-ci.yml").read_text(
     encoding="utf-8"
@@ -34,6 +33,7 @@ def run_step(
     script: str,
     environment: dict[str, str],
     *,
+    fake_date: str | None = None,
     fake_sccache_statuses: tuple[int, int] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, str]]:
     with tempfile.TemporaryDirectory() as temporary_directory:
@@ -49,9 +49,19 @@ def run_step(
             "GITHUB_RUN_ID": "9001",
             "RUNNER_TEMP": str(root / "runner-temp"),
         }
-        if fake_sccache_statuses is not None:
+        if fake_date is not None or fake_sccache_statuses is not None:
             binary_dir = root / "bin"
             binary_dir.mkdir()
+            process_environment["PATH"] = f"{binary_dir}:{process_environment['PATH']}"
+        if fake_date is not None:
+            fake_date_command = binary_dir / "date"
+            fake_date_command.write_text(
+                "#!/bin/bash\nprintf '%s\\n' \"$FAKE_DATE\"\n",
+                encoding="utf-8",
+            )
+            fake_date_command.chmod(0o755)
+            process_environment["FAKE_DATE"] = fake_date
+        if fake_sccache_statuses is not None:
             fake_sccache = binary_dir / "sccache"
             fake_sccache.write_text(
                 "#!/bin/bash\n"
@@ -64,7 +74,6 @@ def run_step(
             fake_sccache.chmod(0o755)
             process_environment.update(
                 {
-                    "PATH": f"{binary_dir}:{process_environment['PATH']}",
                     "FAKE_STATS_STATUS": str(fake_sccache_statuses[0]),
                     "FAKE_STOP_STATUS": str(fake_sccache_statuses[1]),
                 }
@@ -72,10 +81,9 @@ def run_step(
         result = subprocess.run(
             ["bash", "-e", "-o", "pipefail", "-c", script],
             check=False,
+            capture_output=True,
             env=process_environment,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
         return result, {
             "env": github_env.read_text() if github_env.exists() else "",
@@ -85,27 +93,28 @@ def run_step(
 
 
 class BlockingCompilerCachePolicyTest(unittest.TestCase):
-    def test_scope_script_selects_trusted_and_ephemeral_namespaces(self) -> None:
+    def test_policy_script_selects_daily_main_writes(self) -> None:
         cases = (
-            ("push", "refs/heads/main", "", "trusted-main"),
-            ("pull_request", "refs/pull/42/merge", "42", "pr-42"),
-            ("push", "refs/heads/topic", "", "ephemeral-9001"),
-            ("workflow_dispatch", "refs/heads/main", "", "ephemeral-9001"),
-            ("pull_request", "refs/pull/42/merge", "", None),
+            ("push", "refs/heads/main", "true"),
+            ("pull_request", "refs/pull/42/merge", "false"),
+            ("push", "refs/heads/topic", "false"),
+            ("workflow_dispatch", "refs/heads/main", "false"),
         )
-        for event, ref, pr_number, expected_scope in cases:
+        for event, ref, may_save in cases:
             with self.subTest(event=event, ref=ref):
                 result, evidence = run_step(
-                    step_script("Select compiler cache write scope"),
-                    {"EVENT_NAME": event, "EVENT_REF": ref, "PR_NUMBER": pr_number},
+                    step_script("Select compiler cache policy"),
+                    {
+                        "EVENT_NAME": event,
+                        "EVENT_REF": ref,
+                    },
+                    fake_date="20260906",
                 )
-                if expected_scope is None:
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("missing pull request number", result.stderr)
-                    self.assertNotIn("write-scope=", evidence["output"])
-                    continue
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn(f"write-scope={expected_scope}\n", evidence["output"])
+                self.assertEqual(
+                    evidence["output"],
+                    f"cache-day=20260906\nmay-save={may_save}\n",
+                )
                 self.assertEqual(
                     evidence["env"],
                     f"SCCACHE_DIR={evidence['runner_temp']}/sccache\n",
@@ -116,14 +125,14 @@ class BlockingCompilerCachePolicyTest(unittest.TestCase):
             ((9, 0), 9, "cache-ready=true\n", "Compile requests 10"),
             ((0, 7), 7, "", "cache save is disabled"),
         )
-        for statuses, returncode, output, diagnostic in cases:
+        for statuses, return_code, output, diagnostic in cases:
             with self.subTest(statuses=statuses):
                 result, evidence = run_step(
                     step_script("Report sccache statistics"),
                     {},
                     fake_sccache_statuses=statuses,
                 )
-                self.assertEqual(result.returncode, returncode)
+                self.assertEqual(result.returncode, return_code)
                 self.assertIn(diagnostic, result.stdout)
                 self.assertEqual(evidence["output"], output)
 
@@ -139,23 +148,41 @@ class BlockingCompilerCachePolicyTest(unittest.TestCase):
             for line in restore.split("          restore-keys: |\n", 1)[1].splitlines()
             if line.strip()
         ]
+        restore_key = next(
+            line.strip().removeprefix("key: ")
+            for line in restore.splitlines()
+            if line.strip().startswith("key: ")
+        )
+        save = workspace_job.split("      - name: Save compiler object cache\n", 1)[
+            1
+        ].split("      - name: Upload Rust feedback evidence\n", 1)[0]
+        save_key = next(
+            line.strip().removeprefix("key: ")
+            for line in save.splitlines()
+            if line.strip().startswith("key: ")
+        )
 
-        self.assertEqual(len(restore_keys), 2)
-        for key in restore_keys:
+        self.assertEqual(restore_key, save_key)
+        self.assertTrue(
+            restore_key.endswith(
+                "-trusted-main-${{ steps.compiler_cache_scope.outputs.cache-day }}"
+            )
+        )
+        self.assertEqual(len(restore_keys), 1)
+        for key in (restore_key, *restore_keys):
             self.assertIn("${{ runner.arch }}", key)
             self.assertIn("aarch64-apple-darwin-dev-toolchain-", key)
             self.assertIn("${{ steps.toolchain.outputs.cachekey }}", key)
             self.assertIn("hashFiles('codex-rs/rust-toolchain.toml')", key)
             self.assertIn("hashFiles('codex-rs/Cargo.lock')", key)
-        self.assertIn("outputs.write-scope", restore_keys[0])
-        self.assertTrue(restore_keys[1].endswith("-trusted-main-"))
+        self.assertTrue(restore_keys[0].endswith("-trusted-main-"))
+        self.assertNotIn("github.run_id", restore_key)
+        self.assertIn(
+            "steps.compiler_cache_scope.outputs.may-save == 'true'", workspace_job
+        )
         self.assertIn("steps.workspace_compile.outcome == 'success'", workspace_job)
         self.assertIn(
             "steps.sccache_report.outputs.cache-ready == 'true'", workspace_job
-        )
-        self.assertIn(
-            "!startsWith(steps.compiler_cache_scope.outputs.write-scope, 'ephemeral-')",
-            workspace_job,
         )
         self.assertIn("-- cargo check --workspace --tests --locked", workspace_job)
         self.assertNotIn("SCCACHE_GHA_ENABLED", workspace_job)
