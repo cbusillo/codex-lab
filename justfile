@@ -57,6 +57,11 @@ app-server-test-client *args:
 local-cleanup-space *args:
     {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
 
+[doc('Inspect explicitly named build storage without deleting data')]
+[no-cd]
+local-build-storage *args:
+    {{ python }} {{ justfile_directory() }}/scripts/local/build_storage.py {args}
+
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
     @{{ python }} ../scripts/format.py
