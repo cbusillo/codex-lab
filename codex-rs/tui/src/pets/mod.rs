@@ -280,6 +280,9 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
 
+    use base64::Engine as _;
+    use pretty_assertions::assert_eq;
+
     use super::image_protocol::ImageProtocol;
     use super::*;
 
@@ -347,30 +350,45 @@ mod tests {
     #[test]
     fn kitty_local_file_pet_image_uses_file_reference_without_inline_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let frame = dir.path().join("frame.png");
-        std::fs::write(&frame, b"png").unwrap();
-        let request = AmbientPetDraw {
-            frame,
-            protocol: ImageProtocol::KittyLocalFile,
-            x: 2,
-            y: 3,
-            clear_top_y: 3,
-            columns: 4,
-            rows: 2,
-            height_px: 75,
-            sixel_dir: PathBuf::new(),
-        };
-        let mut output = Vec::new();
-        let mut state = PetImageRenderState::default();
+        // Cover every base64 alignment: an encoded file path can itself contain
+        // `cG5n` (the encoding of the image bytes `png`).
+        for name in ["frame.png", "frame1.png", "frame12.png"] {
+            let frame = dir.path().join(name);
+            std::fs::write(&frame, b"png").unwrap();
+            let canonical_frame = frame.canonicalize().unwrap();
+            let expected_payload = base64::engine::general_purpose::STANDARD
+                .encode(canonical_frame.to_string_lossy().as_bytes());
+            let request = AmbientPetDraw {
+                frame,
+                protocol: ImageProtocol::KittyLocalFile,
+                x: 2,
+                y: 3,
+                clear_top_y: 3,
+                columns: 4,
+                rows: 2,
+                height_px: 75,
+                sixel_dir: PathBuf::new(),
+            };
+            let mut output = Vec::new();
+            let mut state = PetImageRenderState::default();
 
-        render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
+            render_ambient_pet_image(&mut output, &mut state, Some(request)).unwrap();
 
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("a=d,d=I,i=49374,q=2;"));
-        assert!(output.contains("\x1b[4;3H"));
-        assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
-        assert!(!output.contains("cG5n"));
-        assert!(output.contains("\x1b8"));
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("a=d,d=I,i=49374,q=2;"));
+            assert!(output.contains("\x1b[4;3H"));
+            assert!(output.contains("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;"));
+            assert!(!output.contains("a=T,t=d,"));
+            let payload = output
+                .split_once("a=T,t=f,f=100,c=4,r=2,q=2,i=49374;")
+                .expect("contains a local-file transmission")
+                .1
+                .split_once('\x1b')
+                .expect("file payload has a command terminator")
+                .0;
+            assert_eq!(payload, expected_payload);
+            assert!(output.contains("\x1b8"));
+        }
     }
 
     #[test]
