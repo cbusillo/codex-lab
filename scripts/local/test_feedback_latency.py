@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,6 +87,7 @@ class FeedbackLatencyTest(unittest.TestCase):
                 "cacheWrites": 3,
                 "cacheWriteErrors": 1,
                 "cacheErrors": 2,
+                "nonCacheableRequests": None,
                 "cacheSizeBytes": 1024,
                 "maxCacheSizeBytes": 4096,
             },
@@ -226,6 +228,9 @@ class FeedbackLatencyTest(unittest.TestCase):
             with (
                 patch_feedback("source_identity", return_value=source),
                 patch_feedback("machine_identity") as identity,
+                patch_feedback(
+                    "build_context", side_effect=OSError("unavailable inputs")
+                ),
                 patch_feedback("read_sccache_stats", return_value=cache),
                 mock.patch("subprocess.run", return_value=process) as run,
             ):
@@ -263,6 +268,100 @@ class FeedbackLatencyTest(unittest.TestCase):
         self.assertNotIn("private-command", serialized)
         self.assertNotIn("/Users/alice", serialized)
         self.assertIn("### Rust feedback latency", summary)
+
+    def test_storage_sampling_preserves_real_child_exit_and_bounds_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            paths = []
+            for index in range(8):
+                paths.extend(["--storage-path", f"role{index}={temporary_directory}"])
+            with (
+                patch_feedback(
+                    "source_identity", return_value={"commit": "a" * 40, "dirty": False}
+                ),
+                patch_feedback(
+                    "read_sccache_stats", return_value={"status": "unavailable"}
+                ),
+            ):
+                result = feedback_latency.main(
+                    [
+                        "--lane",
+                        "storage-child",
+                        "--scenario",
+                        "warm-noop",
+                        "--configuration",
+                        "dev-default",
+                        "--concurrent-builds",
+                        "--output",
+                        str(output),
+                        *paths,
+                        "--",
+                        sys.executable,
+                        "-c",
+                        "raise SystemExit(7)",
+                    ]
+                )
+            record = json.loads(output.read_text())
+            self.assertLess(output.stat().st_size, feedback_latency.MAX_JSON_BYTES)
+        self.assertEqual(result, 7)
+        self.assertFalse(record["comparable"])
+        self.assertEqual(record["storage"]["status"], "available")
+        self.assertGreaterEqual(record["storage"]["sampleCount"], 2)
+        self.assertEqual(len(record["storage"]["filesystems"]), 1)
+        self.assertNotIn(temporary_directory, json.dumps(record))
+
+    def test_eight_distinct_filesystems_fit_the_evidence_budget(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            roles = [str(index) + "a" * 63 for index in range(8)]
+            storage = {
+                "paths": {
+                    role: {
+                        "status": "available",
+                        "filesystemId": "filesystem-" + str(index) * 16,
+                    }
+                    for index, role in enumerate(roles)
+                },
+                "filesystems": {
+                    "filesystem-" + str(index) * 16: {
+                        "status": "available",
+                        "totalBytes": 10**15,
+                        "observedFreeBytes": 10**14,
+                    }
+                    for index in range(8)
+                },
+            }
+            args = [
+                "--lane",
+                "bounded-evidence",
+                "--scenario",
+                "warm-noop",
+                "--output",
+                str(output),
+            ]
+            for role in roles:
+                args.extend(["--storage-path", f"{role}={temporary_directory}"])
+            with (
+                patch_feedback(
+                    "source_identity", return_value={"commit": "a" * 40, "dirty": False}
+                ),
+                patch_feedback(
+                    "read_sccache_stats", return_value={"status": "unavailable"}
+                ),
+                patch("feedback_storage.storage_snapshot", return_value=storage),
+            ):
+                self.assertEqual(
+                    feedback_latency.main([*args, "--", sys.executable, "-c", "pass"]),
+                    0,
+                )
+            self.assertLess(output.stat().st_size, feedback_latency.MAX_JSON_BYTES)
+            self.assertEqual(
+                len(json.loads(output.read_text())["storage"]["filesystems"]), 8
+            )
 
     def test_dirty_checkout_requires_explicit_acknowledgement(self) -> None:
         with (
