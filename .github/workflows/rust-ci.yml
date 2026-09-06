@@ -42,7 +42,7 @@ jobs:
           argument_comment_lint_package=false
           workflows=false
           for f in "${files[@]}"; do
-            [[ $f == codex-rs/* || $f == justfile ]] && codex=true
+            [[ $f == codex-rs/* || $f == justfile || $f == .github/workflows/rust-ci.yml ]] && codex=true
             [[ $f == scripts/local/feedback_latency.py ]] && codex=true
             [[ $f == .github/actions/setup-rusty-v8/* || $f == .github/scripts/run_bazel_with_buildbuddy.py || $f == .github/scripts/rusty_v8_bazel.py || $f == .github/scripts/rusty_v8_module_bazel.py || $f == third_party/v8/rusty_v8_*_codex_release.sha256 ]] && codex=true
             [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml || $f == .github/workflows/rust-ci-full-argument-comment-lint.yml ]] && argument_comment_lint_package=true
@@ -122,14 +122,16 @@ jobs:
         working-directory: codex-rs
     env:
       CARGO_INCREMENTAL: "0"
-      SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_CACHE_SIZE: 2G
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - id: setup_ci
+        uses: ./.github/actions/setup-ci
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Restore Cargo dependency cache
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -140,24 +142,50 @@ jobs:
           key: rust-workspace-check-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
           restore-keys: |
             rust-workspace-check-${{ runner.os }}-
+      - name: Select compiler cache write scope
+        id: compiler_cache_scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "push" && "$EVENT_REF" == "refs/heads/main" ]]; then
+            write_scope="trusted-main"
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            write_scope="pr-${PR_NUMBER:?missing pull request number}"
+          else
+            write_scope="ephemeral-${GITHUB_RUN_ID}"
+          fi
+          echo "write-scope=$write_scope" >> "$GITHUB_OUTPUT"
+          echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+          echo "Compiler cache write scope: $write_scope"
+      # sccache writes to a bounded local directory. actions/cache owns
+      # persistence, and GitHub's branch scopes keep PR writes out of main.
+      - name: Restore compiler object cache
+        id: compiler_cache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/sccache/
+          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ steps.compiler_cache_scope.outputs.write-scope }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ steps.compiler_cache_scope.outputs.write-scope }}-
+            sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-
       - name: Install sccache
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: sccache@0.7.5
       - name: Enable sccache
         shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          fi
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: Configure rusty_v8 artifact overrides
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: aarch64-apple-darwin
           artifact-repository: openai/codex
       - name: Compile Rust workspace and tests
+        id: workspace_compile
         run: >-
           python3 ../scripts/local/feedback_latency.py
           --lane ci-workspace-check
@@ -165,6 +193,47 @@ jobs:
           --output "${RUNNER_TEMP}/rust-feedback-workspace-check.json"
           --verify-rusty-v8
           -- cargo check --workspace --tests --locked
+
+      - name: Report sccache statistics
+        id: sccache_report
+        if: always() && !cancelled()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          set +e
+          stats="$(sccache --show-stats 2>&1)"
+          stats_status=$?
+          set -e
+          printf '%s\n' "$stats"
+          {
+            echo "### sccache stats — aarch64-apple-darwin (dev)"
+            echo
+            echo '```text'
+            printf '%s\n' "$stats"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          set +e
+          sccache --stop-server
+          stop_status=$?
+          set -e
+          if [[ "$stop_status" -eq 0 ]]; then
+            echo "cache-ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::sccache server shutdown failed; cache save is disabled"
+          fi
+          if [[ "$stats_status" -ne 0 ]]; then
+            exit "$stats_status"
+          fi
+          exit "$stop_status"
+
+      - name: Save compiler object cache
+        if: always() && !cancelled() && steps.workspace_compile.outcome == 'success' && steps.sccache_report.outputs.cache-ready == 'true' && !startsWith(steps.compiler_cache_scope.outputs.write-scope, 'ephemeral-') && steps.compiler_cache_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ runner.temp }}/sccache/
+          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ steps.compiler_cache_scope.outputs.write-scope }}-${{ github.run_id }}
 
       - name: Upload Rust feedback evidence
         if: always() && !cancelled()
