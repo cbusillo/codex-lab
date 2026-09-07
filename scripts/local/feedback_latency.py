@@ -110,7 +110,7 @@ def tracked_diff_sha256(repo_root: Path) -> str:
         raise FeedbackLatencyError("Git diff lookup did not provide output")
     digest = hashlib.sha256()
     try:
-        for chunk in iter(lambda: output.read(1024 * 1024), b""):
+        while chunk := output.read(1024 * 1024):
             digest.update(chunk)
     finally:
         output.close()

@@ -744,10 +744,9 @@ class FeedbackLatencyTest(unittest.TestCase):
                 patch_feedback(
                     "read_sccache_stats", return_value={"status": "unavailable"}
                 ),
-                mock.patch.object(
-                    sys.modules["feedback_storage"],
-                    "storage_snapshot",
-                    return_value=storage,
+                mock.patch.dict(
+                    vars(sys.modules["feedback_storage"]),
+                    {"storage_snapshot": mock.Mock(return_value=storage)},
                 ),
             ):
                 self.assertEqual(
