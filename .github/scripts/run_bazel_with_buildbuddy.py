@@ -8,6 +8,12 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
+from local_build_resources import LocalBuildResources
+from local_build_resources import REMOTE_EXECUTION_CONFIGS
+from local_build_resources import ResourceProfileError
+from local_build_resources import bazel_uses_remote_execution
+from local_build_resources import run_with_optional_lock
+
 
 OPENAI_REPOSITORY = "openai/codex"
 # Remote configurations select cache/BES/download endpoints. Their -rbe forms
@@ -16,12 +22,6 @@ GENERIC_REMOTE_CONFIG = "buildbuddy-generic"
 OPENAI_REMOTE_CONFIG = "buildbuddy-openai"
 # These CI configurations require remote build execution. The wrapper supplies
 # an RBE configuration, which also includes the common `remote` settings.
-REMOTE_EXECUTION_CONFIGS = {
-    "--config=ci-linux",
-    "--config=ci-macos",
-    "--config=ci-v8",
-    "--config=ci-windows-cross",
-}
 # Honor either explicit setting so the wrapper never overrides the caller's
 # choice when it supplies the CI default below.
 REMOTE_REPO_CONTENTS_CACHE_STARTUP_OPTIONS = {
@@ -98,11 +98,7 @@ def uses_openai_host(env: Mapping[str, str]) -> bool:
 
 
 def uses_remote_execution(args: Sequence[str]) -> bool:
-    try:
-        separator_idx = args.index("--")
-    except ValueError:
-        separator_idx = len(args)
-    return any(arg in REMOTE_EXECUTION_CONFIGS for arg in args[:separator_idx])
+    return bazel_uses_remote_execution(args, {"BUILDBUDDY_API_KEY": "configured"})
 
 
 def remote_config(args: Sequence[str], env: Mapping[str, str]) -> str | None:
@@ -197,6 +193,10 @@ def bazel_command(*args: str, env: Mapping[str, str] | None = None) -> list[str]
 
 
 def main() -> None:
+    # Validate an opted-in profile even when this invocation will use RBE. A
+    # malformed runner contract should fail visibly instead of being dormant
+    # until a keyless local fallback happens.
+    LocalBuildResources.from_env(os.environ)
     config = remote_config(sys.argv[1:], os.environ)
     if config is None:
         print(
@@ -219,8 +219,17 @@ def main() -> None:
         result = subprocess.run(command, check=False)
         raise SystemExit(result.returncode)
 
-    os.execvp(command[0], command)
+    raise SystemExit(
+        run_with_optional_lock(
+            command,
+            use_lock=not bazel_uses_remote_execution(sys.argv[1:], os.environ),
+        )
+    )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ResourceProfileError as error:
+        print(f"Invalid local build resource profile: {error}", file=sys.stderr)
+        raise SystemExit(2) from error

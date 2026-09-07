@@ -47,6 +47,12 @@ version = "149.2.0"
             )
         )
 
+    def test_local_resource_helper_change_requires_only_general_canary(self) -> None:
+        changed_paths = {".github/scripts/local_build_resources.py"}
+
+        self.assertTrue(canary_required(changed_paths, "149.2.0", "149.2.0"))
+        self.assertFalse(windows_source_required(changed_paths, "149.2.0", "149.2.0"))
+
     def test_shared_ci_setup_changes_require_canary_and_source_build(self) -> None:
         for path in (
             ".github/actions/setup-ci/action.yml",

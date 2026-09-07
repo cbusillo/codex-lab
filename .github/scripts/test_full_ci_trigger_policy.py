@@ -387,6 +387,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
         for path in (
             ".github/actions/setup-rusty-v8/**",
+            ".github/scripts/local_build_resources.py",
             ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",
@@ -394,6 +395,17 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertIn(f'- "{path}"', workflow)
+
+    def test_local_codex_lab_cargo_builds_use_the_shared_resource_helper(self) -> None:
+        for workflow_path in (CODEX_LAB_APP_WORKFLOW, CODEX_LAB_RELEASE_WORKFLOW):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text()
+                self.assertEqual(
+                    workflow.count(
+                        "python3 ../.github/scripts/local_build_resources.py exec --"
+                    ),
+                    2,
+                )
 
     def test_rusty_v8_consumers_use_reviewed_release_checksums(self) -> None:
         action = SETUP_RUSTY_V8_ACTION.read_text()
@@ -411,6 +423,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
         for path in (
             ".github/actions/setup-rusty-v8/*",
+            ".github/scripts/local_build_resources.py",
             ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",
