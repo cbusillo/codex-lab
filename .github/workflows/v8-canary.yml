@@ -17,12 +17,21 @@ jobs:
   metadata:
     uses: ./.github/workflows/v8-canary-metadata.yml
 
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    needs: metadata
+    if: ${{ needs.metadata.outputs.canary_required == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
   build:
     name: Build ${{ matrix.variant }} ${{ matrix.target }}
-    needs: metadata
+    needs:
+      - authorize_self_hosted
+      - metadata
     # Metadata always runs; only relevant changes pay for the large matrix.
-    if: ${{ needs.metadata.outputs.canary_required == 'true' }}
+    if: ${{ needs.metadata.outputs.canary_required == 'true' && needs.authorize_self_hosted.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     permissions:
       contents: read
       actions: read
@@ -31,16 +40,17 @@ jobs:
       deployment: false
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
-          - runner: macos-26
+          - runner: macos-codex-lab
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: false
             target: aarch64-apple-darwin
             v8_cpu: arm64
             variant: release
-          - runner: macos-26
+          - runner: macos-codex-lab
             bazel_config: ci-macos
             platform: macos_arm64
             sandbox: true
@@ -58,10 +68,22 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
+      - name: Configure persistent Bazel cache
+        env:
+          CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT: ${{ vars.CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT }}
+        shell: bash
+        run: scripts/github/configure-codex-lab-bazel-cache.sh v8-canary
+
+      - name: Verify Python
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import sys
+
+          if sys.version_info < (3, 12):
+              raise SystemExit(f"Python 3.12 or newer is required, got {sys.version}")
+          print(sys.version)
+          PY
 
       - name: Set up Rust toolchain for Cargo smoke
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -128,7 +150,8 @@ jobs:
             stage_args+=(--bazel-config v8-release-compat)
           fi
 
-          python3 .github/scripts/rusty_v8_bazel.py stage-release-pair "${stage_args[@]}"
+          python3 .github/scripts/local_build_resources.py exec -- \
+            python3 .github/scripts/rusty_v8_bazel.py stage-release-pair "${stage_args[@]}"
 
       - name: Smoke test staged artifact with Cargo
         env:
@@ -161,7 +184,8 @@ jobs:
             CARGO_TARGET_DIR="${RUNNER_TEMP}/rusty-v8-cargo-smoke-${TARGET}-${SANDBOX}" \
             RUSTY_V8_ARCHIVE="${GITHUB_WORKSPACE}/${archive}" \
             RUSTY_V8_SRC_BINDING_PATH="${GITHUB_WORKSPACE}/${binding}" \
-            cargo "${cargo_args[@]}"
+            python3 ../.github/scripts/local_build_resources.py exec -- \
+              cargo "${cargo_args[@]}"
           )
 
       - name: Upload staged artifacts

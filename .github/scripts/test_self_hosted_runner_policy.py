@@ -26,6 +26,7 @@ SELF_HOSTED_JOBS = {
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),
     "rusty-v8-release.yml": ("build",),
     "sdk-integration.yml": ("typescript-sdk-integration",),
+    "v8-canary.yml": ("build",),
 }
 
 
@@ -125,12 +126,75 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
                     self.assertTrue(depends_on_authorization(job_name, blocks))
 
     def test_v8_self_hosted_builds_use_the_host_python(self) -> None:
-        blocks = workflow_job_blocks(
-            (WORKFLOWS / "rusty-v8-release.yml").read_text(encoding="utf-8")
-        )
+        for workflow_name in ("rusty-v8-release.yml", "v8-canary.yml"):
+            blocks = workflow_job_blocks(
+                (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
+            )
+            build = "\n".join(blocks["build"])
+            with self.subTest(workflow=workflow_name):
+                self.assertNotIn("actions/setup-python@", build)
+                self.assertIn("Python 3.12 or newer is required", build)
+
+    def test_v8_canary_restores_the_trusted_local_build_contract(self) -> None:
+        contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+        blocks = workflow_job_blocks(contents)
         build = "\n".join(blocks["build"])
-        self.assertNotIn("actions/setup-python@", build)
-        self.assertIn("Python 3.12 or newer is required", build)
+
+        self.assertEqual(
+            re.findall(r"^\s+- runner: (.+)$", build, re.MULTILINE),
+            ["macos-codex-lab", "macos-codex-lab"],
+        )
+        self.assertNotIn("runner: macos-26", build)
+        self.assertIn("    timeout-minutes: 180", build)
+        self.assertIn("      max-parallel: 1", build)
+        self.assertIn("./.github/scripts/run_bazel_with_buildbuddy.py", build)
+        self.assertNotIn("./.github/scripts/run-bazel-ci.sh", build)
+        self.assertNotIn("codex-lab-signing", contents)
+
+    def test_v8_canary_configures_persistent_cache_after_bazel_setup(self) -> None:
+        contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        bazel_setup = contents.index("uses: ./.github/actions/setup-bazel-ci")
+        cache_setup = contents.index("name: Configure persistent Bazel cache")
+        build = contents.index("name: Build Bazel V8 release pair")
+        self.assertLess(bazel_setup, cache_setup)
+        self.assertLess(cache_setup, build)
+        self.assertIn(
+            "run: scripts/github/configure-codex-lab-bazel-cache.sh v8-canary",
+            contents,
+        )
+
+    def test_v8_canary_guards_auth_and_build_jobs_with_same_repository_check(
+        self,
+    ) -> None:
+        contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+        blocks = workflow_job_blocks(contents)
+        same_repository_guard = (
+            "github.event.pull_request.head.repo.full_name == github.repository"
+        )
+
+        for job_name in ("authorize_self_hosted", "build"):
+            with self.subTest(job=job_name):
+                self.assertIn(same_repository_guard, "\n".join(blocks[job_name]))
+
+    def test_v8_canary_cargo_smoke_uses_the_shared_resource_lock(self) -> None:
+        contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python3 ../.github/scripts/local_build_resources.py exec --",
+            contents,
+        )
+
+    def test_v8_canary_staging_uses_the_shared_resource_lock(self) -> None:
+        contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            contents,
+            re.compile(
+                r"python3 \.github/scripts/local_build_resources\.py exec -- \\\n"
+                r"\s+python3 \.github/scripts/rusty_v8_bazel\.py stage-release-pair"
+            ),
+        )
 
     def test_pull_request_workflows_require_same_repository_heads(self) -> None:
         trigger = re.compile(r"^  pull_request:(?: \{\})?$", re.MULTILINE)
