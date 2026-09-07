@@ -3,6 +3,21 @@ import unittest
 
 
 class SetupCiActionTests(unittest.TestCase):
+    def test_bazel_setup_does_not_mutate_home_on_self_hosted_unix(self) -> None:
+        action = Path(".github/actions/setup-bazel-ci/action.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "if: runner.environment != 'self-hosted' || runner.os == 'Windows'",
+            action,
+        )
+        self.assertIn(
+            "if: runner.environment == 'self-hosted' && runner.os != 'Windows'",
+            action,
+        )
+        self.assertIn("run: ./.github/scripts/configure-cached-bazel.sh", action)
+
     def test_self_hosted_linux_build_root_is_namespaced_by_runner(self) -> None:
         action = Path(".github/actions/setup-ci/action.yml").read_text(encoding="utf-8")
 
