@@ -164,7 +164,9 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
             contents,
         )
 
-    def test_v8_canary_guards_auth_and_build_jobs_with_same_repository_check(self) -> None:
+    def test_v8_canary_guards_auth_and_build_jobs_with_same_repository_check(
+        self,
+    ) -> None:
         contents = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
         blocks = workflow_job_blocks(contents)
         same_repository_guard = (
