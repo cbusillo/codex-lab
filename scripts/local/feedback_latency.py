@@ -22,7 +22,7 @@ from feedback_storage import StorageSampler
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_JSON_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4 * 1024
 MACHINE_ID_SALT = "codex-lab-feedback-latency-v1"
@@ -382,6 +382,66 @@ def sccache_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
     }
 
 
+def measurement_quality(
+    source_edit: dict[str, Any],
+    cache: dict[str, Any],
+    command_status: str,
+    exit_code: int,
+    preflight_ready: bool,
+    storage: dict[str, Any],
+    context: dict[str, Any],
+    concurrent_builds_declared: bool,
+) -> dict[str, Any]:
+    """Separate sample integrity from caller-declared concurrent load."""
+
+    reasons: list[str] = []
+    if not source_edit.get("comparable"):
+        reasons.append("source-identity-invalid")
+    if not preflight_ready:
+        reasons.append("preflight-invalid")
+    if command_status != "completed" or exit_code != 0:
+        reasons.append("command-failed")
+    if context.get("status") == "unavailable":
+        reasons.append("build-context-unavailable")
+    cache_status = cache.get("status")
+    if cache_status != "available":
+        reasons.append(
+            {
+                "counter-reset": "cache-counters-reset",
+                "server-changed": "cache-identity-changed",
+                "unavailable": "cache-telemetry-unavailable",
+            }.get(cache_status, "cache-telemetry-invalid")
+        )
+    else:
+        identities = cache.get("serverIdentity", {})
+        if not isinstance(identities, dict):
+            statuses = set()
+        else:
+            statuses = {
+                value.get("status") if isinstance(value, dict) else None
+                for value in (
+                    identities.get("before"),
+                    identities.get("after"),
+                )
+            }
+        if statuses != {"known"}:
+            reasons.append("cache-identity-unknown")
+    if storage.get("status") == "degraded":
+        reasons.append("storage-telemetry-degraded")
+    return {
+        "integrity": {
+            "status": "valid" if not reasons else "invalid",
+            "reasons": reasons,
+        },
+        "load": {
+            "concurrentBuildsDeclared": concurrent_builds_declared,
+            "observedIsolation": "unknown",
+        },
+        "matchedAnalysisEligible": not reasons,
+        "analysisScope": ["durationMs", "phaseDurationsMs.command"],
+    }
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -461,6 +521,9 @@ def render_summary(record: dict[str, Any]) -> str:
     if cache.get("status") == "available":
         hit_rate = str(cache["delta"].get("hitRatePercent", "n/a"))
     preflight = record["preflight"]
+    quality = record["measurementQuality"]
+    integrity = quality["integrity"]
+    reasons = safe_text(", ".join(integrity["reasons"])) or "none"
     lines = [
         "### Rust feedback latency",
         "",
@@ -479,6 +542,9 @@ def render_summary(record: dict[str, Any]) -> str:
         f"| Helper preflight | `{preflight['helpers']['status']}` |",
         f"| rusty_v8 preflight | `{preflight['rustyV8']['status']}` |",
         f"| Comparable | `{str(record['comparable']).lower()}` |",
+        f"| Integrity | `{integrity['status']}` (reasons: `{reasons}`) |",
+        f"| Matched latency analysis eligible | "
+        f"`{str(quality['matchedAnalysisEligible']).lower()}` |",
         "",
     ]
     summary = "\n".join(lines)
@@ -653,6 +719,16 @@ def main(argv: list[str]) -> int:
         source_edit = source_edit_evidence(
             source, source_after, args.expected_diff_sha256
         )
+        quality = measurement_quality(
+            source_edit,
+            cache,
+            command_status,
+            exit_code,
+            preflight_ready,
+            storage,
+            context,
+            args.concurrent_builds,
+        )
         record = {
             "schemaVersion": SCHEMA_VERSION,
             "lane": args.lane[:120],
@@ -677,6 +753,7 @@ def main(argv: list[str]) -> int:
             "commandStatus": command_status,
             "preflight": preflight,
             "sccache": cache,
+            "measurementQuality": quality,
             "comparable": source_edit["comparable"]
             and preflight_ready
             and cache["status"] not in {"counter-reset", "server-changed"}

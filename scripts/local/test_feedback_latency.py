@@ -23,6 +23,72 @@ def patch_feedback(name: str, **kwargs: Any) -> Any:
 
 
 class FeedbackLatencyTest(unittest.TestCase):
+    def test_measurement_quality_allows_declared_concurrency(self) -> None:
+        quality = feedback_latency.measurement_quality(
+            {"comparable": True},
+            {
+                "status": "available",
+                "serverIdentity": {
+                    "before": {"status": "known", "fingerprint": "a" * 64},
+                    "after": {"status": "known", "fingerprint": "a" * 64},
+                },
+            },
+            "completed",
+            0,
+            True,
+            {"status": "not-requested"},
+            {},
+            True,
+        )
+
+        self.assertEqual(
+            quality,
+            {
+                "integrity": {"status": "valid", "reasons": []},
+                "load": {
+                    "concurrentBuildsDeclared": True,
+                    "observedIsolation": "unknown",
+                },
+                "matchedAnalysisEligible": True,
+                "analysisScope": ["durationMs", "phaseDurationsMs.command"],
+            },
+        )
+
+    def test_measurement_quality_surfaces_integrity_failures(self) -> None:
+        quality = feedback_latency.measurement_quality(
+            {"comparable": False},
+            {"status": "unavailable"},
+            "completed",
+            9,
+            False,
+            {"status": "degraded"},
+            {"status": "unavailable"},
+            True,
+        )
+
+        self.assertEqual(
+            quality,
+            {
+                "integrity": {
+                    "status": "invalid",
+                    "reasons": [
+                        "source-identity-invalid",
+                        "preflight-invalid",
+                        "command-failed",
+                        "build-context-unavailable",
+                        "cache-telemetry-unavailable",
+                        "storage-telemetry-degraded",
+                    ],
+                },
+                "load": {
+                    "concurrentBuildsDeclared": True,
+                    "observedIsolation": "unknown",
+                },
+                "matchedAnalysisEligible": False,
+                "analysisScope": ["durationMs", "phaseDurationsMs.command"],
+            },
+        )
+
     def test_controlled_edit_requires_a_nonempty_tracked_diff(self) -> None:
         with self.assertRaises(SystemExit):
             feedback_latency.parse_args(
@@ -86,7 +152,7 @@ class FeedbackLatencyTest(unittest.TestCase):
             record = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(result, 0)
-        self.assertEqual(record["schemaVersion"], 3)
+        self.assertEqual(record["schemaVersion"], 4)
         self.assertEqual(
             record["sourceEdit"],
             {
@@ -575,6 +641,11 @@ class FeedbackLatencyTest(unittest.TestCase):
         self.assertEqual(exit_code, 23)
         self.assertEqual(evidence["exitCode"], 23)
         self.assertEqual(evidence["commandStatus"], "completed")
+        self.assertFalse(evidence["measurementQuality"]["matchedAnalysisEligible"])
+        self.assertIn(
+            "cache-telemetry-unavailable",
+            evidence["measurementQuality"]["integrity"]["reasons"],
+        )
         self.assertEqual(
             set(evidence["phaseDurationsMs"]), {"preflight", "command", "telemetry"}
         )
@@ -583,6 +654,9 @@ class FeedbackLatencyTest(unittest.TestCase):
         self.assertNotIn("private-command", serialized)
         self.assertNotIn("/Users/alice", serialized)
         self.assertIn("### Rust feedback latency", summary)
+        self.assertIn("| Integrity | `invalid`", summary)
+        self.assertIn("cache-telemetry-unavailable", summary)
+        self.assertIn("| Matched latency analysis eligible | `false` |", summary)
 
     def test_storage_sampling_preserves_real_child_exit_and_bounds_evidence(
         self,
@@ -622,6 +696,11 @@ class FeedbackLatencyTest(unittest.TestCase):
             self.assertLess(output.stat().st_size, feedback_latency.MAX_JSON_BYTES)
         self.assertEqual(result, 7)
         self.assertFalse(record["comparable"])
+        self.assertFalse(record["measurementQuality"]["matchedAnalysisEligible"])
+        self.assertIn(
+            "command-failed",
+            record["measurementQuality"]["integrity"]["reasons"],
+        )
         self.assertEqual(record["storage"]["status"], "available")
         self.assertGreaterEqual(record["storage"]["sampleCount"], 2)
         self.assertEqual(len(record["storage"]["filesystems"]), 1)

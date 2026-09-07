@@ -24,11 +24,30 @@ just feedback-latency --lane focused-leaf --scenario warm-noop \
 Choose a real package/workload appropriate to the experiment. Use a unique output
 file for each sample. `--configuration` is a caller-declared profile/target/features
 label; the harness does not infer effective Cargo settings from an arbitrary
-command. Schema v3 omits raw paths, command arguments and flag values. Its stable
+command. Schema v4 omits raw paths, command arguments and flag values. Its stable
 fingerprints are pseudonymous, not anonymized: review evidence before publishing. Different path/flag fingerprints can explain
 reuse differences and must not be normalized away blindly. It also records the
 commit, a SHA-256 of the tracked `git diff HEAD`, and whether untracked changes
 were present; diff text and paths are never written to evidence.
+
+Schema v4 adds `measurementQuality` for busy-host analysis. The existing
+`comparable` field keeps its original meaning, so a run with
+`--concurrent-builds` remains non-comparable. `measurementQuality` separates
+that declared load condition from integrity: `integrity.status` is `valid` only
+when source identity, cache identity, command completion, preflight, build
+context, and requested storage telemetry are valid. Its bounded `reasons` list
+keeps failures visible. `matchedAnalysisEligible` can still be `true` for a
+valid busy-host run, while `load.observedIsolation` remains `unknown`; the
+harness does not infer actual isolation from the caller's declaration.
+`analysisScope` limits eligibility to command and total duration. It is an
+integrity prerequisite for matched latency analysis, not proof of matched
+workloads, causal attribution, or comparable cache and disk figures. Cache
+counters remain server aggregates and filesystem figures remain shared-host
+observations even when latency analysis is eligible.
+This eligibility contract currently requires known sccache backend identity.
+An explicitly uncached workload needs a separate declared cache-mode contract
+before using this field; an ineligible record can still contain useful latency
+observations.
 
 For a controlled source edit, compute the declared digest from the checkout and
 identify the scenario explicitly:
