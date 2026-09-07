@@ -707,8 +707,6 @@ class FeedbackLatencyTest(unittest.TestCase):
         self.assertNotIn(temporary_directory, json.dumps(record))
 
     def test_eight_distinct_filesystems_fit_the_evidence_budget(self) -> None:
-        from unittest.mock import patch
-
         with tempfile.TemporaryDirectory() as temporary_directory:
             output = Path(temporary_directory) / "evidence.json"
             roles = [str(index) + "a" * 63 for index in range(8)]
@@ -746,7 +744,11 @@ class FeedbackLatencyTest(unittest.TestCase):
                 patch_feedback(
                     "read_sccache_stats", return_value={"status": "unavailable"}
                 ),
-                patch("feedback_storage.storage_snapshot", return_value=storage),
+                mock.patch.object(
+                    sys.modules["feedback_storage"],
+                    "storage_snapshot",
+                    return_value=storage,
+                ),
             ):
                 self.assertEqual(
                     feedback_latency.main([*args, "--", sys.executable, "-c", "pass"]),

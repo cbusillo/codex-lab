@@ -103,16 +103,17 @@ def tracked_diff_sha256(repo_root: Path) -> str:
         )
     except OSError as error:
         raise FeedbackLatencyError("could not run Git diff lookup") from error
-    if process.stdout is None:
+    output = process.stdout
+    if output is None:
         process.kill()
         process.wait()
         raise FeedbackLatencyError("Git diff lookup did not provide output")
     digest = hashlib.sha256()
     try:
-        for chunk in iter(lambda: process.stdout.read(1024 * 1024), b""):
+        for chunk in iter(lambda: output.read(1024 * 1024), b""):
             digest.update(chunk)
     finally:
-        process.stdout.close()
+        output.close()
     if process.wait() != 0:
         raise FeedbackLatencyError("Git diff lookup failed")
     return digest.hexdigest()
@@ -403,7 +404,7 @@ def measurement_quality(
         reasons.append("command-failed")
     if context.get("status") == "unavailable":
         reasons.append("build-context-unavailable")
-    cache_status = cache.get("status")
+    cache_status = str(cache.get("status"))
     if cache_status != "available":
         reasons.append(
             {
@@ -673,7 +674,7 @@ def main(argv: list[str]) -> int:
         before_cache = read_sccache_stats()
         try:
             context = build_context(REPO_ROOT, args.command, args.configuration)
-        except Exception:
+        except (OSError, ValueError, TypeError):
             context = {"status": "unavailable"}
         sampler = StorageSampler(args.storage_paths)
         sampler.start()
