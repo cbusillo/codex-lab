@@ -292,7 +292,6 @@ def main(argv: list[str] | None = None) -> int:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(args.output, flags, 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = None
             handle.write(
                 json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
             )

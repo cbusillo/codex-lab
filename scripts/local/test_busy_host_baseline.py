@@ -22,15 +22,14 @@ def fixture(
     attempts = []
     for replica, duration in (("r1", 100), ("r2", 120)):
         name = f"pair-01-{replica}.json"
+        expected_diff = "d" if not mismatch or replica == "r1" else "x"
         record = {
             "schemaVersion": 4,
             "exitCode": 0,
             "commandStatus": "completed",
             "scenario": "warm-edit",
             "source": {"commit": "c"},
-            "sourceEdit": {
-                "expectedDiffSha256": "d" if not mismatch or replica == "r1" else "x"
-            },
+            "sourceEdit": {"expectedDiffSha256": expected_diff},
             "buildContext": {
                 "configuration": "dev",
                 "invocationFingerprint": "i",
@@ -47,7 +46,7 @@ def fixture(
                 "pair": 1,
                 "replica": replica,
                 "orderIndex": 0 if replica == "r1" else 1,
-                "expectedDiffSha256": record["sourceEdit"]["expectedDiffSha256"],
+                "expectedDiffSha256": expected_diff,
                 "evidence": name,
                 "harnessExitCode": 0,
             }
