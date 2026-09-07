@@ -10,7 +10,8 @@ RUNNER = SCRIPT.with_name("run_bazel_with_buildbuddy.py")
 
 
 class ConfigureCachedBazelTests(unittest.TestCase):
-    def make_fixture(self, root: Path, version: str) -> tuple[Path, Path]:
+    @staticmethod
+    def make_fixture(root: Path, version: str) -> tuple[Path, Path]:
         repo = root / "repo"
         repo.mkdir()
         (repo / ".bazelversion").write_text("9.0.0\n", encoding="utf-8")
@@ -30,7 +31,8 @@ class ConfigureCachedBazelTests(unittest.TestCase):
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
         return repo, cache
 
-    def run_script(self, root: Path, repo: Path, cache: Path, **extra: str):
+    @staticmethod
+    def run_script(root: Path, repo: Path, cache: Path, **extra: str):
         env = os.environ.copy()
         env.update(
             {
