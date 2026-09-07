@@ -223,8 +223,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --timings --release -p codex-cli --bin codex-lab
-          cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --locked --timings --release -p codex-cli --bin codex-lab
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
           code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
           test -x "$code_mode_host_bin"
           echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"

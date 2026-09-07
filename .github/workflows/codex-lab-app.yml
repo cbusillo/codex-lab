@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/actions/setup-rusty-v8/**"
+      - ".github/scripts/local_build_resources.py"
       - ".github/scripts/run_bazel_with_buildbuddy.py"
       - ".github/scripts/rusty_v8_bazel.py"
       - ".github/scripts/rusty_v8_module_bazel.py"
@@ -85,8 +86,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
-          cargo build --timings --profile ci-app -p codex-code-mode-host --bin codex-code-mode-host
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --timings --profile ci-app -p codex-cli --bin codex-lab
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --timings --profile ci-app -p codex-code-mode-host --bin codex-code-mode-host
           code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
           test -x "$code_mode_host_bin"
           echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
