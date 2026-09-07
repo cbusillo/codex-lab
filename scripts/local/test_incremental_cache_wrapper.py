@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("incremental-cache-wrapper.py")
@@ -159,7 +160,7 @@ class IncrementalCacheWrapperTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("nested RUSTC_WORKSPACE_WRAPPER", result.stderr)
+        self.assertIn("nested RUSTC_WRAPPER", result.stderr)
 
     def test_workspace_wrapper_configuration_is_rejected(self) -> None:
         result = subprocess.run(
@@ -255,6 +256,10 @@ class IncrementalCacheWrapperTest(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                read_log(root / "cache.json")["args"],
+                ["/missing/rustc", "--crate-name", "demo"],
+            )
 
     def test_incremental_existing_sccache_is_unwrapped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -287,6 +292,14 @@ class IncrementalCacheWrapperTest(unittest.TestCase):
                 "1",
             )
             self.assertFalse(cache_log.exists())
+
+
+class PlatformGuardTest(unittest.TestCase):
+    def test_windows_fails_closed(self) -> None:
+        with mock.patch.object(wrapper.os, "name", "nt"):
+            with mock.patch("builtins.print") as print_mock:
+                self.assertEqual(wrapper.main(["wrapper", "rustc"]), 2)
+        self.assertIn("unsupported on Windows", print_mock.call_args.args[0])
 
 
 if __name__ == "__main__":

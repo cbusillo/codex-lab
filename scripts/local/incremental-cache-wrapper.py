@@ -83,6 +83,12 @@ def _exec(
 
 
 def main(argv: Sequence[str] = sys.argv) -> int:
+    if os.name == "nt":
+        print(
+            "incremental-cache-wrapper: this POSIX wrapper is unsupported on Windows",
+            file=sys.stderr,
+        )
+        return 2
     if os.environ.get("RUSTC_WORKSPACE_WRAPPER"):
         print(
             "incremental-cache-wrapper: RUSTC_WORKSPACE_WRAPPER is unsupported; "
@@ -101,7 +107,7 @@ def main(argv: Sequence[str] = sys.argv) -> int:
     compiler_arguments = list(argv[1:])
     if _same_executable(compiler, str(WRAPPER_PATH)):
         print(
-            "incremental-cache-wrapper: nested RUSTC_WORKSPACE_WRAPPER use is "
+            "incremental-cache-wrapper: nested RUSTC_WRAPPER use is "
             "unsupported; configure this wrapper in one Cargo wrapper slot",
             file=sys.stderr,
         )
@@ -111,12 +117,6 @@ def main(argv: Sequence[str] = sys.argv) -> int:
     )
     if incremental:
         if Path(compiler).stem.lower() == "sccache":
-            if len(compiler_arguments) < 2:
-                print(
-                    "incremental-cache-wrapper: sccache invocation has no compiler",
-                    file=sys.stderr,
-                )
-                return 2
             return _exec(compiler_arguments[1:], compiler_arguments[1])
         return _exec(compiler_arguments, compiler)
     if Path(compiler).stem.lower() == "sccache":

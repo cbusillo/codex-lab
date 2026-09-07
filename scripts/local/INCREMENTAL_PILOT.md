@@ -5,6 +5,7 @@ This is an opt-in POSIX experiment for macOS and Linux. Set `RUSTC_WRAPPER` to
 `RUSTC_WORKSPACE_WRAPPER`. The wrapper routes on rustc's actual `-C
 incremental=...` or equivalent `--codegen` flag. Response-file invocations go
 directly to rustc because the wrapper does not scan response files.
+`cargo clippy` is incompatible because it sets `RUSTC_WORKSPACE_WRAPPER`.
 
 Cargo computes rustc flags before invoking the wrapper. For cache-compatible
 calls, the wrapper removes only `CARGO_INCREMENTAL` from the sccache child
@@ -38,4 +39,5 @@ SCCACHE_DIR="$EXTERNAL_PILOT_TARGET/c-cache" \
 Explicit target and cache paths are unmanaged overrides; the caller must
 validate the external volume, isolation, capacity, and cleanup policy. This
 pilot is not an accepted default, performance proof, or GC policy, and makes
-no speed claim. Do not restart a shared sccache daemon for it.
+no speed claim. An explicitly empty `CODEX_LAB_SCCACHE_EXECUTABLE` fails hard;
+it does not request a passthrough. Do not restart a shared sccache daemon.
