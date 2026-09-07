@@ -395,17 +395,6 @@ if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")
 fi
 
-# Self-hosted Codex Lab runners may opt local builds into bounded scheduler
-# estimates. The Python helper validates the complete runner identity/profile
-# and emits nothing for RBE or non-build commands.
-local_resource_args="$(python3 "$(dirname "${BASH_SOURCE[0]}")/local_build_resources.py" \
-  bazel-args -- "${bazel_run_args[@]}")"
-if [[ -n "$local_resource_args" ]]; then
-  while IFS= read -r arg; do
-    [[ -n "$arg" ]] && bazel_run_args+=("$arg")
-  done <<< "$local_resource_args"
-fi
-
 set +e
 # Work around Bazel 9 remote repo contents cache / overlay materialization
 # failures seen in CI (for example "is not a symlink" or permission errors

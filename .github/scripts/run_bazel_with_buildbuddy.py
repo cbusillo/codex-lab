@@ -11,6 +11,7 @@ from pathlib import Path
 from local_build_resources import LocalBuildResources
 from local_build_resources import REMOTE_EXECUTION_CONFIGS
 from local_build_resources import ResourceProfileError
+from local_build_resources import bazel_resource_args
 from local_build_resources import bazel_uses_remote_execution
 from local_build_resources import run_with_optional_lock
 
@@ -179,9 +180,11 @@ def bazel_args_with_remote_config(
             arg.startswith(option_prefix) for arg in configured_args[:separator_idx]
         )
     ]
+    resource_args = bazel_resource_args(args, env)
     return [
         *configured_args[:separator_idx],
         *cache_args,
+        *resource_args,
         *configured_args[separator_idx:],
     ]
 

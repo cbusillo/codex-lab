@@ -79,7 +79,10 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
   integration tests against that real binary on the trusted Apple Silicon runner.
 - `v8-canary.yml` keeps the Apple Silicon upstream V8 artifact pair visible in
-  the release gate, full suite, and relevant pull requests.
+  the release gate, full suite, and relevant pull requests. Its heavy build
+  runs on the trusted `macos-codex-lab` lane only after the same-repository PR
+  and actor authorization checks; public-fork PRs run metadata and skip the
+  gated build.
 - Bazel, Rust, SDK integration, and V8 remain independent top-level suites and
   start in parallel. Full verification optimizes for diagnostic completeness;
   the bounded pull-request gate is responsible for fast rejection.
@@ -204,7 +207,9 @@ The trusted Apple Silicon V8 canary and release jobs use separate persistent
 Bazel repository and disk caches through
 `scripts/github/configure-codex-lab-bazel-cache.sh`. Each disk cache is capped
 at 80 GB so both caches fit within the artifact volume quota with room for
-repository caches and normal artifact growth.
+repository caches and normal artifact growth. The canary serializes its two
+variants on the local lane and uses the shared local-build resource controls
+when it falls back from BuildBuddy to local Bazel execution.
 
 ## Distribution Contract
 
