@@ -10,7 +10,7 @@ uv run python scripts/local/busy_host_baseline.py \
   --output /path/aa-measured/analysis.json
 ```
 
-The manifest is bounded to 40 attempts. Evidence paths must be relative and remain under the root; unsafe paths, symlinks, invalid manifest or identity structure, and existing output are rejected. Missing, oversized, nonregular, or unparseable per-attempt evidence remains counted as failed evidence. Schema-4 records need exact `matchedAnalysisEligible == true`, a successful command, and positive `phaseDurationsMs.command`.
+The manifest is bounded to 40 attempts. Evidence paths must be relative and remain under the root; unsafe paths, symlinks, invalid manifest or identity structure, and existing output are rejected. Missing, oversized, nonregular, or unparsable per-attempt evidence remains counted as failed evidence. Schema-4 records need exact `matchedAnalysisEligible == true`, a successful command, and positive `phaseDurationsMs.command`.
 
 Pairs require distinct labels, order indexes 0/1, and matching source, edit, toolchain/lockfile, invocation, source-path, configuration, and scenario identities. Environment fingerprints remain stable within each replica and are retained but excluded from cross-replica identity matching: separate targets/caches are caller-declared treatment, not proven equivalent by hashes. Ratios use sorted labels.
 
