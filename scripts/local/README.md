@@ -34,7 +34,8 @@ For a controlled source edit, compute the declared digest from the checkout and
 identify the scenario explicitly:
 
 ```sh
-expected_diff_sha256="$(git diff --no-ext-diff --no-textconv --no-color --binary HEAD -- \
+repo_root="$(git rev-parse --show-toplevel)"
+expected_diff_sha256="$(git -C "$repo_root" diff --no-ext-diff --no-textconv --no-color --binary HEAD -- \
   | shasum -a 256 | awk '{print $1}')"
 just feedback-latency --lane focused-leaf-edit --scenario warm-edit \
   --expected-diff-sha256 "$expected_diff_sha256" \
@@ -46,6 +47,9 @@ the checkout must have no untracked changes. The harness samples the same
 identity after the command; a changed commit, tracked diff, or untracked state
 marks the result non-comparable. A dirty checkout without a declared digest
 can still be measured with `--allow-dirty`, but remains non-comparable.
+The digest is checkout-local: compute it from the same repository immediately
+before invoking the harness and do not treat equal or different values across
+checkouts as portable edit identities.
 This endpoint check cannot detect a transient edit that is reverted before the
 post-command scan.
 

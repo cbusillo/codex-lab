@@ -398,6 +398,15 @@ class FeedbackLatencyTest(unittest.TestCase):
             result["serverIdentity"]["before"]["fingerprint"],
             result["serverIdentity"]["after"]["fingerprint"],
         )
+        known_to_unknown = feedback_latency.sccache_delta(
+            {
+                "status": "available",
+                "metrics": {},
+                "serverIdentity": before_identity,
+            },
+            {"status": "available", "metrics": {}},
+        )
+        self.assertEqual(known_to_unknown["status"], "server-changed")
 
     def test_sccache_unknown_identity_is_explicit(self) -> None:
         result = feedback_latency.sccache_delta(

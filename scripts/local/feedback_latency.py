@@ -332,11 +332,15 @@ def sccache_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
             "gauges": {},
             "serverIdentity": server_identity,
         }
-    if (
-        before_identity.get("status") == "known"
-        and after_identity.get("status") == "known"
+    identity_statuses = {
+        before_identity.get("status"),
+        after_identity.get("status"),
+    }
+    identity_changed = (
+        identity_statuses == {"known"}
         and before_identity.get("fingerprint") != after_identity.get("fingerprint")
-    ):
+    ) or identity_statuses == {"known", "unknown"}
+    if identity_changed:
         return {
             "status": "server-changed",
             "reason": "sccache backend identity changed during the command",
