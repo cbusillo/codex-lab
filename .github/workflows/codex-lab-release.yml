@@ -157,6 +157,7 @@ jobs:
       release_tag: ${{ needs.release-metadata.outputs.release_tag }}
       release_version: ${{ needs.release-metadata.outputs.release_version }}
     env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}
       CODEX_LAB_RELEASE_VERSION: ${{ needs.release-metadata.outputs.release_identity }}
       # The release profile builds with `debug = "line-tables-only"` and
