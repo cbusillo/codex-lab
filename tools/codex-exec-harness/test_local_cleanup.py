@@ -280,18 +280,19 @@ class LocalCleanupSpaceTest(unittest.TestCase):
                 env.stdout,
             )
 
-    def test_cargo_build_env_falls_back_to_worktree_target(self) -> None:
+    def test_cargo_build_env_rejects_missing_configured_root(self) -> None:
         with copied_cleanup_workspace() as workspace:
+            artifact_root = workspace / "missing-volume"
             env = run_cargo_build_env(
                 workspace,
                 CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
-                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(workspace / "missing-volume"),
+                CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT=str(artifact_root),
             )
 
-            self.assertEqual(
-                f"{workspace / 'codex-rs' / 'target'}\n",
-                env.stdout,
-            )
+            self.assertEqual(1, env.returncode)
+            self.assertEqual("", env.stdout)
+            self.assertIn("configured artifact root is missing", env.stderr)
+            self.assertFalse(artifact_root.exists())
 
     def test_cargo_build_env_without_artifact_root_uses_worktree_target(self) -> None:
         with copied_cleanup_workspace() as workspace:
@@ -645,8 +646,23 @@ def run_cargo_build_env(
     env.pop("CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_CARGO_TARGET_DIR", None)
     env.pop("CODEX_LAB_CARGO_TARGET_KEY", None)
+    env.pop("CODEX_LAB_CARGO_TARGET_NO_MKDIR", None)
     env.pop("CODEX_LAB_CARGO_TARGET_SCOPE", None)
     env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT", None)
+    env.pop("CODEX_LAB_DEVELOPER_ARTIFACTS_VOLUME_UUID", None)
+    test_bin = workspace / ".cargo-build-env-test-bin"
+    test_bin.mkdir(exist_ok=True)
+    uname = test_bin / "uname"
+    uname.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        "-s) printf 'Linux\\n' ;;\n"
+        "-m) printf 'x86_64\\n' ;;\n"
+        "*) printf 'Linux\\n' ;;\n"
+        "esac\n"
+    )
+    uname.chmod(0o755)
+    env["PATH"] = f"{test_bin}{os.pathsep}{env['PATH']}"
     env.update(env_overrides)
     return subprocess.run(
         [str(workspace / "scripts" / "local" / "cargo-build-env.sh")],
