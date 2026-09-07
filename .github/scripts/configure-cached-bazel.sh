@@ -90,15 +90,17 @@ PY
 }
 
 validated_binary=""
-for candidate in "${candidates[@]}"; do
-  [[ -x "$candidate" && ! -L "$candidate" ]] || continue
-  version_output="$(probe_bazel_version "$candidate" || true)"
-  actual_version="$(awk '$1 == "bazel" { print $2; exit }' <<<"$version_output")"
-  if [[ "$actual_version" == "$expected_version" ]]; then
-    validated_binary="$candidate"
-    break
-  fi
-done
+if (( candidate_count > 0 )); then
+  for candidate in "${candidates[@]}"; do
+    [[ -x "$candidate" && ! -L "$candidate" ]] || continue
+    version_output="$(probe_bazel_version "$candidate" || true)"
+    actual_version="$(awk '$1 == "bazel" { print $2; exit }' <<<"$version_output")"
+    if [[ "$actual_version" == "$expected_version" ]]; then
+      validated_binary="$candidate"
+      break
+    fi
+  done
+fi
 
 if [[ -z "$validated_binary" ]]; then
   echo "Cannot configure cached Bazel: no cached binary matches Bazel $expected_version" >&2

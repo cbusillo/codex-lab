@@ -1,10 +1,9 @@
-from pathlib import Path
 import os
 import stat
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 SCRIPT = Path(__file__).with_name("configure-cached-bazel.sh")
 RUNNER = SCRIPT.with_name("run_bazel_with_buildbuddy.py")
@@ -47,7 +46,7 @@ class ConfigureCachedBazelTests(unittest.TestCase):
             }
         )
         return subprocess.run(
-            [str(SCRIPT)],
+            ["/bin/bash", str(SCRIPT)],
             cwd=repo,
             env=env,
             capture_output=True,
