@@ -23,6 +23,214 @@ def patch_feedback(name: str, **kwargs: Any) -> Any:
 
 
 class FeedbackLatencyTest(unittest.TestCase):
+    def test_controlled_edit_requires_a_nonempty_tracked_diff(self) -> None:
+        with self.assertRaises(SystemExit):
+            feedback_latency.parse_args(
+                [
+                    "--lane",
+                    "empty-edit",
+                    "--scenario",
+                    "warm-edit",
+                    "--expected-diff-sha256",
+                    feedback_latency.EMPTY_DIFF_SHA256,
+                    "--",
+                    "private-command",
+                ]
+            )
+
+    def test_uncontrolled_dirty_diff_drift_is_not_stable(self) -> None:
+        before = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": False,
+            "trackedDiffSha256": "1" * 64,
+        }
+        after = {**before, "trackedDiffSha256": "2" * 64}
+
+        evidence = feedback_latency.source_edit_evidence(before, after, None)
+
+        self.assertFalse(evidence["stable"])
+        self.assertFalse(evidence["comparable"])
+
+    def test_controlled_edit_matches_declared_tracked_diff(self) -> None:
+        diff = "c" * 64
+        source = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": False,
+            "trackedDiffSha256": diff,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            with (
+                patch_feedback("source_identity", return_value=source),
+                patch_feedback(
+                    "read_sccache_stats", return_value={"status": "unavailable"}
+                ),
+                mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)),
+            ):
+                result = feedback_latency.main(
+                    [
+                        "--lane",
+                        "controlled-edit",
+                        "--scenario",
+                        "warm-edit",
+                        "--expected-diff-sha256",
+                        diff,
+                        "--output",
+                        str(output),
+                        "--",
+                        "private-command",
+                    ]
+                )
+            record = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record["schemaVersion"], 3)
+        self.assertEqual(
+            record["sourceEdit"],
+            {
+                "mode": "controlled-edit",
+                "expectedDiffSha256": diff,
+                "beforeStatus": "matched",
+                "afterStatus": "matched",
+                "stable": True,
+                "comparable": True,
+            },
+        )
+        self.assertTrue(record["comparable"])
+
+    def test_controlled_edit_rejects_wrong_diff_before_command(self) -> None:
+        source = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": False,
+            "trackedDiffSha256": "d" * 64,
+        }
+        with (
+            patch_feedback("source_identity", return_value=source),
+            patch_feedback("write_evidence") as write_evidence,
+            mock.patch("subprocess.run") as run,
+        ):
+            result = feedback_latency.main(
+                [
+                    "--lane",
+                    "wrong-edit",
+                    "--scenario",
+                    "warm-edit",
+                    "--expected-diff-sha256",
+                    "e" * 64,
+                    "--",
+                    "private-command",
+                ]
+            )
+
+        self.assertEqual(result, feedback_latency.HARNESS_EXIT_CODE)
+        run.assert_not_called()
+        write_evidence.assert_not_called()
+
+    def test_controlled_edit_rejects_untracked_changes(self) -> None:
+        source = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": True,
+            "trackedDiffSha256": "f" * 64,
+        }
+        with (
+            patch_feedback("source_identity", return_value=source),
+            patch_feedback("write_evidence") as write_evidence,
+        ):
+            result = feedback_latency.main(
+                [
+                    "--lane",
+                    "untracked-edit",
+                    "--scenario",
+                    "warm-edit",
+                    "--expected-diff-sha256",
+                    "f" * 64,
+                    "--",
+                    "private-command",
+                ]
+            )
+
+        self.assertEqual(result, feedback_latency.HARNESS_EXIT_CODE)
+        write_evidence.assert_not_called()
+
+    def test_unknown_dirty_checkout_remains_non_comparable(self) -> None:
+        source = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": False,
+            "trackedDiffSha256": "1" * 64,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            with (
+                patch_feedback("source_identity", return_value=source),
+                patch_feedback(
+                    "read_sccache_stats", return_value={"status": "unavailable"}
+                ),
+                mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)),
+            ):
+                result = feedback_latency.main(
+                    [
+                        "--lane",
+                        "unknown-dirty",
+                        "--scenario",
+                        "warm-edit",
+                        "--allow-dirty",
+                        "--output",
+                        str(output),
+                        "--",
+                        "private-command",
+                    ]
+                )
+            record = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record["sourceEdit"]["beforeStatus"], "unknown-dirty")
+        self.assertFalse(record["sourceEdit"]["comparable"])
+        self.assertFalse(record["comparable"])
+
+    def test_controlled_edit_drift_after_command_is_non_comparable(self) -> None:
+        diff = "2" * 64
+        before = {
+            "commit": "a" * 40,
+            "dirty": True,
+            "untrackedChanges": False,
+            "trackedDiffSha256": diff,
+        }
+        after = {**before, "trackedDiffSha256": "3" * 64}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            with (
+                patch_feedback("source_identity", side_effect=[before, after]),
+                patch_feedback(
+                    "read_sccache_stats", return_value={"status": "unavailable"}
+                ),
+                mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)),
+            ):
+                result = feedback_latency.main(
+                    [
+                        "--lane",
+                        "drifted-edit",
+                        "--scenario",
+                        "warm-edit",
+                        "--expected-diff-sha256",
+                        diff,
+                        "--output",
+                        str(output),
+                        "--",
+                        "private-command",
+                    ]
+                )
+            record = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record["sourceEdit"]["afterStatus"], "diff-mismatch")
+        self.assertFalse(record["sourceEdit"]["stable"])
+        self.assertFalse(record["comparable"])
+
     def test_machine_identity_is_bounded_and_hides_private_inputs(self) -> None:
         environment = {
             "GITHUB_ACTIONS": "true",
@@ -140,6 +348,10 @@ class FeedbackLatencyTest(unittest.TestCase):
                     "hitRatePercent": 75.0,
                 },
                 "gauges": {"cacheSizeBytes": 200, "maxCacheSizeBytes": 1000},
+                "serverIdentity": {
+                    "before": {"status": "unknown", "fingerprint": None},
+                    "after": {"status": "unknown", "fingerprint": None},
+                },
             },
         )
         after["metrics"]["compileRequests"] = 1
@@ -150,8 +362,111 @@ class FeedbackLatencyTest(unittest.TestCase):
                 "reason": "sccache counters decreased during the command",
                 "delta": None,
                 "gauges": {"cacheSizeBytes": 200, "maxCacheSizeBytes": 1000},
+                "serverIdentity": {
+                    "before": {"status": "unknown", "fingerprint": None},
+                    "after": {"status": "unknown", "fingerprint": None},
+                },
             },
         )
+
+    def test_sccache_endpoint_drift_is_opaque_and_non_comparable(self) -> None:
+        before_output = json.dumps(
+            {"cache_location": "/private/alice/cache", "version": "v1"}
+        )
+        after_output = json.dumps(
+            {"cache_location": "/private/bob/cache", "version": "v1"}
+        )
+        before_identity = feedback_latency.sccache_server_identity(before_output)
+        after_identity = feedback_latency.sccache_server_identity(after_output)
+        result = feedback_latency.sccache_delta(
+            {
+                "status": "available",
+                "metrics": {"cacheHits": 1, "cacheMisses": 0},
+                "serverIdentity": before_identity,
+            },
+            {
+                "status": "available",
+                "metrics": {"cacheHits": 2, "cacheMisses": 0},
+                "serverIdentity": after_identity,
+            },
+        )
+
+        self.assertEqual(result["status"], "server-changed")
+        self.assertEqual(result["serverIdentity"]["before"]["status"], "known")
+        self.assertNotIn("/private", json.dumps(result))
+        self.assertNotEqual(
+            result["serverIdentity"]["before"]["fingerprint"],
+            result["serverIdentity"]["after"]["fingerprint"],
+        )
+        known_to_unknown = feedback_latency.sccache_delta(
+            {
+                "status": "available",
+                "metrics": {},
+                "serverIdentity": before_identity,
+            },
+            {"status": "available", "metrics": {}},
+        )
+        self.assertEqual(known_to_unknown["status"], "server-changed")
+
+    def test_sccache_unknown_identity_is_explicit(self) -> None:
+        result = feedback_latency.sccache_delta(
+            {"status": "available", "metrics": {}},
+            {"status": "available", "metrics": {}},
+        )
+
+        self.assertEqual(
+            result["serverIdentity"],
+            {
+                "before": {"status": "unknown", "fingerprint": None},
+                "after": {"status": "unknown", "fingerprint": None},
+            },
+        )
+
+    def test_server_change_makes_evidence_non_comparable(self) -> None:
+        source = {"commit": "a" * 40, "dirty": False}
+        before = feedback_latency.sccache_server_identity(
+            json.dumps({"cache_location": "/private/a", "version": "v1"})
+        )
+        after = feedback_latency.sccache_server_identity(
+            json.dumps({"cache_location": "/private/b", "version": "v1"})
+        )
+        cache_before = {
+            "status": "available",
+            "metrics": {"cacheHits": 1, "cacheMisses": 0},
+            "serverIdentity": before,
+        }
+        cache_after = {
+            "status": "available",
+            "metrics": {"cacheHits": 2, "cacheMisses": 0},
+            "serverIdentity": after,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output = Path(temporary_directory) / "evidence.json"
+            with (
+                patch_feedback("source_identity", return_value=source),
+                patch_feedback(
+                    "read_sccache_stats", side_effect=[cache_before, cache_after]
+                ),
+                mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)),
+            ):
+                result = feedback_latency.main(
+                    [
+                        "--lane",
+                        "server-change",
+                        "--scenario",
+                        "warm-noop",
+                        "--output",
+                        str(output),
+                        "--",
+                        "private-command",
+                    ]
+                )
+            record = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(record["sccache"]["status"], "server-changed")
+        self.assertFalse(record["comparable"])
+        self.assertNotIn("/private", json.dumps(record))
 
     def test_rusty_v8_preflight_verifies_manifest_checksums(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
