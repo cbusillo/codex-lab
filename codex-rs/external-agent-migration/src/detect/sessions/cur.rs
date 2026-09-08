@@ -8,9 +8,26 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
+// This limits directory enumerations (`fs::read_dir` calls), not metadata probes.
 const MAX_CUR_PROJECT_PATH_PROBES: usize = 128;
-const CUR_PROJECT_SEPARATORS: [&str; 11] =
-    ["-", "_", ".", " ", "--", "..", "__", "  ", "+", "@", "&"];
+const MAX_CUR_PROJECT_PATH_ENTRIES: usize = 8_192;
+const MAX_CUR_PROJECT_PATH_FRONTIER: usize = 1_024;
+const MAX_CUR_PROJECT_PATH_INPUT_BYTES: usize = 4_096;
+
+#[derive(Clone, Copy)]
+struct CurProjectPathSearchLimits {
+    max_directory_probes: usize,
+    max_entries_scanned: usize,
+    max_frontier_states: usize,
+    max_input_bytes: usize,
+}
+
+const CUR_PROJECT_PATH_SEARCH_LIMITS: CurProjectPathSearchLimits = CurProjectPathSearchLimits {
+    max_directory_probes: MAX_CUR_PROJECT_PATH_PROBES,
+    max_entries_scanned: MAX_CUR_PROJECT_PATH_ENTRIES,
+    max_frontier_states: MAX_CUR_PROJECT_PATH_FRONTIER,
+    max_input_bytes: MAX_CUR_PROJECT_PATH_INPUT_BYTES,
+};
 
 pub fn detect_recent_cur_sessions(
     external_agent_home: &Path,
@@ -98,11 +115,22 @@ fn cur_project_cwd(project_storage: &Path, external_agent_home: &Path) -> Option
 }
 
 fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
+    decode_cur_project_path_with_limits(encoded, CUR_PROJECT_PATH_SEARCH_LIMITS)
+}
+
+fn decode_cur_project_path_with_limits(
+    encoded: &str,
+    limits: CurProjectPathSearchLimits,
+) -> Option<PathBuf> {
+    if encoded.len() > limits.max_input_bytes {
+        return None;
+    }
+
     #[cfg(not(windows))]
-    let mut path = PathBuf::from("/");
+    let root = PathBuf::from("/");
 
     #[cfg(windows)]
-    let (encoded, mut path) = {
+    let (encoded, root) = {
         let (drive, encoded) = decode_cur_windows_project_drive(encoded)?;
         (encoded, PathBuf::from(format!("{drive}:\\")))
     };
@@ -115,98 +143,204 @@ fn decode_cur_project_path(encoded: &str) -> Option<PathBuf> {
         {
             return None;
         }
-        path.push(component);
+    }
+
+    resolve_cur_project_path(root, encoded, limits)
+}
+
+fn resolve_cur_project_path(
+    root: PathBuf,
+    encoded: &str,
+    limits: CurProjectPathSearchLimits,
+) -> Option<PathBuf> {
+    if limits.max_frontier_states == 0 {
+        return None;
     }
 
     let mut matched_path = None;
-    let mut probes = 0;
-    let mut inspect = |candidate: PathBuf| {
-        if probes >= MAX_CUR_PROJECT_PATH_PROBES {
+    let mut directory_probes = 0;
+    let mut entries_scanned = 0;
+    let mut pending = vec![(root, 0)];
+
+    while let Some((directory, offset)) = pending.pop() {
+        if directory_probes >= limits.max_directory_probes {
             return None;
         }
-        probes += 1;
-        if candidate.is_dir() {
-            if matched_path
-                .as_ref()
-                .is_some_and(|matched_path| matched_path != &candidate)
+        directory_probes += 1;
+        let entries = fs::read_dir(&directory).ok()?;
+        let remaining = encoded.get(offset..)?;
+
+        for entry in entries {
+            if entries_scanned >= limits.max_entries_scanned {
+                return None;
+            }
+            entries_scanned += 1;
+            let entry = entry.ok()?;
+            let file_name = entry.file_name();
+            let Some(file_name) = file_name.to_str() else {
+                continue;
+            };
+
+            let mut match_ends = Vec::with_capacity(2);
+            if let Some(match_end) =
+                native_cur_component_match_end(&directory, &entry.path(), remaining, file_name)
             {
-                return None;
+                match_ends.push(match_end);
             }
-            matched_path = Some(candidate);
-        }
-        Some(())
-    };
-    inspect(path.clone())?;
-
-    for suffix_length in 2..=4 {
-        let mut parent = path.as_path();
-        let mut suffix = Vec::with_capacity(suffix_length);
-        for _ in 0..suffix_length {
-            let Some(component) = parent.file_name().and_then(|name| name.to_str()) else {
-                break;
-            };
-            suffix.push(component);
-            let Some(ancestor) = parent.parent() else {
-                break;
-            };
-            parent = ancestor;
-        }
-        if suffix.len() != suffix_length {
-            break;
-        }
-        suffix.reverse();
-
-        for separator in CUR_PROJECT_SEPARATORS {
-            inspect(parent.join(suffix.join(separator)))?;
-        }
-    }
-
-    let mut ancestor = path.parent();
-    while let Some(right) = ancestor {
-        let Some(right_name) = right.file_name().and_then(|name| name.to_str()) else {
-            break;
-        };
-        let Some(left) = right.parent() else {
-            break;
-        };
-        let Some(left_name) = left.file_name().and_then(|name| name.to_str()) else {
-            break;
-        };
-        let Some(prefix) = left.parent() else {
-            break;
-        };
-        let Ok(trailing) = path.strip_prefix(right) else {
-            return None;
-        };
-
-        for separator in CUR_PROJECT_SEPARATORS {
-            let merged_prefix = prefix.join(format!("{left_name}{separator}{right_name}"));
-            if probes >= MAX_CUR_PROJECT_PATH_PROBES {
-                return None;
+            let normalized = normalize_cur_project_component(file_name);
+            if normalized != file_name
+                && let Some(match_end) = native_normalized_cur_component_match_end(
+                    &directory,
+                    &entry.path(),
+                    remaining,
+                    file_name,
+                    &normalized,
+                )
+                && !match_ends.contains(&match_end)
+            {
+                match_ends.push(match_end);
             }
-            probes += 1;
-            if !merged_prefix.is_dir() {
+            if match_ends.is_empty() {
                 continue;
             }
 
-            if probes >= MAX_CUR_PROJECT_PATH_PROBES {
-                return None;
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+            let is_directory = if file_type.is_symlink() {
+                fs::metadata(&path).ok()?.is_dir()
+            } else {
+                file_type.is_dir()
+            };
+            if !is_directory {
+                continue;
             }
-            probes += 1;
-            let candidate = merged_prefix.join(trailing);
-            if !candidate.is_dir()
-                || matched_path
-                    .as_ref()
-                    .is_some_and(|matched_path| matched_path != &candidate)
-            {
-                return None;
+
+            for match_end in match_ends {
+                let next_offset = offset + match_end;
+                if next_offset == encoded.len() {
+                    if matched_path
+                        .as_ref()
+                        .is_some_and(|matched_path| matched_path != &path)
+                    {
+                        return None;
+                    }
+                    matched_path = Some(path.clone());
+                } else {
+                    if pending.len() >= limits.max_frontier_states {
+                        return None;
+                    }
+                    pending.push((path.clone(), next_offset));
+                }
             }
-            matched_path = Some(candidate);
         }
-        ancestor = Some(left);
     }
 
     matched_path
+}
+
+fn native_cur_component_match_end(
+    directory: &Path,
+    entry_path: &Path,
+    encoded: &str,
+    spelling: &str,
+) -> Option<usize> {
+    if let Some(match_end) = cur_component_match_end(encoded, spelling) {
+        return Some(match_end);
+    }
+
+    let candidate = encoded.get(..spelling.len())?;
+    let match_end = cur_component_match_end(encoded, candidate)?;
+    if !candidate.eq_ignore_ascii_case(spelling)
+        || fs::canonicalize(directory.join(candidate)).ok()? != fs::canonicalize(entry_path).ok()?
+    {
+        return None;
+    }
+    Some(match_end)
+}
+
+fn native_normalized_cur_component_match_end(
+    directory: &Path,
+    entry_path: &Path,
+    encoded: &str,
+    file_name: &str,
+    normalized: &str,
+) -> Option<usize> {
+    if let Some(match_end) = cur_component_match_end(encoded, normalized) {
+        return Some(match_end);
+    }
+
+    let candidate = encoded.get(..normalized.len())?;
+    let match_end = cur_component_match_end(encoded, candidate)?;
+    if !candidate.eq_ignore_ascii_case(normalized) {
+        return None;
+    }
+    let native_candidate = cur_component_with_encoded_ascii_case(file_name, candidate)?;
+    if fs::canonicalize(directory.join(native_candidate)).ok()?
+        != fs::canonicalize(entry_path).ok()?
+    {
+        return None;
+    }
+    Some(match_end)
+}
+
+fn cur_component_with_encoded_ascii_case(component: &str, encoded: &str) -> Option<String> {
+    let mut encoded = encoded.chars();
+    let mut native = String::with_capacity(component.len());
+    let mut in_punctuation_run = false;
+    for character in component.chars() {
+        if matches!(character, '-' | '_' | '.' | ' ' | '+' | '@' | '&') {
+            if !in_punctuation_run && encoded.next()? != '-' {
+                return None;
+            }
+            native.push(character);
+            in_punctuation_run = true;
+        } else {
+            let encoded_character = encoded.next()?;
+            if character == encoded_character {
+                native.push(character);
+            } else if character.is_ascii_alphabetic()
+                && encoded_character.is_ascii_alphabetic()
+                && character.eq_ignore_ascii_case(&encoded_character)
+            {
+                native.push(encoded_character);
+            } else {
+                return None;
+            }
+            in_punctuation_run = false;
+        }
+    }
+    if encoded.next().is_some() {
+        return None;
+    }
+    Some(native)
+}
+
+fn cur_component_match_end(encoded: &str, spelling: &str) -> Option<usize> {
+    let trailing = encoded.strip_prefix(spelling)?;
+    if trailing.is_empty() {
+        Some(spelling.len())
+    } else if trailing.starts_with('-') {
+        Some(spelling.len() + 1)
+    } else {
+        None
+    }
+}
+
+fn normalize_cur_project_component(component: &str) -> String {
+    let mut normalized = String::with_capacity(component.len());
+    let mut in_punctuation_run = false;
+    for character in component.chars() {
+        if matches!(character, '-' | '_' | '.' | ' ' | '+' | '@' | '&') {
+            if !in_punctuation_run {
+                normalized.push('-');
+            }
+            in_punctuation_run = true;
+        } else {
+            normalized.push(character);
+            in_punctuation_run = false;
+        }
+    }
+    normalized
 }
 
 #[cfg(any(windows, test))]

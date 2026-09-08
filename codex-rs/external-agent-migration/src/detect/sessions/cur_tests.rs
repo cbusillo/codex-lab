@@ -201,6 +201,34 @@ fn resolves_cur_project_names_with_common_separators() {
 }
 
 #[test]
+fn resolves_cur_project_below_hyphenated_ancestor_and_leaf() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root
+        .path()
+        .join("developer-artifacts")
+        .join("cursor-project");
+    fs::create_dir_all(&project).expect("project root");
+
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&project)),
+        Some(project)
+    );
+}
+
+#[test]
+fn resolves_cur_project_with_raw_and_normalized_components() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("team.with space").join("repo_name");
+    fs::create_dir_all(&project).expect("project root");
+    let encoded = format!(
+        "{}-team.with space-repo-name",
+        encode_project_path(root.path())
+    );
+
+    assert_eq!(decode_cur_project_path(&encoded), Some(project));
+}
+
+#[test]
 fn rejects_ambiguous_cur_project_without_a_direct_match() {
     let root = TempDir::new().expect("tempdir");
     for project_name in ["my-project", "my project", "my+project"] {
@@ -222,6 +250,30 @@ fn rejects_ambiguous_cur_project_with_punctuated_ancestor() {
 
     assert_eq!(encoded, encode_project_path(&punctuated_leaf));
     assert_eq!(decode_cur_project_path(&encoded), None);
+}
+
+#[test]
+fn rejects_ambiguous_cur_project_below_hyphenated_ancestor() {
+    let root = TempDir::new().expect("tempdir");
+    let hyphenated_ancestor = root
+        .path()
+        .join("developer-artifacts")
+        .join("cursor-project");
+    let split_ancestor = root
+        .path()
+        .join("developer")
+        .join("artifacts-cursor-project");
+    fs::create_dir_all(&hyphenated_ancestor).expect("hyphenated ancestor project");
+    fs::create_dir_all(&split_ancestor).expect("split ancestor project");
+
+    assert_eq!(
+        encode_project_path(&hyphenated_ancestor),
+        encode_project_path(&split_ancestor)
+    );
+    assert_eq!(
+        decode_cur_project_path(&encode_project_path(&hyphenated_ancestor)),
+        None
+    );
 }
 
 #[test]
@@ -248,6 +300,165 @@ fn rejects_ambiguous_cur_project_with_multiple_punctuated_ancestors() {
         assert_eq!(encoded, encode_project_path(&second));
         assert_eq!(decode_cur_project_path(&encoded), None);
     }
+}
+
+#[test]
+fn returns_none_when_cur_project_directory_probe_budget_is_exhausted() {
+    let root = TempDir::new().expect("tempdir");
+    fs::create_dir_all(root.path().join("ancestor/project")).expect("project root");
+    let limits = CurProjectPathSearchLimits {
+        max_directory_probes: 1,
+        ..CUR_PROJECT_PATH_SEARCH_LIMITS
+    };
+
+    assert_eq!(
+        resolve_cur_project_path(root.path().to_path_buf(), "ancestor-project", limits),
+        None
+    );
+}
+
+#[test]
+fn returns_none_when_cur_project_entry_scan_budget_is_exhausted() {
+    let root = TempDir::new().expect("tempdir");
+    fs::create_dir_all(root.path().join("project")).expect("project root");
+    fs::create_dir_all(root.path().join("unrelated")).expect("unrelated directory");
+    let limits = CurProjectPathSearchLimits {
+        max_entries_scanned: 1,
+        ..CUR_PROJECT_PATH_SEARCH_LIMITS
+    };
+
+    assert_eq!(
+        resolve_cur_project_path(root.path().to_path_buf(), "project", limits),
+        None
+    );
+}
+
+#[test]
+fn matches_raw_ascii_case_according_to_native_filesystem_semantics() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("Project");
+    fs::create_dir_all(&project).expect("project root");
+    let alternate_spelling = root.path().join("project");
+    let expected = fs::canonicalize(&alternate_spelling)
+        .ok()
+        .filter(|resolved| *resolved == fs::canonicalize(&project).expect("canonical project"))
+        .map(|_| project);
+
+    assert_eq!(
+        resolve_cur_project_path(
+            root.path().to_path_buf(),
+            "project",
+            CUR_PROJECT_PATH_SEARCH_LIMITS,
+        ),
+        expected
+    );
+}
+
+#[test]
+fn matches_normalized_ascii_case_according_to_native_filesystem_semantics() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("Repo_Name");
+    fs::create_dir_all(&project).expect("project root");
+    let alternate_spelling = root.path().join("repo_name");
+    let alternate_matches = fs::canonicalize(&alternate_spelling)
+        .ok()
+        .is_some_and(|resolved| resolved == fs::canonicalize(&project).expect("canonical project"));
+
+    assert_eq!(
+        resolve_cur_project_path(
+            root.path().to_path_buf(),
+            "repo-name",
+            CUR_PROJECT_PATH_SEARCH_LIMITS,
+        ),
+        alternate_matches.then(|| project.clone())
+    );
+
+    if !alternate_matches {
+        fs::create_dir_all(&alternate_spelling).expect("case-distinct project");
+        assert_eq!(
+            resolve_cur_project_path(
+                root.path().to_path_buf(),
+                "repo-name",
+                CUR_PROJECT_PATH_SEARCH_LIMITS,
+            ),
+            Some(alternate_spelling)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resolves_symlinked_cur_project_ancestor_and_leaf_as_alias_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().expect("tempdir");
+    let actual_ancestor = root.path().join("actual-parent");
+    let actual_project = actual_ancestor.join("actual-project");
+    fs::create_dir_all(&actual_project).expect("actual project");
+    let linked_ancestor = root.path().join("linked-parent");
+    symlink(&actual_ancestor, &linked_ancestor).expect("linked ancestor");
+    let linked_project = actual_ancestor.join("linked-project");
+    symlink(&actual_project, &linked_project).expect("linked project");
+    let expected = linked_ancestor.join("linked-project");
+
+    assert_eq!(
+        resolve_cur_project_path(
+            root.path().to_path_buf(),
+            "linked-parent-linked-project",
+            CUR_PROJECT_PATH_SEARCH_LIMITS,
+        ),
+        Some(expected)
+    );
+}
+
+#[test]
+fn honors_cur_project_encoded_input_budget_boundary() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("project");
+    fs::create_dir_all(&project).expect("project root");
+    let encoded = encode_project_path(&project);
+    let exact_limits = CurProjectPathSearchLimits {
+        max_input_bytes: encoded.len(),
+        ..CUR_PROJECT_PATH_SEARCH_LIMITS
+    };
+    let over_limit = CurProjectPathSearchLimits {
+        max_input_bytes: encoded.len() - 1,
+        ..CUR_PROJECT_PATH_SEARCH_LIMITS
+    };
+
+    assert_eq!(
+        decode_cur_project_path_with_limits(&encoded, exact_limits),
+        Some(project)
+    );
+    assert_eq!(
+        decode_cur_project_path_with_limits(&encoded, over_limit),
+        None
+    );
+}
+
+#[test]
+fn returns_none_when_cur_project_frontier_budget_is_exhausted() {
+    let root = TempDir::new().expect("tempdir");
+    let project = root.path().join("a/b/c");
+    fs::create_dir_all(&project).expect("project root");
+    fs::create_dir_all(root.path().join("a-b")).expect("second prefix");
+    let limits = CurProjectPathSearchLimits {
+        max_frontier_states: 1,
+        ..CUR_PROJECT_PATH_SEARCH_LIMITS
+    };
+
+    assert_eq!(
+        resolve_cur_project_path(
+            root.path().to_path_buf(),
+            "a-b-c",
+            CUR_PROJECT_PATH_SEARCH_LIMITS,
+        ),
+        Some(project)
+    );
+    assert_eq!(
+        resolve_cur_project_path(root.path().to_path_buf(), "a-b-c", limits),
+        None
+    );
 }
 
 #[test]
