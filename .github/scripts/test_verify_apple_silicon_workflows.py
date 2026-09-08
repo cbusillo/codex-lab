@@ -68,7 +68,9 @@ class AppleSiliconWorkflowPolicyTest(unittest.TestCase):
                 )
                 self.assertEqual(len(violations), 0 if allowed else 1)
 
-    def test_control_exception_does_not_allow_another_runner_or_product_target(self) -> None:
+    def test_control_exception_does_not_allow_another_runner_or_product_target(
+        self,
+    ) -> None:
         for selector in ("runs-on: ubuntu-latest", "target: x86_64-unknown-linux-gnu"):
             with self.subTest(selector=selector):
                 violations = selector_violations(

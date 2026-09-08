@@ -189,7 +189,9 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
             job_name = job_match.group(1)
         if any(action in stripped for action in LINUX_CONTAINER_ACTIONS):
             violations.append(
-                Violation(path, line_number, "Linux container action in active workflow")
+                Violation(
+                    path, line_number, "Linux container action in active workflow"
+                )
             )
             continue
         if re.match(r"^\s*container\s*:", line):
@@ -309,7 +311,9 @@ def main() -> int:
     args = parser.parse_args()
     violations = repository_violations(args.root.resolve())
     if not violations:
-        print("product workflows are Apple Silicon-only; named control jobs may use Linux")
+        print(
+            "product workflows are Apple Silicon-only; named control jobs may use Linux"
+        )
         return 0
 
     for violation in violations:

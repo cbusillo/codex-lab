@@ -25,8 +25,12 @@ SELF_HOSTED_JOBS = {
     "rust-release-zsh.yml": ("darwin",),
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),
     "rust-ci-full.yml": (
-        "general", "cargo_shear", "argument_comment_lint_package",
-        "argument_comment_lint_prebuilt", "lint_build", "tests_macos_aarch64",
+        "general",
+        "cargo_shear",
+        "argument_comment_lint_package",
+        "argument_comment_lint_prebuilt",
+        "lint_build",
+        "tests_macos_aarch64",
     ),
     "rusty-v8-release.yml": ("build",),
     "sdk-integration.yml": ("typescript-sdk-integration",),
@@ -107,7 +111,9 @@ def depends_on_authorization(
 
 
 class SelfHostedWorkflowPolicyTest(unittest.TestCase):
-    def test_every_persistent_runner_workflow_calls_the_authorization_gate(self) -> None:
+    def test_every_persistent_runner_workflow_calls_the_authorization_gate(
+        self,
+    ) -> None:
         workflows = persistent_runner_workflows()
         self.assertTrue(workflows)
 
@@ -229,9 +235,7 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
         release_workflow = (WORKFLOWS / "codex-lab-release.yml").read_text(
             encoding="utf-8"
         )
-        release_blocks = workflow_job_blocks(
-            release_workflow
-        )
+        release_blocks = workflow_job_blocks(release_workflow)
         release_job = "\n".join(release_blocks["build-macos-aarch64"])
         app_workflow = (WORKFLOWS / "codex-lab-app.yml").read_text(encoding="utf-8")
 
@@ -239,7 +243,9 @@ class SelfHostedWorkflowPolicyTest(unittest.TestCase):
             "    if: ${{ github.ref_name == github.event.repository.default_branch }}",
             release_job,
         )
-        self.assertIn("      - name: Require the repository default branch", release_workflow)
+        self.assertIn(
+            "      - name: Require the repository default branch", release_workflow
+        )
         self.assertIn('if [[ "$REF_NAME" != "$DEFAULT_BRANCH" ]]', release_workflow)
         self.assertIn("    runs-on: codex-lab-signing", release_job)
         self.assertIn("      name: macos-signing", release_job)
