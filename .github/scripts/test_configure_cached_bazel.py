@@ -20,9 +20,12 @@ class ConfigureCachedBazelTests(unittest.TestCase):
         binary.parent.mkdir(parents=True)
         binary.write_text(
             "#!/bin/sh\n"
-            'if [ "$1" = "--ignore_all_rc_files" ]; then\n'
+            'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then\n'
             '  printf "%s\\n" "$*" >> "$BAZEL_VERSION_LOG"\n'
             f'  printf "bazel {version}\\n"\n'
+            'elif [ "$1" = "--ignore_all_rc_files" ]; then\n'
+            '  echo "Unknown startup option: --version" >&2\n'
+            "  exit 2\n"
             "else\n"
             '  for arg in "$@"; do printf "<%s>\\n" "$arg" >> "$BAZEL_ARGS_LOG"; done\n'
             "fi\n",
@@ -38,6 +41,7 @@ class ConfigureCachedBazelTests(unittest.TestCase):
             {
                 "GITHUB_WORKSPACE": str(repo),
                 "BAZELISK_HOME": str(cache),
+                "XDG_CACHE_HOME": str(root / "xdg-cache"),
                 "CI_BUILD_ROOT": str(root / "ci"),
                 "BAZEL_OUTPUT_BASE": str(root / "ci" / "o"),
                 "GITHUB_ENV": str(root / "github-env"),
@@ -91,7 +95,7 @@ class ConfigureCachedBazelTests(unittest.TestCase):
             self.assertIn(str(root / "ci" / "bin"), (root / "github-path").read_text())
             self.assertEqual(
                 (root / "version-log").read_text(encoding="utf-8"),
-                "--ignore_all_rc_files --version\n",
+                "--version\n",
             )
             shim = root / "ci" / "bin" / "bazel"
             shim_env = os.environ.copy()

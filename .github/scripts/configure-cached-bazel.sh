@@ -72,8 +72,9 @@ import subprocess
 import sys
 
 try:
+    # Bazel's version fast path requires --version to be the sole argument.
     completed = subprocess.run(
-        [sys.argv[1], "--ignore_all_rc_files", "--version"],
+        [sys.argv[1], "--version"],
         capture_output=True,
         check=False,
         text=True,
