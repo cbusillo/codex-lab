@@ -136,7 +136,9 @@ runs:
             echo "CODEX_LOCAL_RUST_CI requires a self-hosted macOS runner." >&2
             exit 1
           fi
-          dotslash_cache="$tmp/dotslashcache"
+          # DotSlash creates read-only cache directories. Keep these under
+          # runner-owned temp, outside canonical-temp's strict cleanup boundary.
+          dotslash_cache="$RUNNER_TEMP/dotslashcache"
           mkdir -p "$dotslash_cache"
           {
             echo "DOTSLASH_CACHE=$dotslash_cache"

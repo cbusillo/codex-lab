@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
@@ -119,6 +120,72 @@ test("allocates canonical private directories with isolated socket paths", async
     await listenOnSocket(path.join(second.path, "s"));
     assertCleanupStatus(first, options, "cleaned");
     assertCleanupStatus(second, options, "cleaned");
+  });
+});
+
+test("setup-ci keeps read-only DotSlash caches outside canonical cleanup", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    const state = allocateCanonicalTemp(options);
+    const envFile = path.join(paths.root, "github-env");
+    const action = fs.readFileSync(
+      path.join(__dirname, "../setup-ci/action.yml"),
+      "utf8",
+    );
+    const configure = action
+      .split("    - name: Configure CI build paths\n")[1]
+      .split("      run: |\n")[1]
+      .split("\n    - name:")[0]
+      .replace(/^ {8}/gm, "");
+    const result = spawnSync("bash", ["-c", configure], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        RUNNER_ENVIRONMENT: "self-hosted",
+        RUNNER_NAME_VALUE: "cleanup-test",
+        RUNNER_OS_NAME: "macOS",
+        RUNNER_OS: "macOS",
+        RUNNER_TEMP: paths.runnerTemp,
+        CI_BUILD_ROOT: path.join(paths.runnerTemp, "build"),
+        CANONICAL_TEMP_DIR: state.path,
+        CODEX_LOCAL_RUST_CI: "true",
+        GITHUB_ENV: envFile,
+        GITHUB_OUTPUT: path.join(paths.root, "github-output"),
+        GITHUB_WORKSPACE: paths.root,
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const exported = Object.fromEntries(
+      fs
+        .readFileSync(envFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => {
+          const separator = line.indexOf("=");
+          return [line.slice(0, separator), line.slice(separator + 1)];
+        }),
+    );
+    assert.equal(
+      exported.DOTSLASH_CACHE,
+      path.join(paths.runnerTemp, "dotslashcache"),
+    );
+    assert.equal(exported.TMPDIR, state.path);
+    assert.equal(
+      exported.SCCACHE_SERVER_UDS,
+      path.join(state.path, "sccache.sock"),
+    );
+    const immutableCache = path.join(exported.DOTSLASH_CACHE, "tool");
+    fs.mkdirSync(immutableCache);
+    const tool = path.join(immutableCache, "binary");
+    fs.writeFileSync(tool, "owned test fixture");
+    fs.chmodSync(immutableCache, 0o555);
+    try {
+      assertCleanupStatus(state, options, "cleaned");
+      assert.equal(fs.readFileSync(tool, "utf8"), "owned test fixture");
+      assert.equal(fs.statSync(immutableCache).mode & 0o777, 0o555);
+    } finally {
+      fs.chmodSync(immutableCache, 0o755);
+    }
   });
 });
 
