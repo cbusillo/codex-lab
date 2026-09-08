@@ -55,6 +55,37 @@ class AppleSiliconWorkflowPolicyTest(unittest.TestCase):
         self.assertEqual(len(violations), 1)
         self.assertIn("non-Apple-Silicon target", violations[0].reason)
 
+    def test_linux_control_job_exception_is_scoped_to_workflow_and_job(self) -> None:
+        for workflow, job, allowed in (
+            ("codex-lab-release.yml", "release-metadata", True),
+            ("codex-lab-release.yml", "build-macos-aarch64", False),
+            ("unrelated.yml", "release-metadata", False),
+        ):
+            with self.subTest(workflow=workflow, job=job):
+                violations = selector_violations(
+                    Path(workflow),
+                    f"jobs:\n  {job}:\n    runs-on: ubuntu-24.04\n",
+                )
+                self.assertEqual(len(violations), 0 if allowed else 1)
+
+    def test_control_exception_does_not_allow_another_runner_or_product_target(self) -> None:
+        for selector in ("runs-on: ubuntu-latest", "target: x86_64-unknown-linux-gnu"):
+            with self.subTest(selector=selector):
+                violations = selector_violations(
+                    Path("codex-lab-release.yml"),
+                    f"jobs:\n  release-metadata:\n    {selector}\n",
+                )
+                self.assertEqual(len(violations), 1)
+
+    def test_control_exception_does_not_leak_into_later_jobs_or_matrix(self) -> None:
+        violations = selector_violations(
+            Path("codex-lab-release.yml"),
+            "jobs:\n  release-metadata:\n    runs-on: ubuntu-24.04\n"
+            "    strategy:\n      matrix:\n        runner: ubuntu-24.04\n"
+            "  build:\n    runs-on: ubuntu-24.04\n",
+        )
+        self.assertEqual(len(violations), 2)
+
     def test_linux_container_action_is_rejected(self) -> None:
         path = Path("workflow.yml")
         violations = selector_violations(

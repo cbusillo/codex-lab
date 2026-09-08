@@ -24,6 +24,10 @@ SELF_HOSTED_JOBS = {
     "rust-release-argument-comment-lint.yml": ("build",),
     "rust-release-zsh.yml": ("darwin",),
     "rust-release.yml": ("build", "package-macos", "finalize-macos"),
+    "rust-ci-full.yml": (
+        "general", "cargo_shear", "argument_comment_lint_package",
+        "argument_comment_lint_prebuilt", "lint_build", "tests_macos_aarch64",
+    ),
     "rusty-v8-release.yml": ("build",),
     "sdk-integration.yml": ("typescript-sdk-integration",),
     "v8-canary.yml": ("build",),

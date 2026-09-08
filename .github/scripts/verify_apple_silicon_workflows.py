@@ -20,6 +20,20 @@ SELECTOR = re.compile(
 BLOCK_SCALAR = re.compile(r"^\s*[A-Za-z0-9_-]+:\s*[>|][0-9+-]*\s*$")
 EXPRESSION = re.compile(r"^\$\{\{.*\}\}$")
 APPLE_RUNNERS = frozenset({"macos-26", "macos-codex-lab", "codex-lab-signing"})
+# These jobs inspect metadata or existing artifacts, never compile or execute
+# product binaries. Keep exceptions scoped to exact workflow/job identities.
+HOSTED_LINUX_CONTROL_JOBS = {
+    "authorize-self-hosted.yml": {"authorize"},
+    "v8-canary-metadata.yml": {"metadata"},
+    "codex-lab-release.yml": {
+        "release-metadata",
+        "full-verification",
+        "validate-release-artifacts",
+        "publish-prerelease",
+    },
+    "rust-ci-full.yml": {"execution_policy", "execution_gate", "results"},
+    "rust-ci-full-nextest-platform.yml": {"result"},
+}
 APPLE_TARGET = "aarch64-apple-darwin"
 APPLE_PLATFORMS = frozenset({"macos_arm64", "macos-aarch64"})
 LINUX_CONTAINER_ACTIONS = (
@@ -150,6 +164,8 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
     lines = contents.splitlines()
     violations: list[Violation] = []
     block_scalar_indent: int | None = None
+    in_jobs = False
+    job_name: str | None = None
 
     for index, line in enumerate(lines):
         line_number = index + 1
@@ -164,6 +180,13 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
             continue
         if stripped.startswith("#"):
             continue
+        if line == "jobs:":
+            in_jobs = True
+        elif stripped and indent == 0:
+            in_jobs = False
+            job_name = None
+        elif in_jobs and (job_match := re.fullmatch(r"  ([A-Za-z0-9_-]+):", line)):
+            job_name = job_match.group(1)
         if any(action in stripped for action in LINUX_CONTAINER_ACTIONS):
             violations.append(
                 Violation(path, line_number, "Linux container action in active workflow")
@@ -205,6 +228,13 @@ def selector_violations(path: Path, contents: str) -> list[Violation]:
             continue
 
         if key in {"runs-on", "runs_on", "runner"}:
+            if (
+                key == "runs-on"
+                and indent == 4
+                and clean_scalar(value) == "ubuntu-24.04"
+                and job_name in HOSTED_LINUX_CONTROL_JOBS.get(path.name, set())
+            ):
+                continue
             violations.extend(validate_runner_value(path, line_number, value))
             continue
 
@@ -279,7 +309,7 @@ def main() -> int:
     args = parser.parse_args()
     violations = repository_violations(args.root.resolve())
     if not violations:
-        print("active development and release workflows are Apple Silicon-only")
+        print("product workflows are Apple Silicon-only; named control jobs may use Linux")
         return 0
 
     for violation in violations:

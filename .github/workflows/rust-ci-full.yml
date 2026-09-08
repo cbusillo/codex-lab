@@ -1,6 +1,12 @@
 name: rust-ci-full
 on:
   workflow_call:
+    inputs:
+      execution_mode:
+        description: Run on GitHub-hosted macOS, or on the trusted local release runner.
+        required: false
+        default: hosted
+        type: string
   push:
     branches:
       # Keep this opt-in branch trigger for developers who want the full suite
@@ -11,59 +17,176 @@ on:
 
 concurrency:
   group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ (inputs.execution_mode || 'hosted') != 'local' }}
 
 jobs:
+  execution_policy:
+    name: Resolve Rust CI execution policy
+    runs-on: ubuntu-24.04
+    outputs:
+      execution_mode: ${{ steps.policy.outputs.execution_mode }}
+      runner: ${{ steps.policy.outputs.runner }}
+    steps:
+      - id: policy
+        name: Require an approved execution mode and caller
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXECUTION_MODE: ${{ inputs.execution_mode || 'hosted' }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          case "$EXECUTION_MODE" in
+            hosted)
+              runner=macos-26
+              ;;
+            local)
+              expected_ref="refs/heads/${DEFAULT_BRANCH}"
+              expected_workflow_ref="cbusillo/codex-lab/.github/workflows/codex-lab-release.yml@${expected_ref}"
+              if [[ "$REPOSITORY" != "cbusillo/codex-lab" || "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$REF" != "$expected_ref" || "$REF_NAME" != "$DEFAULT_BRANCH" || "$WORKFLOW_REF" != "$expected_workflow_ref" ]]; then
+                echo "Local Rust CI is restricted to the Codex Lab release workflow on the repository default branch." >&2
+                exit 1
+              fi
+              runner=macos-codex-lab
+              ;;
+            *)
+              echo "Unsupported Rust CI execution mode: $EXECUTION_MODE" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "execution_mode=$EXECUTION_MODE"
+            echo "runner=$runner"
+          } >> "$GITHUB_OUTPUT"
+
+  authorize_self_hosted:
+    name: Authorize self-hosted execution
+    needs: execution_policy
+    if: ${{ needs.execution_policy.outputs.execution_mode == 'local' }}
+    uses: ./.github/workflows/authorize-self-hosted.yml
+
+  execution_gate:
+    name: Rust CI execution gate
+    needs:
+      - execution_policy
+      - authorize_self_hosted
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    outputs:
+      execution_mode: ${{ needs.execution_policy.outputs.execution_mode }}
+      runner: ${{ needs.execution_policy.outputs.runner }}
+    steps:
+      - name: Require successful execution policy and authorization
+        shell: bash
+        env:
+          AUTHORIZATION_RESULT: ${{ needs.authorize_self_hosted.result }}
+          EXECUTION_MODE: ${{ needs.execution_policy.outputs.execution_mode }}
+          POLICY_RESULT: ${{ needs.execution_policy.result }}
+        run: |
+          set -euo pipefail
+          [[ "$POLICY_RESULT" == "success" ]]
+          if [[ "$EXECUTION_MODE" == "local" ]]; then
+            [[ "$AUTHORIZATION_RESULT" == "success" ]]
+          else
+            [[ "$EXECUTION_MODE" == "hosted" ]]
+            [[ "$AUTHORIZATION_RESULT" == "skipped" ]]
+          fi
+
   # --- CI that doesn't need specific targets ---------------------------------
   general:
     name: Format / etc
-    runs-on: macos-26
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
+    runs-on: ${{ needs.execution_gate.outputs.runner }}
     defaults:
       run:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
       - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Install Rust toolchain without changing the shared default (local)
+        if: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
+        run: python3 ../.github/scripts/local_build_resources.py exec -- rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt --component rust-src --no-self-update
+      - if: ${{ needs.execution_gate.outputs.execution_mode == 'hosted' }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: rustfmt
       - name: cargo fmt
-        run: cargo fmt -- --config imports_granularity=Item --check
+        run: python3 ../.github/scripts/local_build_resources.py exec -- cargo fmt -- --config imports_granularity=Item --check
       - name: Rust benchmark smoke test
-        run: just bench-smoke
+        run: python3 ../.github/scripts/local_build_resources.py exec -- just bench-smoke
 
   cargo_shear:
     name: cargo shear
-    runs-on: macos-26
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
+    runs-on: ${{ needs.execution_gate.outputs.runner }}
     defaults:
       run:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
       - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Install Rust toolchain without changing the shared default (local)
+        if: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
+        run: python3 ../.github/scripts/local_build_resources.py exec -- rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt --component rust-src --no-self-update
+      - if: ${{ needs.execution_gate.outputs.execution_mode == 'hosted' }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: cargo-shear@1.11.2
       - name: cargo shear
-        run: cargo shear --deny-warnings
+        run: python3 ../.github/scripts/local_build_resources.py exec -- cargo shear --deny-warnings
 
   argument_comment_lint_package:
     name: Argument comment lint package
-    runs-on: macos-26
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
+    runs-on: ${{ needs.execution_gate.outputs.runner }}
     env:
       CARGO_DYLINT_VERSION: 5.0.0
       DYLINT_LINK_VERSION: 5.0.0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: ./.github/actions/setup-ci
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - id: setup_local_rust
+        uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
+      - id: setup_ci
+        uses: ./.github/actions/setup-ci
+      - name: Install Rust toolchains without changing the shared default (local)
+        if: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
+        shell: bash
+        run: |
+          python3 .github/scripts/local_build_resources.py exec -- \
+            rustup toolchain install 1.95.0 --profile minimal --component clippy --component rustfmt --component rust-src --no-self-update
+          python3 .github/scripts/local_build_resources.py exec -- \
+            rustup toolchain install nightly-2025-09-18 \
+              --profile minimal \
+              --component llvm-tools-preview \
+              --component rustc-dev \
+              --component rust-src \
+              --no-self-update
+      - if: ${{ needs.execution_gate.outputs.execution_mode == 'hosted' }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           toolchain: nightly-2025-09-18
           components: llvm-tools-preview, rustc-dev, rust-src
@@ -72,70 +195,79 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/bin/cargo-dylint
-            ~/.cargo/bin/dylint-link
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: argument-comment-lint-${{ runner.os }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml', '.github/workflows/rust-ci-full-argument-comment-lint.yml') }}
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/cargo-dylint
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/dylint-link
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db
+          key: argument-comment-lint-${{ steps.setup_ci.outputs.cache-scope }}-${{ env.CARGO_DYLINT_VERSION }}-${{ env.DYLINT_LINK_VERSION }}-${{ hashFiles('tools/argument-comment-lint/Cargo.lock', 'tools/argument-comment-lint/rust-toolchain', '.github/workflows/rust-ci.yml', '.github/workflows/rust-ci-full.yml', '.github/workflows/rust-ci-full-argument-comment-lint.yml') }}
       - name: Install cargo-dylint tooling
         if: ${{ steps.cargo_dylint_cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
-          cargo install --locked cargo-dylint --version "$CARGO_DYLINT_VERSION"
-          cargo install --locked dylint-link --version "$DYLINT_LINK_VERSION"
+          python3 .github/scripts/local_build_resources.py exec -- \
+            cargo install --locked cargo-dylint --version "$CARGO_DYLINT_VERSION"
+          python3 .github/scripts/local_build_resources.py exec -- \
+            cargo install --locked dylint-link --version "$DYLINT_LINK_VERSION"
       - name: Check Python wrapper syntax
         run: python3 -m py_compile tools/argument-comment-lint/wrapper_common.py tools/argument-comment-lint/run.py tools/argument-comment-lint/run-prebuilt-linter.py tools/argument-comment-lint/test_wrapper_common.py
       - name: Test Python wrapper helpers
         run: python3 -m unittest discover -s tools/argument-comment-lint -p 'test_*.py'
       - name: Test argument comment lint package
         working-directory: tools/argument-comment-lint
-        run: cargo test
+        run: python3 ../../.github/scripts/local_build_resources.py exec -- cargo test
         env:
           RUST_MIN_STACK: "16777216" # 16 MiB
 
   argument_comment_lint_prebuilt:
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform_name: macOS
-            runner: macos-26
             target: aarch64-apple-darwin
     uses: ./.github/workflows/rust-ci-full-argument-comment-lint.yml
     with:
       platform_name: ${{ matrix.platform_name }}
-      runner: ${{ matrix.runner }}
+      runner: ${{ needs.execution_gate.outputs.runner }}
       target: ${{ matrix.target }}
+      use_local_resources: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
     secrets: inherit
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-26
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             profile: dev
-          - runner: macos-26
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
             profile: release
     uses: ./.github/workflows/rust-ci-full-lint-build.yml
     with:
-      runner: ${{ matrix.runner }}
+      runner: ${{ needs.execution_gate.outputs.runner }}
       target: ${{ matrix.target }}
       profile: ${{ matrix.profile }}
+      use_local_resources: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
 
   tests_macos_aarch64:
-    name: Tests — macos-26 - aarch64-apple-darwin
+    name: Tests — ${{ needs.execution_gate.outputs.runner }} - aarch64-apple-darwin
+    needs: execution_gate
+    if: ${{ !cancelled() && needs.execution_gate.result == 'success' }}
     uses: ./.github/workflows/rust-ci-full-nextest-platform.yml
     with:
-      runner: macos-26
+      runner: ${{ needs.execution_gate.outputs.runner }}
       target: aarch64-apple-darwin
       profile: ci-test
       artifact_id: macos-aarch64
       use_sccache: true
+      test_threads: ${{ needs.execution_gate.outputs.execution_mode == 'local' && 4 || 0 }}
+      use_local_resources: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
     secrets: inherit
 
   # --- Gatherer job for the full Rust workflow --------------------------------
@@ -144,6 +276,7 @@ jobs:
     needs:
       [
         general,
+        execution_gate,
         cargo_shear,
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
@@ -151,7 +284,7 @@ jobs:
         tests_macos_aarch64,
       ]
     if: always()
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
