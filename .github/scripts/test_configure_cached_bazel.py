@@ -41,6 +41,7 @@ class ConfigureCachedBazelTests(unittest.TestCase):
             {
                 "GITHUB_WORKSPACE": str(repo),
                 "BAZELISK_HOME": str(cache),
+                "XDG_CACHE_HOME": str(root / "xdg-cache"),
                 "CI_BUILD_ROOT": str(root / "ci"),
                 "BAZEL_OUTPUT_BASE": str(root / "ci" / "o"),
                 "GITHUB_ENV": str(root / "github-env"),
