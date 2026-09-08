@@ -73,7 +73,7 @@ import sys
 
 try:
     completed = subprocess.run(
-        [sys.argv[1], "--ignore_all_rc_files", "--version"],
+        [sys.argv[1], "--version"],
         capture_output=True,
         check=False,
         text=True,
