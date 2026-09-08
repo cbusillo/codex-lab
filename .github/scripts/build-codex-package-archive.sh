@@ -175,11 +175,43 @@ if ! command -v zstd >/dev/null 2>&1 && [[ -x "${repo_root}/.github/workflows/zs
   export PATH="${repo_root}/.github/workflows:${PATH}"
 fi
 
+ownership_mode="${CODEX_TARGET_OWNERSHIP:-0}"
+case "$ownership_mode" in
+  0)
+    ;;
+  1)
+    if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
+      echo "CODEX_TARGET_OWNERSHIP=1 requires GitHub Actions" >&2
+      exit 1
+    fi
+    if [[ -z "${RUNNER_TEMP:-}" || "${RUNNER_TEMP}" != /* ]]; then
+      echo "CODEX_TARGET_OWNERSHIP=1 requires an absolute RUNNER_TEMP" >&2
+      exit 1
+    fi
+    if [[ "$(uname -s)" != "Linux" ]]; then
+      echo "CODEX_TARGET_OWNERSHIP=1 is enabled only on Linux" >&2
+      exit 1
+    fi
+    if ! "$python_bin" -c "import fcntl" >/dev/null 2>&1; then
+      echo "CODEX_TARGET_OWNERSHIP=1 requires Python fcntl support" >&2
+      exit 1
+    fi
+    if [[ ! -f "${repo_root}/scripts/local/target_ownership.py" ]]; then
+      echo "target ownership helper is missing" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unsupported CODEX_TARGET_OWNERSHIP value: $ownership_mode" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "$archive_dir"
-package_dir="${RUNNER_TEMP:-/tmp}/${archive_stem}-${target}"
+runner_temp="${RUNNER_TEMP:-/tmp}"
+package_dir="${runner_temp}/${archive_stem}-${target}"
 gzip_archive_path="${archive_dir}/${archive_stem}-${target}.tar.gz"
 zstd_archive_path="${archive_dir}/${archive_stem}-${target}.tar.zst"
-rm -rf "$package_dir"
 
 python_args=(
   "${repo_root}/scripts/build_codex_package.py"
@@ -194,6 +226,20 @@ python_args=(
 if ((${#resource_args[@]} > 0)); then
   python_args+=("${resource_args[@]}")
 fi
-python_args+=(--force)
 
-"$python_bin" "${python_args[@]}"
+if [[ "$ownership_mode" == "1" ]]; then
+  python_args+=(--overwrite-archives)
+  owned_runner=(
+    "$python_bin"
+    "${repo_root}/scripts/local/target_ownership.py"
+    run
+    --root "$runner_temp"
+    --target "${package_dir##*/}"
+    --
+  )
+  "${owned_runner[@]}" "$python_bin" "${python_args[@]}"
+else
+  rm -rf "$package_dir"
+  python_args+=(--force)
+  "$python_bin" "${python_args[@]}"
+fi

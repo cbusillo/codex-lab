@@ -181,6 +181,62 @@ class TargetOwnershipTest(unittest.TestCase):
                 {result["status"], result["reason"]},
             )
 
+    def test_owner_waits_for_synchronous_grandchild_before_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            child_code = (
+                "import os, time\n"
+                "from pathlib import Path\n"
+                "gate = (Path(os.environ['CODEX_LAB_OWNED_TARGET']) / "
+                "'grandchild-release')\n"
+                "deadline = time.monotonic() + 60\n"
+                "while not gate.exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(.01)\n"
+            )
+            code = (
+                "import os, subprocess, sys; "
+                "from pathlib import Path; "
+                "target = Path(os.environ['CODEX_LAB_OWNED_TARGET']); "
+                f"child = subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+                "(target / 'grandchild-started').write_text('yes'); "
+                "child.wait(); "
+                "(target / 'grandchild-complete').write_text('yes')"
+            )
+            owner = subprocess.Popen(self.owner_command(root, "build", code))
+            release = root / "build" / "grandchild-release"
+            try:
+                started = root / "build" / "grandchild-started"
+                deadline = time.monotonic() + 10
+                while not started.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                self.assertTrue(started.exists())
+                inspected, result = self.inspect(root, "build")
+                self.assertEqual(OWNERSHIP.EXIT_ACTIVE, inspected.returncode)
+                self.assertEqual(
+                    {"active", "lock-held"}, {result["status"], result["reason"]}
+                )
+
+                release.write_text("yes")
+                owner.wait(timeout=12)
+                self.assertEqual(
+                    (root / "build" / "grandchild-complete").read_text(), "yes"
+                )
+                self.assertEqual(
+                    OWNERSHIP.EXIT_RELEASED, self.inspect(root, "build")[0].returncode
+                )
+            finally:
+                if release.parent.is_dir():
+                    try:
+                        release.write_text("yes")
+                    except FileNotFoundError:
+                        pass
+                try:
+                    owner.wait(timeout=12)
+                except subprocess.TimeoutExpired:
+                    owner.kill()
+                    owner.wait(timeout=3)
+
     def test_malformed_claim_and_symlink_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
