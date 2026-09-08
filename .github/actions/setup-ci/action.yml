@@ -118,6 +118,19 @@ runs:
           "$tmp"
         )
         mkdir -p "${build_dirs[@]}"
+
+        if [[ "${CODEX_LOCAL_RUST_CI:-false}" == "true" ]]; then
+          if [[ "$RUNNER_ENVIRONMENT" != "self-hosted" || "$RUNNER_OS_NAME" != "macOS" ]]; then
+            echo "CODEX_LOCAL_RUST_CI requires a self-hosted macOS runner." >&2
+            exit 1
+          fi
+          dotslash_cache="$tmp/dotslashcache"
+          mkdir -p "$dotslash_cache"
+          {
+            echo "DOTSLASH_CACHE=$dotslash_cache"
+            echo "SCCACHE_SERVER_UDS=$tmp/sccache.sock"
+          } >> "$GITHUB_ENV"
+        fi
         echo "bazel-output-base=$bazel_output_base" >> "$GITHUB_OUTPUT"
         echo "cache-scope=$cache_scope" >> "$GITHUB_OUTPUT"
         echo "cargo-target-dir=$cargo_target_dir" >> "$GITHUB_OUTPUT"
@@ -135,7 +148,7 @@ runs:
           echo "TMPDIR=$tmp"
           if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" != "Windows" ]]; then
             echo "SCCACHE_SERVER_PORT=$((20000 + runner_checksum % 10000))"
-            if [[ "$RUNNER_OS_NAME" == "macOS" ]]; then
+            if [[ "$RUNNER_OS_NAME" == "macOS" && "${CODEX_LOCAL_RUST_CI:-false}" != "true" ]]; then
               sccache_socket_dir="$HOME/.cache/codex-sccache"
               mkdir -p "$sccache_socket_dir"
               chmod 700 "$sccache_socket_dir"
@@ -164,6 +177,10 @@ runs:
       env:
         RUNNER_ENVIRONMENT: ${{ runner.environment }}
       run: |
+        if [[ "${CODEX_LOCAL_RUST_CI:-false}" == "true" ]]; then
+          echo "Skipping the system-wide DotSlash copy for isolated local Rust CI."
+          exit 0
+        fi
         dotslash_path="$(command -v dotslash)"
         if [[ -w /usr/local/bin ]]; then
           cp "${dotslash_path}" /usr/local/bin

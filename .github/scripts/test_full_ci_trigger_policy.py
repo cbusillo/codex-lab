@@ -114,7 +114,10 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             "\n  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}",
             workflow_header,
         )
-        self.assertIn("\n  cancel-in-progress: true", workflow_header)
+        self.assertIn(
+            "\n  cancel-in-progress: ${{ (inputs.execution_mode || 'hosted') != 'local' }}",
+            workflow_header,
+        )
 
     def test_scheduled_v8_canary_forces_a_complete_run(self) -> None:
         workflow = V8_CANARY_METADATA_WORKFLOW.read_text()
@@ -137,9 +140,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         ):
             with self.subTest(job=job_name):
                 permissions = (
-                    "    permissions:\n"
-                    "      contents: read\n"
-                    "      actions: read\n"
+                    "    permissions:\n      contents: read\n      actions: read\n"
                     if job_name == "full-v8-canary"
                     else ""
                 )
@@ -156,7 +157,12 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
                     "    needs: release-metadata\n"
                     + permissions
                     + f"    uses: ./.github/workflows/{workflow_name}\n"
-                    "    secrets: inherit\n"
+                    + (
+                        "    with:\n      execution_mode: local\n"
+                        if job_name == "full-rust"
+                        else ""
+                    )
+                    + "    secrets: inherit\n"
                 )
                 self.assertIn(job_block, workflow)
         self.assertIn(
@@ -237,7 +243,9 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         )
 
     def test_full_ci_and_release_use_the_same_apple_silicon_suites(self) -> None:
-        self.assertEqual(called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS)
+        self.assertEqual(
+            called_workflows(FULL_CI_WORKFLOW), FULL_VERIFICATION_WORKFLOWS
+        )
         release_calls = called_workflows(CODEX_LAB_RELEASE_WORKFLOW)
         self.assertEqual(
             release_calls,
@@ -311,7 +319,9 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
 
         self.assertIn("  tests_macos_aarch64:\n", workflow)
-        self.assertIn("      runner: macos-26\n", workflow)
+        self.assertIn(
+            "      runner: ${{ needs.execution_gate.outputs.runner }}\n", workflow
+        )
         self.assertIn("      target: aarch64-apple-darwin\n", workflow)
         self.assertNotIn("remote_test_filter:", workflow)
         self.assertIn('run_nextest "${nextest_args[@]}"', platform_workflow)
