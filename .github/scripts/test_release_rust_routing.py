@@ -24,7 +24,9 @@ def shell_block(contents: str, marker: str) -> str:
 
 
 class ReleaseRustRoutingTests(unittest.TestCase):
-    def run_shell(self, script: str, **overrides: str) -> tuple[int, str, str, str]:
+    def run_shell(
+        self, script: str, **overrides: str
+    ) -> tuple[int, str, str, str, str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output, environment, path_file = (
@@ -72,8 +74,9 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             )
             return (
                 result.returncode,
-                output.read_text(),
-                environment.read_text(),
+                output.read_text().replace(directory, "$RUNNER_TEMP"),
+                environment.read_text().replace(directory, "$RUNNER_TEMP"),
+                path_file.read_text().replace(directory, "$RUNNER_TEMP"),
                 result.stderr,
             )
 
@@ -84,15 +87,20 @@ class ReleaseRustRoutingTests(unittest.TestCase):
         )
 
     def test_local_setup_exports_private_cargo_home_and_marker(self) -> None:
-        code, output, environment, error = self.run_shell(self.setup_script())
-        self.assertEqual(code, 0, error)
-        self.assertTrue(output.rstrip().endswith("/cargo-home"))
-        self.assertIn("CODEX_LOCAL_RUST_CI=true\n", environment)
-        self.assertIn("CARGO_HOME=", environment)
-        self.assertNotIn("RUSTUP_HOME=", environment)
+        code, output, environment, path, error = self.run_shell(self.setup_script())
+        self.assertEqual(
+            (code, output, environment, path),
+            (
+                0,
+                "cargo-home=$RUNNER_TEMP/cargo-home\n",
+                "CARGO_HOME=$RUNNER_TEMP/cargo-home\nCARGO_INCREMENTAL=0\nCODEX_LOCAL_RUST_CI=true\n",
+                "$RUNNER_TEMP/cargo-home/bin\n",
+            ),
+            error,
+        )
 
     def test_hosted_setup_preserves_cargo_home_without_local_mutation(self) -> None:
-        code, output, environment, error = self.run_shell(
+        code, output, environment, path, error = self.run_shell(
             self.setup_script(),
             ENABLED="false",
             CARGO_HOME="/existing/cargo",
@@ -100,7 +108,9 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             RUNNER_OS_VALUE="Linux",
         )
         self.assertEqual(
-            (code, output, environment), (0, "cargo-home=/existing/cargo\n", ""), error
+            (code, output, environment, path),
+            (0, "cargo-home=/existing/cargo\n", "", ""),
+            error,
         )
 
     def test_local_setup_rejects_unsafe_identity_and_resource_profiles(self) -> None:
@@ -115,18 +125,18 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             {"CODEX_LOCAL_BUILD_LOCK": "relative.lock"},
         ):
             with self.subTest(override=override):
-                code, output, environment, _ = self.run_shell(
+                code, output, environment, path, _ = self.run_shell(
                     self.setup_script(), **override
                 )
                 self.assertNotEqual(code, 0)
-                self.assertEqual((output, environment), ("", ""))
+                self.assertEqual((output, environment, path), ("", "", ""))
 
     def test_policy_allows_local_only_for_the_default_branch_release(self) -> None:
         script = shell_block(
             (ROOT / ".github/workflows/rust-ci-full.yml").read_text(),
             "name: Require an approved execution mode and caller",
         )
-        code, output, _, error = self.run_shell(script)
+        code, output, _, _, error = self.run_shell(script)
         self.assertEqual(
             (code, output), (0, "execution_mode=local\nrunner=macos-codex-lab\n"), error
         )
@@ -146,10 +156,10 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             },
         ):
             with self.subTest(override=override):
-                code, output, _, _ = self.run_shell(script, **override)
+                code, output, _, _, _ = self.run_shell(script, **override)
                 self.assertNotEqual(code, 0)
                 self.assertEqual(output, "")
-        code, output, _, error = self.run_shell(
+        code, output, _, _, error = self.run_shell(
             script,
             EXECUTION_MODE="hosted",
             REPOSITORY="fork/codex-lab",
@@ -173,7 +183,7 @@ class ReleaseRustRoutingTests(unittest.TestCase):
                     with self.subTest(
                         mode=mode, policy=policy, authorization=authorization
                     ):
-                        code, _, _, _ = self.run_shell(
+                        code, _, _, _, _ = self.run_shell(
                             script,
                             EXECUTION_MODE=mode,
                             POLICY_RESULT=policy,

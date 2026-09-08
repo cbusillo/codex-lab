@@ -206,9 +206,9 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/local_build_resources.py exec -- \
-            cargo install --locked cargo-dylint --version "$CARGO_DYLINT_VERSION"
+            cargo +1.95.0 install --locked cargo-dylint --version "$CARGO_DYLINT_VERSION"
           python3 .github/scripts/local_build_resources.py exec -- \
-            cargo install --locked dylint-link --version "$DYLINT_LINK_VERSION"
+            cargo +1.95.0 install --locked dylint-link --version "$DYLINT_LINK_VERSION"
       - name: Check Python wrapper syntax
         run: python3 -m py_compile tools/argument-comment-lint/wrapper_common.py tools/argument-comment-lint/run.py tools/argument-comment-lint/run-prebuilt-linter.py tools/argument-comment-lint/test_wrapper_common.py
       - name: Test Python wrapper helpers
