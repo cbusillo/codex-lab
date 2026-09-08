@@ -87,13 +87,13 @@ jobs:
           POLICY_RESULT: ${{ needs.execution_policy.result }}
         run: |
           set -euo pipefail
-          [[ "$POLICY_RESULT" == "success" ]]
-          if [[ "$EXECUTION_MODE" == "local" ]]; then
-            [[ "$AUTHORIZATION_RESULT" == "success" ]]
-          else
-            [[ "$EXECUTION_MODE" == "hosted" ]]
-            [[ "$AUTHORIZATION_RESULT" == "skipped" ]]
-          fi
+          case "$POLICY_RESULT:$EXECUTION_MODE:$AUTHORIZATION_RESULT" in
+            success:local:success|success:hosted:skipped) ;;
+            *)
+              echo "Rust CI execution policy or authorization did not pass." >&2
+              exit 1
+              ;;
+          esac
 
   # --- CI that doesn't need specific targets ---------------------------------
   general:

@@ -1,5 +1,6 @@
 """Exercise the actual workflow shell guards without starting any builds."""
 
+import itertools
 import os
 from pathlib import Path
 import subprocess
@@ -25,7 +26,7 @@ def shell_block(contents: str, marker: str) -> str:
 
 class ReleaseRustRoutingTests(unittest.TestCase):
     def run_shell(
-        self, script: str, **overrides: str
+        self, script: str, *, executable: str = "bash", **overrides: str
     ) -> tuple[int, str, str, str, str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -65,7 +66,7 @@ class ReleaseRustRoutingTests(unittest.TestCase):
                 **overrides,
             }
             result = subprocess.run(
-                ["bash", "-c", script],
+                [executable, "-c", script],
                 env=env,
                 text=True,
                 capture_output=True,
@@ -177,23 +178,28 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             (ROOT / ".github/workflows/rust-ci-full.yml").read_text(),
             "name: Require successful execution policy and authorization",
         )
-        for mode in ("hosted", "local", "unknown"):
-            for policy in ("success", "failure", "skipped", "cancelled"):
-                for authorization in ("success", "failure", "skipped", "cancelled"):
-                    with self.subTest(
-                        mode=mode, policy=policy, authorization=authorization
-                    ):
-                        code, _, _, _, _ = self.run_shell(
-                            script,
-                            EXECUTION_MODE=mode,
-                            POLICY_RESULT=policy,
-                            AUTHORIZATION_RESULT=authorization,
-                        )
-                        allowed = policy == "success" and (
-                            (mode == "local" and authorization == "success")
-                            or (mode == "hosted" and authorization == "skipped")
-                        )
-                        self.assertEqual(code == 0, allowed)
+        results = ("success", "failure", "skipped", "cancelled")
+        for executable, mode, policy, authorization in itertools.product(
+            ("bash", "/bin/bash"), ("hosted", "local", "unknown"), results, results
+        ):
+            with self.subTest(
+                executable=executable,
+                mode=mode,
+                policy=policy,
+                authorization=authorization,
+            ):
+                code, _, _, _, error = self.run_shell(
+                    script,
+                    executable=executable,
+                    EXECUTION_MODE=mode,
+                    POLICY_RESULT=policy,
+                    AUTHORIZATION_RESULT=authorization,
+                )
+                allowed = policy == "success" and (
+                    (mode == "local" and authorization == "success")
+                    or (mode == "hosted" and authorization == "skipped")
+                )
+                self.assertEqual(code == 0, allowed, error)
 
 
 if __name__ == "__main__":
