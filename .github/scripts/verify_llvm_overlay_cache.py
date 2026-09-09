@@ -59,6 +59,7 @@ def load_functions(source: Path) -> dict[str, Any]:
     ]
     scope: dict[str, Any] = {
         "Label": lambda label: label,
+        "struct": SimpleNamespace,
         "structs": SimpleNamespace(to_dict=lambda value: dict(vars(value))),
         "fail": lambda message: (_ for _ in ()).throw(ValueError(message)),
     }
@@ -75,6 +76,7 @@ def load_functions(source: Path) -> dict[str, Any]:
                 "_create_llvm_raw_repo",
                 "_llvm_project_overlay_files",
                 "_llvm_source_archive_excludes",
+                "_source_archive_for_version",
             },
         ),
         scope,
@@ -134,9 +136,18 @@ def offline(source: Path, root: Path, *, patched: bool) -> dict[str, Any]:
         {"kind": "local", **kwargs}
     )
     scope["git_repository"] = lambda **kwargs: calls.append({"kind": "git", **kwargs})
-    config = SimpleNamespace(source_archive=SimpleNamespace(files=defaults))
+    # Exercise upstream's actual mapping factory; download fields are unused here.
+    archive = scope["_source_archive_for_version"](
+        "fixture",
+        {"url": "https://example.invalid/llvm.tar.xz", "sha256": "unused"},
+        [],
+    )
+    config = SimpleNamespace(source_archive=archive)
     scope["_create_llvm_raw_repo"](SimpleNamespace(modules=[]), config)
     default_call = calls.pop()
+    assert default_call["files"] == defaults
+    if patched:
+        assert set(default_call["copy_build_files"]) == set(default_call["files"])
     provider = root / "A" / "provider"
     provider.mkdir(parents=True)
     labels = {}
@@ -238,6 +249,8 @@ def bazel_fixture(
 ) -> dict[str, Any]:
     scope = load_functions(source)
     overlays = list(scope["_LLVM_PROJECT_OVERLAY_FILES"])
+    assert all(Path(name).name in {"BUILD", "BUILD.bazel"} for name in overlays)
+    assert len({str(Path(name).parent) for name in overlays}) == len(overlays)
     helper = selected_source(
         (source / "http_bsdtar_archive.bzl").read_text(), {"symlink_files"}
     )
