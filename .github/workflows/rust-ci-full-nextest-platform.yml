@@ -297,6 +297,8 @@ jobs:
         with:
           name: nextest-archive-${{ inputs.artifact_id }}
           path: ${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}
+          # nextest already compresses this tar.zst; avoid recompressing it.
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
 
