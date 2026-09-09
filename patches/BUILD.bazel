@@ -1,4 +1,5 @@
 exports_files([
+    "llvm_cache_owned_overlays.patch",
     "llvm_reject_sdk_finder_metadata.patch",
     "abseil_windows_gnullvm_thread_identity.patch",
     "bzip2_windows_stack_args.patch",

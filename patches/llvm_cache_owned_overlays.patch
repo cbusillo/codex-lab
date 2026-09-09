@@ -1,0 +1,45 @@
+--- a/http_bsdtar_archive.bzl
++++ b/http_bsdtar_archive.bzl
+@@ -107,7 +107,11 @@
+             fail("Input %s does not exist" % label)
+         if ctx.path(path).exists:
+             ctx.delete(path)
+-        ctx.symlink(src_path, path)
++        if path in getattr(ctx.attr, "copy_build_files", []):
++            # Cached overlays must not depend on the fetching output base.
++            ctx.template(path, src_path, executable = False)
++        else:
++            ctx.symlink(src_path, path)
+ 
+ # TODO(cerisier): Remove when we no longer support bazel < 8.5.0
+ def download_remote_files(ctx, auth = None):
+@@ -215,6 +219,8 @@
+     "strip_prefix": attr.string(),
+     "add_prefix": attr.string(default = ""),
+     "files": attr.string_keyed_label_dict(default = {}),
++    # Only the default LLVM BUILD overlays opt into text materialization.
++    "copy_build_files": attr.string_list(default = []),
+     "type": attr.string(),
+     "patches": attr.label_list(default = []),
+     "remote_file_urls": attr.string_list_dict(default = {}),
+--- a/extensions/llvm_source.bzl
++++ b/extensions/llvm_source.bzl
+@@ -157,12 +157,18 @@
+ 
+             kwargs = structs.to_dict(tag)
+             kwargs["files"] = _llvm_project_overlay_files(tag.files)
++            kwargs["copy_build_files"] = [
++                path
++                for path in _LLVM_PROJECT_OVERLAY_FILES
++                if path not in tag.files
++            ]
+             http_bsdtar_archive(name = "llvm-raw", **kwargs)
+ 
+     if not had_override:
+         http_bsdtar_archive(
+             name = "llvm-raw",
+             build_file_content = "# EMPTY",
++            copy_build_files = _LLVM_PROJECT_OVERLAY_FILES.keys(),
+             excludes = _llvm_source_archive_excludes(),
+             bsdtar_extra_args = _LLVM_SOURCE_BSDTAR_EXTRA_ARGS,
+             **structs.to_dict(version_config.source_archive)
