@@ -1,4 +1,3 @@
-import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,12 +5,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).with_name("storage_admission.py")
-SPEC = importlib.util.spec_from_file_location("storage_admission", MODULE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError(f"failed to load {MODULE_PATH}")
-storage_admission = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(storage_admission)
+import storage_admission
 
 
 class StorageAdmissionTest(unittest.TestCase):
@@ -56,7 +50,16 @@ class StorageAdmissionTest(unittest.TestCase):
                         temporary_directory, temporary_directory, "1", None
                     )
 
-    def test_symlink_destination_is_canonicalized(self) -> None:
+    def test_missing_posix_capacity_api_fails_closed(self) -> None:
+        with mock.patch.object(storage_admission.os, "statvfs"):
+            del storage_admission.os.statvfs
+            with self.assertRaisesRegex(
+                storage_admission.AdmissionError, "native POSIX capacity is unavailable"
+            ):
+                storage_admission.available_bytes("/", "root storage")
+
+    @staticmethod
+    def test_symlink_destination_is_canonicalized() -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             destination = root / "destination"

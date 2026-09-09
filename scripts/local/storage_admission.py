@@ -79,11 +79,10 @@ def canonical_existing_directory(path: str, name: str) -> str:
 
 
 def available_bytes(path: str, name: str) -> int:
-    statvfs = getattr(os, "statvfs", None)
-    if statvfs is None:
-        raise AdmissionError(f"{name} native POSIX capacity is unavailable")
     try:
-        usage = statvfs(path)
+        usage = os.statvfs(path)
+    except AttributeError as error:
+        raise AdmissionError(f"{name} native POSIX capacity is unavailable") from error
     except OSError as error:
         raise AdmissionError(f"{name} capacity is unknown: {error}") from error
     if usage.f_bavail < 0 or usage.f_frsize <= 0:
