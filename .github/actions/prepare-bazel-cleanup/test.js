@@ -59,7 +59,7 @@ function fixture(t) {
 
 const mode = (file) => fs.statSync(file).mode & 0o777;
 
-test("shutdown precedes directory-only repair, without following symlinks", (t) => {
+test("shutdown precedes owned tree removal, without following symlinks", (t) => {
   const f = fixture(t);
   const outside = path.join(f.temp, "outside");
   fs.mkdirSync(outside, { mode: 0o555 });
@@ -93,11 +93,10 @@ test("shutdown precedes directory-only repair, without following symlinks", (t) 
       return { status: 0 };
     },
   });
-  assert.equal(result, "prepared");
+  assert.equal(result, "removed");
   assert.equal(calls, 1);
-  assert.equal(mode(f.readonly), 0o755);
-  assert.equal(mode(f.file), 0o444);
-  assert.equal(mode(cached), 0o755);
+  assert.equal(fs.existsSync(f.env.CI_BUILD_ROOT), false);
+  assert.equal(fs.existsSync(f.env.BAZEL_REPO_CONTENTS_CACHE), false);
   assert.equal(mode(outside), 0o555);
   assert.equal(
     fs.existsSync(path.join(f.env.BAZEL_REPO_CONTENTS_CACHE, "outside")),
@@ -181,6 +180,43 @@ test("missing shim refuses nonempty output but allows setup failure before Bazel
   fs.rmSync(path.join(f.env.BAZEL_OUTPUT_BASE, "python"), { recursive: true });
   assert.equal(
     prepare({ ...f, spawn: () => assert.fail("must not run") }),
-    "prepared",
+    "removed",
+  );
+});
+
+test("removal errors fail the post action instead of leaving a green job", (t) => {
+  const f = fixture(t);
+  const remove = fs.rmSync;
+  t.mock.method(fs, "rmSync", (directory, options) => {
+    if (directory !== f.env.CI_BUILD_ROOT) return remove(directory, options);
+    const error = new Error("metadata keeps appearing");
+    error.code = "ENOTEMPTY";
+    throw error;
+  });
+  assert.throws(() => prepare(f), /metadata keeps appearing/);
+  assert.equal(fs.existsSync(f.env.CI_BUILD_ROOT), true);
+});
+
+test("revalidates the second root after removing the first", (t) => {
+  const f = fixture(t);
+  const remove = fs.rmSync;
+  t.mock.method(fs, "rmSync", (directory, options) => {
+    remove(directory, options);
+    if (directory === f.env.CI_BUILD_ROOT) {
+      fs.renameSync(
+        f.env.BAZEL_REPO_CONTENTS_CACHE,
+        `${f.env.BAZEL_REPO_CONTENTS_CACHE}-old`,
+      );
+      fs.mkdirSync(f.env.BAZEL_REPO_CONTENTS_CACHE);
+      fs.writeFileSync(
+        path.join(f.env.BAZEL_REPO_CONTENTS_CACHE, "keep"),
+        "new owner",
+      );
+    }
+  });
+  assert.throws(() => prepare(f), /identity changed before removal/);
+  assert.equal(
+    fs.readFileSync(path.join(f.env.BAZEL_REPO_CONTENTS_CACHE, "keep"), "utf8"),
+    "new owner",
   );
 });

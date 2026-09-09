@@ -123,18 +123,35 @@ function prepare({ state, env = process.env, spawn = spawnSync, ...options }) {
     );
   }
   validate();
-  // The server is stopped and the runner still owns deletion of these job roots.
-  // Repair parents first: Runner.Sdk's parallel deletion can otherwise suppress
-  // permission errors for their children and finally report ENOTEMPTY.
-  for (const root of [
+  // Repair parents without following links after the build server has stopped.
+  const disposableRoots = [
     state.roots.CI_BUILD_ROOT,
     state.roots.BAZEL_REPO_CONTENTS_CACHE,
-  ]) {
+  ];
+  for (const root of disposableRoots) {
     repairReadonlyDirectories(root.path, root, state.uid, fs, {
       unlinkSymlinks: true,
     });
   }
-  return "prepared";
+  validate();
+  for (const root of disposableRoots) {
+    if (
+      JSON.stringify(directoryIdentity(state.runnerTemp.path, state.uid)) !==
+        JSON.stringify(state.runnerTemp) ||
+      JSON.stringify(directoryIdentity(root.path, state.uid)) !==
+        JSON.stringify(root)
+    ) {
+      throw new Error(
+        "Bazel cleanup directory identity changed before removal",
+      );
+    }
+    // Finder can add metadata once repair makes SDK directories writable.
+    // Remove these job-private trees now, with bounded retries for ENOTEMPTY,
+    // instead of leaving that race to Runner.Sdk's non-retrying finalizer.
+    // An exhausted retry fails this post action, rather than only the runner log.
+    fs.rmSync(root.path, { recursive: true, maxRetries: 3, retryDelay: 100 });
+  }
+  return "removed";
 }
 
 module.exports = { capture, prepare };

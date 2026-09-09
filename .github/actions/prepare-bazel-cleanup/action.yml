@@ -1,5 +1,5 @@
 name: prepare-bazel-cleanup
-description: Stop this job's Bazel server and prepare read-only directories for runner cleanup.
+description: Stop this job's Bazel server and remove its owned temporary build directories.
 runs:
   using: node24
   main: main.js
