@@ -130,7 +130,9 @@ function prepare({ state, env = process.env, spawn = spawnSync, ...options }) {
     state.roots.CI_BUILD_ROOT,
     state.roots.BAZEL_REPO_CONTENTS_CACHE,
   ]) {
-    repairReadonlyDirectories(root.path, root, state.uid, fs);
+    repairReadonlyDirectories(root.path, root, state.uid, fs, {
+      unlinkSymlinks: true,
+    });
   }
   return "prepared";
 }

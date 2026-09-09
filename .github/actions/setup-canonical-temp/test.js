@@ -10,6 +10,7 @@ const {
   allocateCanonicalTemp,
   cleanupCanonicalTemp,
   layoutForRunnerTemp,
+  repairReadonlyDirectories,
 } = require("./canonical-temp.js");
 const { run: runMain } = require("./main.js");
 const { run: runPost } = require("./post.js");
@@ -18,6 +19,69 @@ function withStatProperty(stat, name, value) {
   const copy = Object.assign(Object.create(Object.getPrototypeOf(stat)), stat);
   return Object.defineProperty(copy, name, { value, enumerable: true });
 }
+
+test("deletion preparation unlinks references without changing shared targets", () =>
+  withFixture((paths) => {
+    const owned = path.join(paths.root, "owned");
+    const shared = path.join(paths.root, "shared");
+    fs.mkdirSync(owned);
+    fs.mkdirSync(shared);
+    fs.writeFileSync(path.join(shared, "header"), "shared content");
+    fs.chmodSync(shared, 0o555);
+    const link = path.join(owned, "sdk");
+    fs.symlinkSync(shared, link);
+    fs.symlinkSync(path.join(shared, "absent"), path.join(owned, "dangling"));
+    const stat = fs.lstatSync(owned, { bigint: true });
+    try {
+      repairReadonlyDirectories(
+        owned,
+        { dev: String(stat.dev), ino: String(stat.ino) },
+        process.getuid(),
+        fs,
+        { unlinkSymlinks: true },
+      );
+      assert.deepEqual(fs.readdirSync(owned), []);
+      assert.equal(fs.statSync(shared).mode & 0o777, 0o555);
+      assert.equal(
+        fs.readFileSync(path.join(shared, "header"), "utf8"),
+        "shared content",
+      );
+    } finally {
+      fs.chmodSync(shared, 0o755);
+    }
+  }));
+
+test("deletion preparation refuses a symlink replaced during enumeration", () =>
+  withFixture((paths) => {
+    const owned = path.join(paths.root, "owned");
+    fs.mkdirSync(owned);
+    const link = path.join(owned, "sdk");
+    fs.symlinkSync(paths.root, link);
+    const stat = fs.lstatSync(owned, { bigint: true });
+    const changedFs = {
+      ...fs,
+      readdirSync(directory, options) {
+        const entries = fs.readdirSync(directory, options);
+        if (directory === owned) {
+          fs.unlinkSync(link);
+          fs.writeFileSync(link, "replacement must survive");
+        }
+        return entries;
+      },
+    };
+    assert.throws(
+      () =>
+        repairReadonlyDirectories(
+          owned,
+          { dev: String(stat.dev), ino: String(stat.ino) },
+          process.getuid(),
+          changedFs,
+          { unlinkSymlinks: true },
+        ),
+      /symlink identity or owner changed/,
+    );
+    assert.equal(fs.readFileSync(link, "utf8"), "replacement must survive");
+  }));
 
 function fixture() {
   const rawRoot = fs.mkdtempSync("/tmp/canon-");

@@ -1,3 +1,4 @@
+diff --git a/http_bsdtar_archive.bzl b/http_bsdtar_archive.bzl
 --- a/http_bsdtar_archive.bzl
 +++ b/http_bsdtar_archive.bzl
 @@ -107,7 +107,11 @@
@@ -22,6 +23,7 @@
      "type": attr.string(),
      "patches": attr.label_list(default = []),
      "remote_file_urls": attr.string_list_dict(default = {}),
+diff --git a/extensions/llvm_source.bzl b/extensions/llvm_source.bzl
 --- a/extensions/llvm_source.bzl
 +++ b/extensions/llvm_source.bzl
 @@ -157,12 +157,18 @@

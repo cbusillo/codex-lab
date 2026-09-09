@@ -99,6 +99,10 @@ test("shutdown precedes directory-only repair, without following symlinks", (t) 
   assert.equal(mode(f.file), 0o444);
   assert.equal(mode(cached), 0o755);
   assert.equal(mode(outside), 0o555);
+  assert.equal(
+    fs.existsSync(path.join(f.env.BAZEL_REPO_CONTENTS_CACHE, "outside")),
+    false,
+  );
 });
 
 for (const failure of [
@@ -107,11 +111,14 @@ for (const failure of [
 ]) {
   test(`failed shutdown leaves permissions unchanged: ${failure.stderr || "timeout"}`, (t) => {
     const f = fixture(t);
+    const link = path.join(f.env.BAZEL_OUTPUT_BASE, "sdk-link");
+    fs.symlinkSync(f.temp, link);
     assert.throws(
       () => prepare({ ...f, spawn: () => failure }),
       /shutdown failed/,
     );
     assert.equal(mode(f.readonly), 0o555);
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
   });
 }
 

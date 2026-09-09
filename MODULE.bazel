@@ -18,6 +18,7 @@ single_version_override(
         "//patches:llvm_windows_arm64_powl.patch",
         "//patches:llvm_windows_mingw_compat.patch",
         "//patches:llvm_reject_sdk_finder_metadata.patch",
+        "//patches:llvm_protect_extracted_sdk.patch",
         "//patches:llvm_cache_owned_overlays.patch",
     ],
 )
