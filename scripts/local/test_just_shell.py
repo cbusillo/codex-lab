@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,6 +33,19 @@ class JustShellTest(unittest.TestCase):
             stderr=None,
             env={"CODEX_REPO_ROOT": str(root)},
         )
+
+    def test_cargo_recipe_does_not_launch_when_resolver_fails(self) -> None:
+        completed = mock.Mock(returncode=1, stdout="")
+        with (
+            mock.patch.dict(os.environ, {"CODEX_REPO_ROOT": "/repo"}),
+            mock.patch("subprocess.run", return_value=completed),
+            mock.patch("os.execvp") as execvp,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            just_shell.run_sh("printf launched", "codex", [])
+
+        self.assertEqual(raised.exception.code, 1)
+        execvp.assert_not_called()
 
     def test_non_cargo_recipe_does_not_resolve_target(self) -> None:
         with mock.patch("subprocess.run") as run:

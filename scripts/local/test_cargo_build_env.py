@@ -18,6 +18,8 @@ def base_environment() -> dict[str, str]:
         "CODEX_LAB_CARGO_TARGET_SCOPE",
         "CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT",
         "CODEX_LAB_DEVELOPER_ARTIFACTS_VOLUME_UUID",
+        "CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES",
+        "CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES",
     ):
         environment.pop(name, None)
     return environment
@@ -28,7 +30,7 @@ class CargoBuildEnvTest(unittest.TestCase):
         environment = base_environment()
         environment.update(updates)
         return subprocess.run(
-            [SCRIPT],
+            ["/bin/bash", SCRIPT],
             check=False,
             capture_output=True,
             text=True,
@@ -73,6 +75,20 @@ class CargoBuildEnvTest(unittest.TestCase):
         )
         self.assertIn("portable repository target", completed.stderr)
 
+    def test_unset_floors_do_not_require_python(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_python = Path(temporary_directory) / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            target = Path(temporary_directory) / "target"
+            completed = self.run_script(
+                CODEX_LAB_CARGO_TARGET_DIR=str(target),
+                CODEX_LAB_CARGO_TARGET_NO_MKDIR="1",
+                PATH=f"{temporary_directory}{os.pathsep}{os.environ['PATH']}",
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_missing_configured_root_fails_without_creating_it(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             artifact_root = Path(temporary_directory) / "missing-volume"
@@ -98,6 +114,66 @@ class CargoBuildEnvTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout.strip(), str(target))
         self.assertIn("artifact root unmanaged", completed.stderr)
+
+    def test_low_floors_allow_normal_missing_target_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            target = Path(temporary_directory) / "target with spaces"
+            completed = self.run_script(
+                CODEX_LAB_CARGO_TARGET_DIR=str(target),
+                CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES="1",
+                CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES="1",
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(target.is_dir())
+
+    def test_high_target_floor_fails_before_mkdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            target = Path(temporary_directory) / "not-created"
+            completed = self.run_script(
+                CODEX_LAB_CARGO_TARGET_DIR=str(target),
+                CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES=str((1 << 63) - 1),
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertFalse(target.exists())
+        self.assertIn("below", completed.stderr)
+
+    def test_high_root_floor_fails_before_mkdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            target = Path(temporary_directory) / "not-created"
+            completed = self.run_script(
+                CODEX_LAB_CARGO_TARGET_DIR=str(target),
+                CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES=str((1 << 63) - 1),
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertFalse(target.exists())
+        self.assertIn("root storage", completed.stderr)
+
+    def test_malformed_floor_fails_before_mkdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            for value in ("", "0", "01", "not-a-number"):
+                with self.subTest(value=value):
+                    target = Path(temporary_directory) / f"target-{len(value)}"
+                    completed = self.run_script(
+                        CODEX_LAB_CARGO_TARGET_DIR=str(target),
+                        CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES=value,
+                    )
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertFalse(target.exists())
+
+    def test_symlink_loop_fails_before_mkdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            loop = root / "loop"
+            loop.symlink_to(loop)
+            completed = self.run_script(
+                CODEX_LAB_CARGO_TARGET_DIR=str(loop),
+                CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES="1",
+            )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("canonicalized", completed.stderr)
 
     @unittest.skipIf(
         hasattr(os, "geteuid") and os.geteuid() == 0,

@@ -1,5 +1,36 @@
 # Local build measurements
 
+## Optional local storage admission
+
+`scripts/local/cargo-build-env.sh` keeps the existing precedence rules and
+accepts two opt-in, host-configured floors:
+
+```sh
+CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES=1000000000
+CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES=2000000000
+```
+
+Each value must be a positive canonical decimal no larger than `2^63-1`.
+Unset values disable that floor; set-but-empty values refuse the command.
+Configuring either floor requires Python 3.10 or newer on `PATH`.
+Configured floors are checked independently with native filesystem available
+space before the target directory is created. A failed configured check stops
+the command; it does not fall back to the repository target. Explicit
+`CODEX_LAB_CARGO_TARGET_DIR` or `CARGO_TARGET_DIR` values remain honored and
+are reported as unmanaged, while configured floors still apply.
+
+These are pre-command capacity snapshots, not reservations or hard quotas;
+concurrent work can consume space after admission. Missing target directories
+are measured on their nearest existing canonical parent. Configured artifact
+roots retain the existing mount-identity checks; an unmanaged override alone
+cannot prove that an intended external volume is mounted. Path-resolution
+errors refuse admission even when only the root floor is configured.
+
+The maintained `just` Cargo recipes call this resolver. A direct `cargo`
+command and a raw IDE Cargo launch bypass it unless the caller explicitly
+evaluates the resolver or configures the IDE to invoke `just`; there is no
+universal Cargo or IDE interception.
+
 `just local-build-storage --path root=/ --path artifacts="$CODEX_LAB_DEVELOPER_ARTIFACTS_ROOT"`
 reports filesystem capacity for explicitly named paths without walking or deleting
 build data. Paths are represented by caller-selected public-safe role names.

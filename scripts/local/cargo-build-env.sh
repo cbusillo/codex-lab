@@ -131,6 +131,22 @@ cargo_target_key() {
 	printf '%s-%s' "$slug" "$repo_hash"
 }
 
+storage_admission_args=()
+if [[ "${CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES+x}" == x || "${CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES+x}" == x ]]; then
+	python_bin="$(command -v python3 || true)"
+	if [[ -z "$python_bin" ]]; then
+		printf 'storage admission requires python3 when a free-space floor is configured\n' >&2
+		exit 1
+	fi
+	storage_admission_args=(
+		"$python_bin"
+		"$repo_root/scripts/local/storage_admission.py"
+		--root-path
+		/
+		--target-path
+	)
+fi
+
 if [[ -n "${CODEX_LAB_CARGO_TARGET_DIR:-}" ]]; then
 	target_dir="$CODEX_LAB_CARGO_TARGET_DIR"
 	report_storage_route "using explicit CODEX_LAB_CARGO_TARGET_DIR (artifact root unmanaged)"
@@ -173,6 +189,22 @@ case "$target_dir" in
 /*) ;;
 *) target_dir="$repo_root/${target_dir#./}" ;;
 esac
+
+if [[ "${#storage_admission_args[@]}" -gt 0 ]]; then
+	storage_admission_args+=("$target_dir")
+	if [[ "${CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES+x}" == x ]]; then
+		storage_admission_args+=(--min-root-free "${CODEX_LAB_STORAGE_MIN_ROOT_FREE_BYTES}")
+	fi
+	if [[ "${CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES+x}" == x ]]; then
+		storage_admission_args+=(--min-target-free "${CODEX_LAB_STORAGE_MIN_TARGET_FREE_BYTES}")
+	fi
+	if "${storage_admission_args[@]}"; then
+		:
+	else
+		admission_status=$?
+		exit "$admission_status"
+	fi
+fi
 
 if [[ "${CODEX_LAB_CARGO_TARGET_NO_MKDIR:-}" != "1" ]]; then
 	mkdir -p "$target_dir"
