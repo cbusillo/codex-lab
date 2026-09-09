@@ -132,21 +132,18 @@ class ReleaseRustRoutingTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual((output, environment, path), ("", "", ""))
 
-    def test_policy_allows_local_only_for_the_default_branch_release(self) -> None:
+    def test_policy_allows_local_only_for_approved_default_branch_callers(self) -> None:
         script = shell_block(
             (ROOT / ".github/workflows/rust-ci-full.yml").read_text(),
             "name: Require an approved execution mode and caller",
         )
-        code, output, _, _, error = self.run_shell(script)
-        self.assertEqual(
-            (code, output), (0, "execution_mode=local\nrunner=macos-codex-lab\n"), error
-        )
-        for override in (
+        invalid_overrides = (
             {"EXECUTION_MODE": "unknown"},
             {"REPOSITORY": "fork/codex-lab"},
             {"GITHUB_EVENT_NAME": "pull_request"},
             {"GITHUB_EVENT_NAME": "push"},
             {"REF_NAME": "task-branch"},
+            {"REF": "refs/heads/task-branch"},
             {
                 "GITHUB_REF": "refs/tags/main",
                 "REF": "refs/tags/main",
@@ -155,11 +152,38 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             {
                 "WORKFLOW_REF": "cbusillo/codex-lab/.github/workflows/full-ci.yml@refs/heads/main"
             },
+            {
+                "WORKFLOW_REF": "cbusillo/codex-lab/.github/workflows/rust-ci-local.yml@refs/heads/task-branch"
+            },
+            {
+                "WORKFLOW_REF": "fork/codex-lab/.github/workflows/rust-ci-local.yml@refs/heads/main"
+            },
+            {
+                "WORKFLOW_REF": "cbusillo/codex-lab/.github/workflows/rust-ci-full.yml@refs/heads/main"
+            },
+        )
+        for executable, caller in itertools.product(
+            ("bash", "/bin/bash"), ("codex-lab-release.yml", "rust-ci-local.yml")
         ):
-            with self.subTest(override=override):
-                code, output, _, _, _ = self.run_shell(script, **override)
-                self.assertNotEqual(code, 0)
-                self.assertEqual(output, "")
+            workflow_ref = f"cbusillo/codex-lab/.github/workflows/{caller}@refs/heads/main"
+            with self.subTest(executable=executable, caller=caller):
+                code, output, _, _, error = self.run_shell(
+                    script, executable=executable, WORKFLOW_REF=workflow_ref
+                )
+                self.assertEqual(
+                    (code, output),
+                    (0, "execution_mode=local\nrunner=macos-codex-lab\n"),
+                    error,
+                )
+                for override in invalid_overrides:
+                    with self.subTest(override=override):
+                        code, output, _, _, _ = self.run_shell(
+                            script,
+                            executable=executable,
+                            **{"WORKFLOW_REF": workflow_ref, **override},
+                        )
+                        self.assertNotEqual(code, 0)
+                        self.assertEqual(output, "")
         code, output, _, _, error = self.run_shell(
             script,
             EXECUTION_MODE="hosted",
