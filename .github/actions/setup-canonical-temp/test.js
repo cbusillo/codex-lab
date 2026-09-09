@@ -189,6 +189,189 @@ test("setup-ci keeps read-only DotSlash caches outside canonical cleanup", () =>
   });
 });
 
+test("cleanup repairs nested read-only directories without changing outside symlink targets", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    const state = allocateCanonicalTemp(options);
+    const outside = path.join(paths.root, "outside");
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, "keep"), "outside data");
+    const nested = path.join(state.path, "cache", "tool");
+    fs.mkdirSync(nested, { recursive: true });
+    fs.writeFileSync(path.join(nested, "binary"), "tool");
+    fs.symlinkSync(outside, path.join(nested, "outside"));
+    fs.chmodSync(outside, 0o555);
+    fs.chmodSync(nested, 0o555);
+    fs.chmodSync(path.dirname(nested), 0o555);
+    try {
+      assertCleanupStatus(state, options, "cleaned");
+      assert.equal(fs.existsSync(state.path), false);
+      assert.equal(
+        fs.readFileSync(path.join(outside, "keep"), "utf8"),
+        "outside data",
+      );
+      assert.equal(fs.statSync(outside).mode & 0o777, 0o555);
+    } finally {
+      fs.chmodSync(outside, 0o755);
+    }
+  });
+});
+
+test("cleanup retries newly appearing metadata and bounds persistent failures", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    for (const persistent of [false, true]) {
+      const state = allocateCanonicalTemp(options);
+      let calls = 0;
+      let retained;
+      const fsApi = {
+        ...paths.fsApi,
+        rmSync(directory, rmOptions) {
+          retained = directory;
+          calls++;
+          if (persistent || calls === 1) {
+            fs.writeFileSync(path.join(directory, ".DS_Store"), "new metadata");
+            throw Object.assign(new Error("injected metadata race"), {
+              code: "ENOTEMPTY",
+            });
+          }
+          return fs.rmSync(directory, rmOptions);
+        },
+      };
+      if (persistent) {
+        assert.throws(
+          () => cleanupCanonicalTemp({ state, ...options, fsApi }),
+          /retained .*injected metadata race/,
+        );
+        assert.equal(calls, 3);
+        assert.equal(fs.existsSync(retained), true);
+      } else {
+        assertCleanupStatus(state, { ...options, fsApi }, "cleaned");
+        assert.equal(calls, 2);
+      }
+    }
+  });
+});
+
+test("permission repair refuses foreign directory devices and owners", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    for (const property of ["dev", "uid"]) {
+      const state = allocateCanonicalTemp(options);
+      fs.mkdirSync(path.join(state.path, "foreign"));
+      const fsApi = {
+        ...paths.fsApi,
+        rmSync() {
+          throw Object.assign(new Error("injected retry"), {
+            code: "ENOTEMPTY",
+          });
+        },
+        lstatSync(value, statOptions) {
+          const stat = fs.lstatSync(value, statOptions);
+          return path.basename(value) === "foreign"
+            ? withStatProperty(stat, property, stat[property] + 1n)
+            : stat;
+        },
+      };
+      assert.throws(
+        () => cleanupCanonicalTemp({ state, ...options, fsApi }),
+        /directory identity or owner changed.*while removing: ENOTEMPTY/,
+      );
+    }
+  });
+});
+
+test("cleanup does not retry non-permission filesystem errors", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    const state = allocateCanonicalTemp(options);
+    let calls = 0;
+    const fsApi = {
+      ...paths.fsApi,
+      rmSync() {
+        calls++;
+        throw Object.assign(new Error("busy fixture"), { code: "EBUSY" });
+      },
+      openSync() {
+        assert.fail("must not repair a busy filesystem");
+      },
+    };
+    assert.throws(
+      () => cleanupCanonicalTemp({ state, ...options, fsApi }),
+      /retained .*busy fixture/,
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+test("permission repair refuses a changed opened-directory identity", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    const state = allocateCanonicalTemp(options);
+    let chmodCalls = 0;
+    const fsApi = {
+      ...paths.fsApi,
+      rmSync() {
+        throw Object.assign(new Error("injected retry"), { code: "ENOTEMPTY" });
+      },
+      fstatSync(fd, statOptions) {
+        const stat = fs.fstatSync(fd, statOptions);
+        return withStatProperty(stat, "ino", stat.ino + 1n);
+      },
+      fchmodSync() {
+        chmodCalls++;
+      },
+    };
+    assert.throws(
+      () => cleanupCanonicalTemp({ state, ...options, fsApi }),
+      /retained .*changed while opening/,
+    );
+    assert.equal(chmodCalls, 0);
+  });
+});
+
+test("cleanup retains partial failures with directory diagnostics", () => {
+  return withFixture((paths) => {
+    const options = fixtureOptions(paths);
+    const state = allocateCanonicalTemp(options);
+    const nested = path.join(state.path, "readonly");
+    fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, "keep"), "retained");
+    fs.chmodSync(nested, 0o555);
+    let retained;
+    const fsApi = {
+      ...paths.fsApi,
+      mkdtempSync(prefix) {
+        retained = fs.mkdtempSync(prefix);
+        return retained;
+      },
+      fchmodSync() {
+        throw Object.assign(new Error("injected chmod failure"), {
+          code: "EPERM",
+        });
+      },
+    };
+    try {
+      assert.throws(
+        () => cleanupCanonicalTemp({ state, ...options, fsApi }),
+        /retained .*injected chmod failure; directory .*readonly, mode 555/,
+      );
+      assert.equal(
+        fs.readFileSync(
+          path.join(retained, path.basename(state.path), "readonly", "keep"),
+          "utf8",
+        ),
+        "retained",
+      );
+    } finally {
+      fs.chmodSync(
+        path.join(retained, path.basename(state.path), "readonly"),
+        0o755,
+      );
+    }
+  });
+});
+
 test("main and post exchange the GitHub state key and clean the allocated directory", () => {
   return withFixture((paths) => {
     const outputFile = path.join(paths.root, "output");

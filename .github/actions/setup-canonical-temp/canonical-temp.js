@@ -232,6 +232,65 @@ function validateState(state) {
   }
 }
 
+// Only repair directories in the private, identity-checked quarantine. Open
+// without following links and chmod the verified descriptor, never a link target.
+function repairReadonlyDirectories(root, identity, uid, fsApi) {
+  const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop();
+    let stat;
+    try {
+      stat = fsApi.lstatSync(directory, { bigint: true });
+    } catch (error) {
+      if (error.code === "ENOENT" && directory !== root) continue;
+      throw error;
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+    if (
+      String(stat.dev) !== identity.dev ||
+      (directory === root && !sameIdentity(statIdentity(stat), identity)) ||
+      Number(stat.uid) !== uid ||
+      fsApi.realpathSync(directory) !== directory
+    ) {
+      throw new Error(
+        `cleanup directory identity or owner changed: ${directory}`,
+      );
+    }
+    const fd = fsApi.openSync(
+      directory,
+      fsApi.constants.O_RDONLY |
+        fsApi.constants.O_NOFOLLOW |
+        fsApi.constants.O_DIRECTORY,
+    );
+    try {
+      const opened = fsApi.fstatSync(fd, { bigint: true });
+      if (
+        !opened.isDirectory() ||
+        !sameIdentity(statIdentity(opened), statIdentity(stat)) ||
+        Number(opened.uid) !== uid
+      ) {
+        throw new Error(
+          `cleanup directory changed while opening: ${directory}`,
+        );
+      }
+      const mode = Number(opened.mode) & 0o777;
+      if ((mode & 0o700) !== 0o700) {
+        try {
+          fsApi.fchmodSync(fd, mode | 0o700);
+        } catch (error) {
+          error.message += `; directory ${directory}, mode ${mode.toString(8)}`;
+          throw error;
+        }
+      }
+    } finally {
+      fsApi.closeSync(fd);
+    }
+    for (const name of fsApi.readdirSync(directory)) {
+      pending.push(path.join(directory, name));
+    }
+  }
+}
+
 function cleanupCanonicalTemp({
   state,
   fsApi = fs,
@@ -334,7 +393,40 @@ function cleanupCanonicalTemp({
     ) {
       throw new Error("renamed path identity changed");
     }
-    fsApi.rmSync(quarantine, { recursive: true, force: false });
+    for (let attempt = 0; ; attempt++) {
+      const current = fsApi.lstatSync(quarantine, { bigint: true });
+      if (
+        !current.isDirectory() ||
+        current.isSymbolicLink() ||
+        !sameIdentity(statIdentity(current), statIdentity(quarantineStat)) ||
+        Number(current.uid) !== state.uid ||
+        fsApi.realpathSync(quarantine) !== quarantine
+      ) {
+        throw new Error("cleanup quarantine identity changed");
+      }
+      try {
+        fsApi.rmSync(quarantine, { recursive: true, force: false });
+        break;
+      } catch (error) {
+        if (
+          attempt >= 2 ||
+          !["EACCES", "EPERM", "ENOTEMPTY"].includes(error.code)
+        ) {
+          throw error;
+        }
+        try {
+          repairReadonlyDirectories(
+            quarantine,
+            statIdentity(quarantineStat),
+            state.uid,
+            fsApi,
+          );
+        } catch (repairError) {
+          repairError.message += `; while removing: ${error.code}: ${error.message}`;
+          throw repairError;
+        }
+      }
+    }
     return { status: "cleaned" };
   } catch (error) {
     throw new Error(
