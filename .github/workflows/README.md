@@ -80,9 +80,14 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   - the Cargo `nextest` suite via archive-backed shards
   - release-profile Cargo builds
   - Apple Silicon `argument-comment-lint`
-- The Lab release opts into trusted local Rust execution; other callers retain
-  hosted execution. Local release jobs require hosted actor authorization and
-  explicit release-caller/default-branch checks before they can reach the
+- The Lab release and manual `rust-ci-local.yml` workflow opt into trusted local
+  Rust execution; other callers retain hosted execution. The local verification
+  entrypoint runs the same Rust suite without release signing or publication.
+  Dispatch it from the default branch after other heavy release work finishes
+  when collecting comparable cache measurements. It uses the existing sccache
+  configuration; it does not enable Kache or demonstrate local-to-CI cache reuse.
+  Local jobs require hosted actor authorization and
+  explicit caller/default-branch checks before they can reach the
   persistent runner. Resource controls serialize heavy commands with the
   existing shared lock and retain the four-job profile; four nextest partitions
   remain required, with four test threads per local shard.

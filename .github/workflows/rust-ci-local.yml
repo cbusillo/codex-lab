@@ -1,0 +1,22 @@
+name: rust-ci-local
+
+# Manual verification on the persistent runner, without release artifact jobs.
+# rust-ci-full enforces default-branch dispatch and trusted actor authorization.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rust-ci-local::${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rust:
+    name: Local Rust verification
+    uses: ./.github/workflows/rust-ci-full.yml
+    with:
+      execution_mode: local
+    secrets: inherit
