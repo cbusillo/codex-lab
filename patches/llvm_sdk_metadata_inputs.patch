@@ -1,0 +1,97 @@
+diff --git a/directory.bzl b/directory.bzl
+--- a/directory.bzl
++++ b/directory.bzl
+@@ -2,18 +2,19 @@
+ load("@bazel_skylib//rules/directory:providers.bzl", "DirectoryInfo")
+ load("@bazel_skylib//rules/directory:subdirectory.bzl", "subdirectory")
+ 
+-# We want to put a source directory into the DefaultInfo but still propagate
+-# the DirectoryInfo for header inclusion checking.
++# Declare individual inputs so Finder metadata cannot invalidate every compile.
++# DirectoryInfo still supplies the include path and header inclusion checking.
+ def headers_directory(name, path, visibility = None):
++    files = native.glob(["**" if path == "." else path + "/**"], exclude = ["**/.DS_Store"])
+     if path == ".":
+         directory(
+             name = name + "_directory",
+-            srcs = native.glob(["**"]),
++            srcs = files,
+         )
+     else:
+         directory(
+             name = name + "_files",
+-            srcs = native.glob([path + "/**"]),
++            srcs = files,
+         )
+ 
+         subdirectory(
+@@ -24,7 +25,7 @@
+ 
+     native.filegroup(
+         name = name + "_source_directory",
+-        srcs = [path],
++        srcs = files,
+     )
+ 
+     _headers_directory(
+diff --git a/runtimes/module_map.bzl b/runtimes/module_map.bzl
+--- a/runtimes/module_map.bzl
++++ b/runtimes/module_map.bzl
+@@ -6,13 +6,17 @@
+ IncludePathInfo = provider(
+     "IncludePathInfo",
+     fields = {
++        "source_directory_paths": "A depset of source directory paths, whose inputs are individual files.",
+         "submodule_directories": "A depset of File objects representing directories to be included as umbrella submodules.",
+         "textual_headers": "A depset of File objects representing headers to be included as textual headers.",
+     },
+ )
+ 
+ def _umbrella_submodule(directory):
+-    path = paths.normalize(directory.path).replace("//", "/")
++    return _umbrella_source_path(directory.path)
++
++def _umbrella_source_path(path):
++    path = paths.normalize(path).replace("//", "/")
+ 
+     return """
+   module "{path}" {{
+@@ -27,6 +31,12 @@
+     module_map_args = ctx.actions.args()
+     module_map_args.set_param_file_format("multiline")
+     module_map_args.add('module "crosstool" [system] {')
++
++    module_map_args.add_joined(
++        include_path_info.source_directory_paths,
++        join_with = "\n",
++        map_each = _umbrella_source_path,
++    )
+ 
+     module_map_args.add_joined(
+         include_path_info.submodule_directories,
+@@ -70,18 +80,23 @@
+ )
+ 
+ def _include_path_impl(ctx):
++    source_directory_paths = []
+     submodule_directories = []
+     textual_headers_depsets = []
+ 
+     for src in ctx.attr.srcs:
+-        if SourceDirectoryInfo in src or DirectoryInfo not in src:
+-            # We're either a source directory or an output directory (Tree Artifact).
++        if SourceDirectoryInfo in src:
++            # DefaultInfo contains filtered files; DirectoryInfo supplies the path.
++            source_directory_paths.append(src[DirectoryInfo].path)
++        elif DirectoryInfo not in src:
++            # Output directories (Tree Artifacts).
+             submodule_directories.append(src[DefaultInfo].files)
+         else:
+             textual_headers_depsets.append(src[DirectoryInfo].transitive_files)
+ 
+     return [
+         IncludePathInfo(
++            source_directory_paths = depset(source_directory_paths),
+             submodule_directories = depset([], transitive = submodule_directories),
+             textual_headers = depset([], transitive = textual_headers_depsets),
+         ),

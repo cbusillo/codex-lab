@@ -1,0 +1,47 @@
+diff --git a/rust/private/utils.bzl b/rust/private/utils.bzl
+--- a/rust/private/utils.bzl
++++ b/rust/private/utils.bzl
+@@ -15,6 +15,7 @@
+ """Utility functions not specific to the rust toolchain."""
+ 
+ load("@bazel_skylib//lib:paths.bzl", "paths")
++load("@bazel_skylib//rules/directory:providers.bzl", "DirectoryInfo")
+ load("@rules_cc//cc:find_cc_toolchain.bzl", find_rules_cc_toolchain = "find_cc_toolchain")
+ load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+ load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+@@ -280,6 +281,25 @@
+     # Fast-path - both location expansions and make vars have a `$` so we can short-circuit everything.
+     if "$" not in v:
+         return v
++
++    # Expand directory paths independently of DefaultInfo's file count. Split
++    # escaped dollars first so $$(directorypath ...) remains a literal.
++    expanded_parts = []
++    for escaped_part in v.split("$$"):
++        parts = escaped_part.split("$(directorypath ")
++        expanded = parts[0]
++        if len(parts) > 1:
++            directories = {target.label: target[DirectoryInfo].path for target in data if DirectoryInfo in target}
++            for part in parts[1:]:
++                label, closing, suffix = part.partition(")")
++                if not closing:
++                    fail("%s: unclosed $(directorypath ...)" % ctx.label)
++                target = ctx.package_relative_label(label)
++                if target not in directories:
++                    fail("%s: $(directorypath %s) requires a DirectoryInfo target in data or tools" % (ctx.label, label))
++                expanded += "$${pwd}/" + directories[target].replace("$", "$$") + suffix
++        expanded_parts.append(expanded)
++    v = "$$".join(expanded_parts)
+ 
+     for directive in ("$(execpath ", "$(location "):
+         if directive in v:
+@@ -313,6 +333,9 @@
+ 
+ def expand_dict_value_locations(ctx, env, data, known_variables):
+     """Performs location-macro expansion on string values.
++
++    $(directorypath ...) expands a DirectoryInfo target in data to its include
++    directory, independently of how many files the target declares.
+ 
+     $(execpath ...), $(execpaths ...), $(location ...) and $(locations ...) are
+     prefixed with ${pwd}, which process_wrapper and build_script_runner will
