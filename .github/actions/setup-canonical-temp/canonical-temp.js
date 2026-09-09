@@ -232,7 +232,7 @@ function validateState(state) {
   }
 }
 
-// Only repair directories in the private, identity-checked quarantine. Open
+// Call only for owned, identity-checked roots after their writers stop. Open
 // without following links and chmod the verified descriptor, never a link target.
 function repairReadonlyDirectories(root, identity, uid, fsApi) {
   const pending = [root];
@@ -441,4 +441,5 @@ module.exports = {
   allocateCanonicalTemp,
   cleanupCanonicalTemp,
   layoutForRunnerTemp,
+  repairReadonlyDirectories,
 };
