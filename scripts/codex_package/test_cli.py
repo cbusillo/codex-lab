@@ -4,9 +4,11 @@ import argparse
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from codex_package.cli import parse_args
 from codex_package.cli import parse_package_version
 
 
@@ -42,6 +44,19 @@ class PackageVersionTest(unittest.TestCase):
             with self.subTest(version=version):
                 with self.assertRaises(argparse.ArgumentTypeError):
                     parse_package_version(version)
+
+
+class PackageArgumentTest(unittest.TestCase):
+    def test_archive_overwrite_does_not_enable_package_replacement(self) -> None:
+        with mock.patch.object(
+            sys,
+            "argv",
+            ["build_codex_package.py", "--overwrite-archives"],
+        ):
+            args = parse_args()
+
+        self.assertTrue(args.overwrite_archives)
+        self.assertFalse(args.force)
 
 
 if __name__ == "__main__":

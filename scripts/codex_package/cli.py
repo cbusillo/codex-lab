@@ -94,6 +94,13 @@ def parse_args() -> argparse.Namespace:
         help="Replace an existing package directory or archive output.",
     )
     parser.add_argument(
+        "--overwrite-archives",
+        action="store_true",
+        help=(
+            "Replace existing archive outputs without replacing the package directory."
+        ),
+    )
+    parser.add_argument(
         "--cargo",
         default="cargo",
         help="Cargo executable to use for source-built package artifacts.",
@@ -231,7 +238,11 @@ def main() -> int:
 
     for archive_output in args.archive_output:
         archive_path = archive_output.resolve()
-        write_archive(package_dir, archive_path, force=args.force)
+        write_archive(
+            package_dir,
+            archive_path,
+            force=args.force or args.overwrite_archives,
+        )
         print(f"Built Codex package archive at {archive_path}")
 
     print(f"Built Codex package directory at {package_dir}")
