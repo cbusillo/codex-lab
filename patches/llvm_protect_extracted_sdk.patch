@@ -1,0 +1,49 @@
+diff --git a/http_pkg_archive.bzl b/http_pkg_archive.bzl
+--- a/http_pkg_archive.bzl
++++ b/http_pkg_archive.bzl
+@@ -37,6 +37,45 @@
+     for file, label in rctx.attr.files.items():
+         rctx.file(file, rctx.read(label))
+ 
++    if rctx.os.name == "mac os x":
++        # Seal first: Finder can write while extraction is still in progress.
++        protected = rctx.execute([
++            "/bin/chmod", "-R", "-P", "a-w", rctx.attr.dst,
++        ])
++        if protected.return_code != 0:
++            fail("Failed to protect extracted SDK: {}".format(protected.stderr))
++        # Only this newly extracted repository is modified. Briefly reopen
++        # parents of existing metadata, always restoring protection on exit.
++        remove_metadata = """set -eu
++for metadata do
++parent=${metadata%/*}
++trap '/bin/chmod a-w "$parent"' EXIT
++/bin/chmod u+w "$parent"
++/bin/rm -f "$metadata"
++/bin/chmod a-w "$parent"
++trap - EXIT
++done
++"""
++        for attempt in range(3):
++            clean = rctx.execute([
++                "/usr/bin/find", "-P", rctx.attr.dst,
++                "-type", "f", "-name", ".DS_Store",
++                "-exec", "/bin/sh", "-c", remove_metadata, "sdk-metadata", "{}", "+",
++            ])
++            if clean.return_code != 0:
++                fail("Failed to clean extracted SDK metadata: {}".format(clean.stderr))
++            remaining = rctx.execute([
++                "/usr/bin/find", "-P", rctx.attr.dst, "-name", ".DS_Store", "-print",
++            ])
++            if remaining.return_code != 0:
++                fail("Failed to verify extracted SDK: {}".format(remaining.stderr))
++            if not remaining.stdout.strip():
++                break
++            if attempt == 2:
++                fail("Extracted SDK metadata persisted after protection: {}".format(remaining.stdout))
++        # Job cleanup must unlink SDK references before Runner.Sdk deletion,
++        # which otherwise clears read-only attributes on shared targets.
++
+     return rctx.repo_metadata(reproducible = True)
+ 
+ http_pkg_archive = repository_rule(

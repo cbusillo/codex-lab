@@ -232,9 +232,15 @@ function validateState(state) {
   }
 }
 
-// Only repair directories in the private, identity-checked quarantine. Open
+// Call only for owned, identity-checked roots after their writers stop. Open
 // without following links and chmod the verified descriptor, never a link target.
-function repairReadonlyDirectories(root, identity, uid, fsApi) {
+function repairReadonlyDirectories(
+  root,
+  identity,
+  uid,
+  fsApi,
+  { unlinkSymlinks = false } = {},
+) {
   const pending = [root];
   while (pending.length) {
     const directory = pending.pop();
@@ -285,8 +291,33 @@ function repairReadonlyDirectories(root, identity, uid, fsApi) {
     } finally {
       fsApi.closeSync(fd);
     }
-    for (const name of fsApi.readdirSync(directory)) {
-      pending.push(path.join(directory, name));
+    for (const entry of fsApi.readdirSync(directory, { withFileTypes: true })) {
+      const child = path.join(directory, entry.name);
+      if (entry.isSymbolicLink() && unlinkSymlinks) {
+        // Runner.Sdk clears read-only attributes through symlinks. Remove the
+        // owned link itself so deletion cannot make a shared SDK writable.
+        // This traversal requires exclusive ownership and stopped writers.
+        const link = fsApi.lstatSync(child, { bigint: true });
+        const parent = fsApi.lstatSync(directory, { bigint: true });
+        if (
+          !link.isSymbolicLink() ||
+          Number(link.uid) !== uid ||
+          String(link.dev) !== identity.dev ||
+          !sameIdentity(statIdentity(parent), statIdentity(stat)) ||
+          !parent.isDirectory() ||
+          Number(parent.uid) !== uid ||
+          fsApi.realpathSync(directory) !== directory
+        ) {
+          throw new Error(
+            `cleanup symlink identity or owner changed: ${child}`,
+          );
+        }
+        fsApi.unlinkSync(child);
+      } else if (!entry.isFile() && !entry.isSymbolicLink()) {
+        // Avoid one lstat per regular build output; only directories need
+        // permission repair. Unknown entry types still get checked above.
+        pending.push(child);
+      }
     }
   }
 }
@@ -441,4 +472,5 @@ module.exports = {
   allocateCanonicalTemp,
   cleanupCanonicalTemp,
   layoutForRunnerTemp,
+  repairReadonlyDirectories,
 };
