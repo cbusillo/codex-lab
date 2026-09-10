@@ -453,6 +453,12 @@ fn normalize_writable_root_for_sandbox(
         root.as_path().starts_with(home.as_path())
             || normalize_path_for_sandbox(home.as_path())
                 .is_some_and(|target| root.as_path().starts_with(target.as_path()))
+            // The home resolver canonicalizes its result, so recover a lexical home alias
+            // without resolving a nested symlink target that the opt-out intentionally trusts.
+            || root.as_path().ancestors().any(|ancestor| {
+                normalize_path_for_sandbox(ancestor)
+                    .is_some_and(|target| target.as_path() == home.as_path())
+            })
     });
     if !allow_symlinks && let Some(symlink) = nested_symlink_component(root.as_path()) {
         return Err(SeatbeltPreparationError::FileSystem(format!(

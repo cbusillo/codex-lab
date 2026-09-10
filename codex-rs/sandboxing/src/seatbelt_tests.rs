@@ -11,6 +11,7 @@ use super::create_seatbelt_command_args_for_legacy_policy;
 use super::create_seatbelt_command_args_with_profile;
 use super::dynamic_network_policy;
 use super::normalize_path_for_sandbox;
+use super::normalize_writable_root_for_sandbox;
 use super::seatbelt_regex_for_glob;
 use super::seatbelt_regex_for_unreadable_glob;
 use super::unix_socket_dir_params;
@@ -1915,6 +1916,57 @@ fn create_seatbelt_args_rejects_symlinked_writable_root() {
     assert!(
         error.contains(&workspace.display().to_string()),
         "error should identify the rejected workspace: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_codex_home_alias_allows_only_its_descendant_roots() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let actual_home = tmp.path().join("actual-home");
+    let home_alias = tmp.path().join("home-alias");
+    let project = tmp.path().join("project");
+    let project_alias = tmp.path().join("project-alias");
+    let target = tmp.path().join("target");
+    for path in [&actual_home, &project, &target] {
+        fs::create_dir(path).expect("create fixture directory");
+    }
+    symlink(&actual_home, &home_alias).expect("create home alias");
+    symlink(&project, &project_alias).expect("create project alias");
+    symlink(&target, actual_home.join("visualizations")).expect("create home child alias");
+    symlink(&target, project.join("visualizations")).expect("create project child alias");
+
+    let allowed_home =
+        AbsolutePathBuf::from_absolute_path(actual_home.canonicalize().expect("canonicalize home"))
+            .expect("absolute home");
+    let home_root = AbsolutePathBuf::from_absolute_path(home_alias.join("visualizations"))
+        .expect("absolute home root");
+    let normalized = normalize_writable_root_for_sandbox(home_root.clone(), Some(&allowed_home))
+        .expect("configured home alias should allow its descendant root");
+    let super::NormalizedWritableRoot::Subpath(normalized) = normalized else {
+        panic!("existing directory should normalize as a subpath root");
+    };
+    assert_eq!(
+        normalized.as_path(),
+        target.canonicalize().expect("canonicalize target")
+    );
+    assert!(
+        normalize_writable_root_for_sandbox(home_root, /*allowed_symlinked_codex_home*/ None)
+            .is_err(),
+        "the explicit home opt-out is required"
+    );
+
+    let project_root = AbsolutePathBuf::from_absolute_path(project_alias.join("visualizations"))
+        .expect("absolute project root");
+    let error = normalize_writable_root_for_sandbox(project_root, Some(&allowed_home))
+        .expect_err("unrelated project alias must remain rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("symlinked writable roots are not supported"),
+        "unexpected error: {error}"
     );
 }
 

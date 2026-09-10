@@ -1513,7 +1513,71 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             reloaded_snapshot.model_provider_id,
             reloaded_snapshot.reasoning_effort,
         ),
-        (fallback_model, stored_child.model_provider, None,),
+        (fallback_model, stored_child.model_provider.clone(), None,),
+    );
+
+    reloaded_child
+        .shutdown_and_wait()
+        .await
+        .expect("fallback-model child should shut down");
+    let mut stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("fallback-model child metadata should be readable")
+        .expect("fallback-model child metadata should exist");
+    stored_metadata.model = None;
+    stored_metadata.reasoning_effort = None;
+    state_db
+        .upsert_thread(&stored_metadata)
+        .await
+        .expect("stored child model should be cleared again");
+    let stored_metadata = state_db
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("cleared child metadata should be readable")
+        .expect("cleared child metadata should exist");
+    assert_eq!(
+        (stored_metadata.model, stored_metadata.reasoning_effort),
+        (None, None)
+    );
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_agent.thread_id)
+            .await
+            .is_some()
+    );
+    let mut different_provider_config = harness.config.clone();
+    different_provider_config.model = Some("caller-only-model".to_string());
+    different_provider_config.model_provider_id = "ollama".to_string();
+    different_provider_config.model_provider = different_provider_config
+        .model_providers
+        .get("ollama")
+        .cloned()
+        .expect("ollama provider should be configured");
+    // The stored provider's catalog marks Astra (priority 1) as its default;
+    // Sol above was only an explicit caller choice, not that catalog default.
+    control
+        .ensure_v2_agent_loaded(
+            different_provider_config,
+            spawned_agent.thread_id,
+            /*parent*/ None,
+        )
+        .await
+        .expect("known v2 agent without a stored model should reload through its stored provider");
+    let provider_default_child = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("provider-default child thread should exist");
+    let provider_default_snapshot = provider_default_child.config_snapshot().await;
+    assert_eq!(
+        (
+            provider_default_snapshot.model,
+            provider_default_snapshot.model_provider_id,
+            provider_default_snapshot.reasoning_effort,
+        ),
+        ("gpt-6-astra".to_string(), stored_child.model_provider, None,),
     );
 }
 
