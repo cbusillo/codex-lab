@@ -39,7 +39,9 @@ jobs:
 
   sdks:
     runs-on: macos-26
-    timeout-minutes: 20
+    # Match the cold-build allowance of the other Bazel jobs. Forks may build
+    # sandboxed V8 locally without an authenticated remote action cache.
+    timeout-minutes: 90
     environment:
       name: bazel
       deployment: false
@@ -68,6 +70,8 @@ jobs:
           target: aarch64-apple-darwin
 
       - name: Build codex and the code-mode host with Bazel
+        # Leave job time for post-build checks and failure diagnostics.
+        timeout-minutes: 75
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
