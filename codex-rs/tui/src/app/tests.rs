@@ -2994,7 +2994,36 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
     let turn = next_user_turn_op(&mut ops);
     app.submit_thread_op(&mut server, thread_id, turn).await?;
     server.startup_interrupt(thread_id).await?;
-    let settings = next_thread_settings_updated(&mut server, thread_id).await;
+    // Settings and interruption complete independently; retain both authoritative events.
+    let (settings, first_completion) = time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        let mut settings = None;
+        let mut first_completion = None;
+        loop {
+            let event = server.next_event().await.expect("app-server event stream");
+            if let codex_app_server_client::AppServerEvent::ServerNotification(notification) = event
+            {
+                match *notification {
+                    ServerNotification::ThreadSettingsUpdated(updated)
+                        if updated.thread_id == thread_id.to_string() =>
+                    {
+                        settings = Some(updated);
+                    }
+                    ServerNotification::TurnCompleted(completed)
+                        if completed.thread_id == thread_id.to_string() =>
+                    {
+                        first_completion = Some(ServerNotification::TurnCompleted(completed));
+                    }
+                    _ => {}
+                }
+            }
+            if let (Some(settings), Some(first_completion)) =
+                (settings.as_ref(), first_completion.as_ref())
+            {
+                break (settings.clone(), first_completion.clone());
+            }
+        }
+    })
+    .await?;
     app.enqueue_thread_notification(
         thread_id,
         ServerNotification::ThreadSettingsUpdated(settings),
@@ -3011,7 +3040,7 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
         @"■ Changing directories with a named profile is not supported."
     );
     app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
-        turn_completed_notification(thread_id, "first", TurnStatus::Interrupted),
+        first_completion,
     )));
     while events.try_recv().is_ok() {}
     app.chat_widget
@@ -3027,6 +3056,19 @@ async fn server_only_profile_selection_keeps_turns_on_the_selected_profile() -> 
         *active_permission_profile = Some(ActivePermissionProfile::new("stale-profile"));
     }
     app.submit_thread_op(&mut server, thread_id, turn).await?;
+    // Admission acknowledges routing before the second turn is recorded in history.
+    time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            let event = server.next_event().await.expect("app-server event stream");
+            if let codex_app_server_client::AppServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnStarted(started) = *notification
+                && started.thread_id == thread_id.to_string()
+            {
+                break;
+            }
+        }
+    })
+    .await?;
     let thread = server
         .thread_read(thread_id, /*include_turns*/ true)
         .await?;

@@ -482,6 +482,9 @@ impl GoalRuntimeHandle {
                 // Turn-stop evaluation takes the same permit, so even a fast response
                 // cannot finish before this host-admitted continuation is identified.
                 self.inner.accounting_state.mark_goal_continuation(turn_id);
+                // The turn-start lifecycle may still be pending. An admitted turn is no
+                // longer idle, so preserve its active-goal baseline for that lifecycle.
+                return Ok(());
             }
             Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
                 tracing::debug!(

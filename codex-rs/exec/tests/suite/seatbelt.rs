@@ -1,4 +1,5 @@
 use super::sandbox::spawn_command_under_sandbox;
+use anyhow::Context;
 use codex_core::spawn::StdioPolicy;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
@@ -102,8 +103,28 @@ async fn codex_home_symlink_opt_out_uses_loaded_user_config() -> anyhow::Result<
         assert!(output.status.success(), "{output:?}");
         assert_eq!(mock.requests().len(), 2);
         if should_run {
-            assert_eq!(fs::read(target.path().join("shell.txt"))?, b"shell");
-            assert_eq!(fs::read(target.path().join("patch.txt"))?, b"patched\n");
+            let shell_output = mock
+                .function_call_output_text("shell")
+                .unwrap_or_else(|| "missing shell tool output".to_string());
+            let patch_output = mock
+                .function_call_output_text("patch")
+                .unwrap_or_else(|| "missing patch tool output".to_string());
+            let case = format!(
+                "home_env={home_env:?}, root_alias={root_alias:?}, enabled={enabled}, \
+                 ignore_user_config={ignore_user_config}, shell_output={:?}, patch_output={:?}",
+                shell_output.chars().take(/*n*/ 1_000).collect::<String>(),
+                patch_output.chars().take(/*n*/ 1_000).collect::<String>(),
+            );
+            assert_eq!(
+                fs::read(target.path().join("shell.txt"))
+                    .with_context(|| format!("shell output file missing: {case}"))?,
+                b"shell"
+            );
+            assert_eq!(
+                fs::read(target.path().join("patch.txt"))
+                    .with_context(|| format!("patch output file missing: {case}"))?,
+                b"patched\n"
+            );
         } else {
             let shell_output = mock
                 .function_call_output_text("shell")

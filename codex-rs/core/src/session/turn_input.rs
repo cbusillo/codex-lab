@@ -462,9 +462,7 @@ async fn start_if_idle(
         }
     }
     let task = RegularTask::new(&task_input);
-    let task_start = session.start_task(turn_context, task_input, task).await;
-    // Callers may mark continuation state immediately after Started; initialize it first.
-    task_start.run().await;
+    session.start_task(turn_context, task_input, task).await;
     Ok(TurnInputSubmission::Started {
         turn_id: submission_id,
     })

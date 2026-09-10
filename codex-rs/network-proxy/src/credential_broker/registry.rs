@@ -409,34 +409,42 @@ pub(super) fn prioritized_credentials<'a>(
     env: &HashMap<String, String>,
 ) -> Vec<&'a CredentialRecord> {
     let binding_env = state.context.with_fallbacks(env);
-    let mut credentials = state.credentials.iter().collect::<Vec<_>>();
-    credentials.sort_unstable_by_key(|credential| {
-        let active = env_entry(env, &credential.env_var)
-            .is_some_and(|(_, value)| value == credential.dummy_value);
-        let has_matching_host_binding = match &credential.provider {
-            BrokeredCredentialProvider::Builtin(provider) => {
-                provider.sources().iter().any(|source| {
-                    !source.binding_env_vars.is_empty()
-                        && (source.host_binding)(&binding_env, state.openai_api_host.as_deref())
-                            .is_some_and(|binding| binding == credential.host_binding)
-                })
-            }
-            BrokeredCredentialProvider::Configured(provider) => provider
-                .config
-                .url_prefix_from_env
-                .as_deref()
-                .is_some_and(|key| {
-                    env_value(&binding_env, key).is_some()
-                        && provider
-                            .host_binding(&binding_env)
-                            .is_some_and(|binding| binding == credential.host_binding)
-                }),
-        };
-        (
-            std::cmp::Reverse(credential.real_value.len()),
-            std::cmp::Reverse(active),
-            std::cmp::Reverse(has_matching_host_binding),
-        )
-    });
+    let mut credentials = state
+        .credentials
+        .iter()
+        .map(|credential| {
+            let active = env_entry(env, &credential.env_var)
+                .is_some_and(|(_, value)| value == credential.dummy_value);
+            let has_matching_host_binding = match &credential.provider {
+                BrokeredCredentialProvider::Builtin(provider) => {
+                    provider.sources().iter().any(|source| {
+                        !source.binding_env_vars.is_empty()
+                            && (source.host_binding)(&binding_env, state.openai_api_host.as_deref())
+                                .is_some_and(|binding| binding == credential.host_binding)
+                    })
+                }
+                BrokeredCredentialProvider::Configured(provider) => provider
+                    .config
+                    .url_prefix_from_env
+                    .as_deref()
+                    .is_some_and(|key| {
+                        env_value(&binding_env, key).is_some()
+                            && provider
+                                .host_binding(&binding_env)
+                                .is_some_and(|binding| binding == credential.host_binding)
+                    }),
+            };
+            let priority = (
+                std::cmp::Reverse(credential.real_value.len()),
+                std::cmp::Reverse(active),
+                std::cmp::Reverse(has_matching_host_binding),
+            );
+            (credential, priority)
+        })
+        .collect::<Vec<_>>();
+    credentials.sort_unstable_by_key(|(_, priority)| *priority);
     credentials
+        .into_iter()
+        .map(|(credential, _)| credential)
+        .collect()
 }

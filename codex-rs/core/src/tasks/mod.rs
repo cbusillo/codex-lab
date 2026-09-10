@@ -331,14 +331,12 @@ impl Session {
         self.start_task(turn_context, input, task).await;
     }
 
-    // Internal restart callers can be inside the finalization this start awaits.
-    // Return its shared handle so only external admission waits for initialization.
     pub(crate) async fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-    ) -> TaskStart {
+    ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let background_review_trigger_eligible = task.background_review_trigger_eligible();
@@ -413,7 +411,6 @@ impl Session {
             token_usage_at_turn_start,
         );
         let task_start_for_run = task_start.clone();
-        let task_start_for_admission = task_start.clone();
         // Task-owned turn spans keep a core-owned span open for the
         // full task lifecycle after the submission dispatch span ends.
         let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
@@ -488,7 +485,6 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
-        task_start_for_admission
     }
 
     /// Returns whether an extension has marked this thread as durably asleep.

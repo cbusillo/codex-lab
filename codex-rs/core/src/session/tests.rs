@@ -12269,45 +12269,6 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
-#[tokio::test]
-async fn interrupted_abort_restarts_trigger_turn_mail_without_waiting_on_its_own_finalization() {
-    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
-    sess.spawn_task(
-        Arc::clone(&tc),
-        Vec::new(),
-        NeverEndingTask {
-            kind: TaskKind::Regular,
-            listen_to_cancellation_token: true,
-        },
-    )
-    .await;
-    sess.input_queue
-        .defer_mailbox_delivery_to_next_turn(&sess.active_turn, &tc.sub_id)
-        .await;
-    sess.input_queue
-        .enqueue_mailbox_communication(
-            InterAgentCommunication::new(
-                AgentPath::try_from("/root/worker").expect("worker path should parse"),
-                AgentPath::root(),
-                Vec::new(),
-                "restart after interrupt".to_string(),
-                /*trigger_turn*/ true,
-            ),
-            Default::default(),
-        )
-        .await;
-
-    timeout(
-        StdDuration::from_secs(5),
-        sess.abort_all_tasks(TurnAbortReason::Interrupted),
-    )
-    .await
-    .expect("interrupted finalization should start pending trigger-turn mail");
-    assert!(!sess.input_queue.has_pending_mailbox_items().await);
-
-    sess.abort_all_tasks(TurnAbortReason::Replaced).await;
-}
-
 #[test_case(None; "independent root")]
 #[test_case(Some("root-a"); "inherited root")]
 #[tokio::test]
