@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
 import hashlib
 import json
 import os
@@ -38,6 +39,8 @@ ALLOW_JIT_ENTITLEMENT_PLUTIL_KEY_PATH = r"com\.apple\.security\.cs\.allow-jit"
 ALLOW_UNSIGNED_EXECUTABLE_MEMORY_PLUTIL_KEY_PATH = (
     r"com\.apple\.security\.cs\.allow-unsigned-executable-memory"
 )
+PROVIDER_CLI_SYSTEM_PATHS = (Path("/opt/homebrew/bin"), Path("/usr/local/bin"))
+BASE_SYSTEM_PATHS = (Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin"))
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,7 @@ class SupervisorPaths:
     label: str = DEFAULT_LABEL
     listen_host: str = DEFAULT_LISTEN_HOST
     listen_port: int = DEFAULT_LISTEN_PORT
+    user_home: Path = field(default_factory=Path.home)
 
     @property
     def managed_cli(self) -> Path:
@@ -122,7 +126,22 @@ def default_supervisor_paths(
         launch_agents_dir=(launch_agents_dir or home / "Library/LaunchAgents")
         .expanduser()
         .resolve(),
+        user_home=home,
     )
+
+
+def provider_cli_search_path(home: Path) -> str:
+    """Return the bounded PATH inherited by supervised external providers."""
+    home = home.expanduser()
+    if not home.is_absolute():
+        raise ValueError(f"provider CLI home must be absolute: {home}")
+    if os.pathsep in str(home):
+        raise ValueError("provider CLI home must not contain a PATH separator")
+    home = home.resolve()
+    if os.pathsep in str(home):
+        raise ValueError("resolved provider CLI home must not contain a PATH separator")
+    paths = [home / ".local/bin", *PROVIDER_CLI_SYSTEM_PATHS, *BASE_SYSTEM_PATHS]
+    return os.pathsep.join(str(path) for path in paths)
 
 
 def inspect_engine(
@@ -233,12 +252,15 @@ def build_supervisor_runner(
     code_mode_host_identity: CodeModeHostIdentity | None = None,
     tools: SupervisorTools = SupervisorTools(),
     blocked_retry_seconds: int = 60,
+    provider_cli_path: str | None = None,
 ) -> str:
     if blocked_retry_seconds <= 0:
         raise ValueError("supervisor retry interval must be greater than zero")
 
     def quote(value: object) -> str:
         return shlex.quote(str(value))
+
+    provider_cli_path = provider_cli_path or provider_cli_search_path(paths.user_home)
 
     if code_mode_host_identity is None:
         code_mode_host_variables = ""
@@ -298,6 +320,7 @@ PLUTIL={quote(tools.plutil)}
 SHASUM={quote(tools.shasum)}
 BLOCKED_RETRY_SECONDS={blocked_retry_seconds}
 MAX_PROVENANCE_BYTES={MAX_PROVENANCE_BYTES}
+PROVIDER_CLI_PATH={quote(provider_cli_path)}
 UPDATER_PID_FILE="$LAB_HOME/app-server-daemon/app-server-updater.pid"
 DAEMON_PID_FILE="$LAB_HOME/app-server-daemon/app-server.pid"
 PROVENANCE_FILE=
@@ -429,16 +452,19 @@ while :; do
 done
 log_state "state=starting url=$LISTEN_URL"
 exec /usr/bin/env CODEX_HOME="$LAB_HOME" CODEX_LAB_HOME="$LAB_HOME" \
+  PATH="$PROVIDER_CLI_PATH" \
   "$MANAGED_CLI" app-server --remote-control --listen "$LISTEN_URL"
 """
 
 
 def build_launch_agent_plist(paths: SupervisorPaths) -> bytes:
+    system_path = os.pathsep.join(str(path) for path in BASE_SYSTEM_PATHS)
     return plistlib.dumps(
         {
             "EnvironmentVariables": {
                 "CODEX_HOME": str(paths.lab_home),
                 "CODEX_LAB_HOME": str(paths.lab_home),
+                "PATH": system_path,
             },
             "ExitTimeOut": 10,
             "KeepAlive": True,
@@ -469,6 +495,7 @@ def install_supervisor(
     uid: int | None = None,
     health_timeout_seconds: float = 75.0,
 ) -> dict[str, Any]:
+    provider_cli_path = provider_cli_search_path(paths.user_home)
     _stop_updater(paths)
     identity = inspect_engine(paths.managed_cli, codesign_path=tools.codesign)
     _require_expected_identity(
@@ -521,10 +548,15 @@ def install_supervisor(
                 identity,
                 code_mode_host_identity=code_mode_host_identity,
                 tools=tools,
+                provider_cli_path=provider_cli_path,
             ).encode(),
             0o755,
         )
-        _write_atomic(paths.plist, build_launch_agent_plist(paths), 0o644)
+        _write_atomic(
+            paths.plist,
+            build_launch_agent_plist(paths),
+            0o644,
+        )
         subprocess.run([str(paths.runner), "check"], check=True)
         if was_loaded:
             _launchctl(launchctl_path, "bootout", service)

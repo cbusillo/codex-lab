@@ -85,6 +85,9 @@ The published-release installer provisions the app, optional shim, individually
 signed managed CLI and Code Mode host, and the
 `dev.everycode.codex-lab.app-server.v1` user LaunchAgent as one rollback-aware
 transaction. No manual canary provisioning is required for a supported release.
+The supervised LaunchAgent gives external provider children a bounded search path
+covering the per-user `~/.local/bin`, supported Homebrew locations, and standard
+system directories, without inheriting an interactive shell's arbitrary `PATH`.
 
 The installer records a bounded, `0600` journal beside the install state before
 it changes any target. Every replacement uses a deterministic per-target staging
