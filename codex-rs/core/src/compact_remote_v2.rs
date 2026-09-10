@@ -7,6 +7,7 @@ use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::compact::CompactionJobConfig;
 use crate::compact::InitialContextInjection;
 use crate::compact::build_compaction_initial_context;
 use crate::compact::compaction_status_from_result;
@@ -87,25 +88,14 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
-    reason: CompactionReason,
-    phase: CompactionPhase,
+    config: CompactionJobConfig,
 ) -> CodexResult<()> {
-    let compaction_metadata = CompactionTurnMetadata::new(
-        CompactionTrigger::Auto,
-        reason,
-        CompactionImplementation::ResponsesCompactionV2,
-        phase,
-    );
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
         Some(client_session),
-        initial_context_injection,
-        model_request_history_mode,
-        compaction_metadata,
+        config,
     )
     .await
 }
@@ -127,20 +117,18 @@ pub(crate) async fn run_remote_compact_task(
     });
     sess.send_event(&turn_context, start_event).await;
 
-    let compaction_metadata = CompactionTurnMetadata::new(
-        CompactionTrigger::Manual,
-        CompactionReason::UserRequested,
-        CompactionImplementation::ResponsesCompactionV2,
-        CompactionPhase::StandaloneTurn,
-    );
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
         /*client_session*/ None,
-        InitialContextInjection::DoNotInject,
-        ModelRequestHistoryMode::Normal,
-        compaction_metadata,
+        CompactionJobConfig {
+            initial_context_injection: InitialContextInjection::DoNotInject,
+            model_request_history_mode: ModelRequestHistoryMode::Normal,
+            trigger: CompactionTrigger::Manual,
+            reason: CompactionReason::UserRequested,
+            phase: CompactionPhase::StandaloneTurn,
+        },
     )
     .await
 }
@@ -150,11 +138,15 @@ async fn run_remote_compact_task_inner(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     client_session: Option<&mut ModelClientSession>,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
-    compaction_metadata: CompactionTurnMetadata,
+    config: CompactionJobConfig,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
+    let compaction_metadata = CompactionTurnMetadata::new(
+        config.trigger,
+        config.reason,
+        CompactionImplementation::ResponsesCompactionV2,
+        config.phase,
+    );
     let trigger = compaction_metadata.trigger();
     let reason = compaction_metadata.reason();
     let implementation = compaction_metadata.implementation();
@@ -193,8 +185,7 @@ async fn run_remote_compact_task_inner(
         step_context,
         fallback_step_context,
         client_session,
-        initial_context_injection,
-        model_request_history_mode,
+        config,
         compaction_metadata,
         &mut analytics_details,
     )
@@ -232,11 +223,15 @@ async fn run_remote_compact_task_inner_impl(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     mut client_session: Option<&mut ModelClientSession>,
-    initial_context_injection: InitialContextInjection,
-    model_request_history_mode: ModelRequestHistoryMode,
+    config: CompactionJobConfig,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<()> {
+    let CompactionJobConfig {
+        initial_context_injection,
+        model_request_history_mode,
+        ..
+    } = config;
     let turn_context = &step_context.turn;
     let context_compaction_item = ContextCompactionItem::new();
     let compaction_id = context_compaction_item.id.clone();

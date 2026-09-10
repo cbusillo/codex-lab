@@ -983,7 +983,10 @@ impl TurnRequestProcessor {
             )
             .await
             .map_err(|err| {
-                let error = internal_error(format!("failed to submit turn input: {err}"));
+                let error = match err.details() {
+                    CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
+                    _ => internal_error(format!("failed to submit turn input: {err}")),
+                };
                 self.track_error_response(&request_id, &error, /*error_type*/ None);
                 error
             })?;
@@ -991,7 +994,7 @@ impl TurnRequestProcessor {
             TurnInputSubmission::Started { turn_id } => (turn_id, true),
             TurnInputSubmission::Steered { turn_id } => (turn_id, false),
             TurnInputSubmission::NotSubmitted { reason } => {
-                let error = internal_error(format!("failed to submit turn input: {reason:?}"));
+                let error = invalid_request(format!("failed to submit turn input: {reason:?}"));
                 self.track_error_response(&request_id, &error, /*error_type*/ None);
                 return Err(error);
             }
@@ -1382,7 +1385,10 @@ impl TurnRequestProcessor {
             )
             .await
             .map_err(|err| {
-                let error = internal_error(format!("failed to steer turn: {err}"));
+                let error = match err.details() {
+                    CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
+                    _ => internal_error(format!("failed to steer turn: {err}")),
+                };
                 self.track_error_response(request_id, &error, /*error_type*/ None);
                 error
             })?;

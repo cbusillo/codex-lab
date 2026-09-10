@@ -1,8 +1,23 @@
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 
 class SetupCiActionTests(unittest.TestCase):
+    def test_bazel_setup_does_not_mutate_home_on_self_hosted_unix(self) -> None:
+        action = Path(".github/actions/setup-bazel-ci/action.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "if: runner.environment != 'self-hosted' || runner.os == 'Windows'",
+            action,
+        )
+        self.assertIn(
+            "if: runner.environment == 'self-hosted' && runner.os != 'Windows'",
+            action,
+        )
+        self.assertIn("run: ./.github/scripts/configure-cached-bazel.sh", action)
+
     def test_self_hosted_linux_build_root_is_namespaced_by_runner(self) -> None:
         action = Path(".github/actions/setup-ci/action.yml").read_text(encoding="utf-8")
 
@@ -63,11 +78,31 @@ class SetupCiActionTests(unittest.TestCase):
 
         self.assertIn('if [[ "${RUNNER_OS:-}" == "Windows" ]]', action)
         self.assertIn('tmp="$CI_BUILD_ROOT/tmp"', action)
-        self.assertIn('job_tmp="$RUNNER_TEMP/codex-ci-tmp"', action)
-        self.assertIn('short_tmp="/tmp/codex-ci-$runner_checksum"', action)
+        self.assertIn(
+            "if: env.CODEX_LOCAL_RUST_CI == 'true' && runner.environment == 'self-hosted' && runner.os == 'macOS'",
+            action,
+        )
+        self.assertIn("uses: ./.github/actions/setup-canonical-temp", action)
+        self.assertIn(
+            "CANONICAL_TEMP_DIR: ${{ steps.configure_canonical_temp.outputs.temp-dir }}",
+            action,
+        )
+        self.assertIn('elif [[ -n "${CANONICAL_TEMP_DIR:-}" ]]', action)
+        self.assertIn('tmp="$CANONICAL_TEMP_DIR"', action)
+        self.assertIn('&& -z "${CANONICAL_TEMP_DIR:-}"', action)
+        self.assertIn(
+            'echo "Canonical local Rust CI temp setup did not produce a directory" >&2\n          exit 1',
+            action,
+        )
+        self.assertIn(
+            'elif [[ "$RUNNER_ENVIRONMENT" == "self-hosted" && "$RUNNER_OS_NAME" == "macOS" ]]',
+            action,
+        )
+        self.assertIn('job_tmp="$RUNNER_TEMP/codexcitemp"', action)
+        self.assertIn('short_tmp="/tmp/codexci$runner_checksum"', action)
         self.assertIn('ln -sfn "$job_tmp" "$short_tmp"', action)
         self.assertIn('tmp="$short_tmp"', action)
-        self.assertIn('tmp="$RUNNER_TEMP/codex-ci-tmp"', action)
+        self.assertIn('tmp="$RUNNER_TEMP/codexcitemp"', action)
 
 
 if __name__ == "__main__":

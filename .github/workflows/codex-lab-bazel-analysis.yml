@@ -48,7 +48,7 @@ jobs:
           relevant=false
           for file in "${files[@]}"; do
             case "$file" in
-              codex-rs/*|third_party/v8/*|bazel/*|*.bzl|announcement_tip.toml|BUILD.bazel|MODULE.bazel|MODULE.bazel.lock|.bazelrc|.bazelversion|justfile|scripts/list-bazel-release-targets.sh|.github/actions/setup-ci/*|.github/actions/setup-bazel-ci/*|.github/actions/prepare-bazel-ci/*|.github/scripts/run-bazel-ci.sh|.github/workflows/bazel.yml|.github/workflows/blocking-ci.yml|.github/workflows/codex-lab-bazel-analysis.yml)
+              codex-rs/*|third_party/v8/*|bazel/*|*.bzl|announcement_tip.toml|BUILD.bazel|MODULE.bazel|MODULE.bazel.lock|.bazelrc|.bazelversion|justfile|scripts/list-bazel-release-targets.sh|.github/actions/setup-ci/*|.github/actions/setup-bazel-ci/*|.github/actions/prepare-bazel-ci/*|.github/scripts/local_build_resources.py|.github/scripts/run-bazel-ci.sh|.github/workflows/bazel.yml|.github/workflows/blocking-ci.yml|.github/workflows/codex-lab-bazel-analysis.yml)
                 relevant=true
                 break
                 ;;

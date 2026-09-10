@@ -357,6 +357,7 @@ struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
     endpoint: Option<ResponsesEndpoint>,
     connection_auth_cache_key: Option<WebsocketAuthCacheKey>,
+    connection_model_version: Option<String>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
@@ -767,6 +768,9 @@ impl ModelClient {
         };
 
         let mut extra_headers = ApiHeaderMap::new();
+        if self.state.provider.info().is_openai() {
+            extra_headers.extend(codex_login::default_client::requested_model_headers(&model));
+        }
         if let Ok(header_value) = HeaderValue::from_str(&responses_metadata.installation_id) {
             extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
         }
@@ -1256,6 +1260,7 @@ impl ModelClient {
     #[allow(clippy::too_many_arguments)]
     async fn connect_websocket(
         &self,
+        model: &str,
         session_telemetry: &SessionTelemetry,
         api_provider: codex_api::Provider,
         api_auth: SharedAuthProvider,
@@ -1264,7 +1269,9 @@ impl ModelClient {
         request_route_telemetry: RequestRouteTelemetry,
         endpoint: ResponsesEndpoint,
     ) -> std::result::Result<ApiWebSocketConnection, ApiError> {
-        let headers = self.build_websocket_headers(responses_metadata).await;
+        let headers = self
+            .build_websocket_headers(model, responses_metadata)
+            .await;
         let websocket_telemetry = ModelClientSession::build_websocket_telemetry(
             session_telemetry,
             auth_context.clone(),
@@ -1344,12 +1351,16 @@ impl ModelClient {
     /// Builds websocket handshake headers for both prewarm and turn-time reconnect.
     async fn build_websocket_headers(
         &self,
+        model: &str,
         responses_metadata: &CodexResponsesMetadata,
     ) -> ApiHeaderMap {
         let mut headers = build_responses_headers(
             self.state.beta_features_header.as_deref(),
             /*turn_state*/ None,
         );
+        if self.state.provider.info().is_openai() {
+            headers.extend(codex_login::default_client::requested_model_headers(model));
+        }
         add_originator_header(&mut headers, self.state.originator.as_str());
         if let Ok(header_value) = HeaderValue::from_str(&responses_metadata.thread_id) {
             headers.insert("x-client-request-id", header_value);
@@ -1412,7 +1423,7 @@ impl ModelClientSession {
         &self,
         responses_metadata: &CodexResponsesMetadata,
         compression: Compression,
-        use_responses_lite: bool,
+        model_info: &ModelInfo,
     ) -> ApiResponsesOptions {
         ApiResponsesOptions {
             session_id: Some(responses_metadata.session_id.to_string()),
@@ -1424,6 +1435,11 @@ impl ModelClientSession {
                     Some(&self.turn_state),
                 );
                 add_originator_header(&mut headers, self.client.state.originator.as_str());
+                if self.client.state.provider.info().is_openai() {
+                    headers.extend(codex_login::default_client::requested_model_headers(
+                        &model_info.slug,
+                    ));
+                }
                 headers.extend(
                     self.client
                         .build_responses_compatibility_headers(responses_metadata),
@@ -1431,7 +1447,7 @@ impl ModelClientSession {
                 if let Some(header_value) = self.client.generate_attestation_header_for().await {
                     headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
                 }
-                add_responses_lite_header(&mut headers, use_responses_lite);
+                add_responses_lite_header(&mut headers, model_info.use_responses_lite);
                 headers
             },
             compression,
@@ -1524,6 +1540,8 @@ impl ModelClientSession {
     /// Opportunistically preconnects a websocket for this turn-scoped client session.
     ///
     /// This performs only connection setup; it never sends prompt payloads.
+    /// Until a model is selected, use the generic identity. Streaming reconnects
+    /// if that model requires a different compatibility version.
     pub async fn preconnect_websocket(
         &mut self,
         model_info: &ModelInfo,
@@ -1554,6 +1572,7 @@ impl ModelClientSession {
         let connection = self
             .client
             .connect_websocket(
+                "",
                 session_telemetry,
                 client_setup.api_provider,
                 client_setup.api_auth,
@@ -1565,6 +1584,13 @@ impl ModelClientSession {
             .await?;
         self.websocket_session.connection = Some(connection);
         self.websocket_session.endpoint = Some(endpoint);
+        self.websocket_session.connection_model_version = self
+            .client
+            .state
+            .provider
+            .info()
+            .is_openai()
+            .then(|| codex_version::wire_compatible_version().to_string());
         self.websocket_session.connection_auth_cache_key =
             Some(client_setup.websocket_auth_cache_key);
         self.websocket_session
@@ -1589,6 +1615,7 @@ impl ModelClientSession {
         params: WebsocketConnectParams<'_>,
     ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
         let WebsocketConnectParams {
+            model,
             session_telemetry,
             api_provider,
             api_auth,
@@ -1598,9 +1625,17 @@ impl ModelClientSession {
             request_route_telemetry,
             endpoint,
         } = params;
+        let model_version = self
+            .client
+            .state
+            .provider
+            .info()
+            .is_openai()
+            .then(|| codex_version::wire_compatible_version_for_model(model));
         let needs_new = match self.websocket_session.connection.as_ref() {
             Some(conn) => {
                 self.websocket_session.endpoint != Some(endpoint)
+                    || self.websocket_session.connection_model_version != model_version
                     || self.websocket_session.connection_auth_cache_key.as_ref()
                         != Some(&websocket_auth_cache_key)
                     || conn.is_closed().await
@@ -1613,6 +1648,7 @@ impl ModelClientSession {
             let new_conn = match self
                 .client
                 .connect_websocket(
+                    model,
                     session_telemetry,
                     api_provider,
                     api_auth,
@@ -1633,6 +1669,7 @@ impl ModelClientSession {
             };
             self.websocket_session.connection = Some(new_conn);
             self.websocket_session.endpoint = Some(endpoint);
+            self.websocket_session.connection_model_version = model_version;
             self.websocket_session.connection_auth_cache_key = Some(websocket_auth_cache_key);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
@@ -1717,11 +1754,7 @@ impl ModelClientSession {
             );
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
-                .build_responses_options(
-                    responses_metadata,
-                    compression,
-                    model_info.use_responses_lite,
-                )
+                .build_responses_options(responses_metadata, compression, model_info)
                 .await;
 
             let mut request = self.client.build_responses_request(
@@ -1906,6 +1939,7 @@ impl ModelClientSession {
             }
             match self
                 .websocket_connection(WebsocketConnectParams {
+                    model: &model_info.slug,
                     session_telemetry,
                     api_provider: client_setup.api_provider,
                     api_auth: client_setup.api_auth,
@@ -2501,6 +2535,7 @@ impl AuthRequestTelemetryContext {
 }
 
 struct WebsocketConnectParams<'a> {
+    model: &'a str,
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
     api_auth: SharedAuthProvider,

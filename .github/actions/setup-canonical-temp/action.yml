@@ -1,0 +1,10 @@
+name: setup-canonical-temp
+description: Allocate and clean up a short, canonical local Rust CI temp directory.
+outputs:
+  temp-dir:
+    description: Fresh canonical temporary directory allocated for this job.
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

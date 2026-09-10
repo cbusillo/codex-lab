@@ -12,6 +12,10 @@ on:
       target:
         required: true
         type: string
+      use_local_resources:
+        required: false
+        default: false
+        type: boolean
     secrets:
       BUILDBUDDY_API_KEY:
         required: false
@@ -29,7 +33,12 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - id: setup_local_rust
+        uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ inputs.use_local_resources }}
       - uses: ./.github/actions/setup-bazel-ci
         with:
           target: ${{ runner.os }}
@@ -43,9 +52,9 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db/
           key: argument-comment-workspace-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}
           restore-keys: |
             argument-comment-workspace-${{ runner.os }}-
@@ -63,16 +72,18 @@ jobs:
           set -euo pipefail
           if [[ -z "${BUILDBUDDY_API_KEY}" && "${RUNNER_OS}" != "Windows" ]]; then
             echo "::notice::BuildBuddy is unavailable; using the packaged Cargo/Dylint runner instead of a local full Bazel build"
-            rustup toolchain install nightly-2025-09-18 \
-              --profile minimal \
-              --component llvm-tools-preview \
-              --component rustc-dev \
-              --component rust-src \
-              --no-self-update
+            python3 .github/scripts/local_build_resources.py exec -- \
+              rustup toolchain install nightly-2025-09-18 \
+                --profile minimal \
+                --component llvm-tools-preview \
+                --component rustc-dev \
+                --component rust-src \
+                --no-self-update
             # The packaged Dylint library is ABI-coupled to this nightly. Cargo
             # still fails if a dependency actually uses unsupported language
             # features, but newer rust-version metadata alone must not block it.
-            python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version
+            python3 .github/scripts/local_build_resources.py exec -- \
+              python3 ./tools/argument-comment-lint/run-prebuilt-linter.py -- --ignore-rust-version
             exit 0
           fi
 

@@ -114,7 +114,10 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             "\n  group: rust-ci-full::${{ github.workflow }}::${{ github.ref }}",
             workflow_header,
         )
-        self.assertIn("\n  cancel-in-progress: true", workflow_header)
+        self.assertIn(
+            "\n  cancel-in-progress: ${{ (inputs.execution_mode || 'hosted') != 'local' }}",
+            workflow_header,
+        )
 
     def test_scheduled_v8_canary_forces_a_complete_run(self) -> None:
         workflow = V8_CANARY_METADATA_WORKFLOW.read_text()
@@ -154,7 +157,12 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
                     "    needs: release-metadata\n"
                     + permissions
                     + f"    uses: ./.github/workflows/{workflow_name}\n"
-                    "    secrets: inherit\n"
+                    + (
+                        "    with:\n      execution_mode: local\n"
+                        if job_name == "full-rust"
+                        else ""
+                    )
+                    + "    secrets: inherit\n"
                 )
                 self.assertIn(job_block, workflow)
         self.assertIn(
@@ -311,7 +319,9 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
 
         self.assertIn("  tests_macos_aarch64:\n", workflow)
-        self.assertIn("      runner: macos-26\n", workflow)
+        self.assertIn(
+            "      runner: ${{ needs.execution_gate.outputs.runner }}\n", workflow
+        )
         self.assertIn("      target: aarch64-apple-darwin\n", workflow)
         self.assertNotIn("remote_test_filter:", workflow)
         self.assertIn('run_nextest "${nextest_args[@]}"', platform_workflow)
@@ -387,6 +397,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
         for path in (
             ".github/actions/setup-rusty-v8/**",
+            ".github/scripts/local_build_resources.py",
             ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",
@@ -394,6 +405,17 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertIn(f'- "{path}"', workflow)
+
+    def test_local_codex_lab_cargo_builds_use_the_shared_resource_helper(self) -> None:
+        for workflow_path in (CODEX_LAB_APP_WORKFLOW, CODEX_LAB_RELEASE_WORKFLOW):
+            with self.subTest(workflow=workflow_path.name):
+                workflow = workflow_path.read_text()
+                self.assertEqual(
+                    workflow.count(
+                        "python3 ../.github/scripts/local_build_resources.py exec --"
+                    ),
+                    2,
+                )
 
     def test_rusty_v8_consumers_use_reviewed_release_checksums(self) -> None:
         action = SETUP_RUSTY_V8_ACTION.read_text()
@@ -411,6 +433,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
         for path in (
             ".github/actions/setup-rusty-v8/*",
+            ".github/scripts/local_build_resources.py",
             ".github/scripts/run_bazel_with_buildbuddy.py",
             ".github/scripts/rusty_v8_bazel.py",
             ".github/scripts/rusty_v8_module_bazel.py",

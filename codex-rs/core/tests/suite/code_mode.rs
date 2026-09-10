@@ -4920,13 +4920,18 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         usize::from(evidence_enabled),
         "a reused Guardian session must not append the same evidence twice"
     );
+    let expected_second_reviewer_images = if reviewer_constraint == Some("large_prompt") {
+        vec![PRIVATE_IMAGE.to_string()]
+    } else if check_image_cap {
+        let mut images = reviewer_image_urls;
+        images.push(PRIVATE_IMAGE.to_string());
+        images
+    } else {
+        reviewer_image_urls
+    };
     assert_eq!(
         guardian_requests[1].message_input_image_urls("user"),
-        if reviewer_constraint == Some("large_prompt") {
-            vec![PRIVATE_IMAGE.to_string()]
-        } else {
-            reviewer_image_urls
-        }
+        expected_second_reviewer_images
     );
     if reviewer_rollover {
         let second_request = guardian_requests[1];

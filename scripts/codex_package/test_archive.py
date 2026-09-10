@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_package.archive import resolve_zstd_command
+from codex_package.archive import write_archive
 
 
 class ResolveZstdCommandTest(unittest.TestCase):
@@ -39,6 +40,35 @@ class ResolveZstdCommandTest(unittest.TestCase):
                     dotslash_manifest=missing_manifest,
                     which=lambda _name: None,
                 )
+
+
+class ArchiveOverwriteTest(unittest.TestCase):
+    def test_existing_archive_is_preserved_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_dir = root / "package"
+            package_dir.mkdir()
+            (package_dir / "payload").write_text("new", encoding="utf-8")
+            archive_path = root / "package.tar.gz"
+            archive_path.write_bytes(b"sentinel")
+
+            with self.assertRaisesRegex(RuntimeError, "already exists"):
+                write_archive(package_dir, archive_path, force=False)
+
+            self.assertEqual(archive_path.read_bytes(), b"sentinel")
+
+    def test_overwrite_replaces_existing_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_dir = root / "package"
+            package_dir.mkdir()
+            (package_dir / "payload").write_text("new", encoding="utf-8")
+            archive_path = root / "package.tar.gz"
+            archive_path.write_bytes(b"sentinel")
+
+            write_archive(package_dir, archive_path, force=True)
+
+            self.assertNotEqual(archive_path.read_bytes(), b"sentinel")
 
 
 if __name__ == "__main__":

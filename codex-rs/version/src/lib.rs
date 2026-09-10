@@ -382,6 +382,16 @@ pub fn wire_compatible_version() -> &'static str {
     wire_compatible_version_for(CODE_VERSION, min_wire_compat_version())
 }
 
+/// Discovery uses the highest supported minimum; inference retains per-model identities.
+pub fn models_discovery_version() -> String {
+    MODEL_MINIMUM_CLIENT_VERSIONS
+        .values()
+        .fold(wire_compatible_version(), |version, minimum| {
+            max_semver(version, minimum)
+        })
+        .to_string()
+}
+
 pub fn wire_compatible_version_for_model(model: &str) -> String {
     let canonical_model = model.rsplit('/').next().unwrap_or(model).trim();
     let Some(required_version) =

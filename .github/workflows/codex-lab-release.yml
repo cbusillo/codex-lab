@@ -25,7 +25,7 @@ jobs:
   release-metadata:
     name: Resolve Codex Lab release metadata
     needs: authorize_self_hosted
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -104,6 +104,8 @@ jobs:
     name: Full verification / Rust
     needs: release-metadata
     uses: ./.github/workflows/rust-ci-full.yml
+    with:
+      execution_mode: local
     secrets: inherit
 
   full-sdk-integration:
@@ -129,7 +131,7 @@ jobs:
       - full-sdk-integration
       - full-v8-canary
     if: ${{ always() }}
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -157,6 +159,7 @@ jobs:
       release_tag: ${{ needs.release-metadata.outputs.release_tag }}
       release_version: ${{ needs.release-metadata.outputs.release_version }}
     env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CODE_VERSION: ${{ needs.release-metadata.outputs.release_version }}
       CODEX_LAB_RELEASE_VERSION: ${{ needs.release-metadata.outputs.release_identity }}
       # The release profile builds with `debug = "line-tables-only"` and
@@ -222,8 +225,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --timings --release -p codex-cli --bin codex-lab
-          cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --locked --timings --release -p codex-cli --bin codex-lab
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo build --locked --timings --release -p codex-code-mode-host --bin codex-code-mode-host
           code_mode_host_bin="$(dirname "$CODEX_LAB_BIN")/codex-code-mode-host"
           test -x "$code_mode_host_bin"
           echo "CODE_MODE_HOST_BIN=$code_mode_host_bin" >> "$GITHUB_ENV"
@@ -596,7 +601,7 @@ jobs:
   validate-release-artifacts:
     name: Validate staged release artifacts
     needs: build-macos-aarch64
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -662,7 +667,7 @@ jobs:
       - build-macos-aarch64
       - validate-release-artifacts
     if: ${{ inputs.publish }}
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write

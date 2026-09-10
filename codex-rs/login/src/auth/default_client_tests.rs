@@ -57,6 +57,24 @@ fn app_server_user_agent_uses_build_version() {
 }
 
 #[test]
+fn model_headers_keep_discovery_and_inference_versions_separate() {
+    for (model, version) in [
+        ("gpt-6-astra", "0.153.0"),
+        ("openai/GPT-6-ASTRA", "0.153.0"),
+        ("gpt-5.6-sol", "0.144.0"),
+        ("gpt-5.6-terra", "0.144.0"),
+        ("gpt-5.6-luna", "0.144.0"),
+        ("gpt-5.5", "0.124.0"),
+        ("custom-model", codex_version::wire_compatible_version()),
+    ] {
+        let headers = requested_model_headers(model);
+        assert_eq!(headers["version"].to_str().unwrap(), version);
+        let prefix = format!("{}/{version} ", originator().value);
+        assert!(headers[USER_AGENT].to_str().unwrap().starts_with(&prefix));
+    }
+}
+
+#[test]
 fn is_first_party_originator_matches_known_values() {
     assert_eq!(is_first_party_originator(DEFAULT_ORIGINATOR), true);
     assert_eq!(is_first_party_originator("codex-tui"), true);

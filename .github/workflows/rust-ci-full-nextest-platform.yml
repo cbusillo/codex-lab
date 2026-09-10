@@ -31,6 +31,10 @@ on:
         required: false
         default: false
         type: boolean
+      use_local_resources:
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   archive:
@@ -51,7 +55,13 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+
+      - id: setup_local_rust
+        uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ inputs.use_local_resources }}
 
       - id: setup_ci
         uses: ./.github/actions/setup-ci
@@ -74,7 +84,20 @@ jobs:
             "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
           fi
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Install Rust toolchain without changing the shared default (local)
+        if: ${{ inputs.use_local_resources }}
+        shell: bash
+        run: |
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            rustup toolchain install 1.95.0 \
+              --profile minimal \
+              --target ${{ inputs.target }} \
+              --component clippy \
+              --component rustfmt \
+              --component rust-src \
+              --no-self-update
+      - if: ${{ !inputs.use_local_resources }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ inputs.target }}
 
@@ -113,10 +136,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db/
           key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
             cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-
@@ -194,7 +217,8 @@ jobs:
           set -euo pipefail
           archive_dir="${RUNNER_TEMP}/nextest-archive"
           mkdir -p "${archive_dir}"
-          cargo nextest archive \
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo nextest archive \
             --target ${{ inputs.target }} \
             --cargo-profile ${{ inputs.profile }} \
             --timings \
@@ -207,7 +231,11 @@ jobs:
           helper_dir="${RUNNER_TEMP}/${TEST_HELPERS_ARTIFACT}"
           mkdir -p "${helper_dir}"
 
-          cargo build \
+          run_cargo() {
+            python3 ../.github/scripts/local_build_resources.py exec -- cargo "$@"
+          }
+
+          run_cargo build \
             --target ${{ inputs.target }} \
             --profile ${{ inputs.profile }} \
             -p codex-code-mode-host \
@@ -215,7 +243,7 @@ jobs:
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
             cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-code-mode-host.exe" "${helper_dir}/"
           else
-            cargo build \
+            run_cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \
               -p codex-shell-escalation \
@@ -225,12 +253,12 @@ jobs:
           fi
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
-            cargo build \
+            run_cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \
               -p codex-linux-sandbox \
               --bin codex-linux-sandbox
-            cargo build \
+            run_cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \
               -p codex-bwrap \
@@ -238,7 +266,7 @@ jobs:
             cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex-linux-sandbox" "${helper_dir}/"
             cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/bwrap" "${helper_dir}/"
             if [[ "${{ inputs.remote_env }}" == "true" ]]; then
-              cargo build \
+              run_cargo build \
                 --target ${{ inputs.target }} \
                 --profile ${{ inputs.profile }} \
                 -p codex-cli \
@@ -246,7 +274,7 @@ jobs:
               cp "${CARGO_TARGET_DIR}/${{ inputs.target }}/${{ inputs.profile }}/codex" "${helper_dir}/"
             fi
           elif [[ "${RUNNER_OS}" == "Windows" ]]; then
-            cargo build \
+            run_cargo build \
               --target ${{ inputs.target }} \
               --profile ${{ inputs.profile }} \
               -p codex-windows-sandbox \
@@ -269,6 +297,8 @@ jobs:
         with:
           name: nextest-archive-${{ inputs.artifact_id }}
           path: ${{ runner.temp }}/nextest-archive/${{ env.NEXTEST_ARCHIVE_FILE }}
+          # nextest already compresses this tar.zst; avoid recompressing it.
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
 
@@ -286,10 +316,10 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db/
           key: cargo-home-v2-${{ steps.setup_ci.outputs.cache-scope }}-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
@@ -337,7 +367,12 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+
+      - uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ inputs.use_local_resources }}
 
       - uses: ./.github/actions/setup-ci
 
@@ -359,7 +394,20 @@ jobs:
             "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
           fi
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Install Rust toolchain without changing the shared default (local)
+        if: ${{ inputs.use_local_resources }}
+        shell: bash
+        run: |
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            rustup toolchain install 1.95.0 \
+              --profile minimal \
+              --target ${{ inputs.target }} \
+              --component clippy \
+              --component rustfmt \
+              --component rust-src \
+              --no-self-update
+      - if: ${{ !inputs.use_local_resources }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ inputs.target }}
 
@@ -485,7 +533,7 @@ jobs:
                 "CARGO_BIN_EXE_codex_execve_wrapper=${execve_wrapper}" \
                 "CARGO_BIN_EXE_codex-linux-sandbox=${sandbox_helper}" \
                 "CARGO_BIN_EXE_codex_linux_sandbox=${sandbox_helper}" \
-                cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
             elif [[ "${RUNNER_OS}" == "Windows" ]]; then
               local setup_helper
               local command_runner
@@ -498,14 +546,14 @@ jobs:
                 "CARGO_BIN_EXE_codex_code_mode_host=${code_mode_host_win}" \
                 "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
                 "CARGO_BIN_EXE_codex_command_runner=${command_runner}" \
-                cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
             else
               env \
                 "CARGO_BIN_EXE_codex-code-mode-host=${code_mode_host}" \
                 "CARGO_BIN_EXE_codex_code_mode_host=${code_mode_host}" \
                 "CARGO_BIN_EXE_codex-execve-wrapper=${execve_wrapper}" \
                 "CARGO_BIN_EXE_codex_execve_wrapper=${execve_wrapper}" \
-                cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
             fi
           }
 
@@ -568,7 +616,7 @@ jobs:
           fi
         env:
           RUST_BACKTRACE: 1
-          RUST_MIN_STACK: "8388608" # 8 MiB
+          RUST_MIN_STACK: "16777216" # 16 MiB
           NEXTEST_STATUS_LEVEL: leak
           REMOTE_TEST_FILTER: ${{ inputs.remote_test_filter }}
 
@@ -590,7 +638,7 @@ jobs:
     name: Platform result
     needs: shard
     if: always()
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     steps:
       - name: Confirm test shards passed
         shell: bash

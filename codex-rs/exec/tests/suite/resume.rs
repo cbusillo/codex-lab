@@ -5,6 +5,7 @@ use codex_core::init_state_db;
 use codex_protocol::ThreadId;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex_exec::TestCodexExecBuilder;
 use core_test_support::test_codex_exec::test_codex_exec;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -130,6 +131,21 @@ async fn mount_exec_responses(
     count: usize,
 ) -> core_test_support::responses::ResponseMock {
     responses::mount_sse_sequence(server, (0..count).map(exec_sse_response).collect()).await
+}
+
+fn sse_exec_command(test: &TestCodexExecBuilder, server: &MockServer) -> assert_cmd::Command {
+    // These resume tests mock HTTP SSE, not WebSockets. Avoid retrying unsupported
+    // WebSocket upgrades on every subprocess before falling back to the mock.
+    let base_url = serde_json::to_string(&format!("{}/v1", server.uri())).unwrap();
+    let mut command = test.cmd_with_server(server);
+    command
+        .arg("-c")
+        .arg(format!(
+            "model_providers.lab_test={{name=\"Lab test SSE\",base_url={base_url},wire_api=\"responses\",supports_websockets=false}}"
+        ))
+        .arg("-c")
+        .arg("model_provider=\"lab_test\"");
+    command
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -378,7 +394,7 @@ async fn exec_resume_last_skips_mismatched_state_db_candidate() -> anyhow::Resul
     let sessions_dir = test.home_path().join("sessions");
 
     let older_marker = format!("resume-last-valid-{}", Uuid::new_v4());
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(&repo_root)
@@ -389,7 +405,7 @@ async fn exec_resume_last_skips_mismatched_state_db_candidate() -> anyhow::Resul
         .expect("no valid session file after first run");
 
     let newer_marker = format!("resume-last-mismatched-{}", Uuid::new_v4());
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(&repo_root)
@@ -415,7 +431,7 @@ async fn exec_resume_last_skips_mismatched_state_db_candidate() -> anyhow::Resul
     state_db.upsert_thread(&mismatched).await?;
 
     let resumed_marker = format!("resume-last-valid-resumed-{}", Uuid::new_v4());
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(&repo_root)
@@ -497,7 +513,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
 
     let marker_a = format!("resume-cwd-a-{}", Uuid::new_v4());
     let prompt_a = format!("echo {marker_a}");
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(dir_a.path())
@@ -507,7 +523,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
 
     let marker_b = format!("resume-cwd-b-{}", Uuid::new_v4());
     let prompt_b = format!("echo {marker_b}");
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(dir_b.path())
@@ -529,7 +545,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
     let session_id_b = extract_conversation_id(&path_b);
     let marker_b_touch = format!("resume-cwd-b-touch-{}", Uuid::new_v4());
     let prompt_b_touch = format!("echo {marker_b_touch}");
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(dir_b.path())
@@ -546,7 +562,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
 
     let marker_b2 = format!("resume-cwd-b-2-{}", Uuid::new_v4());
     let prompt_b2 = format!("echo {marker_b2}");
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(dir_a.path())
@@ -574,7 +590,7 @@ async fn exec_resume_last_respects_cwd_filter_and_all_flag() -> anyhow::Result<(
 
     let marker_a2 = format!("resume-cwd-a-2-{}", Uuid::new_v4());
     let prompt_a2 = format!("echo {marker_a2}");
-    test.cmd_with_server(&server)
+    sse_exec_command(&test, &server)
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(dir_a.path())

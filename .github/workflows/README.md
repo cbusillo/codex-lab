@@ -6,13 +6,17 @@ on a nightly or explicitly requested cadence.
 
 ## Temporary Apple Silicon-Only Mode
 
-As of July 31, 2026, every active CI, canary, app-build, and release execution
-path is limited to macOS ARM64. Linux, Windows, and Intel macOS workflows are
-temporarily unreachable while Codex Lab prioritizes Apple Silicon development.
+Product builds, runtime tests, and release artifacts remain limited to macOS
+ARM64 while Codex Lab prioritizes Apple Silicon development. Named
+platform-neutral control jobs use hosted Ubuntu 24.04 so authorization,
+metadata, result aggregation, archive/checksum validation and publication do
+not wait for a hosted Mac. These exceptions do not execute product binaries or
+restore Linux, Windows, or Intel macOS product qualification.
 
 - `verify_apple_silicon_workflows.py` follows every active workflow entrypoint
   through its local reusable-workflow calls and rejects non-Apple runners,
-  targets, containers, and release platforms.
+  targets, containers, and release platforms, except exact workflow/job pairs
+  listed in `HOSTED_LINUX_CONTROL_JOBS` for `ubuntu-24.04` control execution.
 - Windows-only reusable workflows remain `workflow_call`-only with no active
   callers so the old implementation is recoverable without consuming CI.
 - The upstream multi-platform Rust and Python release entrypoints are also
@@ -76,10 +80,24 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   - the Cargo `nextest` suite via archive-backed shards
   - release-profile Cargo builds
   - Apple Silicon `argument-comment-lint`
+- The Lab release and manual `rust-ci-local.yml` workflow opt into trusted local
+  Rust execution; other callers retain hosted execution. The local verification
+  entrypoint runs the same Rust suite without release signing or publication.
+  Dispatch it from the default branch after other heavy release work finishes
+  when collecting comparable cache measurements. It uses the existing sccache
+  configuration; it does not enable Kache or demonstrate local-to-CI cache reuse.
+  Local jobs require hosted actor authorization and
+  explicit caller/default-branch checks before they can reach the
+  persistent runner. Resource controls serialize heavy commands with the
+  existing shared lock and retain the four-job profile; four nextest partitions
+  remain required, with four test threads per local shard.
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
   integration tests against that real binary on the trusted Apple Silicon runner.
 - `v8-canary.yml` keeps the Apple Silicon upstream V8 artifact pair visible in
-  the release gate, full suite, and relevant pull requests.
+  the release gate, full suite, and relevant pull requests. Its heavy build
+  runs on the trusted `macos-codex-lab` lane only after the same-repository PR
+  and actor authorization checks; public-fork PRs run metadata and skip the
+  gated build.
 - Bazel, Rust, SDK integration, and V8 remain independent top-level suites and
   start in parallel. Full verification optimizes for diagnostic completeness;
   the bounded pull-request gate is responsible for fast rejection.
@@ -204,7 +222,9 @@ The trusted Apple Silicon V8 canary and release jobs use separate persistent
 Bazel repository and disk caches through
 `scripts/github/configure-codex-lab-bazel-cache.sh`. Each disk cache is capped
 at 80 GB so both caches fit within the artifact volume quota with room for
-repository caches and normal artifact growth.
+repository caches and normal artifact growth. The canary serializes its two
+variants on the local lane and uses the shared local-build resource controls
+when it falls back from BuildBuddy to local Bazel execution.
 
 ## Distribution Contract
 
@@ -226,7 +246,7 @@ unsigned and are packaging-validation inputs, not publishable releases.
 
 `codex-lab-release.yml` is the Codex Lab-owned release authority. It builds the
 macOS ARM64 app, shim, and engine, signs and verifies the engine on the trusted
-macOS runner, validates the staged distribution on `macos-26`, and grants
+macOS runner, validates the staged distribution on hosted Linux, and grants
 `contents: write` only to the separate publication job.
 
 The signed engine contract pins both binary digests, stable identifiers,

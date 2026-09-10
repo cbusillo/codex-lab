@@ -170,7 +170,6 @@ mod npm_registry;
 pub(crate) mod onboarding;
 mod oss_selection;
 mod pager_overlay;
-mod permission_compat;
 mod pinned_candidate_warning;
 pub(crate) mod public_widgets;
 mod render;
@@ -184,7 +183,6 @@ mod session_queue_commands;
 mod session_resume;
 mod session_start;
 mod session_state;
-mod shimmer;
 mod skills_helpers;
 mod slash_command;
 mod startup_draft;
@@ -1899,40 +1897,6 @@ async fn get_login_status(
     Ok((login_status, account))
 }
 
-async fn startup_login_status<F, Fut>(
-    workload_identity_selected: bool,
-    requires_openai_auth: bool,
-    detect_account: F,
-) -> color_eyre::Result<LoginStatus>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = color_eyre::Result<LoginStatus>>,
-{
-    if workload_identity_selected {
-        Ok(LoginStatus::AuthMode(AuthMode::Chatgpt))
-    } else if requires_openai_auth {
-        detect_account().await
-    } else {
-        Ok(LoginStatus::NotAuthenticated)
-    }
-}
-
-async fn enforce_startup_login_restrictions<F, Fut>(
-    app_server_target: &AppServerTarget,
-    workload_identity_selected: bool,
-    enforce: F,
-) -> std::io::Result<()>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>>,
-{
-    if app_server_target.uses_remote_workspace() || workload_identity_selected {
-        Ok(())
-    } else {
-        enforce().await
-    }
-}
-
 struct ConfigHomes {
     codex_home: PathBuf,
     auth_home: PathBuf,
@@ -2098,28 +2062,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workload_identity_skips_account_detection_and_login_onboarding()
-    -> color_eyre::Result<()> {
+    async fn authenticated_users_skip_login_but_still_see_project_trust() -> color_eyre::Result<()>
+    {
         let temp_dir = TempDir::new()?;
         let config = build_config(&temp_dir).await?;
-        let account_detection_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let attempts = Arc::clone(&account_detection_attempts);
+        let login_status = LoginStatus::AuthMode(AuthMode::Chatgpt);
 
-        let login_status = startup_login_status(
-            /*workload_identity_selected*/ true,
-            /*requires_openai_auth*/ true,
-            || async move {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(LoginStatus::NotAuthenticated)
-            },
-        )
-        .await?;
-
-        assert_eq!(login_status, LoginStatus::AuthMode(AuthMode::Chatgpt));
-        assert_eq!(
-            account_detection_attempts.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
         assert!(!should_show_login_screen(login_status, &config));
         assert!(!should_show_onboarding(
             login_status,
@@ -2253,7 +2201,6 @@ mod tests {
         }
         Ok(())
     }
-
     fn write_session_rollout(
         codex_home: &Path,
         filename_ts: &str,

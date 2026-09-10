@@ -5,7 +5,6 @@ use codex_utils_output_truncation::truncate_text;
 
 use crate::context::ContextualUserFragment;
 use crate::context::InterAgentCompletionMessage;
-use crate::context::SubagentNotification;
 
 const COMPLETION_MESSAGE_MAX_TOKENS: usize = 1_000;
 const COMPLETION_MESSAGE_ENVELOPE_TOKEN_RESERVE: usize = 100;
@@ -18,14 +17,6 @@ const ERROR_NEXT_ACTION: &str = "This agent's turn failed. If you still need thi
 
 // Helpers for model-visible session state markers that are stored in user-role
 // messages but are not user intent.
-
-// TODO(jif) unify with structured schema
-pub(crate) fn format_subagent_notification_message(
-    agent_reference: &str,
-    status: &AgentStatus,
-) -> String {
-    SubagentNotification::new(agent_reference, bounded_status(status)).render()
-}
 
 /// Apply the completion-message budget to every agent-authored string an [`AgentStatus`] can
 /// carry. Both the completion message and the error text originate from an agent (or an external

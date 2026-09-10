@@ -12,6 +12,10 @@ on:
       profile:
         required: true
         type: string
+      use_local_resources:
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   lint_build:
@@ -31,7 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - id: setup_local_rust
+        uses: ./.github/actions/setup-local-rust-ci
+        with:
+          enabled: ${{ inputs.use_local_resources }}
       - id: setup_ci
         uses: ./.github/actions/setup-ci
       - name: Install Linux build dependencies
@@ -51,7 +60,20 @@ jobs:
             "${apt_prefix[@]}" apt-get update -y
             "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
           fi
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Install Rust toolchain without changing the shared default (local)
+        if: ${{ inputs.use_local_resources }}
+        shell: bash
+        run: |
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            rustup toolchain install 1.95.0 \
+              --profile minimal \
+              --target ${{ inputs.target }} \
+              --component clippy \
+              --component rustfmt \
+              --component rust-src \
+              --no-self-update
+      - if: ${{ !inputs.use_local_resources }}
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ inputs.target }}
           components: clippy
@@ -83,10 +105,10 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db/
             ${{ github.workspace }}/.cargo-home/bin/
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
@@ -190,11 +212,13 @@ jobs:
         run: |
           set -euo pipefail
           RECIPE="${RUNNER_TEMP}/chef-recipe.json"
-          cargo chef prepare --recipe-path "$RECIPE"
-          cargo chef cook --recipe-path "$RECIPE" --target ${{ inputs.target }} --release
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo chef prepare --recipe-path "$RECIPE"
+          python3 ../.github/scripts/local_build_resources.py exec -- \
+            cargo chef cook --recipe-path "$RECIPE" --target ${{ inputs.target }} --release
 
       - name: cargo clippy
-        run: cargo clippy --target ${{ inputs.target }} --tests --profile ${{ inputs.profile }} --timings -- -D warnings
+        run: python3 ../.github/scripts/local_build_resources.py exec -- cargo clippy --target ${{ inputs.target }} --tests --profile ${{ inputs.profile }} --timings -- -D warnings
 
       - name: Upload Cargo timings (clippy)
         if: always()
@@ -212,10 +236,10 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/bin/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/index/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/registry/cache/
+            ${{ steps.setup_local_rust.outputs.cargo-home }}/git/db/
             ${{ github.workspace }}/.cargo-home/bin/
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/

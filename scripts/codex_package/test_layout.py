@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_package.layout import build_package_dir
+from codex_package.layout import prepare_package_dir
 from codex_package.layout import validate_package_dir
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import PackageInputs
@@ -15,6 +16,27 @@ from codex_package.targets import TARGET_SPECS
 
 
 class PackageLayoutTest(unittest.TestCase):
+    def test_prepare_accepts_existing_empty_directory_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_dir = Path(temp_dir) / "package"
+            package_dir.mkdir()
+
+            prepare_package_dir(package_dir, force=False)
+
+            self.assertEqual(list(package_dir.iterdir()), [])
+
+    def test_prepare_rejects_nonempty_directory_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_dir = Path(temp_dir) / "package"
+            package_dir.mkdir()
+            sentinel = package_dir / "sentinel"
+            sentinel.write_text("keep", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "not empty"):
+                prepare_package_dir(package_dir, force=False)
+
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+
     def test_macos_package_preserves_prebuilt_resource_binaries(self) -> None:
         for variant_name in ("codex", "codex-app-server"):
             for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):

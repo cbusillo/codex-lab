@@ -16,15 +16,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from build_storage import MAX_PATH_COUNT, parse_path_spec
+from feedback_context import build_context
+from feedback_storage import StorageSampler
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 MAX_JSON_BYTES = 16 * 1024
 MAX_SUMMARY_BYTES = 4 * 1024
 MACHINE_ID_SALT = "codex-lab-feedback-latency-v1"
+SCCACHE_IDENTITY_SALT = "codex-lab-sccache-identity-v1"
 HARNESS_EXIT_CODE = 125
 RUSTY_V8_ENV_VARS = ("RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH")
 SAFE_LANE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}\Z")
+SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}\Z")
+EMPTY_DIFF_SHA256 = hashlib.sha256(b"").hexdigest()
 SCCACHE_GAUGES = {"cacheSizeBytes", "maxCacheSizeBytes"}
 
 
@@ -63,11 +70,102 @@ def source_identity(repo_root: Path) -> dict[str, Any]:
     ):
         raise FeedbackLatencyError("Git did not report an exact 40-character commit")
     status = run_text(
-        ["git", "status", "--porcelain"],
+        ["git", "status", "--porcelain", "--untracked-files=all"],
         "Git status lookup",
         repo_root,
     )
-    return {"commit": commit, "dirty": bool(status)}
+    return {
+        "commit": commit,
+        "dirty": bool(status),
+        "untrackedChanges": any(line.startswith("?? ") for line in status.splitlines()),
+        "trackedDiffSha256": tracked_diff_sha256(repo_root),
+    }
+
+
+def tracked_diff_sha256(repo_root: Path) -> str:
+    """Hash the complete tracked worktree diff without retaining diff text."""
+
+    try:
+        process = subprocess.Popen(
+            [
+                "git",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--binary",
+                "HEAD",
+                "--",
+            ],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise FeedbackLatencyError("could not run Git diff lookup") from error
+    output = process.stdout
+    if output is None:
+        process.kill()
+        process.wait()
+        raise FeedbackLatencyError("Git diff lookup did not provide output")
+    digest = hashlib.sha256()
+    try:
+        while chunk := output.read(1024 * 1024):
+            digest.update(chunk)
+    finally:
+        output.close()
+    if process.wait() != 0:
+        raise FeedbackLatencyError("Git diff lookup failed")
+    return digest.hexdigest()
+
+
+def source_status(snapshot: dict[str, Any], expected_diff_sha256: str | None) -> str:
+    if snapshot.get("status") == "unavailable":
+        return "unavailable"
+    if expected_diff_sha256 is None:
+        return "clean" if not snapshot.get("dirty", True) else "unknown-dirty"
+    if snapshot.get("untrackedChanges"):
+        return "untracked-changes"
+    if snapshot.get("trackedDiffSha256") == EMPTY_DIFF_SHA256:
+        return "empty-edit"
+    if snapshot.get("trackedDiffSha256") != expected_diff_sha256:
+        return "diff-mismatch"
+    return "matched"
+
+
+def source_edit_evidence(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    expected_diff_sha256: str | None,
+) -> dict[str, Any]:
+    before_status = source_status(before, expected_diff_sha256)
+    after_status = source_status(after, expected_diff_sha256)
+    stable = (
+        before.get("commit") == after.get("commit")
+        and before.get("trackedDiffSha256") == after.get("trackedDiffSha256")
+        and before.get("dirty") == after.get("dirty")
+        and before.get("untrackedChanges") == after.get("untrackedChanges")
+        and before_status == after_status
+    )
+    comparable = (
+        before_status == "matched" and after_status == "matched" and stable
+        if expected_diff_sha256 is not None
+        else before_status == "clean" and after_status == "clean" and stable
+    )
+    return {
+        "mode": "controlled-edit" if expected_diff_sha256 else "uncontrolled",
+        "expectedDiffSha256": expected_diff_sha256,
+        "beforeStatus": before_status,
+        "afterStatus": after_status,
+        "stable": stable,
+        "comparable": comparable,
+    }
+
+
+def parse_sha256(value: str) -> str:
+    if SHA256_HEX.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError("expected a 64-character SHA-256 hex digest")
+    return value.lower()
 
 
 def machine_identity(environment: dict[str, str] | None = None) -> dict[str, Any]:
@@ -144,6 +242,7 @@ def parse_sccache_stats(output: str) -> dict[str, int | None]:
         "cacheWrites": "cache_writes",
         "cacheWriteErrors": "cache_write_errors",
         "cacheErrors": "cache_errors",
+        "nonCacheableRequests": "requests_not_cacheable",
     }
     metrics = {
         name: integer_total(stats.get(source)) for name, source in fields.items()
@@ -151,6 +250,37 @@ def parse_sccache_stats(output: str) -> dict[str, int | None]:
     metrics["cacheSizeBytes"] = integer_total(payload.get("cache_size"))
     metrics["maxCacheSizeBytes"] = integer_total(payload.get("max_cache_size"))
     return metrics
+
+
+def sccache_server_identity(output: str) -> dict[str, str | None]:
+    """Return a bounded opaque identity for a fully described sccache backend."""
+
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError:
+        return {"status": "unknown", "fingerprint": None}
+    if not isinstance(payload, dict):
+        return {"status": "unknown", "fingerprint": None}
+    location = payload.get("cache_location")
+    version = payload.get("version")
+    if (
+        not isinstance(location, str)
+        or not isinstance(version, str)
+        or not location
+        or not version
+        or len(location) > 512
+        or len(version) > 128
+    ):
+        return {"status": "unknown", "fingerprint": None}
+    identity = json.dumps(
+        {"cacheLocation": location, "version": version},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    fingerprint = hashlib.sha256(
+        SCCACHE_IDENTITY_SALT.encode() + b"\0" + identity
+    ).hexdigest()
+    return {"status": "known", "fingerprint": fingerprint}
 
 
 def read_sccache_stats() -> dict[str, Any]:
@@ -171,15 +301,54 @@ def read_sccache_stats() -> dict[str, Any]:
     if result.returncode != 0:
         return {"status": "unavailable", "reason": "stats-command-failed"}
     try:
-        return {"status": "available", "metrics": parse_sccache_stats(result.stdout)}
+        return {
+            "status": "available",
+            "metrics": parse_sccache_stats(result.stdout),
+            "serverIdentity": sccache_server_identity(result.stdout),
+        }
     except FeedbackLatencyError:
         return {"status": "unavailable", "reason": "invalid-stats"}
 
 
+def normalized_sccache_identity(value: object) -> dict[str, str | None]:
+    if (
+        isinstance(value, dict)
+        and value.get("status") == "known"
+        and isinstance(value.get("fingerprint"), str)
+    ):
+        return {"status": "known", "fingerprint": value["fingerprint"]}
+    return {"status": "unknown", "fingerprint": None}
+
+
 def sccache_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    before_identity = normalized_sccache_identity(before.get("serverIdentity"))
+    after_identity = normalized_sccache_identity(after.get("serverIdentity"))
+    server_identity = {"before": before_identity, "after": after_identity}
     if before.get("status") != "available" or after.get("status") != "available":
         reason = after.get("reason") or before.get("reason") or "unavailable"
-        return {"status": "unavailable", "reason": reason, "delta": None, "gauges": {}}
+        return {
+            "status": "unavailable",
+            "reason": reason,
+            "delta": None,
+            "gauges": {},
+            "serverIdentity": server_identity,
+        }
+    identity_statuses = {
+        before_identity.get("status"),
+        after_identity.get("status"),
+    }
+    identity_changed = (
+        identity_statuses == {"known"}
+        and before_identity.get("fingerprint") != after_identity.get("fingerprint")
+    ) or identity_statuses == {"known", "unknown"}
+    if identity_changed:
+        return {
+            "status": "server-changed",
+            "reason": "sccache backend identity changed during the command",
+            "delta": None,
+            "gauges": {},
+            "serverIdentity": server_identity,
+        }
     before_metrics = before["metrics"]
     after_metrics = after["metrics"]
     delta: dict[str, int | float | None] = {}
@@ -197,6 +366,7 @@ def sccache_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
                 "gauges": {
                     gauge: after_metrics.get(gauge) for gauge in sorted(SCCACHE_GAUGES)
                 },
+                "serverIdentity": server_identity,
             }
         else:
             delta[name] = after_value - before_value
@@ -209,6 +379,67 @@ def sccache_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, An
         "reason": None,
         "delta": delta,
         "gauges": {name: after_metrics.get(name) for name in sorted(SCCACHE_GAUGES)},
+        "serverIdentity": server_identity,
+    }
+
+
+def measurement_quality(
+    source_edit: dict[str, Any],
+    cache: dict[str, Any],
+    command_status: str,
+    exit_code: int,
+    preflight_ready: bool,
+    storage: dict[str, Any],
+    context: dict[str, Any],
+    concurrent_builds_declared: bool,
+) -> dict[str, Any]:
+    """Separate sample integrity from caller-declared concurrent load."""
+
+    reasons: list[str] = []
+    if not source_edit.get("comparable"):
+        reasons.append("source-identity-invalid")
+    if not preflight_ready:
+        reasons.append("preflight-invalid")
+    if command_status != "completed" or exit_code != 0:
+        reasons.append("command-failed")
+    if context.get("status") == "unavailable":
+        reasons.append("build-context-unavailable")
+    cache_status = str(cache.get("status"))
+    if cache_status != "available":
+        reasons.append(
+            {
+                "counter-reset": "cache-counters-reset",
+                "server-changed": "cache-identity-changed",
+                "unavailable": "cache-telemetry-unavailable",
+            }.get(cache_status, "cache-telemetry-invalid")
+        )
+    else:
+        identities = cache.get("serverIdentity", {})
+        if not isinstance(identities, dict):
+            statuses = set()
+        else:
+            statuses = {
+                value.get("status") if isinstance(value, dict) else None
+                for value in (
+                    identities.get("before"),
+                    identities.get("after"),
+                )
+            }
+        if statuses != {"known"}:
+            reasons.append("cache-identity-unknown")
+    if storage.get("status") == "degraded":
+        reasons.append("storage-telemetry-degraded")
+    return {
+        "integrity": {
+            "status": "valid" if not reasons else "invalid",
+            "reasons": reasons,
+        },
+        "load": {
+            "concurrentBuildsDeclared": concurrent_builds_declared,
+            "observedIsolation": "unknown",
+        },
+        "matchedAnalysisEligible": not reasons,
+        "analysisScope": ["durationMs", "phaseDurationsMs.command"],
     }
 
 
@@ -286,10 +517,14 @@ def safe_text(value: str) -> str:
 
 def render_summary(record: dict[str, Any]) -> str:
     cache = record["sccache"]
+    source_edit = record.get("sourceEdit", {})
     hit_rate = "unavailable"
     if cache.get("status") == "available":
         hit_rate = str(cache["delta"].get("hitRatePercent", "n/a"))
     preflight = record["preflight"]
+    quality = record["measurementQuality"]
+    integrity = quality["integrity"]
+    reasons = safe_text(", ".join(integrity["reasons"])) or "none"
     lines = [
         "### Rust feedback latency",
         "",
@@ -299,6 +534,8 @@ def render_summary(record: dict[str, Any]) -> str:
         f"| Scenario | `{record['scenario']}` |",
         f"| Source | `{record['source']['commit']}` |",
         f"| Dirty | `{str(record['source']['dirty']).lower()}` |",
+        f"| Source identity | `{source_edit.get('beforeStatus', 'unknown')} -> "
+        f"{source_edit.get('afterStatus', 'unknown')}` |",
         f"| Duration | `{record['durationMs']} ms` |",
         f"| Command phase | `{record['phaseDurationsMs']['command']} ms` |",
         f"| Exit | `{record['exitCode']}` |",
@@ -306,6 +543,9 @@ def render_summary(record: dict[str, Any]) -> str:
         f"| Helper preflight | `{preflight['helpers']['status']}` |",
         f"| rusty_v8 preflight | `{preflight['rustyV8']['status']}` |",
         f"| Comparable | `{str(record['comparable']).lower()}` |",
+        f"| Integrity | `{integrity['status']}` (reasons: `{reasons}`) |",
+        f"| Matched latency analysis eligible | "
+        f"`{str(quality['matchedAnalysisEligible']).lower()}` |",
         "",
     ]
     summary = "\n".join(lines)
@@ -344,7 +584,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("cold", "warm-cache", "warm-noop", "warm-edit"),
     )
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--configuration",
+        default="unspecified",
+        help="Public-safe build configuration label; caller-declared, not inferred",
+    )
+    parser.add_argument(
+        "--storage-path",
+        type=parse_path_spec,
+        action="append",
+        default=[],
+        metavar="ROLE=PATH",
+        help="Sample filesystem free space for at most eight explicit paths; no directory walk",
+    )
+    parser.add_argument(
+        "--concurrent-builds",
+        action="store_true",
+        help="Uncontrolled other builds may contaminate this sample; mark it non-comparable",
+    )
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument(
+        "--expected-diff-sha256",
+        type=parse_sha256,
+        help=(
+            "Expected git diff HEAD hash for an explicitly declared warm-edit scenario"
+        ),
+    )
     parser.add_argument("--require-helper", action="append", default=[])
     parser.add_argument("--verify-rusty-v8", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -357,6 +622,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error(
             "--lane must be a public-safe name using letters, digits, ., _, or -"
         )
+    if SAFE_LANE.fullmatch(args.configuration) is None:
+        parser.error("--configuration must be a public-safe label")
+    if args.expected_diff_sha256 and args.scenario != "warm-edit":
+        parser.error("--expected-diff-sha256 requires --scenario warm-edit")
+    if args.expected_diff_sha256 == EMPTY_DIFF_SHA256:
+        parser.error("--expected-diff-sha256 must describe a non-empty tracked edit")
+    if len(args.storage_path) > MAX_PATH_COUNT:
+        parser.error("too many --storage-path arguments")
+    paths = {}
+    for role, path in args.storage_path:
+        if role in paths:
+            parser.error("--storage-path requires a unique public-safe ROLE=PATH")
+        paths[role] = path
+    args.storage_paths = paths
     return args
 
 
@@ -367,10 +646,18 @@ def main(argv: list[str]) -> int:
         wall_started = time.monotonic()
         preflight_started = time.monotonic()
         source = source_identity(REPO_ROOT)
-        if source["dirty"] and not args.allow_dirty:
+        if source["dirty"] and not args.allow_dirty and not args.expected_diff_sha256:
             raise FeedbackLatencyError(
                 "refusing to measure a dirty checkout without --allow-dirty"
             )
+        initial_source_edit = source_edit_evidence(
+            source, source, args.expected_diff_sha256
+        )
+        if (
+            args.expected_diff_sha256
+            and initial_source_edit["beforeStatus"] != "matched"
+        ):
+            raise FeedbackLatencyError("declared source edit does not match checkout")
         helpers = helper_preflight(args.require_helper)
         rusty_v8 = (
             trusted_rusty_v8_preflight(REPO_ROOT)
@@ -385,6 +672,12 @@ def main(argv: list[str]) -> int:
         preflight_duration_ms = round((time.monotonic() - preflight_started) * 1000)
         telemetry_started = time.monotonic()
         before_cache = read_sccache_stats()
+        try:
+            context = build_context(REPO_ROOT, args.command, args.configuration)
+        except (OSError, ValueError, TypeError):
+            context = {"status": "unavailable"}
+        sampler = StorageSampler(args.storage_paths)
+        sampler.start()
         telemetry_duration_ms = round((time.monotonic() - telemetry_started) * 1000)
         command_started = time.monotonic()
         if preflight_ready:
@@ -411,18 +704,44 @@ def main(argv: list[str]) -> int:
             return_code = HARNESS_EXIT_CODE
             command_status = "not-run"
         command_duration_ms = round((time.monotonic() - command_started) * 1000)
+        source_check_started = time.monotonic()
+        try:
+            source_after = source_identity(REPO_ROOT)
+        except FeedbackLatencyError:
+            source_after = {"status": "unavailable"}
+        telemetry_duration_ms += round((time.monotonic() - source_check_started) * 1000)
         telemetry_started = time.monotonic()
+        storage = sampler.finish()
         cache = sccache_delta(before_cache, read_sccache_stats())
         telemetry_duration_ms += round((time.monotonic() - telemetry_started) * 1000)
         duration_ms = round((time.monotonic() - wall_started) * 1000)
         finished_at = utc_now()
         exit_code = normalize_exit_code(return_code)
+        source_edit = source_edit_evidence(
+            source, source_after, args.expected_diff_sha256
+        )
+        quality = measurement_quality(
+            source_edit,
+            cache,
+            command_status,
+            exit_code,
+            preflight_ready,
+            storage,
+            context,
+            args.concurrent_builds,
+        )
         record = {
             "schemaVersion": SCHEMA_VERSION,
             "lane": args.lane[:120],
             "scenario": args.scenario,
             "source": source,
+            "sourceAfter": source_after,
+            "sourceEdit": source_edit,
             "environment": machine_identity(),
+            "buildContext": context,
+            "storage": storage,
+            "concurrentBuildsDeclared": args.concurrent_builds,
+            "cacheAttribution": "server-aggregate",
             "startedAt": started_at,
             "finishedAt": finished_at,
             "durationMs": duration_ms,
@@ -435,9 +754,14 @@ def main(argv: list[str]) -> int:
             "commandStatus": command_status,
             "preflight": preflight,
             "sccache": cache,
-            "comparable": not source["dirty"]
+            "measurementQuality": quality,
+            "comparable": source_edit["comparable"]
             and preflight_ready
-            and cache["status"] != "counter-reset",
+            and cache["status"] not in {"counter-reset", "server-changed"}
+            and not args.concurrent_builds
+            and exit_code == 0
+            and storage["status"] in {"available", "not-requested"}
+            and context.get("status") != "unavailable",
         }
         output = args.output or Path(tempfile.gettempdir()) / (
             f"codex-feedback-{hashlib.sha256(args.lane.encode()).hexdigest()[:12]}.json"

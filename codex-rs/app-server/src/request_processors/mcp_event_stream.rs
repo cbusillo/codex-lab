@@ -32,15 +32,9 @@ const MCP_EVENT_STREAM_STARTUP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 
 
 pub(crate) type McpEventStreamReady = oneshot::Receiver<Result<(), JSONRPCErrorError>>;
 
-#[derive(Debug)]
-struct McpEventStreamTask {
-    thread_id: ThreadId,
-    task: JoinHandle<()>,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct McpEventStreams {
-    tasks: Mutex<HashMap<String, McpEventStreamTask>>,
+    tasks: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 impl McpEventStreams {
@@ -61,7 +55,7 @@ impl McpEventStreams {
         let (ready_tx, ready_rx) = oneshot::channel();
         {
             let mut tasks = self.tasks.lock().await;
-            tasks.retain(|_, task| !task.task.is_finished());
+            tasks.retain(|_, task| !task.is_finished());
             if tasks.contains_key(&subscription_id) {
                 return Err(invalid_request(format!(
                     "MCP event subscription '{subscription_id}' already exists"
@@ -127,7 +121,7 @@ impl McpEventStreams {
                     }
                 }
             });
-            tasks.insert(subscription_id, McpEventStreamTask { thread_id, task });
+            tasks.insert(subscription_id, task);
         }
         Ok(ready_rx)
     }
@@ -152,30 +146,8 @@ impl McpEventStreams {
     pub(crate) async fn stop(&self, subscription_id: &str) {
         let task = self.tasks.lock().await.remove(subscription_id);
         if let Some(task) = task {
-            task.task.abort();
-            let _ = task.task.await;
-        }
-    }
-
-    pub(crate) async fn stop_thread(&self, thread_id: ThreadId) {
-        self.stop_matching(Some(thread_id)).await;
-    }
-
-    pub(crate) async fn clear(&self) {
-        self.stop_matching(/*thread_id*/ None).await;
-    }
-
-    async fn stop_matching(&self, thread_id: Option<ThreadId>) {
-        let tasks = self
-            .tasks
-            .lock()
-            .await
-            .extract_if(|_, task| thread_id.is_none_or(|id| task.thread_id == id))
-            .map(|(_, task)| task)
-            .collect::<Vec<_>>();
-        for task in tasks {
-            task.task.abort();
-            let _ = task.task.await;
+            task.abort();
+            let _ = task.await;
         }
     }
 }

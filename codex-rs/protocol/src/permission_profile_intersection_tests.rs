@@ -115,13 +115,27 @@ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
     let result = intersection(&authority, &requested, &project);
     let policy = result.file_system_sandbox_policy();
 
+    // Both inputs can grant writes to root through :tmpdir when the canonical
+    // fixture path is beneath the raw TMPDIR path.
+    let expected_access = [&root, &project]
+        .map(|path| requested_policy.resolve_access_with_cwd(path.as_path(), root.as_path()));
     assert_eq!(
         [&root, &project]
             .map(|path| policy.resolve_access_with_cwd(path.as_path(), root.as_path())),
-        [Read, Write]
+        expected_access
     );
     assert_eq!(result.network_sandbox_policy(), Restricted);
     assert!(policy.entries.contains(&special(Tmpdir, Write)));
+    // Check workspace narrowing independently of the shared temporary grant.
+    let mut workspace_policy = policy.clone();
+    workspace_policy
+        .entries
+        .retain(|entry| entry.path != FileSystemPath::Special { value: Tmpdir });
+    assert_eq!(
+        [&root, &project]
+            .map(|path| workspace_policy.resolve_access_with_cwd(path.as_path(), root.as_path())),
+        [Read, Write]
+    );
     for name in [".git", ".agents", ".codex"] {
         let protected = project.join(name);
         assert!(!policy.can_write_path_with_cwd(protected.as_path(), root.as_path()));

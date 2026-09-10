@@ -61,6 +61,11 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -887,6 +892,7 @@ struct BlockingRemoteControlBackend {
 }
 
 struct ConnectedRemoteControlBackend {
+    _models_server: MockServer,
     initialized_rx: Option<oneshot::Receiver<std::result::Result<(), String>>>,
     server_task: JoinHandle<Result<()>>,
 }
@@ -899,6 +905,20 @@ struct ClientManagementRemoteControlBackend {
 impl ConnectedRemoteControlBackend {
     async fn start(codex_home: &std::path::Path) -> Result<Self> {
         let listener = configured_remote_control_listener(codex_home).await?;
+        // Model refresh runs independently of enrollment and must not be accepted
+        // as the WebSocket connection on the remote-control listener.
+        let models_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(/*s*/ 200).set_body_json(serde_json::json!({ "models": [] })),
+            )
+            .mount(&models_server)
+            .await;
+        let remote_control_url = format!("http://{}/backend-api/", listener.local_addr()?);
+        MockResponsesConfig::new(&models_server.uri())
+            .with_root_config(&format!("chatgpt_base_url = \"{remote_control_url}\""))
+            .write(codex_home)?;
         let (initialized_tx, initialized_rx) = oneshot::channel();
         let server_task = tokio::spawn(async move {
             let mut initialized_tx = Some(initialized_tx);
@@ -992,6 +1012,7 @@ impl ConnectedRemoteControlBackend {
         });
 
         Ok(Self {
+            _models_server: models_server,
             initialized_rx: Some(initialized_rx),
             server_task,
         })

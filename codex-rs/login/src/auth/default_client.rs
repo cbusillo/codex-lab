@@ -176,10 +176,15 @@ pub fn get_codex_user_agent_for_model(model: &str) -> String {
 
 pub fn requested_model_headers(model: &str) -> HeaderMap {
     let requested_version = codex_version::wire_compatible_version_for_model(model);
-    let user_agent = get_codex_user_agent_for_model(model);
+    requested_version_headers(&requested_version)
+}
+
+/// Builds matching version and user-agent identities for an endpoint's compatibility contract.
+pub fn requested_version_headers(requested_version: &str) -> HeaderMap {
+    let user_agent = get_codex_user_agent_with_version(requested_version);
     let mut headers = HeaderMap::new();
 
-    match HeaderValue::from_str(&requested_version) {
+    match HeaderValue::from_str(requested_version) {
         Ok(value) => {
             headers.insert("version", value);
         }

@@ -116,12 +116,20 @@ impl Default for ProjectValidationCommand {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-#[derive(Default)]
 pub struct ValidationGroups {
     #[serde(default = "default_true")]
     pub functional: bool,
     #[serde(default)]
     pub stylistic: bool,
+}
+
+impl Default for ValidationGroups {
+    fn default() -> Self {
+        Self {
+            functional: true,
+            stylistic: false,
+        }
+    }
 }
 
 #[cfg(test)]

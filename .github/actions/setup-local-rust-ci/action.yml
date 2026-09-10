@@ -1,0 +1,56 @@
+name: setup-local-rust-ci
+description: Isolate mutable Rust tool state for an explicitly local full-CI job.
+inputs:
+  enabled:
+    description: Whether this job will run on the persistent Codex Lab macOS runner.
+    required: false
+    default: "false"
+outputs:
+  cargo-home:
+    description: Cargo home used by this job and its external cache steps.
+    value: ${{ steps.configure.outputs.cargo-home }}
+
+runs:
+  using: composite
+  steps:
+    - id: configure
+      name: Configure job-scoped Rust tool state
+      shell: bash
+      env:
+        ENABLED: ${{ inputs.enabled }}
+        RUNNER_ENVIRONMENT_VALUE: ${{ runner.environment }}
+        RUNNER_OS_VALUE: ${{ runner.os }}
+      run: |
+        set -euo pipefail
+
+        case "$ENABLED" in
+          true)
+            if [[ "$RUNNER_ENVIRONMENT_VALUE" != "self-hosted" || "$RUNNER_OS_VALUE" != "macOS" ]]; then
+              echo "Local Rust CI isolation requires a self-hosted macOS runner." >&2
+              exit 1
+            fi
+            if [[ "${CODEX_LOCAL_BUILD_JOBS:-}" != "4" || "${CARGO_BUILD_JOBS:-}" != "4" || "${CODEX_LOCAL_BUILD_MEMORY_MB:-}" != "24576" ]]; then
+              echo "Local Rust CI requires the 4-job, 24576-MiB cooperative resource profile." >&2
+              exit 1
+            fi
+            PYTHONPATH="$GITHUB_WORKSPACE/.github/scripts" python3 -c \
+              'import os, sys; from local_build_resources import LocalBuildResources; LocalBuildResources.from_env(os.environ) or sys.exit("local build resource profile is missing")'
+            cargo_home="$RUNNER_TEMP/cargo-home"
+            mkdir -p "$cargo_home"
+            {
+              echo "CARGO_HOME=$cargo_home"
+              echo "CARGO_INCREMENTAL=0"
+              echo "CODEX_LOCAL_RUST_CI=true"
+            } >> "$GITHUB_ENV"
+            echo "$cargo_home/bin" >> "$GITHUB_PATH"
+            ;;
+          false)
+            cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+            ;;
+          *)
+            echo "enabled must be true or false, got: $ENABLED" >&2
+            exit 1
+            ;;
+        esac
+
+        echo "cargo-home=$cargo_home" >> "$GITHUB_OUTPUT"

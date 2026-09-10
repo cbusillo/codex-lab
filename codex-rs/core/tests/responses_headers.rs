@@ -81,7 +81,10 @@ async fn responses_stream_includes_subagent_header_on_review() {
         aws: None,
         wire_api: WireApi::Responses,
         query_params: None,
-        http_headers: None,
+        http_headers: Some(std::collections::HashMap::from([
+            ("version".to_string(), "9.9.9".into()),
+            ("user-agent".to_string(), "custom-client".into()),
+        ])),
         env_http_headers: None,
         request_max_retries: Some(0),
         stream_max_retries: Some(0),
@@ -171,6 +174,11 @@ async fn responses_stream_includes_subagent_header_on_review() {
     }
 
     let request = request_recorder.single_request();
+    assert_eq!(request.header("version").as_deref(), Some("9.9.9"));
+    assert_eq!(
+        request.header("user-agent").as_deref(),
+        Some("custom-client")
+    );
     assert_eq!(
         request.header("x-openai-subagent").as_deref(),
         Some("review")
