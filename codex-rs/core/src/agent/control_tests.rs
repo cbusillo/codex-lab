@@ -1493,6 +1493,10 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     let mut sender_config = harness.config.clone();
     sender_config.model = Some("gpt-5.5".to_string());
     sender_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    let fallback_model = sender_config
+        .model
+        .clone()
+        .expect("sender config should provide the reload fallback model");
     control
         .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id, /*parent*/ None)
         .await
@@ -1509,7 +1513,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             reloaded_snapshot.model_provider_id,
             reloaded_snapshot.reasoning_effort,
         ),
-        ("gpt-5.6-sol".to_string(), stored_child.model_provider, None,),
+        (fallback_model, stored_child.model_provider, None,),
     );
 }
 

@@ -331,12 +331,14 @@ impl Session {
         self.start_task(turn_context, input, task).await;
     }
 
+    // Internal restart callers can be inside the finalization this start awaits.
+    // Return its shared handle so only external admission waits for initialization.
     pub(crate) async fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-    ) {
+    ) -> TaskStart {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let background_review_trigger_eligible = task.background_review_trigger_eligible();
@@ -486,12 +488,7 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
-        drop(active);
-        // A successful admission guarantees that turn-start contributors have
-        // initialized their per-turn state. The task driver and abort cleanup
-        // await this same shared future, so it still runs exactly once when a
-        // task is interrupted while waiting on prior finalization.
-        task_start_for_admission.run().await;
+        task_start_for_admission
     }
 
     /// Returns whether an extension has marked this thread as durably asleep.

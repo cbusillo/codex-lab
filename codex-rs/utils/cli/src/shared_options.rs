@@ -51,7 +51,6 @@ pub struct SharedCliOptions {
         default_value_t = false,
         conflicts_with_all = [
             "sandbox_mode",
-            "approval_policy",
             "dangerously_bypass_approvals_and_sandbox"
         ]
     )]

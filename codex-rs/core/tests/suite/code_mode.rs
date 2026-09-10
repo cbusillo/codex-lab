@@ -5491,7 +5491,8 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     if check_image_cap {
         assert_eq!(reviewer_image_urls, image_cap_urls[3..].to_vec());
         assert!(guardian_text.contains("<omitted node_repl_images=\"4\""));
-        assert!(guardian_text.contains("<omitted node_repl_responses="));
+        // This fixture exceeds the image count, not the 32 KB nested-response text
+        // bound. Combined text/image omissions are covered by the renderer test.
     } else if reviewer_images {
         assert_eq!(reviewer_image_urls[0], PRIVATE_IMAGE);
         let reviewer_user_content = guardian_request

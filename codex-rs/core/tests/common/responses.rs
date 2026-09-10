@@ -16,6 +16,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::extensions::ExtensionsConfig;
@@ -1223,14 +1224,14 @@ pub async fn start_websocket_server_with_headers(
 /// Starts a WebSocket test server whose handshakes wait for `accept_gate`.
 pub async fn start_websocket_server_with_headers_gated(
     connections: Vec<WebSocketConnectionConfig>,
-    accept_gate: Arc<Notify>,
+    accept_gate: watch::Receiver<bool>,
 ) -> WebSocketTestServer {
     start_websocket_server_with_headers_inner(connections, Some(accept_gate)).await
 }
 
 async fn start_websocket_server_with_headers_inner(
     connections: Vec<WebSocketConnectionConfig>,
-    accept_gate: Option<Arc<Notify>>,
+    accept_gate: Option<watch::Receiver<bool>>,
 ) -> WebSocketTestServer {
     let start = std::time::Instant::now();
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1268,8 +1269,12 @@ async fn start_websocket_server_with_headers_inner(
                 continue;
             };
 
-            if let Some(accept_gate) = accept_gate.as_ref() {
-                accept_gate.notified().await;
+            if let Some(mut accept_gate) = accept_gate.clone() {
+                if !*accept_gate.borrow() {
+                    if accept_gate.wait_for(|ready| *ready).await.is_err() {
+                        return;
+                    }
+                }
             }
             if let Some(delay) = connection.accept_delay {
                 tokio::time::sleep(delay).await;

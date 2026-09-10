@@ -4454,7 +4454,7 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
 }
 
 #[tokio::test]
-async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
+async fn tool_handlers_close_cascades_but_v2_resume_reopens_only_target() {
     let (_session, turn) = make_session_and_context().await;
     let mut config = turn.config.as_ref().clone();
     config.agent_max_depth = 3;
@@ -4609,7 +4609,9 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             .permission_profile,
         owner_permission_profile
     );
-    assert_ne!(
+    // Lab sessions resolve to V2, whose targeted resume deliberately does not
+    // reopen descendants that were shut down by the cascading close.
+    assert_eq!(
         manager
             .agent_control()
             .get_status(grandchild_thread_id)

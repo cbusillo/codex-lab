@@ -2650,9 +2650,9 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
             config.model_catalog = Some(ModelsResponse {
                 models: [
                     (MODEL_A, Some(10_000), None, false),
-                    // Keep the 2% metadata budget below the extension World State section cap
-                    // while still separating it from the 50% usable inference window.
-                    (MODEL_B, None, Some(100_000), true),
+                    // Keep the 2% metadata budget below the independently tested 9 KiB World
+                    // State section cap while separating it from the 50% usable inference window.
+                    (MODEL_B, None, Some(40_000), true),
                 ]
                 .into_iter()
                 .map(|(slug, window, max_window, usage)| {
@@ -2704,7 +2704,7 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
     let mut included_counts = Vec::new();
     for (request, (model, default_budget, include_usage)) in requests
         .iter()
-        .zip([(MODEL_A, 200, false), (MODEL_B, 2_000, true)])
+        .zip([(MODEL_A, 200, false), (MODEL_B, 800, true)])
     {
         assert_eq!(request.body_json()["model"], model);
         let developer_texts = request.message_input_texts("developer");

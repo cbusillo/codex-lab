@@ -3398,13 +3398,13 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
             tty: false,
         };
         assert_eq!(
-            Box::pin(review_approval_request(
+            review_approval_request(
                 &session,
                 &turn,
                 "review-shell-guardian-1".to_string(),
                 initial_request,
                 ApprovalRequestReasons::default()
-            ))
+            )
             .await,
             ReviewDecision::Approved
         );
@@ -3458,7 +3458,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
         let session_for_second = Arc::clone(&session);
         let turn_for_second = Arc::clone(&turn);
         let mut second_review = tokio::spawn(async move {
-            Box::pin(review_approval_request(
+            review_approval_request(
                 &session_for_second,
                 &turn_for_second,
                 "review-shell-guardian-2".to_string(),
@@ -3467,7 +3467,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                     approval: None,
                     retry: Some("trunk follow-up".to_string()),
                 },
-            ))
+            )
             .await
         });
 
@@ -3508,7 +3508,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
             )
             .await;
 
-        let third_decision = Box::pin(review_approval_request(
+        let third_decision = review_approval_request(
             &session,
             &turn,
             "review-shell-guardian-3".to_string(),
@@ -3517,7 +3517,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
                 approval: None,
                 retry: Some("parallel follow-up".to_string()),
             },
-        ))
+        )
         .await;
         assert_eq!(third_decision, ReviewDecision::Approved);
         let requests = server.requests().await;

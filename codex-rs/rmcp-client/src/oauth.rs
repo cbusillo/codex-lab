@@ -1148,7 +1148,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use codex_keyring_store::tests::MockKeyringStore;
-    use codex_secrets::compute_keyring_account;
+    use codex_secrets::compute_keyring_account_for_namespace;
     use keyring::Error as KeyringError;
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
@@ -1526,7 +1526,10 @@ mod tests {
         let env = TempCodexHome::new();
         let store = MockKeyringStore::default();
         store.set_error(
-            &compute_keyring_account(&env.path().canonicalize()?),
+            &compute_keyring_account_for_namespace(
+                &env.path().canonicalize()?,
+                LocalSecretsNamespace::McpOAuth,
+            ),
             KeyringError::Invalid("error".into(), "save".into()),
         );
         let tokens = sample_tokens();

@@ -74,6 +74,73 @@ fn user_message(text: &str) -> ResponseItem {
     }
 }
 
+#[tokio::test]
+async fn start_if_idle_waits_for_turn_start_lifecycle() {
+    struct BlockingTurnStart {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl codex_extension_api::TurnLifecycleContributor for BlockingTurnStart {
+        fn on_turn_start<'a>(
+            &'a self,
+            _input: codex_extension_api::TurnStartInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.entered.notify_one();
+                self.release
+                    .acquire()
+                    .await
+                    .expect("turn-start release semaphore")
+                    .forget();
+            })
+        }
+    }
+
+    let (mut session, _turn_context) = make_session_and_context().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    builder.turn_lifecycle_contributor(Arc::new(BlockingTurnStart {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        calls: Arc::clone(&calls),
+    }));
+    session.services.extensions = Arc::new(builder.build());
+    let session = Arc::new(session);
+    let mut admission = Box::pin(start_if_idle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(
+            user_message("continue").into(),
+        )),
+        "lifecycle-admission-test".to_string(),
+        TurnStartKind::Automatic,
+    ));
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::select! {
+            biased;
+            result = &mut admission => panic!("admission finished before lifecycle: {result:?}"),
+            () = entered.notified() => {}
+        }
+    })
+    .await
+    .expect("turn-start lifecycle should begin");
+    assert!(futures::poll!(admission.as_mut()).is_pending());
+    release.add_permits(1);
+    assert!(matches!(
+        admission.await.expect("start-if-idle admission"),
+        TurnInputSubmission::Started { .. }
+    ));
+    assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
+}
+
 async fn submit_start_only(
     session: &Arc<Session>,
     input: SubmittedTurnInput,
