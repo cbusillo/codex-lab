@@ -535,7 +535,10 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item {
-                let state = &mut world_state.state;
+                let state = world_state
+                    .state
+                    .as_object_mut()
+                    .expect("world-state payload should be an object");
                 removed_recorded_usage_hint |= state.remove("multi_agent_usage_hint").is_some();
                 if let Some(mode) = state
                     .get_mut("multi_agent_mode")

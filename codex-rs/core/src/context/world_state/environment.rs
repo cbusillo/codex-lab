@@ -565,6 +565,7 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                 },
             )
         })
+        .take(MAX_TURN_ENVIRONMENT_SELECTIONS)
         .collect::<BTreeMap<_, _>>();
     for environment in snapshot.starting() {
         if environments.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS {
@@ -586,6 +587,11 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
     let mut remaining_error_bytes = MAX_TOTAL_ERROR_BYTES;
     for environment in &snapshot.environments {
         if let TurnEnvironmentState::Failed { selection, error } = environment {
+            if environments.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS
+                || environments.contains_key(&selection.environment_id)
+            {
+                continue;
+            }
             let detail = error
                 [..error.floor_char_boundary(remaining_error_bytes.min(MAX_ERROR_BYTES))]
                 .to_string();
@@ -602,12 +608,8 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
             );
         }
     }
-    // Ready environments are already capped by `ThreadEnvironments::update_selections`; starting
-    // and failed entries are merged from separate lists, so re-assert the cap over the merged map.
-    while environments.len() > MAX_TURN_ENVIRONMENT_SELECTIONS {
-        let last = environments.keys().next_back().cloned().unwrap_or_default();
-        environments.remove(&last);
-    }
+    // Preserve snapshot priority under overload: ready selections (primary first), then starting,
+    // then failed. Map ordering controls rendering only and must not decide which entries survive.
     environments
 }
 

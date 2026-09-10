@@ -9,7 +9,6 @@ use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_history::CompactedItem;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
@@ -73,7 +72,7 @@ fn rollout_items(rollout_text: &str) -> Vec<RolloutItem> {
     rollout_text
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line.trim()).ok())
+        .filter_map(|line| codex_rollout::parse_rollout_line(line.trim()).ok())
         .map(|line| line.item)
         .collect()
 }

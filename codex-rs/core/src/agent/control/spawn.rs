@@ -478,7 +478,9 @@ impl AgentControl {
         config.service_tier = self.root_service_tier();
         if restore_persisted_model_settings && stored_model_provider_id == config.model_provider_id
         {
-            config.model = stored_model;
+            if let Some(stored_model) = stored_model {
+                config.model = Some(stored_model);
+            }
             config.model_reasoning_effort = stored_reasoning_effort;
         } else if restore_persisted_model_settings
             && let Some(stored_model_provider) = config
@@ -486,7 +488,9 @@ impl AgentControl {
                 .get(&stored_model_provider_id)
                 .cloned()
         {
-            config.model = stored_model;
+            if let Some(stored_model) = stored_model {
+                config.model = Some(stored_model);
+            }
             config.model_provider = stored_model_provider;
             config.model_provider_id = stored_model_provider_id;
             config.model_reasoning_effort = stored_reasoning_effort;

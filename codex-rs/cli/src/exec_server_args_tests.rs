@@ -188,6 +188,7 @@ fn exec_server_transport_and_aws_options_require_registration_arguments() {
 
 #[tokio::test]
 async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
+    let homes = tempfile::tempdir().expect("test homes");
     for options in [vec![], vec!["--remote-transport", "noise"]] {
         let mut args = vec![
             "--remote",
@@ -202,6 +203,10 @@ async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
         let error = run_exec_server_command(
             command,
             &Arg0DispatchPaths::default(),
+            ConfigHomes {
+                codex_home: homes.path().join("codex"),
+                auth_home: homes.path().join("auth"),
+            },
             &CliConfigOverrides::default(),
             /*strict_config*/ false,
         )
@@ -216,6 +221,7 @@ async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
 
 #[tokio::test]
 async fn exec_server_direct_forwarding_remains_rejected() {
+    let homes = tempfile::tempdir().expect("test homes");
     let command = exec_server_from_args(&[
         "forward",
         "--connect",
@@ -253,6 +259,10 @@ async fn exec_server_direct_forwarding_remains_rejected() {
     let error = run_exec_server_command(
         command,
         &Arg0DispatchPaths::default(),
+        ConfigHomes {
+            codex_home: homes.path().join("codex"),
+            auth_home: homes.path().join("auth"),
+        },
         &CliConfigOverrides::default(),
         /*strict_config*/ false,
     )

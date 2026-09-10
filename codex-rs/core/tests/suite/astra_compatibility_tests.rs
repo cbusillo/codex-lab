@@ -10,7 +10,6 @@ use codex_protocol::protocol::Op;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_compact_json_once;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
@@ -64,7 +63,7 @@ async fn discovery_and_repeated_turns_preserve_wire_contract(
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_model(model_slug)
         .with_config(|config| {
-            let _ = config.features.disable(Feature::RemoteCompactionV2);
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
         });
     let test = builder.build_with_auto_env(&server).await?;
     let models = test
@@ -145,11 +144,18 @@ async fn discovery_and_repeated_turns_preserve_wire_contract(
     let first_input = bodies[0]["input"].as_array().expect("first input array");
     let next_input = bodies[1]["input"].as_array().expect("next input array");
     assert_eq!(first_input, &next_input[..first_input.len()]);
-    let compact = mount_compact_json_once(
+    let compact = mount_sse_once(
         &server,
-        json!({"output": [{
-            "type": "compaction", "encrypted_content": "compacted"
-        }]}),
+        sse(vec![
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "compacted",
+                },
+            }),
+            ev_completed("compact-response"),
+        ]),
     )
     .await;
     test.codex.submit(Op::Compact).await?;

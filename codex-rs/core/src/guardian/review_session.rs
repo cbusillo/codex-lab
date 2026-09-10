@@ -107,7 +107,10 @@ use codex_guardian_reviewer::run_before_review_deadline;
 use codex_guardian_reviewer::run_before_review_deadline_with_cancel;
 
 const GUARDIAN_INTERRUPT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-const GUARDIAN_MAX_IMAGE_ITEM_TOKENS: i64 = 10_000;
+// Preserve the downstream aggregate admission ceiling for the already bounded
+// text and newest four images. This is a whole-prompt estimate, not an individual
+// text-fragment allowance; section bounds remain enforced by the composer.
+const GUARDIAN_MAX_MULTIMODAL_PROMPT_TOKENS: i64 = 25_000;
 pub(crate) use codex_guardian_reviewer::GuardianReviewSessionOutcome;
 
 pub(crate) struct GuardianReviewSessionParams {
@@ -585,7 +588,7 @@ async fn run_review_on_session(
                         .estimate_token_count_with_base_instructions(&base_instructions)
                         .unwrap_or(i64::MAX)
                         .max(review_session.session.get_total_token_usage().await);
-                    prompt_tokens <= GUARDIAN_MAX_IMAGE_ITEM_TOKENS
+                    prompt_tokens <= GUARDIAN_MAX_MULTIMODAL_PROMPT_TOKENS
                         && prompt_tokens.saturating_add(history_tokens) <= context_window
                 } else {
                     false

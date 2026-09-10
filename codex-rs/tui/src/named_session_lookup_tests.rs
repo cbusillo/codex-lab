@@ -274,6 +274,45 @@ async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> 
 }
 
 #[tokio::test]
+async fn resolves_legacy_index_name_when_sqlite_title_is_missing() -> color_eyre::Result<()> {
+    let temp_dir = TempDir::new()?;
+    let config = build_config(&temp_dir).await?;
+    let runtime = state_runtime(&config).await?;
+    let thread_id = ThreadId::new();
+    let rollout_path = write_rollout(
+        &config,
+        thread_id,
+        "2025-02-01T10:00:00Z",
+        "preview text",
+        SessionSource::Cli,
+        ThreadHistoryMode::Legacy,
+    )?;
+    upsert_thread(
+        &runtime,
+        thread_metadata(&config, thread_id, rollout_path, "preview text"),
+    )
+    .await?;
+    codex_rollout::append_thread_name(config.codex_home.as_path(), thread_id, "legacy-index-name")
+        .await?;
+
+    let found = lookup_name(
+        &config,
+        "legacy-index-name",
+        &[SessionCollection::Active],
+        ThreadParamsMode::Embedded,
+        Some(&config.model_provider_id),
+    )
+    .await?
+    .expect("legacy index name should resolve");
+
+    assert_eq!(
+        (found.id, found.name),
+        (thread_id.to_string(), Some("legacy-index-name".to_string()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
     let config = build_config(&temp_dir).await?;

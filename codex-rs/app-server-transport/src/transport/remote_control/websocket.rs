@@ -1831,6 +1831,7 @@ mod refresh_tests;
 mod tests {
     use super::*;
     use crate::outgoing_message::OutgoingMessage;
+    use crate::transport::remote_control::RECONNECT_CHANNEL_CAPACITY;
     use crate::transport::remote_control::ServerEvent;
     use crate::transport::remote_control::auth::mark_recovery_auth_change_seen;
     use crate::transport::remote_control::protocol::StreamId;

@@ -411,6 +411,7 @@ impl Session {
             token_usage_at_turn_start,
         );
         let task_start_for_run = task_start.clone();
+        let task_start_for_admission = task_start.clone();
         // Task-owned turn spans keep a core-owned span open for the
         // full task lifecycle after the submission dispatch span ends.
         let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
@@ -485,6 +486,12 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
+        drop(active);
+        // A successful admission guarantees that turn-start contributors have
+        // initialized their per-turn state. The task driver and abort cleanup
+        // await this same shared future, so it still runs exactly once when a
+        // task is interrupted while waiting on prior finalization.
+        task_start_for_admission.run().await;
     }
 
     /// Returns whether an extension has marked this thread as durably asleep.

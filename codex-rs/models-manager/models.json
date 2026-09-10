@@ -17,8 +17,6 @@
         "mode": "tokens",
         "limit": 10000
       },
-      "tool_mode": "code_mode_only",
-      "multi_agent_version": "v2",
       "supports_parallel_tool_calls": true,
       "tool_mode": "code_mode_only",
       "multi_agent_version": "v2",
@@ -67,7 +65,6 @@
         }
       ],
       "shell_type": "unified_exec",
-      "visibility": "hide",
       "visibility": "list",
       "minimal_client_version": "0.153.0",
       "supported_in_api": true,
@@ -171,7 +168,6 @@
         "fast"
       ],
       "supports_reasoning_summary_parameter": true,
-      "model_messages": null,
       "supports_reasoning_summaries": true
     },
     {

@@ -24,6 +24,7 @@ impl ManagedTuiWorktree {
 
     pub(crate) async fn check_source_policy(
         &self,
+        homes: &ConfigHomes,
         cli_overrides: &[(String, toml::Value)],
         overrides: &ConfigOverrides,
         loader_overrides: &LoaderOverrides,
@@ -33,6 +34,8 @@ impl ManagedTuiWorktree {
         let mut source_overrides = overrides.clone();
         source_overrides.cwd = Some(self.checkout.source_cwd.clone());
         let source = ConfigBuilder::default()
+            .codex_home(homes.codex_home.clone())
+            .auth_home(homes.auth_home.clone())
             .cli_overrides(cli_overrides.to_vec())
             .harness_overrides(source_overrides)
             .loader_overrides(LoaderOverrides {
@@ -280,6 +283,10 @@ pub(super) async fn prepare(
     .await?;
     managed
         .check_source_policy(
+            &ConfigHomes {
+                codex_home: source.codex_home.to_path_buf(),
+                auth_home: source.auth_home.to_path_buf(),
+            },
             &cli_overrides,
             overrides,
             &loader_overrides,
@@ -289,6 +296,8 @@ pub(super) async fn prepare(
         .await?;
     overrides.cwd = Some(managed.checkout.cwd.clone());
     let config = ConfigBuilder::default()
+        .codex_home(source.codex_home.to_path_buf())
+        .auth_home(source.auth_home.to_path_buf())
         .cli_overrides(cli_overrides)
         .harness_overrides(overrides.clone())
         .loader_overrides(loader_overrides)

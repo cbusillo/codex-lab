@@ -34,6 +34,7 @@ async fn run_startup_for_test(
         Some(bootstrap),
         /*startup_hooks_browser*/ None,
         crate::startup_draft::tests::quiet_startup_test_pump(),
+        codex_version::ProductIdentity::Codex,
         /*managed_worktree*/ None,
     )
     .await

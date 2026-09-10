@@ -1217,6 +1217,21 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
 pub async fn start_websocket_server_with_headers(
     connections: Vec<WebSocketConnectionConfig>,
 ) -> WebSocketTestServer {
+    start_websocket_server_with_headers_inner(connections, None).await
+}
+
+/// Starts a WebSocket test server whose handshakes wait for `accept_gate`.
+pub async fn start_websocket_server_with_headers_gated(
+    connections: Vec<WebSocketConnectionConfig>,
+    accept_gate: Arc<Notify>,
+) -> WebSocketTestServer {
+    start_websocket_server_with_headers_inner(connections, Some(accept_gate)).await
+}
+
+async fn start_websocket_server_with_headers_inner(
+    connections: Vec<WebSocketConnectionConfig>,
+    accept_gate: Option<Arc<Notify>>,
+) -> WebSocketTestServer {
     let start = std::time::Instant::now();
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1253,6 +1268,9 @@ pub async fn start_websocket_server_with_headers(
                 continue;
             };
 
+            if let Some(accept_gate) = accept_gate.as_ref() {
+                accept_gate.notified().await;
+            }
             if let Some(delay) = connection.accept_delay {
                 tokio::time::sleep(delay).await;
             }

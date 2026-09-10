@@ -3273,6 +3273,70 @@ async fn turn_start_lifecycle_exposes_turn_metadata_and_token_baseline() {
 }
 
 #[tokio::test]
+async fn task_admission_waits_for_turn_start_lifecycle() {
+    struct BlockingTurnStart {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Semaphore>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl codex_extension_api::TurnLifecycleContributor for BlockingTurnStart {
+        fn on_turn_start<'a>(
+            &'a self,
+            _input: codex_extension_api::TurnStartInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.entered.notify_one();
+                self.release
+                    .acquire()
+                    .await
+                    .expect("turn-start release semaphore")
+                    .forget();
+            })
+        }
+    }
+
+    let (mut session, turn_context) = make_session_and_context().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    builder.turn_lifecycle_contributor(Arc::new(BlockingTurnStart {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+        calls: Arc::clone(&calls),
+    }));
+    session.services.extensions = Arc::new(builder.build());
+
+    let session = Arc::new(session);
+    let mut admission = Box::pin(session.spawn_task(
+        Arc::new(turn_context),
+        Vec::new(),
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: true,
+        },
+    ));
+    tokio::time::timeout(StdDuration::from_secs(1), async {
+        tokio::select! {
+            biased;
+            () = &mut admission => panic!("task admission finished before turn-start lifecycle"),
+            () = entered.notified() => {}
+        }
+    })
+    .await
+    .expect("turn-start lifecycle should begin");
+    assert!(futures::poll!(admission.as_mut()).is_pending());
+    release.add_permits(1);
+    admission.await;
+    assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn turn_error_lifecycle_exposes_error_and_stores() {
     struct SessionTurnErrorMarker;
     struct ThreadTurnErrorMarker;
@@ -12309,8 +12373,8 @@ async fn active_turn_keeps_first_root_when_mail_coalesces(inherited_root: Option
             )
             .await;
         if index == 0 {
-            // The first message is already queued when this independent task
-            // starts; the second arrives after its root is established.
+            // The queued first message supplies the new task root; the second
+            // arrives after that root is established and cannot replace it.
             sess.spawn_task(
                 Arc::clone(&tc),
                 Vec::new(),
@@ -12332,7 +12396,7 @@ async fn active_turn_keeps_first_root_when_mail_coalesces(inherited_root: Option
     );
     assert_eq!(
         tc.turn_metadata_state.root_turn_id().as_deref(),
-        Some(inherited_root.unwrap_or(&tc.sub_id))
+        Some(inherited_root.unwrap_or("root-a"))
     );
     assert!(!sess.input_queue.has_pending_mailbox_items().await);
 

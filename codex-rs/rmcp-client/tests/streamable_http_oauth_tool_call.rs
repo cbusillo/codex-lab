@@ -72,7 +72,7 @@ async fn run_scenarios(scenarios: &[&str]) -> anyhow::Result<()> {
         let home = TempDir::new()?;
         let output = Command::new(std::env::current_exe()?)
             .args(["runtime_oauth_child", "--exact", "--ignored", "--nocapture"])
-            .env("CODEX_HOME", home.path())
+            .env("CODEX_LAB_HOME", home.path())
             .env(SCENARIO_ENV, scenario)
             .output()
             .await?;
@@ -87,7 +87,7 @@ async fn run_scenarios(scenarios: &[&str]) -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[ignore = "spawned by OAuth recovery tests with an isolated CODEX_HOME"]
+#[ignore = "spawned by OAuth recovery tests with an isolated CODEX_LAB_HOME"]
 async fn runtime_oauth_child() -> anyhow::Result<()> {
     let scenario = std::env::var(SCENARIO_ENV)?;
     let mcp = MockServer::start().await;

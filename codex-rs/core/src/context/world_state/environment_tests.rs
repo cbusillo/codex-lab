@@ -437,3 +437,80 @@ fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
         ]
     );
 }
+
+#[tokio::test]
+async fn overloaded_failure_context_preserves_primary_and_available_environments() {
+    use crate::environment_selection::EnvironmentConfigOrigin;
+    use crate::session::turn_context::TurnEnvironment;
+    use codex_exec_server::Environment;
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfileSnapshot;
+    use codex_protocol::protocol::EnvironmentConfig;
+    use codex_protocol::protocol::EnvironmentConfigState;
+    use codex_protocol::protocol::TurnEnvironmentSelection;
+    use std::sync::Arc;
+
+    let config = EnvironmentConfig {
+        allow_login_shell: true,
+        workspace_roots: Vec::new(),
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: true,
+        use_legacy_landlock: false,
+        permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
+        shell_environment_policy: Default::default(),
+        exec_policy: None,
+        mcp_policy: None,
+        network_policy: None,
+        selected_capability_roots: Vec::new(),
+    };
+    let environment = Arc::new(Environment::default_for_tests());
+    let mut states = vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
+        TurnEnvironmentSelection {
+            environment_id: "zz-primary".to_string(),
+            cwd: PathUri::parse("file:///primary").unwrap(),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::Ready(config.clone()),
+        },
+        EnvironmentConfigOrigin::Thread,
+        Arc::clone(&environment),
+        /*shell*/ None,
+    ))];
+    states.extend((0..3).map(|index| {
+        TurnEnvironmentState::Ready(TurnEnvironment::new(
+            TurnEnvironmentSelection {
+                environment_id: format!("zz-available-{index}"),
+                cwd: PathUri::parse(&format!("file:///available-{index}")).unwrap(),
+                workspace_roots: Vec::new(),
+                config: EnvironmentConfigState::Ready(config.clone()),
+            },
+            EnvironmentConfigOrigin::Thread,
+            Arc::clone(&environment),
+            /*shell*/ None,
+        ))
+    }));
+    states.extend((0..8).map(|index| TurnEnvironmentState::Failed {
+        selection: TurnEnvironmentSelection {
+            environment_id: format!("aa-failed-{index}"),
+            cwd: PathUri::parse(&format!("file:///failed-{index}")).unwrap(),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+        },
+        error: "界".repeat(300),
+    }));
+
+    let rendered = EnvironmentsState {
+        environments: environment_states(&TurnEnvironmentSnapshot {
+            environments: states,
+        }),
+        ..Default::default()
+    }
+    .body();
+
+    insta::assert_snapshot!(rendered);
+    assert!(rendered.contains("id=\"zz-primary\" primary=\"true\""));
+    for index in 0..3 {
+        assert!(rendered.contains(&format!("id=\"zz-available-{index}\"")));
+    }
+    assert_eq!(rendered.matches("status>failed").count(), 4);
+    assert_eq!(rendered.matches("<error>").count(), 2);
+}

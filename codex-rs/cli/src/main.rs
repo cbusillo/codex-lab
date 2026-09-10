@@ -3672,7 +3672,9 @@ mod tests {
     #[test]
     fn help_text_never_advertises_the_upstream_codex_home() {
         let mut texts = Vec::new();
-        help_texts(&MultitoolCli::command(), &mut texts);
+        let mut command = MultitoolCli::command();
+        command.build();
+        help_texts(&command, &mut texts);
 
         let offenders: Vec<&str> = texts
             .iter()

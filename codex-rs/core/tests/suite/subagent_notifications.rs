@@ -401,24 +401,6 @@ async fn wait_for_request_with_model(
     }
 }
 
-async fn setup_turn_one_with_spawned_child(
-    server: &MockServer,
-    child_response_delay: Option<Duration>,
-) -> Result<(TestCodex, String)> {
-    let (test, spawned_id, _child_request_log) = setup_turn_one_with_custom_spawned_child(
-        server,
-        json!({
-            "message": CHILD_PROMPT,
-        }),
-        child_response_delay,
-        /*wait_for_parent_notification*/ true,
-        INHERITED_REASONING_EFFORT,
-        |builder| builder,
-    )
-    .await?;
-    Ok((test, spawned_id))
-}
-
 async fn setup_turn_one_with_custom_spawned_child(
     server: &MockServer,
     spawn_args: serde_json::Value,
@@ -720,7 +702,7 @@ async fn subagent_start_replaces_session_start_and_injects_context(
     let user_prompt_submit_inputs = wait_for_hook_log(
         test.codex_home_path(),
         "user_prompt_submit_hook_log.jsonl",
-        /*expected_len*/ 1,
+        /*expected_len*/ 2,
     )
     .await?;
     let parent_prompt_input = user_prompt_submit_inputs

@@ -104,7 +104,7 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
         "https://api.openai.com/auth": {
             "chatgpt_user_id": "user-12345",
             "user_id": "user-12345",
-            "chatgpt_account_id": "account_id"
+            "chatgpt_account_id": account_id
         }
     });
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
@@ -1890,6 +1890,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     codex_app_server_protocol::ClientResponsePayload::Initialize(
                         codex_app_server_protocol::InitializeResponse {
                             user_agent: "codex-test-agent".to_string(),
+                            server_build: None,
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),
@@ -1910,6 +1911,7 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                 "id": 11,
                 "result": {
                     "userAgent": "codex-test-agent",
+                    "serverBuild": null,
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",

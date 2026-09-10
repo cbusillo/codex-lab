@@ -113,6 +113,7 @@ jobs:
             openai-codex-cli-bin "$PYTHON_RUNTIME_VERSION"
 
   publish-python-sdk:
+    if: github.repository == 'openai/codex'
     name: publish-python-sdk
     needs:
       - build-python-sdk

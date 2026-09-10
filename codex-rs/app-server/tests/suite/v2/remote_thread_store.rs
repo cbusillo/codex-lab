@@ -387,7 +387,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
 }
 
 #[test]
-fn cold_thread_resume_reuses_non_local_history_probe() -> Result<()> {
+fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .thread_stack_size(16 * 1024 * 1024)

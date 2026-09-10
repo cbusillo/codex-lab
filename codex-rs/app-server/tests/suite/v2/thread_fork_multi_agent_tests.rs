@@ -35,7 +35,7 @@ enum SourceState {
 #[test_case::test_case(ThreadHistoryMode::Paginated, SourceState::Loaded; "paginated_loaded")]
 #[test_case::test_case(ThreadHistoryMode::Paginated, SourceState::Unloaded; "paginated_unloaded")]
 #[tokio::test]
-async fn fork_before_first_turn_preserves_model_selected_multi_agent_version(
+async fn fork_before_first_turn_preserves_resolved_multi_agent_version(
     history_mode: ThreadHistoryMode,
     source_state: SourceState,
 ) -> Result<()> {
@@ -45,6 +45,11 @@ async fn fork_before_first_turn_preserves_model_selected_multi_agent_version(
         .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
+    let expected_namespace = config
+        .multi_agent_v2
+        .tool_namespace
+        .clone()
+        .expect("enabled multi-agent v2 namespace");
     let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
     write_models_cache_with_models(codex_home.path(), vec![model]).await?;
@@ -138,14 +143,17 @@ async fn fork_before_first_turn_preserves_model_selected_multi_agent_version(
                 .expect("tools")
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
-                .filter(|name| matches!(*name, "collaboration" | "multi_agent_v1"))
+                .filter(|name| *name == expected_namespace.as_str() || *name == "multi_agent_v1")
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         );
     }
     assert_eq!(
         multi_agent_namespaces,
-        vec![vec!["collaboration"], vec!["collaboration"]]
+        vec![
+            vec![expected_namespace.clone()],
+            vec![expected_namespace.clone()]
+        ]
     );
     Ok(())
 }

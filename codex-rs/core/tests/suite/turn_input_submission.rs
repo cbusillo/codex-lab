@@ -14,6 +14,8 @@ use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
@@ -101,6 +103,53 @@ async fn initial_input_is_persisted_before_the_model_request() -> anyhow::Result
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_collision_persists_input_and_emits_error() -> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let response = responses::mount_sse_once(&server, responses::sse_completed("unused")).await;
+    let base = test_codex()
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_config(|config| {
+            config.tool_registry.error_on_tool_collisions = true;
+            config.update_plan_enabled = true;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let started = base
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: "update_plan".to_string(),
+                description: "Duplicates the built-in plan tool.".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+                defer_loading: false,
+            })],
+            ..StartThreadOptions::new(base.config.clone())
+        })
+        .await?;
+    let thread = started.thread;
+
+    submit_user_message(&thread, "persist this input despite the tool collision").await?;
+    let EventMsg::Error(error) = wait_for_event(
+        &thread,
+        |event| matches!(event, EventMsg::Error(error) if error.message.contains("duplicate tool")),
+    )
+    .await
+    else {
+        unreachable!("event guard requires the tool-collision error");
+    };
+    assert!(
+        error
+            .message
+            .contains("duplicate tool: functions.update_plan")
+    );
+    let rollout =
+        tokio::fs::read_to_string(thread.rollout_path().expect("local rollout path")).await?;
+    assert!(rollout.contains("persist this input despite the tool collision"));
+    assert!(response.requests().is_empty());
     Ok(())
 }
 
@@ -253,6 +302,7 @@ async fn host_drain_allows_running_review_to_finish_its_delegate() -> anyhow::Re
                 },
                 user_facing_hint: None,
             },
+            persistence: None,
         })
         .await?;
     let event = wait_for_event(&test.codex, |event| {

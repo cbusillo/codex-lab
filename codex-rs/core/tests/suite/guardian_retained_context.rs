@@ -961,6 +961,12 @@ async fn standalone_fork_retains_inherited_user_instructions(
         })
         .build_with_auto_env(&server)
         .await?;
+    let multi_agent_namespace = test
+        .config
+        .multi_agent_v2
+        .tool_namespace
+        .as_deref()
+        .context("enabled multi-agent v2 namespace")?;
     let instruction = if compacted {
         format!(
             "You may publish the release. {} Delegate an inspection.",
@@ -975,7 +981,7 @@ async fn standalone_fork_retains_inherited_user_instructions(
         vec![
             sse(vec![
                 ev_function_call_with_namespace(
-                    "spawn", "collaboration", "spawn_agent",
+                    "spawn", multi_agent_namespace, "spawn_agent",
                     &json!({"task_name": "worker", "message": "Inspect the project.", "fork_turns": "all"}).to_string(),
                 ),
                 ev_completed("spawn-response"),
@@ -1173,6 +1179,12 @@ async fn forked_parent_instructions_do_not_become_local_authorization(
         })
         .build_with_auto_env(&server)
         .await?;
+    let multi_agent_namespace = test
+        .config
+        .multi_agent_v2
+        .tool_namespace
+        .as_deref()
+        .context("enabled multi-agent v2 namespace")?;
     mount_sse_sequence(&server, vec![sse(vec![ev_completed("initial")])]).await;
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -1202,7 +1214,7 @@ async fn forked_parent_instructions_do_not_become_local_authorization(
         sse(vec![
             ev_function_call_with_namespace(
                 "spawn",
-                "collaboration",
+                multi_agent_namespace,
                 "spawn_agent",
                 &json!({
                     "task_name": "worker",
@@ -1397,6 +1409,12 @@ async fn retained_answers_cross_real_session_boundaries(
         })
         .build_with_auto_env(&server)
         .await?;
+    let multi_agent_namespace = test
+        .config
+        .multi_agent_v2
+        .tool_namespace
+        .as_deref()
+        .context("enabled multi-agent v2 namespace")?;
     let before = record_answer(
         &test.codex,
         &server,
@@ -1484,7 +1502,7 @@ async fn retained_answers_cross_real_session_boundaries(
                     sse(vec![
                         ev_function_call_with_namespace(
                             "spawn",
-                            "collaboration",
+                            multi_agent_namespace,
                             "spawn_agent",
                             &arguments.to_string(),
                         ),

@@ -537,10 +537,16 @@ fn drop_last_n_user_turns_removes_post_input_configuration_update_with_its_turn(
     ]);
     history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
 
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
 
     assert_eq!(history.annotated_items(), surviving);
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert!(history.annotated_items().is_empty());
 }
 
@@ -1278,7 +1284,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
         acceptance_order: None,
     });
     let retained = history.retained_context().clone();
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     assert_eq!(history.retained_context(), &retained);
 
     // A steered message shares its source turn, but rollback must keep the earlier
@@ -1323,7 +1332,10 @@ fn drop_last_n_user_turns_preserves_prefix() {
             expected = Some(history.retained_context().clone());
         }
     }
-    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    history.drop_last_n_user_turns(
+        /*num_turns*/ 1,
+        /*multi_agent_usage_hint_identities*/ &[],
+    );
     history.replace_compacted(Vec::new());
     let retained = history.retained_context();
     assert!(retained.user_messages_complete());

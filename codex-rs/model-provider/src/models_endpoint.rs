@@ -108,8 +108,13 @@ impl OpenAiModelsEndpoint {
                 .await?;
             let client = ModelsClient::new(transport, api_provider, api_auth)
                 .with_telemetry(Some(request_telemetry));
+            let headers = if self.provider_info.is_openai() {
+                codex_login::default_client::requested_version_headers(client_version)
+            } else {
+                HeaderMap::new()
+            };
             client
-                .list_models(request_url, HeaderMap::new())
+                .list_models(request_url, headers)
                 .await
                 .map_err(map_api_error)
         })
@@ -311,6 +316,7 @@ mod tests {
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
     use wiremock::matchers::header;
+    use wiremock::matchers::header_regex;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use wiremock::matchers::query_param;
@@ -380,6 +386,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/models"))
             .and(query_param("client_version", "0.0.0"))
+            .and(header("version", "0.0.0"))
+            .and(header_regex("user-agent", r"/0\.0\.0 "))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(ModelsResponse { models: Vec::new() }),
             )

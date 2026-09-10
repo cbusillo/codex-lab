@@ -15,7 +15,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_protocol::protocol::TurnContextEnvironmentItem;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -96,7 +95,7 @@ fn rollout_items(rollout_path: &Path) -> Result<Vec<RolloutItem>> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            Ok(serde_json::from_str::<RolloutLine>(line)
+            Ok(codex_rollout::parse_rollout_line(line)
                 .with_context(|| format!("rollout line should deserialize: {line}"))?
                 .item)
         })

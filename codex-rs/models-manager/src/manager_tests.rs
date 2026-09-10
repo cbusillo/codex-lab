@@ -90,6 +90,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 #[derive(Debug)]
 struct TestModelsEndpoint {
     has_configured_credentials: bool,
+    has_command_auth: bool,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
@@ -191,6 +192,7 @@ impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_configured_credentials: false,
+            has_command_auth: false,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -201,6 +203,7 @@ impl TestModelsEndpoint {
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_configured_credentials: false,
+            has_command_auth: false,
             uses_codex_backend: false,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -1029,7 +1032,7 @@ async fn refresh_available_models_merges_hidden_only_chatgpt_remote_with_bundled
 }
 
 #[tokio::test]
-async fn refresh_available_models_keeps_merging_for_api_auth() {
+async fn refresh_available_models_uses_configured_credentials_without_command_auth() {
     let remote_models = vec![remote_model(
         "api-auth-visible-remote",
         "API Auth Visible",
@@ -1038,6 +1041,7 @@ async fn refresh_available_models_keeps_merging_for_api_auth() {
     let codex_home = tempdir().expect("temp dir");
     let endpoint = Arc::new(TestModelsEndpoint {
         has_configured_credentials: true,
+        has_command_auth: false,
         uses_codex_backend: false,
         responses: Mutex::new(vec![remote_models.clone()].into()),
         fetch_count: AtomicUsize::new(0),
@@ -1312,7 +1316,8 @@ impl TestAuthAwareModelsEndpoint {
 
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
     fn has_configured_credentials(&self) -> bool {
-        self.auth_manager.is_some()
+        // Account auth is independent of provider-configured credentials.
+        false
     }
 
     fn identity(&self) -> Option<String> {

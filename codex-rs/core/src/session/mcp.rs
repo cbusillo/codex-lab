@@ -335,7 +335,14 @@ impl Session {
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
         );
-        let refreshed = self.services.mcp_runtime.replace_fresh(input).await;
+        let refreshed = self
+            .services
+            .mcp_runtime
+            .replace_fresh_with_codex_apps_execution_auth(
+                input,
+                Self::codex_apps_execution_auth(&desired),
+            )
+            .await;
         self.services.thread_extension_data.insert(selected_plugins);
         refreshed
     }

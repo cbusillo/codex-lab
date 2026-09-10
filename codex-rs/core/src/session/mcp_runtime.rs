@@ -33,6 +33,33 @@ pub(super) struct McpDesiredState {
 }
 
 impl Session {
+    pub(super) fn codex_apps_execution_auth(
+        desired: &McpDesiredState,
+    ) -> codex_mcp::CodexAppsExecutionAuth {
+        let auth = desired
+            .execution_snapshot
+            .auth
+            .clone()
+            .filter(CodexAuth::uses_codex_backend);
+        codex_mcp::CodexAppsExecutionAuth {
+            tools_cache_key: auth
+                .as_ref()
+                .map(|auth| connector_runtime_context_key(Some(auth))),
+            auth_provider: auth
+                .as_ref()
+                .map(|_| Arc::clone(&desired.execution_snapshot.auth_provider)),
+            auth_manager: auth
+                .as_ref()
+                .map(|_| Arc::clone(&desired.execution_snapshot.auth_manager)),
+            auth,
+            connection_discriminator: desired
+                .execution_snapshot
+                .cache_identity
+                .connection_discriminator(),
+            revision: desired.execution_snapshot.revision,
+        }
+    }
+
     pub(super) fn mcp_inputs_differ(
         &self,
         current: &SessionConfiguration,
@@ -325,33 +352,9 @@ impl Session {
             ready_selected_capability_roots,
             elicitation_reviewer,
         );
-        let execution_auth = desired
-            .execution_snapshot
-            .auth
-            .clone()
-            .filter(CodexAuth::uses_codex_backend);
         self.services
             .mcp_runtime
-            .replace_with_codex_apps_execution_auth(
-                input,
-                codex_mcp::CodexAppsExecutionAuth {
-                    tools_cache_key: execution_auth
-                        .as_ref()
-                        .map(|auth| connector_runtime_context_key(Some(auth))),
-                    auth_provider: execution_auth
-                        .as_ref()
-                        .map(|_| Arc::clone(&desired.execution_snapshot.auth_provider)),
-                    auth_manager: execution_auth
-                        .as_ref()
-                        .map(|_| Arc::clone(&desired.execution_snapshot.auth_manager)),
-                    auth: execution_auth,
-                    connection_discriminator: desired
-                        .execution_snapshot
-                        .cache_identity
-                        .connection_discriminator(),
-                    revision: desired.execution_snapshot.revision,
-                },
-            )
+            .replace_with_codex_apps_execution_auth(input, Self::codex_apps_execution_auth(desired))
             .await;
         self.services.thread_extension_data.insert(selected_plugins);
     }

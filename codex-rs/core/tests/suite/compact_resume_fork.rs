@@ -84,7 +84,7 @@ fn remove_multi_agent_usage_hint_world_state_section(rollout_path: &Path) -> Res
     let mut removed_section = false;
     let retained = rollout
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .map(|mut line| {

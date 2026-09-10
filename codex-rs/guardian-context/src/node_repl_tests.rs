@@ -20,6 +20,7 @@ fn rendered_text(items: &[UserInput]) -> String {
         .filter_map(|item| match item {
             UserInput::Text { text, .. } => Some(text.as_str()),
             UserInput::Image { .. } => None,
+            _ => panic!("unexpected evidence input: {item:?}"),
         })
         .collect()
 }
@@ -55,6 +56,7 @@ fn multimodal_evidence_caps_distinct_images_at_the_newest_four() {
         .filter_map(|item| match item {
             UserInput::Image { image_url, .. } => Some(image_url.clone()),
             UserInput::Text { .. } => None,
+            _ => panic!("unexpected evidence input: {item:?}"),
         })
         .collect::<Vec<_>>();
     let expected_images = (4..8)

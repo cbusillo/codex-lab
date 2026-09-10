@@ -404,9 +404,7 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
         )
         .expect("create paginated rollout"),
     )?;
-    let mut app_server = crate::start_embedded_app_server_for_picker(&config)
-        .await?
-        .with_startup_config(&config);
+    let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
     app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);
     let next_request_id = app_server.next_request_id;
 

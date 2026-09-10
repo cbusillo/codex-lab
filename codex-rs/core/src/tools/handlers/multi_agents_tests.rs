@@ -10,10 +10,12 @@ use crate::config::PermissionProfileSnapshot;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
+use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
@@ -22,6 +24,7 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -483,7 +486,7 @@ async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "Unknown model `unknown-model` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5, gpt-5.2".to_string()
+            "Unknown model `unknown-model` for spawn_agent. Available models: gpt-6-astra, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5.5".to_string()
         )
     );
     assert!(manager.list_thread_ids().await.is_empty());

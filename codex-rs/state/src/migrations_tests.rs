@@ -231,7 +231,7 @@ async fn thread_attachment_migration_preserves_existing_data() {
         .open_read_write_pool(&sqlite.state_db_path())
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 51)
+    migrator_through(/*version*/ 53)
         .run(&pool)
         .await
         .expect("released thread migrations should apply");
@@ -296,7 +296,29 @@ async fn thread_attachment_migration_preserves_existing_data() {
         )
     );
 
-    let mut released_migrator = migrator_through(/*version*/ 50);
+    let thread_metadata = sqlx::query_as::<_, (Option<String>, Option<bool>)>(
+        "SELECT originator, daybreak_enabled FROM threads WHERE id = ?",
+    )
+    .bind(thread_id)
+    .fetch_one(&pool)
+    .await
+    .expect("new thread metadata should be readable for the released row");
+    assert_eq!(thread_metadata, (None, None));
+    sqlx::query("UPDATE threads SET originator = 'codex-lab', daybreak_enabled = 1 WHERE id = ?")
+        .bind(thread_id)
+        .execute(&pool)
+        .await
+        .expect("migrated thread metadata should remain writable");
+    let thread_metadata = sqlx::query_as::<_, (Option<String>, Option<bool>)>(
+        "SELECT originator, daybreak_enabled FROM threads WHERE id = ?",
+    )
+    .bind(thread_id)
+    .fetch_one(&pool)
+    .await
+    .expect("updated thread metadata should be readable");
+    assert_eq!(thread_metadata, (Some("codex-lab".to_string()), Some(true)));
+
+    let mut released_migrator = migrator_through(/*version*/ 53);
     released_migrator.ignore_missing = true;
     released_migrator
         .run(&pool)

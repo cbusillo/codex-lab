@@ -2093,14 +2093,15 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state(thread_context_enabl
         total_tokens: 80,
         ..TokenUsage::default()
     };
-    assert!(
-        !child_thread
-            .session
-            .clone_history()
-            .await
-            .retained_context()
-            .user_messages_complete(),
-        "V1 forks lack complete retained authorization in both context modes"
+    let child_history = child_thread.session.clone_history().await;
+    assert_eq!(
+        (
+            child_thread.multi_agent_version(),
+            child_history.retained_context().ordered_entries().count(),
+            child_history.retained_context().user_messages_complete(),
+        ),
+        (Some(MultiAgentVersion::V2), 0, thread_context_enabled),
+        "V2 forks keep inherited authorization outside the child's local scope; legacy evidence remains incomplete",
     );
     let turn_context = child_thread.session.new_default_turn().await;
     child_thread

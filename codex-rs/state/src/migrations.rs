@@ -5,22 +5,17 @@ use sqlx::SqlitePool;
 use sqlx::migrate::Migration;
 use sqlx::migrate::Migrator;
 
-/// Versions 36-38 of the state ledger are frozen: released Codex Lab builds
-/// recorded `threads session provenance`, `threads history mode`, and `threads
-/// visible sort indexes` under those versions, so their SQL must stay
-/// byte-for-byte identical or every upgrade fails with `VersionMismatch`.
-/// Migrations imported from upstream snapshots are renumbered onto 39+ instead
-/// of taking the upstream version numbers.
+/// Versions 1-53 of the state ledger are frozen: published Codex Lab lab.6
+/// recorded those SQL checksums, ending with `thread artifacts`. Preserve their
+/// bytes and version numbers so upgrades validate the released ledger.
+/// Upstream migrations use different slots and must be appended after the
+/// downstream ledger: projects recency is 54, originator is 55, Daybreak is 56,
+/// and the attachment rename is 57.
 ///
-/// Databases written by a binary that used the raw upstream numbering for 36-44
-/// are deliberately not repaired: no such build was released, and remapping
-/// them would require rewriting recorded checksums to values the ledger never
-/// produced.
-///
-/// Versions 39 and above are unshipped and may still be rewritten in place.
-/// They must not destroy user data: version 43 originally dropped the agent-job
-/// tables even though the agent-jobs handlers are still `pending_restore`, and
-/// it is now an inert placeholder that holds the slot without deleting rows.
+/// Databases written by unreleased candidates with raw upstream numbering are
+/// not generally repaired. The checksum-gated repairs below cover only the
+/// specific historical candidate layouts they identify.
+/// Version 43 remains an inert placeholder that preserves agent-job rows.
 pub(crate) static STATE_MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 pub(crate) static LOGS_MIGRATOR: Migrator = sqlx::migrate!("./logs_migrations");
 pub(crate) static GOALS_MIGRATOR: Migrator = sqlx::migrate!("./goals_migrations");
@@ -162,9 +157,9 @@ const RETAIN_AGENT_JOBS_DESCRIPTION: &str = "retain agent jobs";
 ///
 /// The SQL is embedded rather than the checksum so the gate is derived the same
 /// way sqlx derives it, and so a reader can see exactly which migration is being
-/// matched. Version 43 was never released -- the shipped ledger stops at 38 --
-/// so this only repairs candidate and development databases built from the #428
-/// restoration branch.
+/// matched. The destructive version 43 was never released; lab.6 shipped its
+/// inert replacement. This repairs only candidate and development databases
+/// built from the historical #428 restoration branch.
 const LEGACY_DROP_AGENT_JOBS_SQL: &str =
     "DROP TABLE IF EXISTS agent_job_items;\nDROP TABLE IF EXISTS agent_jobs;\n";
 

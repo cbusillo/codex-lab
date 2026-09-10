@@ -6834,6 +6834,7 @@ mod tests {
         let item = TurnContextItem {
             turn_id: None,
             root_turn_id: None,
+            disabled_plugin_ids: None,
             cwd: test_path_buf("/tmp").abs(),
             environments: None,
             workspace_roots: None,

@@ -307,13 +307,23 @@ impl McpRuntime {
         reconnect.claimed = false;
     }
 
-    /// Starts fresh connections and returns their complete, refreshed Apps catalog.
-    pub async fn replace_fresh(&self, input: McpRuntimeInput) -> anyhow::Result<Vec<ToolInfo>> {
-        self.publish(
-            input, /*previous*/ None, /*codex_apps_execution_auth*/ None,
-        )
-        .await;
-        self.latest_hard_refresh_codex_apps_tools_cache().await
+    /// Starts fresh connections under one execution-account Apps identity.
+    pub async fn replace_fresh_with_codex_apps_execution_auth(
+        &self,
+        input: McpRuntimeInput,
+        codex_apps_execution_auth: CodexAppsExecutionAuth,
+    ) -> anyhow::Result<Vec<ToolInfo>> {
+        let published = self
+            .publish(
+                input,
+                /*previous*/ None,
+                Some(codex_apps_execution_auth),
+            )
+            .await;
+        published
+            .connections
+            .refresh_codex_apps_tools_for_discovery()
+            .await
     }
 
     async fn publish(
@@ -321,7 +331,7 @@ impl McpRuntime {
         input: McpRuntimeInput,
         previous: Option<&McpConnectionSet>,
         codex_apps_execution_auth: Option<CodexAppsExecutionAuth>,
-    ) {
+    ) -> Arc<PublishedMcpRuntime> {
         let (publish, publication_gate) = McpPublicationGate::pending();
         let config = Arc::clone(&input.config);
         let auth = input.auth.clone();
@@ -355,7 +365,7 @@ impl McpRuntime {
             .event_stream_cancellation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.current.store(Arc::new(PublishedMcpRuntime {
+        let published = Arc::new(PublishedMcpRuntime {
             connections,
             config: Some(config),
             auth,
@@ -365,7 +375,8 @@ impl McpRuntime {
             ready_selected_capability_roots,
             selected_environments,
             cached_binding: Mutex::new(None),
-        }));
+        });
+        self.current.store(Arc::clone(&published));
         let _ = publish.send(true);
         cancellation.event_server_available = hosted_event_server_retained;
         if !hosted_event_server_retained {
@@ -376,6 +387,7 @@ impl McpRuntime {
                 retained.send_replace(());
             }
         }
+        published
     }
 
     /// Ensures the next refresh creates fresh connections for every configured server.
@@ -483,7 +495,7 @@ impl McpRuntime {
         self.current
             .load()
             .codex_apps_execution_revision
-            .is_none_or(|published| published == revision)
+            .is_some_and(|published| published == revision)
     }
 
     /// Detects newly saved credentials for servers whose startup failed authentication.
@@ -956,6 +968,28 @@ mod tests {
         let (publish, gate) = McpPublicationGate::pending();
         drop(publish);
         assert!(!gate.wait().await);
+    }
+
+    #[test]
+    fn execution_revision_match_requires_an_execution_owned_publication() {
+        let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ false);
+        assert!(!runtime.current_codex_apps_execution_revision_matches(7));
+
+        let current = runtime.current.load_full();
+        runtime.current.store(Arc::new(PublishedMcpRuntime {
+            connections: Arc::clone(&current.connections),
+            config: current.config.clone(),
+            auth: current.auth.clone(),
+            auth_token: current.auth_token.clone(),
+            codex_apps_execution_revision: Some(7),
+            plugins_available: current.plugins_available,
+            ready_selected_capability_roots: current.ready_selected_capability_roots.clone(),
+            selected_environments: current.selected_environments.clone(),
+            cached_binding: Mutex::new(None),
+        }));
+
+        assert!(runtime.current_codex_apps_execution_revision_matches(7));
+        assert!(!runtime.current_codex_apps_execution_revision_matches(8));
     }
 
     #[tokio::test]

@@ -49,7 +49,11 @@ pub struct SharedCliOptions {
         long = "approve-for-me",
         alias = "not-so-yolo",
         default_value_t = false,
-        conflicts_with_all = ["sandbox_mode", "dangerously_bypass_approvals_and_sandbox"]
+        conflicts_with_all = [
+            "sandbox_mode",
+            "approval_policy",
+            "dangerously_bypass_approvals_and_sandbox"
+        ]
     )]
     pub auto_review: bool,
 

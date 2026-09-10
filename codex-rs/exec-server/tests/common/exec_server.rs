@@ -106,9 +106,11 @@ impl ExecServerHarness {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::inherit());
         command.kill_on_drop(true);
-        if !command.as_std().get_envs().any(|(key, value)| {
-            matches!(key.to_str(), Some("CODEX_LAB_HOME" | "CODEX_HOME")) && value.is_some()
-        }) {
+        if !command
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| matches!(key.to_str(), Some("CODEX_LAB_HOME")) && value.is_some())
+        {
             command.env("CODEX_LAB_HOME", codex_home.path());
         }
         let mut child = command.spawn()?;

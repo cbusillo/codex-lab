@@ -11,7 +11,8 @@ Two families of inherited jobs mutate OpenAI-owned state:
   calls it -- and every job inside it -- must be pinned to the upstream
   repository.
 * Jobs that publish to an OpenAI-owned external registry or endpoint: the
-  `@openai` npm scope, the `OpenAI.Codex` WinGet manifest via the
+  `@openai` npm scope, the `openai-codex` PyPI packages, the `OpenAI.Codex`
+  WinGet manifest via the
   `openai-oss-forks` winget-pkgs fork, and the developers.openai.com Vercel
   deploy hook. These are found by the fingerprints below rather than by job
   name, so renaming or copying a job cannot drop its guard.
@@ -32,6 +33,14 @@ UPSTREAM_ONLY_WORKFLOWS = ("r2-release.yml",)
 # matches any of these must be pinned to the upstream repository.
 UPSTREAM_OWNED_MUTATIONS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("the @openai npm scope", re.compile(r"""scope\s*:\s*["']?@openai\b""")),
+    (
+        "the openai-codex PyPI packages",
+        re.compile(
+            r"(?=.*pypa/gh-action-pypi-publish@)"
+            r"(?=.*(?<![A-Za-z0-9_.-])openai-codex(?:-cli-bin)?(?![A-Za-z0-9_.-]))",
+            re.DOTALL,
+        ),
+    ),
     ("the OpenAI.Codex WinGet manifest", re.compile(r"\bOpenAI\.Codex\b")),
     ("the openai-oss-forks winget-pkgs fork", re.compile(r"\bopenai-oss-forks\b")),
     ("the WinGet publish credential", re.compile(r"\bWINGET_PUBLISH_PAT\b")),

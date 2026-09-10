@@ -388,6 +388,13 @@ pub(crate) async fn run_turn(
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
+            initial_input_recorder
+                .record(
+                    Arc::clone(&sess),
+                    Arc::clone(&turn_context),
+                    PersistContext::Standard,
+                )
+                .await;
             return Err(err);
         }
         let error = err.to_codex_protocol_error();
@@ -453,7 +460,18 @@ pub(crate) async fn run_turn(
                 .await;
             return Err(err);
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
+                initial_input_recorder
+                    .record(
+                        Arc::clone(&sess),
+                        Arc::clone(&turn_context),
+                        PersistContext::Standard,
+                    )
+                    .await;
+            }
+            return Err(err);
+        }
     };
     // Keep the exact model-visible state used by this turn and its inline compactions.
     let mut world_state = sess

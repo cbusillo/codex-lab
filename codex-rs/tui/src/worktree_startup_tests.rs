@@ -29,6 +29,7 @@ async fn explicit_remote_worktree_rejection_is_snapshotted() -> anyhow::Result<(
         Arg0DispatchPaths::default(),
         LoaderOverrides::default(),
         Some(endpoint),
+        codex_version::ProductIdentity::Codex,
     )
     .await
     .expect_err("managed worktrees require a local session");
@@ -68,10 +69,12 @@ async fn latest_directory_uses_turn_context_and_preserves_fallback() -> anyhow::
 #[tokio::test]
 async fn refreshed_bundle_rechecks_source_during_config_reload() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
+    let config_home = dir.path().join("config-home");
+    let auth_home = dir.path().join("auth-home");
     let source = dir.path().join("source");
     let nested = source.join(".codex");
     let destination = dir.path().join("checkout");
-    for path in [&nested, &destination] {
+    for path in [&nested, &destination, &config_home, &auth_home] {
         std::fs::create_dir_all(path)?;
     }
     let mut loader_overrides = LoaderOverrides::without_managed_config_for_tests();
@@ -101,7 +104,11 @@ async fn refreshed_bundle_rechecks_source_during_config_reload() -> anyhow::Resu
         cwd: Some(destination),
         ..Default::default()
     };
-    crate::load_config_with_worktree_source_policy(
+    let loaded = crate::load_config_with_worktree_source_policy(
+        ConfigHomes {
+            codex_home: config_home.clone(),
+            auth_home: auth_home.clone(),
+        },
         Vec::new(),
         overrides.clone(),
         loader_overrides.clone(),
@@ -111,6 +118,33 @@ async fn refreshed_bundle_rechecks_source_during_config_reload() -> anyhow::Resu
         Some(&worktree),
     )
     .await?;
+    assert_eq!(loaded.codex_home.as_path(), config_home.as_path());
+    assert_eq!(loaded.auth_home.as_path(), auth_home.as_path());
+    std::fs::write(
+        config_home.join("config.toml"),
+        format!(
+            "[projects.{}]\ntrust_level = \"untrusted\"\n",
+            serde_json::to_string(&codex_config::loader::project_trust_key(&nested))?
+        ),
+    )?;
+    let mut user_config_loader = loader_overrides.clone();
+    user_config_loader.ignore_user_config = false;
+    let err = crate::load_config_with_worktree_source_policy(
+        ConfigHomes {
+            codex_home: config_home.clone(),
+            auth_home: auth_home.clone(),
+        },
+        Vec::new(),
+        overrides.clone(),
+        user_config_loader,
+        CloudConfigBundleLoader::default(),
+        /*strict_config*/ false,
+        /*fallback_cwd*/ None,
+        Some(&worktree),
+    )
+    .await
+    .expect_err("source distrust must be read from the selected config home");
+    assert!(err.to_string().contains("explicitly untrusted source"));
     let refreshed =
         codex_config::test_support::CloudConfigBundleFixture::loader_with_enterprise_config(
             format!(
@@ -119,6 +153,10 @@ async fn refreshed_bundle_rechecks_source_during_config_reload() -> anyhow::Resu
             ),
         );
     let err = crate::load_config_with_worktree_source_policy(
+        ConfigHomes {
+            codex_home: config_home.clone(),
+            auth_home: auth_home.clone(),
+        },
         Vec::new(),
         overrides,
         loader_overrides,

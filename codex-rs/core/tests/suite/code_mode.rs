@@ -5167,6 +5167,7 @@ await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated"
 #[test_case("node_repl", true, true, false, Some("unbounded"); "text_fallback_without_context_bound")]
 #[test_case("node_repl", true, true, false, Some("small"); "text_fallback_with_insufficient_context")]
 #[test_case("node_repl", true, true, false, Some("large_prompt"); "images_resume_after_prompt_pressure")]
+#[test_case("node_repl", true, true, false, Some("image_cap"); "retains_newest_bounded_images")]
 #[test_case("node_repl", true, true, false, Some("compaction"); "multimodal_reviewer_compaction_preserves_evidence")]
 #[test_case("cua_repl", false, false, false, None; "cua_disabled")]
 #[test_case("cua_repl", true, false, false, None; "cua_manually_enabled_text_only")]
@@ -5176,6 +5177,7 @@ await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated"
 #[test_case("cua_repl", true, true, false, Some("unbounded"); "cua_text_fallback_without_context_bound")]
 #[test_case("cua_repl", true, true, false, Some("small"); "cua_text_fallback_with_insufficient_context")]
 #[test_case("cua_repl", true, true, false, Some("large_prompt"); "cua_images_resume_after_prompt_pressure")]
+#[test_case("cua_repl", true, true, false, Some("image_cap"); "cua_retains_newest_bounded_images")]
 async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     repl_server: &'static str,
     enhanced_transcripts: bool,
@@ -5200,10 +5202,38 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     let mcp_server_bin = remote_aware_stdio_server_bin()?;
     let reviewer_compaction = reviewer_constraint == Some("compaction");
     let check_detail = enhanced_transcripts && transcript_images && reviewer_constraint.is_none();
+    let check_image_cap = reviewer_constraint == Some("image_cap");
     let mut large_image = Cursor::new(Vec::new());
     if check_detail {
         DynamicImage::new_rgba8(/*w*/ 2049, /*h*/ 32)
             .write_to(&mut large_image, ImageFormat::Png)?;
+    }
+    let prompt_pressure_image_urls = if reviewer_constraint == Some("large_prompt") {
+        [(3200, 3200), (1024, 1024)]
+            .into_iter()
+            .map(|(width, height)| {
+                let mut encoded = Cursor::new(Vec::new());
+                DynamicImage::new_rgba8(width, height).write_to(&mut encoded, ImageFormat::Png)?;
+                Ok(format!(
+                    "data:image/png;base64,{}",
+                    BASE64_STANDARD.encode(encoded.into_inner())
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    let mut image_cap_urls = Vec::new();
+    if check_image_cap {
+        for index in 0..7 {
+            let image = ImageBuffer::from_pixel(1, 1, Rgba([index, 0, 0, 255]));
+            let mut encoded = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(image).write_to(&mut encoded, ImageFormat::Png)?;
+            image_cap_urls.push(format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(encoded.into_inner())
+            ));
+        }
     }
     let mut builder = test_codex()
         .with_model_info_override("gpt-5.5", move |model| {
@@ -5212,7 +5242,10 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
         .with_config(move |config| {
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
             config.approvals_reviewer = ApprovalsReviewer::AutoReview;
-            if reviewer_constraint.is_some_and(|value| value != "large_prompt") || check_detail {
+            if reviewer_constraint
+                .is_some_and(|value| !matches!(value, "large_prompt" | "image_cap"))
+                || check_detail
+            {
                 let reviewer = config
                     .model_catalog
                     .as_mut()
@@ -5247,6 +5280,12 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
                     .features
                     .enable(Feature::TokenBudget)
                     .expect("enable token budget");
+            }
+            if reviewer_constraint == Some("large_prompt") {
+                config
+                    .features
+                    .enable(Feature::UnifiedImageBudget)
+                    .expect("enable unified image budget");
             }
             config
                 .features
@@ -5284,8 +5323,11 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
     let test = builder.build_with_auto_env(&server).await?;
     wait_for_mcp_server(&test.codex, repl_server).await?;
     let images_enabled = auto_review_required || (enhanced_transcripts && transcript_images);
-    let reviewer_images = images_enabled && (reviewer_constraint.is_none() || reviewer_compaction);
-    let snapshot_padding = if images_enabled && reviewer_constraint != Some("large_prompt") {
+    let reviewer_images =
+        images_enabled && (reviewer_constraint.is_none() || reviewer_compaction || check_image_cap);
+    let snapshot_padding = if check_image_cap {
+        10_000
+    } else if images_enabled && reviewer_constraint != Some("large_prompt") {
         2_500
     } else {
         10_000
@@ -5302,6 +5344,31 @@ async fn code_mode_node_repl_text_evidence_is_visible_only_to_guardian(
         })
         .to_string()
     };
+    let image_cap_calls = if check_image_cap {
+        image_cap_urls
+            .iter()
+            .chain(image_cap_urls.last())
+            .map(|url| {
+                format!(
+                    r#"await tools.mcp__{repl_server}__image_scenario({{ scenario: "image_only", data_url: {} }});"#,
+                    serde_json::to_string(url).expect("serialize image data URL")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    };
+    let prompt_pressure_call = prompt_pressure_image_urls
+        .iter()
+        .map(|url| {
+            format!(
+                r#"await tools.mcp__{repl_server}__image_scenario({{ scenario: "image_only", data_url: {} }});"#,
+                serde_json::to_string(url).expect("serialize prompt pressure image data URL")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     let code = r#"
 await tools.mcp__node_repl_echo({ message: "guardian-hidden-unrelated-result" });
@@ -5311,7 +5378,9 @@ await tools.mcp__node_repl__echo({ message: ["guardian-visible-other-", "tool-re
 await tools.mcp__node_repl__encrypted_output({});
 await tools.mcp__node_repl__js({ code: 'nodeRepl.empty()' });
 await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
+PROMPT_PRESSURE_CALL
 if (LARGE_IMAGE) await tools.mcp__node_repl__image_scenario({ scenario: "invalid_image_bytes_then_image" });
+IMAGE_CAP_CALLS
 await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated", justification: "review" });
 if (!REVIEWER_COMPACTION) await tools.mcp__node_repl__js({ code: 'await nodeRepl.emitImage(await tab.screenshot())' });
 if (LARGE_IMAGE) await tools.mcp__node_repl__image({});
@@ -5320,7 +5389,9 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     .replace("node_repl", repl_server)
     .replace("SNAPSHOT_PADDING", &snapshot_padding.to_string())
     .replace("REVIEWER_COMPACTION", &reviewer_compaction.to_string())
-    .replace("LARGE_IMAGE", &check_detail.to_string());
+    .replace("LARGE_IMAGE", &check_detail.to_string())
+    .replace("IMAGE_CAP_CALLS", &image_cap_calls)
+    .replace("PROMPT_PRESSURE_CALL", &prompt_pressure_call);
     let response_mock = responses::mount_sse_sequence(&server, {
         let mut response_bodies = vec![
             sse(vec![
@@ -5411,9 +5482,17 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     }
     let guardian_request = guardian_requests[0];
     let reviewer_image_urls = guardian_request.message_input_image_urls("user");
-    let expected_images = usize::from(reviewer_images) + usize::from(check_detail);
+    let expected_images = if check_image_cap {
+        4
+    } else {
+        usize::from(reviewer_images) + usize::from(check_detail)
+    };
     assert_eq!(reviewer_image_urls.len(), expected_images);
-    if reviewer_images {
+    if check_image_cap {
+        assert_eq!(reviewer_image_urls, image_cap_urls[3..].to_vec());
+        assert!(guardian_text.contains("<omitted node_repl_images=\"4\""));
+        assert!(guardian_text.contains("<omitted node_repl_responses="));
+    } else if reviewer_images {
         assert_eq!(reviewer_image_urls[0], PRIVATE_IMAGE);
         let reviewer_user_content = guardian_request
             .inputs_of_type("message")
@@ -5495,8 +5574,23 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         }
     }
     let parent_request = requests.last().expect("parent turn should complete");
-    let parent_input = serde_json::to_string(&parent_request.input())?;
-    assert!(!parent_input.contains("data:image/png;base64,"));
+    let parent_input = parent_request.input();
+    let mut pending_values = parent_input.iter().collect::<Vec<_>>();
+    let mut contains_parent_image = false;
+    while let Some(value) = pending_values.pop() {
+        match value {
+            Value::Array(values) => pending_values.extend(values),
+            Value::Object(object) => {
+                contains_parent_image |=
+                    object.get("type").and_then(Value::as_str) == Some("input_image");
+                pending_values.extend(object.values());
+            }
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+        }
+    }
+    assert!(!contains_parent_image);
+    let parent_input = serde_json::to_string(&parent_input)?;
+    assert!(!parent_input.contains(PRIVATE_IMAGE));
     assert!(!parent_input.contains("guardian-visible-before-image"));
     assert!(!parent_input.contains("guardian-visible-after-image"));
     assert!(

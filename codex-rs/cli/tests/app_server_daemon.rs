@@ -53,7 +53,7 @@ impl TestDaemon {
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.codex);
-        command.env("CODEX_HOME", self.home.path());
+        command.env("CODEX_LAB_HOME", self.home.path());
         command
     }
 

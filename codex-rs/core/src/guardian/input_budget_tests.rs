@@ -55,17 +55,13 @@ async fn cancelled_startup_does_not_record_unselected_review_evidence() {
             ),
         )
         .await;
-    session
-        .spawn_task(
-            turn,
-            vec![TurnInput::UserInput {
-                acceptance_order: None,
-                content,
-                client_id: None,
-            }],
-            crate::tasks::RegularTask::new(),
-        )
-        .await;
+    let input = vec![TurnInput::UserInput {
+        acceptance_order: None,
+        content,
+        client_id: None,
+    }];
+    let task = crate::tasks::RegularTask::new(&input);
+    session.spawn_task(turn, input, task).await;
     let started = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
         .await
         .unwrap()

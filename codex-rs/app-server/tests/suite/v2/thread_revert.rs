@@ -54,13 +54,18 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[test_case::test_case(false; "live_reload")]
 #[test_case::test_case(true; "cold_resume")]
 #[tokio::test]
-async fn thread_revert_preserves_model_selected_multi_agent_version(restart: bool) -> Result<()> {
+async fn thread_revert_preserves_resolved_multi_agent_version(restart: bool) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
+    let expected_namespace = config
+        .multi_agent_v2
+        .tool_namespace
+        .clone()
+        .expect("enabled multi-agent v2 namespace");
     let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
     write_models_cache_with_models(codex_home.path(), vec![model]).await?;
@@ -136,14 +141,17 @@ async fn thread_revert_preserves_model_selected_multi_agent_version(restart: boo
                 .expect("tools")
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
-                .filter(|name| matches!(*name, "collaboration" | "multi_agent_v1"))
+                .filter(|name| *name == expected_namespace.as_str() || *name == "multi_agent_v1")
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         );
     }
     assert_eq!(
         multi_agent_namespaces,
-        vec![vec!["collaboration"], vec!["collaboration"]]
+        vec![
+            vec![expected_namespace.clone()],
+            vec![expected_namespace.clone()]
+        ]
     );
     Ok(())
 }

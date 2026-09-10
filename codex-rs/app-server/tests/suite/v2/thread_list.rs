@@ -1351,6 +1351,7 @@ fn thread_list_params_with_relations(
         sort_direction: None,
         model_providers: None,
         source_kinds: None,
+        originators: None,
         archived: None,
         section_id: None,
         project_id: None,

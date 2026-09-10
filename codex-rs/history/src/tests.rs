@@ -291,7 +291,7 @@ fn response_item_envelope_preserves_harness_authored_configuration_provenance() 
 
 #[test]
 /// Keeps future metadata fields from making older binaries reject persisted items.
-fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()> {
+fn response_item_envelope_preserves_unknown_harness_metadata_fields() -> Result<()> {
     let line = serde_json::from_value(json!({
         "timestamp": "2025-01-03T12:00:00.000Z",
         "ordinal": 7,
@@ -312,7 +312,13 @@ fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()
     let RolloutItem::ResponseItem(envelope) = line else {
         panic!("expected response item");
     };
-    assert_eq!(envelope.metadata, Some(CodexHarnessMetadata::default()));
+    assert_eq!(
+        envelope.metadata,
+        Some(CodexHarnessMetadata {
+            additional_fields: [("future_field".to_string(), json!("value"))].into(),
+            ..Default::default()
+        })
+    );
 
     let compacted = serde_json::from_value::<CompactedItem>(json!({
         "message": "summary",
@@ -321,7 +327,10 @@ fn response_item_envelope_ignores_unknown_harness_metadata_fields() -> Result<()
     }))?;
     assert_eq!(
         compacted.replacement_history.expect("replacement history")[0].metadata,
-        Some(CodexHarnessMetadata::default())
+        Some(CodexHarnessMetadata {
+            additional_fields: [("future_field".to_string(), json!("value"))].into(),
+            ..Default::default()
+        })
     );
     Ok(())
 }

@@ -3314,7 +3314,7 @@ async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> 
             ..Default::default()
         },
     )?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     login_with_api_key(
         codex_home.path(),
         "sk-old",
@@ -3380,7 +3380,7 @@ async fn chatgpt_auth_tokens_login_refreshes_auth_for_loaded_thread() -> Result<
             ..Default::default()
         },
     )?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
 
     let initial_access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
@@ -3470,7 +3470,7 @@ async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
             ..Default::default()
         },
     )?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     login_with_api_key(
         codex_home.path(),
         "sk-old",
@@ -3576,7 +3576,7 @@ async fn login_account_api_key_pins_execution_auth_until_pinned_account_is_remov
             ..Default::default()
         },
     )?;
-    write_models_cache(codex_home.path())?;
+    write_models_cache(codex_home.path()).await?;
     add_active_chatgpt_account(codex_home.path(), "leased-account", "access-leased-account")?;
     let leased_account_id =
         codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?

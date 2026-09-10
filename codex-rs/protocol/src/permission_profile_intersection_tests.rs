@@ -117,8 +117,9 @@ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
 
     // Both inputs can grant writes to root through :tmpdir when the canonical
     // fixture path is beneath the raw TMPDIR path.
-    let expected_access = [&root, &project]
-        .map(|path| requested_policy.resolve_access_with_cwd(path.as_path(), root.as_path()));
+    let expected_access = [&root, &project].map(|path| {
+        requested_policy.resolve_access_for_local_path_with_cwd(path.as_path(), root.as_path())
+    });
     assert_eq!(
         [&root, &project]
             .map(|path| policy
@@ -133,8 +134,8 @@ fn effective_workspace_intersection_preserves_network_metadata_and_temp() {
         .entries
         .retain(|entry| entry.path != FileSystemPath::Special { value: Tmpdir });
     assert_eq!(
-        [&root, &project]
-            .map(|path| workspace_policy.resolve_access_with_cwd(path.as_path(), root.as_path())),
+        [&root, &project].map(|path| workspace_policy
+            .resolve_access_for_local_path_with_cwd(path.as_path(), root.as_path())),
         [Read, Write]
     );
     for name in [".git", ".agents", ".codex"] {

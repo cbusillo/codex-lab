@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::config_manager::ConfigManager;
+use crate::config_manager::ConfigManagerArgs;
 use crate::message_processor::ConnectionSessionState;
 use crate::message_processor::MessageProcessor;
 use crate::message_processor::MessageProcessorArgs;
@@ -130,15 +131,16 @@ impl Harness {
             device_supported: supported,
             worker: Arc::new(Semaphore::new(/*permits*/ 1)),
         });
-        let config_manager = ConfigManager::new(
-            home.path().into(),
-            Vec::new(),
-            LoaderOverrides::default(),
-            /*strict_config*/ false,
-            CloudConfigBundleLoader::default(),
-            Arg0DispatchPaths::default(),
-            Arc::new(codex_config::NoopThreadConfigLoader),
-        );
+        let config_manager = ConfigManager::new(ConfigManagerArgs {
+            codex_home: config.codex_home.to_path_buf(),
+            auth_home: config.auth_home.to_path_buf(),
+            cli_overrides: Vec::new(),
+            loader_overrides: LoaderOverrides::default(),
+            strict_config: false,
+            cloud_config_bundle: CloudConfigBundleLoader::default(),
+            arg0_paths: Arg0DispatchPaths::default(),
+            thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+        });
         let (sender, messages) = mpsc::channel(/*buffer*/ 16);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             sender,

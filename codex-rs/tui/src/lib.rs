@@ -2064,8 +2064,8 @@ async fn load_config_with_worktree_source_policy(
     worktree: Option<&ManagedTuiWorktree>,
 ) -> std::io::Result<Config> {
     let config = ConfigBuilder::default()
-        .codex_home(homes.codex_home)
-        .auth_home(homes.auth_home)
+        .codex_home(homes.codex_home.clone())
+        .auth_home(homes.auth_home.clone())
         .cli_overrides(cli_kv_overrides.clone())
         .harness_overrides(overrides.clone())
         .loader_overrides(loader_overrides.clone())
@@ -2078,6 +2078,7 @@ async fn load_config_with_worktree_source_policy(
     if let Some(worktree) = worktree {
         worktree
             .check_source_policy(
+                &homes,
                 &cli_kv_overrides,
                 &overrides,
                 &loader_overrides,
@@ -2235,6 +2236,16 @@ requires_openai_auth = {requires_openai_auth}
             assert!(!should_show_login_screen(
                 LoginStatus::AuthMode(AuthMode::Chatgpt),
                 account.requires_openai_auth
+            ));
+            assert!(should_show_onboarding(
+                LoginStatus::AuthMode(AuthMode::Chatgpt),
+                account.requires_openai_auth,
+                /*show_trust_screen*/ true,
+            ));
+            assert!(!should_show_onboarding(
+                LoginStatus::AuthMode(AuthMode::Chatgpt),
+                account.requires_openai_auth,
+                /*show_trust_screen*/ false,
             ));
             server.shutdown().await?;
         }
@@ -3624,6 +3635,92 @@ requires_openai_auth = {requires_openai_auth}
                 serde_json::from_value(serde_json::json!("cli"))
                     .expect("cli session source should deserialize"),
             );
+            builder.cwd = session_cwd;
+            let mut metadata = builder.build(config.model_provider_id.as_str());
+            metadata.title = "saved-session".to_string();
+            metadata.first_user_message = Some("preview text".to_string());
+            state_runtime
+                .upsert_thread(&metadata)
+                .await
+                .map_err(std::io::Error::other)?;
+
+            let mut app_server = AppServerSession::new(
+                codex_app_server_client::AppServerClient::InProcess(
+                    start_test_embedded_app_server(config.clone()).await?,
+                ),
+                ThreadParamsMode::Embedded,
+            );
+            let target =
+                lookup_session_target_with_app_server(&mut app_server, &config, "saved-session")
+                    .await?;
+            let target = target.expect("name lookup should find the saved thread");
+            assert_eq!(target.path, Some(rollout_path.clone()));
+            assert_eq!(target.thread_id, thread_id);
+
+            let target = lookup_session_target_with_app_server(
+                &mut app_server,
+                &config,
+                &thread_id.to_string(),
+            )
+            .await?
+            .expect("ID lookup should find the saved thread");
+            assert_eq!(target.path, Some(rollout_path));
+            assert_eq!(target.thread_id, thread_id);
+
+            assert!(
+                lookup_session_target_with_app_server(&mut app_server, &config, "missing-session",)
+                    .await?
+                    .is_none()
+            );
+
+            app_server.shutdown().await?;
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn resume_picker_loads_complete_paginated_and_legacy_transcripts()
+    -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut config = build_config(&temp_dir).await?;
+        config.terminal_resize_reflow.max_rows =
+            crate::legacy_core::config::TerminalResizeReflowMaxRows::Limit(2);
+        let mut app_server = AppServerSession::new(
+            AppServerClient::InProcess(start_test_embedded_app_server(config.clone()).await?),
+            ThreadParamsMode::Embedded,
+        );
+        let filename_ts = "2025-01-05T12-00-00";
+        let rollout_line = |ordinal: usize, payload: serde_json::Value| {
+            serde_json::json!({
+                "timestamp": "2025-01-05T12:00:00Z",
+                "type": "event_msg",
+                "payload": payload,
+                "ordinal": ordinal,
+            })
+        };
+        for (history_mode, create_rollout) in [
+            app_test_support::create_fake_rollout,
+            app_test_support::create_fake_paginated_rollout,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let thread_id = create_rollout(
+                temp_dir.path(),
+                filename_ts,
+                "2025-01-05T12:00:00Z",
+                "message 0",
+                Some(config.model_provider_id.as_str()),
+                /*git_info*/ None,
+            )
+            .expect("create session rollout");
+            let path = app_test_support::rollout_path(temp_dir.path(), filename_ts, &thread_id);
+            let mut contents = std::fs::read_to_string(&path)?;
+            let started = rollout_line(
+                /*ordinal*/ 3,
+                serde_json::json!({ "type": "task_started", "turn_id": "history-turn", "model_context_window": null }),
+            );
             contents.push_str(&format!("{started}\n"));
             for index in 0..=100 {
                 let message = format!("message {index}");
@@ -3682,31 +3779,22 @@ requires_openai_auth = {requires_openai_auth}
                 let preview = crate::resume_picker::load_transcript_preview(
                     &mut app_server,
                     thread_id,
-                    /*config*/ None,
+                    Some(&config),
                 )
                 .await?;
                 assert!(!preview.is_empty());
             }
             let cells = crate::thread_transcript::load_session_transcript(
                 &mut app_server,
-                &config,
-                &thread_id.to_string(),
+                thread_id,
+                crate::thread_transcript::RawReasoningVisibility::Hidden,
+                Some(&config),
             )
-            .await?
-            .expect("ID lookup should find the saved thread");
-            assert_eq!(target.path, Some(rollout_path));
-            assert_eq!(target.thread_id, thread_id);
-
-            assert!(
-                lookup_session_target_with_app_server(&mut app_server, &config, "missing-session",)
-                    .await?
-                    .is_none()
-            );
-
-            app_server.shutdown().await?;
-            Ok(())
-        })
-        .await
+            .await?;
+            assert!(cells.len() > 100);
+        }
+        app_server.shutdown().await?;
+        Ok(())
     }
 
     #[tokio::test]

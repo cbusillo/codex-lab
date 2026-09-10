@@ -829,11 +829,11 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
 
     let codex_home = TempDir::new()?;
     let cache_path = codex_home.path().join("models_cache.json");
+    write_models_cache(codex_home.path()).await?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::Personality)
         .with_root_config(&format!("model_catalog_json = {cache_path:?}"))
         .write(codex_home.path())?;
-    write_models_cache(codex_home.path()).await?;
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
     let models = cache["models"]
@@ -4028,6 +4028,7 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
     ];
     let server = create_mock_responses_server_sequence(responses).await;
     let cache_path = codex_home.join("models_cache.json");
+    write_models_cache(&codex_home).await?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::ApplyPatchStreamingEvents)
         .disable_feature(Feature::Plugins)
@@ -4035,7 +4036,6 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
         .disable_feature(Feature::ShellSnapshot)
         .with_root_config(&format!("model_catalog_json = {cache_path:?}"))
         .write(&codex_home)?;
-    write_models_cache(&codex_home).await?;
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
     let models = cache["models"]

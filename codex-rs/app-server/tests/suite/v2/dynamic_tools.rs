@@ -606,10 +606,10 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
         codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model_info.input_modalities.push(InputModality::Audio);
     let cache_path = codex_home.path().join("models_cache.json");
+    write_models_cache_with_models(codex_home.path(), vec![model_info]).await?;
     MockResponsesConfig::new(&server.uri())
         .with_root_config(&format!("model_catalog_json = {cache_path:?}"))
         .write(codex_home.path())?;
-    write_models_cache_with_models(codex_home.path(), vec![model_info]).await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
