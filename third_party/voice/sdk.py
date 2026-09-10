@@ -23,6 +23,7 @@ MODULES = (
     "gstreamer-audio-1.0",
     "gstreamer-tag-1.0",
 )
+PKG_CONFIG_MODULES = (*MODULES, "libffi", "libpcre2-8", "zlib")
 
 
 def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
@@ -79,11 +80,7 @@ def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
         if not (
             name.startswith("include/")
             or name == "lib/glib-2.0/include/glibconfig.h"
-            or name
-            in {
-                f"lib/pkgconfig/{module}.pc"
-                for module in (*MODULES, "libffi", "libpcre2-8", "zlib")
-            }
+            or name in {f"lib/pkgconfig/{module}.pc" for module in PKG_CONFIG_MODULES}
             or re.fullmatch(
                 r"lib/[A-Za-z0-9_+.-]+\.(?:a|lib|dylib|so(?:\.[0-9]+)*)", name
             )
@@ -104,12 +101,19 @@ def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
             if binaries.get(source_name) != expected:
                 raise ValueError("SDK shared library is missing from the receipt")
         selected.append((name, source, expected))
-    for module in MODULES:
+    for module in PKG_CONFIG_MODULES:
         path = prefix / f"lib/pkgconfig/{module}.pc"
-        if path.relative_to(prefix).as_posix().casefold() not in names or not re.search(
-            r"^prefix=\$\{pcfiledir\}/\.\./\.\.$", path.read_text(), re.MULTILINE
+        contents = path.read_text() if path.is_file() else ""
+        exec_prefixes = re.findall(r"^exec_prefix=(.*)$", contents, re.MULTILINE)
+        if (
+            path.relative_to(prefix).as_posix().casefold() not in names
+            or not re.search(
+                r"^prefix=\$\{pcfiledir\}/\.\./\.\.$", contents, re.MULTILINE
+            )
+            or len(exec_prefixes) > 1
+            or any(value != "${prefix}" for value in exec_prefixes)
         ):
-            raise ValueError("rebuild the SDK with relocatable Meson pkg-config files")
+            raise ValueError("rebuild the SDK with relocatable pkg-config metadata")
     if "lib/glib-2.0/include/glibconfig.h" not in names:
         raise ValueError("SDK is missing the target's GLib configuration header")
     output.mkdir()

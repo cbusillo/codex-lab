@@ -320,6 +320,70 @@ class NativeBuildTests(unittest.TestCase):
         self.assertFalse(any("/ambient" in value for value in environment.values()))
         self.assertEqual(environment["PKG_CONFIG_PATH"], "")
 
+    def test_pkg_config_metadata_is_relocated_only_from_the_build_prefix(self):
+        build = NativeBuild(self.args, self.environment)
+        metadata = build.prefix / "lib/pkgconfig"
+        metadata.mkdir(parents=True)
+        generated = metadata / "generated.pc"
+        generated.write_text(
+            f"prefix={build.prefix}\n"
+            f"exec_prefix={build.prefix}\n"
+            "libdir=${exec_prefix}/lib\n"
+            "includedir=${prefix}/include\n"
+            "Name: generated\n"
+        )
+        opus = metadata / "opus.pc"
+        opus.write_text(
+            f"prefix={build.prefix}\n"
+            f"exec_prefix={build.prefix}\n"
+            f"libdir={build.prefix}/lib\n"
+            f"includedir={build.prefix}/include\n"
+            "Name: Opus\n"
+            f"Libs: -L{build.prefix}/lib -lopus\n"
+            f"Cflags: -I{build.prefix}/include/opus\n"
+        )
+        already_relocatable = metadata / "relocatable.pc"
+        already_relocatable.write_text(
+            "prefix=${pcfiledir}/../..\nlibdir=${prefix}/lib\nName: relocatable\n"
+        )
+
+        build.relocate_pkg_config_metadata()
+
+        self.assertEqual(
+            generated.read_text(),
+            "prefix=${pcfiledir}/../..\n"
+            "exec_prefix=${prefix}\n"
+            "libdir=${exec_prefix}/lib\n"
+            "includedir=${prefix}/include\n"
+            "Name: generated\n",
+        )
+        self.assertEqual(
+            opus.read_text(),
+            "prefix=${pcfiledir}/../..\n"
+            "exec_prefix=${prefix}\n"
+            "libdir=${exec_prefix}/lib\n"
+            "includedir=${prefix}/include\n"
+            "Name: Opus\n"
+            "Libs: -L${libdir} -lopus\n"
+            "Cflags: -I${includedir}/opus\n",
+        )
+        self.assertEqual(
+            already_relocatable.read_text(),
+            "prefix=${pcfiledir}/../..\nlibdir=${prefix}/lib\nName: relocatable\n",
+        )
+
+        generated.write_text("prefix=/unrelated/sdk\nName: generated\n")
+        with self.assertRaisesRegex(ValueError, "unexpected prefix"):
+            build.relocate_pkg_config_metadata()
+
+        generated.write_text(
+            "prefix=${pcfiledir}/../..\n"
+            f"Cflags: -I{build.prefix}/include\n"
+            "Name: generated\n"
+        )
+        with self.assertRaisesRegex(ValueError, "unexpected prefix"):
+            build.relocate_pkg_config_metadata()
+
     def test_meson_receives_private_link_inputs_with_spaces(self):
         if platform.system() == "Darwin":
             self.args.cc = Path(shutil.which("cc"))

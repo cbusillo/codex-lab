@@ -321,6 +321,85 @@ class NativeBuild:
             name + "-install", [*meson, "install", "-C", directory, "--no-rebuild"]
         )
 
+    def relocate_pkg_config_metadata(self):
+        directory = self.prefix / "lib/pkgconfig"
+        build_prefixes = {
+            str(self.prefix),
+            self.prefix.as_posix(),
+            self.posix_path(self.prefix),
+        }
+        build_paths = {
+            "prefix": build_prefixes,
+            "exec_prefix": build_prefixes,
+            "libdir": {
+                str(self.prefix / "lib"),
+                (self.prefix / "lib").as_posix(),
+                self.posix_path(self.prefix / "lib"),
+            },
+            "includedir": {
+                str(self.prefix / "include"),
+                (self.prefix / "include").as_posix(),
+                self.posix_path(self.prefix / "include"),
+            },
+        }
+        replacements = {
+            "prefix": "${pcfiledir}/../..",
+            "exec_prefix": "${prefix}",
+            "libdir": "${exec_prefix}/lib",
+            "includedir": "${prefix}/include",
+        }
+        updates = {}
+        for metadata in sorted(directory.glob("*.pc")):
+            lines = metadata.read_text().splitlines(keepends=True)
+            prefixes = [
+                index for index, line in enumerate(lines) if line.startswith("prefix=")
+            ]
+            if len(prefixes) != 1:
+                raise ValueError(
+                    f"pkg-config metadata must declare one prefix: {metadata}"
+                )
+            for index, line in enumerate(lines):
+                field, separator, value = line.rstrip("\r\n").partition("=")
+                if not separator or field not in replacements:
+                    continue
+                replacement = replacements[field]
+                if value == replacement:
+                    continue
+                if value not in build_paths[field]:
+                    if field != "prefix" and not Path(value).is_absolute():
+                        continue
+                    raise ValueError(
+                        f"pkg-config metadata has an unexpected {field}: {metadata}"
+                    )
+                newline = line[len(line.rstrip("\r\n")) :]
+                lines[index] = f"{field}={replacement}{newline}"
+            if metadata.name == "opus.pc":
+                opus_paths = {
+                    f"Libs: -L{prefix}/lib -lopus": "Libs: -L${libdir} -lopus"
+                    for prefix in build_prefixes
+                }
+                opus_paths.update(
+                    {
+                        f"Cflags: -I{prefix}/include/opus": (
+                            "Cflags: -I${includedir}/opus"
+                        )
+                        for prefix in build_prefixes
+                    }
+                )
+                for index, line in enumerate(lines):
+                    value = line.rstrip("\r\n")
+                    if replacement := opus_paths.get(value):
+                        newline = line[len(value) :]
+                        lines[index] = replacement + newline
+            updated = "".join(lines)
+            if any(build_prefix in updated for build_prefix in build_prefixes):
+                raise ValueError(
+                    f"pkg-config metadata has an unexpected prefix: {metadata}"
+                )
+            updates[metadata] = updated
+        for metadata, updated in updates.items():
+            metadata.write_text(updated)
+
     def build(self):
         self.output.mkdir()
         manifest = MANIFEST.read_bytes()
@@ -525,6 +604,7 @@ class NativeBuild:
             ],
         )
         self.meson("gst-plugins-good", ["-Drtp=enabled", "-Drtpmanager=enabled"])
+        self.relocate_pkg_config_metadata()
         (self.output / "built.json").write_text(
             json.dumps(self.record, indent=2) + "\n", encoding="utf-8"
         )

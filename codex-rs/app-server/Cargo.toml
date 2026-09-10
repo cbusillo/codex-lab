@@ -32,7 +32,6 @@ ignored-paths = [
     "tests/suite/v2/external_agent_import_sync.rs",
     "tests/suite/v2/model_auto_review.rs",
     "tests/suite/v2/otel.rs",
-    "tests/suite/v2/plugin_search.rs",
     "tests/suite/v2/rollout_migration.rs",
     "tests/suite/v2/server_diagnostics.rs",
     "tests/suite/v2/thread_sections.rs",

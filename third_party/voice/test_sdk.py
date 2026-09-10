@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from runtime import digest
-from sdk import MODULES, export_sdk
+from sdk import PKG_CONFIG_MODULES, export_sdk
 
 
 class SdkTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class SdkTests(unittest.TestCase):
         (self.prefix / "lib/glib-2.0/include/glibconfig.h").write_text("/* target */")
         self.library = self.prefix / "lib/libfixture.0.dylib"
         self.library.write_bytes(b"receipt-verified fixture bytes")
-        for module in (*MODULES, "zlib"):
+        for module in PKG_CONFIG_MODULES:
             (self.prefix / f"lib/pkgconfig/{module}.pc").write_text(
                 "prefix=${pcfiledir}/../..\n"
                 f"Name: {module}\nDescription: SDK fixture\nVersion: 1.0\n"
@@ -38,6 +38,13 @@ class SdkTests(unittest.TestCase):
         audio = self.prefix / "lib/pkgconfig/gstreamer-audio-1.0.pc"
         audio.write_text(
             audio.read_text() + "Requires.private: gstreamer-tag-1.0, zlib\n"
+        )
+        zlib = self.prefix / "lib/pkgconfig/zlib.pc"
+        zlib.write_text(
+            zlib.read_text().replace(
+                "Libs: -L${prefix}/lib",
+                "exec_prefix=${prefix}\nLibs: -L${exec_prefix}/lib",
+            )
         )
         (self.receipts / "inspection").mkdir(parents=True)
         self.ci = {
@@ -134,12 +141,20 @@ class SdkTests(unittest.TestCase):
             export_sdk(self.prefix, self.receipts, self.target, self.output)
 
     def test_nonrelocatable_metadata_and_failed_copy_leave_no_output(self):
-        metadata = self.prefix / "lib/pkgconfig/gstreamer-1.0.pc"
-        original = metadata.read_text()
-        metadata.write_text(original.replace("${pcfiledir}/../..", "/old/build"))
-        with self.assertRaisesRegex(ValueError, "rebuild the SDK"):
-            export_sdk(self.prefix, self.receipts, self.target, self.output)
-        metadata.write_text(original)
+        for module, field in (
+            ("gstreamer-1.0", "prefix=${pcfiledir}/../.."),
+            ("zlib", "exec_prefix=${prefix}"),
+        ):
+            with self.subTest(module=module):
+                metadata = self.prefix / f"lib/pkgconfig/{module}.pc"
+                original = metadata.read_text()
+                metadata.write_text(
+                    original.replace(field, f"{field.partition('=')[0]}=/old/build")
+                )
+                with self.assertRaisesRegex(ValueError, "rebuild the SDK"):
+                    export_sdk(self.prefix, self.receipts, self.target, self.output)
+                metadata.write_text(original)
+                self.assertFalse(self.output.exists())
         with patch("sdk.shutil.copy2", side_effect=OSError("copy failed")):
             with self.assertRaises(OSError):
                 export_sdk(self.prefix, self.receipts, self.target, self.output)

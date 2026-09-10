@@ -327,6 +327,18 @@
       "id": "VALIDATION-1",
       "evidence": [
         {
+          "kind": "symbol",
+          "path": "codex-rs/rollout/src/policy.rs",
+          "token": "#[path = \"policy_tests.rs\"]",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/rollout/src/policy_tests.rs",
+          "token": "fn project_validation_dispositions_are_persisted_in_all_history_modes()",
+          "ciTier": "nightly"
+        },
+        {
           "kind": "file",
           "path": "codex-rs/core/tests/suite/project_validation.rs",
           "ciTier": "nightly"

@@ -271,7 +271,7 @@ impl SharedCliOptions {
 }
 
 #[cfg(test)]
-mod tests {
+mod workspace_and_auth_tests {
     use super::*;
     use clap::Parser;
 
