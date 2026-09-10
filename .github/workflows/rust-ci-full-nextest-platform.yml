@@ -348,7 +348,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   shard:
-    name: Tests shard ${{ matrix.shard }}/4
+    name: Tests shard ${{ matrix.shard }}/${{ matrix.partition_count }}
     needs: archive
     runs-on: ${{ inputs.runner }}
     # Slower hosted lanes can approach the former 60-minute wall after reducing
@@ -363,7 +363,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include: ${{ fromJSON(inputs.use_local_resources && '[{"shard":1,"partition_count":1}]' || '[{"shard":1,"partition_count":4},{"shard":2,"partition_count":4},{"shard":3,"partition_count":4},{"shard":4,"partition_count":4}]') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -516,7 +516,7 @@ jobs:
             run
             --archive-file "${archive_file}"
             --workspace-remap "${workspace_root}"
-            --partition "hash:${{ matrix.shard }}/4"
+            --partition "hash:${{ matrix.shard }}/${{ matrix.partition_count }}"
             --no-fail-fast
           )
           if [[ "${{ inputs.test_threads }}" != "0" ]]; then
