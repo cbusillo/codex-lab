@@ -1,7 +1,7 @@
+import json
 import re
 import unittest
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 FULL_CI_WORKFLOW = ROOT / ".github/workflows/full-ci.yml"
@@ -365,6 +365,38 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn("if-no-files-found: error", junit_upload)
         self.assertNotIn(
             'junit_source="${CARGO_TARGET_DIR}/nextest/default/junit.xml"',
+            platform_workflow,
+        )
+
+    def test_nextest_local_mode_uses_one_complete_partition(self) -> None:
+        platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+
+        matrix_match = re.search(
+            r"include: \$\{\{ fromJSON\(inputs\.use_local_resources && '([^']+)' \|\| '([^']+)'\) \}\}",
+            platform_workflow,
+        )
+        self.assertIsNotNone(matrix_match)
+        assert matrix_match is not None
+        local_matrix = json.loads(matrix_match.group(1))
+        hosted_matrix = json.loads(matrix_match.group(2))
+        self.assertEqual(local_matrix, [{"shard": 1, "partition_count": 1}])
+        self.assertEqual(
+            hosted_matrix,
+            [
+                {"shard": shard, "partition_count": 4}
+                for shard in range(1, 5)
+            ],
+        )
+        self.assertEqual(
+            {entry["shard"] for entry in hosted_matrix},
+            set(range(1, 5)),
+        )
+        self.assertIn(
+            '--partition "hash:${{ matrix.shard }}/${{ matrix.partition_count }}"',
+            platform_workflow,
+        )
+        self.assertIn(
+            "name: Tests shard ${{ matrix.shard }}/${{ matrix.partition_count }}",
             platform_workflow,
         )
 

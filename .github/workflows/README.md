@@ -89,8 +89,15 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   Local jobs require hosted actor authorization and
   explicit caller/default-branch checks before they can reach the
   persistent runner. Resource controls serialize heavy commands with the
-  existing shared lock and retain the four-job profile; four nextest partitions
-  remain required, with four test threads per local shard.
+  existing shared lock and retain the 4-job/24576-MiB profile; local nextest
+  runs one complete `hash:1/1` job with four test threads, while hosted
+  execution retains four hash partitions. Rollback is a revert of this
+  matrix selection; `use_local_resources` remains the resource and isolation
+  switch. Local runs trade four-way parallelism for one full-suite retry unit:
+  rerunning a failed local job repeats the complete suite; Nextest still
+  retries individual failed tests once. Hosted shards preserve parallel
+  diagnostic completion. The 90-minute timeout and local resource guards
+  remain in force.
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
   integration tests against that real binary on the trusted Apple Silicon runner.
 - `v8-canary.yml` keeps the Apple Silicon upstream V8 artifact pair visible in
