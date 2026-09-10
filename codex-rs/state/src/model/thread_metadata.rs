@@ -124,6 +124,8 @@ pub struct ExtractionOutcome {
 /// Canonical persisted thread metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMetadata {
+    /// Originator recorded at creation, if available.
+    pub originator: Option<String>,
     /// The thread identifier.
     pub id: ThreadId,
     /// The absolute rollout path on disk.
@@ -182,6 +184,8 @@ pub struct ThreadMetadata {
     pub section_entered_at: Option<DateTime<Utc>>,
     /// Canonical project assignment owned by app-server, if any.
     pub project_id: Option<String>,
+    /// User-selected Daybreak preference, absent until explicitly set.
+    pub daybreak_enabled: Option<bool>,
     /// The git commit SHA, if known.
     pub git_sha: Option<String>,
     /// The git branch name, if known.
@@ -193,6 +197,8 @@ pub struct ThreadMetadata {
 /// Builder data required to construct [`ThreadMetadata`] without parsing filenames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadMetadataBuilder {
+    /// Originator recorded at creation, if available.
+    pub originator: Option<String>,
     /// The thread identifier.
     pub id: ThreadId,
     /// The absolute rollout path on disk.
@@ -251,6 +257,7 @@ impl ThreadMetadataBuilder {
             created_at,
             updated_at: None,
             recency_at: None,
+            originator: None,
             source,
             session_provenance: None,
             history_mode: ThreadHistoryMode::Legacy,
@@ -285,6 +292,7 @@ impl ThreadMetadataBuilder {
             .map(canonicalize_datetime)
             .unwrap_or(updated_at);
         ThreadMetadata {
+            originator: self.originator.clone(),
             id: self.id,
             rollout_path: self.rollout_path.clone(),
             created_at,
@@ -320,6 +328,7 @@ impl ThreadMetadataBuilder {
             section_position: None,
             section_entered_at: None,
             project_id: None,
+            daybreak_enabled: None,
             git_sha: self.git_sha.clone(),
             git_branch: self.git_branch.clone(),
             git_origin_url: self.git_origin_url.clone(),
@@ -389,6 +398,10 @@ impl ThreadMetadata {
         if self.session_provenance != other.session_provenance {
             diffs.push("session_provenance");
         }
+
+        if self.originator != other.originator {
+            diffs.push("originator");
+        }
         if self.agent_nickname != other.agent_nickname {
             diffs.push("agent_nickname");
         }
@@ -449,6 +462,9 @@ impl ThreadMetadata {
         if self.project_id != other.project_id {
             diffs.push("project_id");
         }
+        if self.daybreak_enabled != other.daybreak_enabled {
+            diffs.push("daybreak_enabled");
+        }
         if self.git_sha != other.git_sha {
             diffs.push("git_sha");
         }
@@ -468,6 +484,7 @@ fn canonicalize_datetime(dt: DateTime<Utc>) -> DateTime<Utc> {
 
 #[derive(Debug)]
 pub(crate) struct ThreadRow {
+    originator: Option<String>,
     id: String,
     rollout_path: String,
     created_at: i64,
@@ -499,6 +516,7 @@ pub(crate) struct ThreadRow {
     section_position: Option<i64>,
     section_entered_at_ms: Option<i64>,
     project_id: Option<String>,
+    daybreak_enabled: Option<bool>,
     git_sha: Option<String>,
     git_branch: Option<String>,
     git_origin_url: Option<String>,
@@ -507,6 +525,7 @@ pub(crate) struct ThreadRow {
 impl ThreadRow {
     pub(crate) fn try_from_row(row: &SqliteRow) -> Result<Self> {
         Ok(Self {
+            originator: row.try_get("originator")?,
             id: row.try_get("id")?,
             rollout_path: row.try_get("rollout_path")?,
             created_at: row.try_get("created_at")?,
@@ -538,6 +557,7 @@ impl ThreadRow {
             section_position: row.try_get("section_position")?,
             section_entered_at_ms: row.try_get("section_entered_at_ms")?,
             project_id: row.try_get("project_id")?,
+            daybreak_enabled: row.try_get("daybreak_enabled")?,
             git_sha: row.try_get("git_sha")?,
             git_branch: row.try_get("git_branch")?,
             git_origin_url: row.try_get("git_origin_url")?,
@@ -550,6 +570,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
 
     fn try_from(row: ThreadRow) -> std::result::Result<Self, Self::Error> {
         let ThreadRow {
+            originator,
             id,
             rollout_path,
             created_at,
@@ -581,6 +602,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             section_position,
             section_entered_at_ms,
             project_id,
+            daybreak_enabled,
             git_sha,
             git_branch,
             git_origin_url,
@@ -612,6 +634,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
         };
         Ok(Self {
             id: ThreadId::try_from(id)?,
+            originator,
             rollout_path: PathBuf::from(rollout_path),
             created_at: epoch_millis_to_datetime(created_at)?,
             updated_at: epoch_millis_to_datetime(updated_at)?,
@@ -643,6 +666,7 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
                 .map(epoch_millis_to_datetime)
                 .transpose()?,
             project_id,
+            daybreak_enabled,
             git_sha,
             git_branch,
             git_origin_url: git_origin_url
@@ -722,6 +746,7 @@ mod tests {
 
     fn thread_row(reasoning_effort: Option<&str>) -> ThreadRow {
         ThreadRow {
+            originator: None,
             id: "00000000-0000-0000-0000-000000000123".to_string(),
             rollout_path: "/tmp/rollout-123.jsonl".to_string(),
             created_at: 1_700_000_000,
@@ -753,6 +778,7 @@ mod tests {
             section_position: None,
             section_entered_at_ms: None,
             project_id: None,
+            daybreak_enabled: None,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,
@@ -761,6 +787,7 @@ mod tests {
 
     fn expected_thread_metadata(reasoning_effort: Option<ReasoningEffort>) -> ThreadMetadata {
         ThreadMetadata {
+            originator: None,
             id: ThreadId::from_string("00000000-0000-0000-0000-000000000123")
                 .expect("valid thread id"),
             rollout_path: PathBuf::from("/tmp/rollout-123.jsonl"),
@@ -791,6 +818,7 @@ mod tests {
             section_position: None,
             section_entered_at: None,
             project_id: None,
+            daybreak_enabled: None,
             git_sha: None,
             git_branch: None,
             git_origin_url: None,

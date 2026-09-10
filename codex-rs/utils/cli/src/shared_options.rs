@@ -71,6 +71,10 @@ pub struct SharedCliOptions {
     #[clap(long = "cd", short = 'C', value_name = "DIR")]
     pub cwd: Option<PathBuf>,
 
+    /// Run the session in a new managed Git worktree.
+    #[arg(long = "worktree", default_value_t = false)]
+    pub worktree: bool,
+
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
@@ -136,6 +140,7 @@ impl SharedCliOptions {
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
             cwd,
+            worktree,
             add_dir,
             workspace_root,
         } = self;
@@ -151,6 +156,7 @@ impl SharedCliOptions {
             dangerously_bypass_approvals_and_sandbox: root_dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust: root_bypass_hook_trust,
             cwd: root_cwd,
+            worktree: root_worktree,
             add_dir: root_add_dir,
             workspace_root: root_workspace_root,
         } = root;
@@ -182,6 +188,7 @@ impl SharedCliOptions {
         if cwd.is_none() {
             cwd.clone_from(root_cwd);
         }
+        *worktree |= *root_worktree;
         if !root_images.is_empty() {
             let mut merged_images = root_images.clone();
             merged_images.append(images);
@@ -215,6 +222,7 @@ impl SharedCliOptions {
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
             cwd,
+            worktree,
             add_dir,
             workspace_root,
         } = subcommand;
@@ -246,6 +254,7 @@ impl SharedCliOptions {
         if let Some(cwd) = cwd {
             self.cwd = Some(cwd);
         }
+        self.worktree |= worktree;
         if !images.is_empty() {
             self.images = images;
         }
@@ -375,3 +384,7 @@ mod tests {
         assert_eq!(root.auth_profile.as_deref(), Some("personal"));
     }
 }
+
+#[cfg(test)]
+#[path = "shared_options_tests.rs"]
+mod tests;

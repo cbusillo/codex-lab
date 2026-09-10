@@ -28,6 +28,7 @@ use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputAsyncHandler;
 use crate::tools::handlers::RequestUserInputHandler;
+use crate::tools::handlers::SendMessageToUserAsyncHandler;
 use crate::tools::handlers::SleepHandler;
 use crate::tools::handlers::TestSyncHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -771,10 +772,15 @@ fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOpt
     }
 }
 
-fn agent_type_description(
+struct AgentTypePlan {
+    description: String,
+    expose: bool,
+}
+
+fn agent_type_plan(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
-) -> String {
+) -> AgentTypePlan {
     let discovered_selectors = crate::agent::role::external_agent_backend_for_selector(
         &turn_context.config,
         "antigravity",
@@ -789,6 +795,17 @@ fn agent_type_description(
         .collect::<Vec<_>>()
     })
     .unwrap_or_default();
+    let expose =
+        turn_context.config.agent_roles.keys().any(|selector| {
+            crate::agent::role::agent_selector_enabled(&turn_context.config, selector)
+        }) || codex_config::agent_defaults::agent_model_specs()
+            .iter()
+            .any(|spec| {
+                crate::agent::role::agent_selector_enabled(&turn_context.config, spec.slug)
+            })
+            || discovered_selectors.iter().any(|selector| {
+                crate::agent::role::agent_selector_enabled(&turn_context.config, selector)
+            });
     let agent_type_description =
         crate::agent::role::spawn_tool_spec::build_for_config_with_external_selectors(
             &turn_context.config,
@@ -799,7 +816,10 @@ fn agent_type_description(
     } else {
         agent_type_description
     };
-    bounded_agent_type_description(agent_type_description)
+    AgentTypePlan {
+        description: bounded_agent_type_description(agent_type_description),
+        expose,
+    }
 }
 
 fn bounded_agent_type_description(description: String) -> String {
@@ -1061,6 +1081,10 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
             {
                 registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
                     allow_login_shell: any_environment_allows_login_shell(context.environments),
+                    allow_tty: turn_context
+                        .config
+                        .features
+                        .enabled(Feature::UnifiedExecTty),
                     exec_permission_approvals_enabled: false,
                     include_environment_id,
                     include_shell_parameter: unified_exec_should_include_shell_parameter(
@@ -1152,6 +1176,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
     let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
     let options = ExecCommandHandlerOptions {
         allow_login_shell,
+        allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
         include_environment_id,
         include_shell_parameter: unified_exec_should_include_shell_parameter(
@@ -1259,6 +1284,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         );
     }
 
+    if !turn_context.session_source.is_non_root_agent()
+        && context
+            .model_info
+            .experimental_supported_tools
+            .iter()
+            .any(|tool| tool == "send_message_to_user_async")
+    {
+        registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
+    }
+
     if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {
         registry.add(RequestPermissionsHandler);
     }
@@ -1354,16 +1389,16 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             let tool_namespace = namespace_tools_enabled(turn_context)
                 .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
                 .flatten();
-            let agent_type_description =
-                agent_type_description(turn_context, context.default_agent_type_description);
+            let agent_type_plan =
+                agent_type_plan(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
             registry.register_trusted_with_exposure(
                 multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
                         available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                        agent_type_description: agent_type_plan.description,
+                        expose_agent_type: agent_type_plan.expose,
                         hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
                         expose_spawn_agent_model_overrides: turn_context
                             .config
@@ -1402,8 +1437,8 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 exposure,
             );
         } else {
-            let agent_type_description =
-                agent_type_description(turn_context, context.default_agent_type_description);
+            let agent_type_plan =
+                agent_type_plan(turn_context, context.default_agent_type_description);
             let exposure = if search_tool_enabled(turn_context, context.model_info) {
                 ToolExposure::Deferred
             } else {
@@ -1412,8 +1447,8 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             registry.add_with_exposure(
                 SpawnAgentHandler::new(SpawnAgentToolOptions {
                     available_models: turn_context.available_models.clone(),
-                    agent_type_description,
-                    expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                    agent_type_description: agent_type_plan.description,
+                    expose_agent_type: agent_type_plan.expose,
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
                     multi_agent_version: turn_context.multi_agent_version,

@@ -41,19 +41,6 @@ pub(crate) struct EventProcessorWithHumanOutput {
 }
 
 impl EventProcessorWithHumanOutput {
-    pub(crate) fn create_with_ansi(
-        with_ansi: bool,
-        config: &Config,
-        last_message_path: Option<PathBuf>,
-    ) -> Self {
-        Self::create_with_ansi_and_identity(
-            with_ansi,
-            config,
-            last_message_path,
-            ProductIdentity::Codex,
-        )
-    }
-
     pub(crate) fn create_with_ansi_and_identity(
         with_ansi: bool,
         config: &Config,

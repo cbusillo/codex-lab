@@ -266,6 +266,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -317,6 +318,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
     let mut previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -1063,6 +1065,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1126,6 +1129,7 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
             RolloutItem::Compacted(CompactedItem {
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
+                retained_context: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,
@@ -1161,6 +1165,7 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1234,6 +1239,7 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(2),
@@ -1273,6 +1279,7 @@ async fn reconstruct_history_replays_world_state_from_latest_compaction_window()
             RolloutItem::Compacted(CompactedItem {
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
+                retained_context: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
@@ -1338,6 +1345,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
                     replacement_history: Some(annotated(vec![assistant_message(&format!(
                         "summary-{window_number}"
                     ))])),
+                    retained_context: None,
                     guardian_history: Some(codex_history::GuardianHistoryCheckpoint(vec![
                         user_message("original task"),
                     ])),
@@ -1448,6 +1456,7 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: None,
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1473,12 +1482,28 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
 async fn reconstruct_history_legacy_compaction_without_replacement_history_does_not_inject_current_initial_context()
  {
     let (session, turn_context) = make_session_and_context().await;
+    let answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "legacy-turn".to_owned(),
+            call_id: "ask-1".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Upload?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: None,
+    };
+    let mut retained = codex_history::RetainedContext::default();
+    retained.mark_user_messages_incomplete();
+    retained.record(&answer);
     let rollout_items = vec![
         RolloutItem::ResponseItem(user_message("before compact").into()),
         RolloutItem::ResponseItem(assistant_message("assistant reply").into()),
+        RolloutItem::RetainedContext(answer),
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: None,
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1502,6 +1527,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         ])
     );
     assert!(reconstructed.reference_context_item.is_none());
+    assert_eq!(reconstructed.retained_context, retained);
 }
 
 #[tokio::test]
@@ -1518,6 +1544,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: None,
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1575,6 +1602,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: Some("root-turn".to_string()),
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -1627,6 +1655,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1672,6 +1701,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         serde_json::to_value(Some(TurnContextItem {
             turn_id: Some(turn_context.sub_id.clone()),
             root_turn_id: Some("root-turn".to_string()),
+            disabled_plugin_ids: None,
             #[allow(deprecated)]
             cwd: turn_context.cwd.clone(),
             environments: None,
@@ -1708,6 +1738,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -1801,6 +1832,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -1846,6 +1878,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
     let current_context_item = TurnContextItem {
         turn_id: Some(current_turn_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -1977,6 +2010,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -2061,6 +2095,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
@@ -2155,6 +2190,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
         root_turn_id: None,
+        disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
         environments: None,
@@ -2240,6 +2276,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
         RolloutItem::Compacted(CompactedItem {
             message: String::new(),
             replacement_history: Some(Vec::new()),
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,

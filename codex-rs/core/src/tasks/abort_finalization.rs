@@ -50,7 +50,11 @@ pub(super) async fn finalize_aborted_turn(
             ))
     {
         session
-            .record_conversation_items(task.turn_context.as_ref(), std::slice::from_ref(&marker))
+            .record_conversation_items(
+                task.turn_context.as_ref(),
+                task.turn_context.model_info(),
+                std::slice::from_ref(&marker),
+            )
             .await;
         if let Err(err) = session.flush_rollout().await {
             warn!("failed to flush interrupted-turn marker before emitting TurnAborted: {err}");

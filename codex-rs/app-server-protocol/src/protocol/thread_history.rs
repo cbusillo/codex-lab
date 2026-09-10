@@ -397,13 +397,14 @@ impl ThreadHistoryBuilder {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
             RolloutItem::ResponseItem(item) => self.handle_response_item(&item.item),
-            RolloutItem::SecurityRiskScore(_) => {}
             RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::TokenUsageRecord(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::RetainedContext(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::SessionMeta(_) => {}
         }
     }
@@ -888,6 +889,7 @@ impl ThreadHistoryBuilder {
             failure: None,
             saved_path: None,
             imagegen_request_id: None,
+            generation_id: None,
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -902,6 +904,7 @@ impl ThreadHistoryBuilder {
             failure: payload.failure.clone(),
             saved_path: payload.saved_path.clone(),
             imagegen_request_id: None,
+            generation_id: None,
         });
         self.upsert_item_in_current_turn(item);
     }
@@ -2210,6 +2213,7 @@ mod tests {
                         failure: None,
                         saved_path: Some(saved_path.clone()),
                         imagegen_request_id: None,
+                        generation_id: None,
                     },
                 )),
                 started_at_ms: Some(0),
@@ -2243,6 +2247,7 @@ mod tests {
                 failure: None,
                 saved_path: Some(saved_path),
                 imagegen_request_id: None,
+                generation_id: None,
             })]
         );
     }
@@ -2563,6 +2568,7 @@ mod tests {
                         failure: None,
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
                         imagegen_request_id: None,
+                        generation_id: None,
                     }),
                 ],
             }
@@ -3358,6 +3364,7 @@ mod tests {
                 ..Default::default()
             }),
             EventMsg::GuardianAssessment(GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-guardian-exec".into(),
                 target_item_id: Some("guardian-exec".into()),
                 plugin_id: Some("sample@openai-curated".into()),
@@ -3379,6 +3386,7 @@ mod tests {
                 .expect("guardian action"),
             }),
             EventMsg::GuardianAssessment(GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-guardian-exec".into(),
                 target_item_id: Some("guardian-exec".into()),
                 plugin_id: Some("sample@openai-curated".into()),
@@ -3450,6 +3458,7 @@ mod tests {
                 ..Default::default()
             }),
             EventMsg::GuardianAssessment(GuardianAssessmentEvent {
+                review_reason: None,
                 id: "review-guardian-execve".into(),
                 target_item_id: Some("guardian-execve".into()),
                 plugin_id: Some("sample@openai-curated".into()),
@@ -4262,6 +4271,7 @@ mod tests {
             RolloutItem::Compacted(CompactedItem {
                 message: String::new(),
                 replacement_history: None,
+                retained_context: None,
                 guardian_history: None,
                 mcp_resource_origins: None,
                 window_number: None,

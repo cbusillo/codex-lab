@@ -69,9 +69,10 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     let mut last_agent_message = None;
     let item = assistant_output_text("original assistant text");
 
+    let step_context = StepContext::for_test(Arc::new(turn_context));
     let handled = handle_assistant_item_done_in_plan_mode(
         &session,
-        &turn_context,
+        &step_context,
         &turn_store,
         &item,
         &mut state,
@@ -85,4 +86,131 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
         last_agent_message.as_deref(),
         Some("plan contributed assistant text")
     );
+}
+
+#[test]
+fn realtime_user_verification_notice_excludes_request_payload() {
+    let event = EventMsg::ElicitationRequest(codex_protocol::approvals::ElicitationRequestEvent {
+        turn_id: None,
+        server_name: "private-server-name".to_string(),
+        id: codex_protocol::mcp::RequestId::String("private-request-id".to_string()),
+        request: codex_protocol::approvals::ElicitationRequest::UserVerification {
+            title: "private-title".to_string(),
+            description: "private-description".to_string(),
+            challenge: "private-challenge".to_string(),
+        },
+    });
+    assert_eq!(
+        realtime_text_for_event(&event),
+        Some((
+            "<user_verification_notice>User verification is required. Please respond in the app.</user_verification_notice>".to_string(),
+            None,
+        )),
+    );
+}
+
+#[test]
+fn realtime_interactive_request_notices_exclude_request_payloads() {
+    const PRIVATE: &str = "private-interactive-request-detail";
+    let cases = [
+        (
+            EventMsg::ExecApprovalRequest(codex_protocol::approvals::ExecApprovalRequestEvent {
+                kind: codex_protocol::approvals::ExecApprovalKind::Command,
+                call_id: "exec-call".to_string(),
+                plugin_id: None,
+                script_path: None,
+                approval_id: None,
+                turn_id: "turn".to_string(),
+                environment_id: None,
+                started_at_ms: 0,
+                command: vec![PRIVATE.to_string()],
+                cwd: codex_utils_path_uri::LegacyAppPathString::from_string(PRIVATE),
+                reason: None,
+                network_approval_context: None,
+                proposed_execpolicy_amendment: None,
+                proposed_network_policy_amendments: None,
+                additional_permissions: None,
+                available_decisions: None,
+                parsed_cmd: Vec::new(),
+            }),
+            RealtimeInteractiveRequestKind::Approval,
+        ),
+        (
+            EventMsg::RequestPermissions(
+                codex_protocol::request_permissions::RequestPermissionsEvent {
+                    call_id: "permissions-call".to_string(),
+                    turn_id: "turn".to_string(),
+                    environment_id: None,
+                    started_at_ms: 0,
+                    reason: Some(PRIVATE.to_string()),
+                    permissions: Default::default(),
+                    cwd: None,
+                },
+            ),
+            RealtimeInteractiveRequestKind::Approval,
+        ),
+        (
+            EventMsg::ApplyPatchApprovalRequest(
+                codex_protocol::approvals::ApplyPatchApprovalRequestEvent {
+                    call_id: "patch-call".to_string(),
+                    turn_id: "turn".to_string(),
+                    started_at_ms: 0,
+                    changes: std::collections::HashMap::from([(
+                        std::path::PathBuf::from(PRIVATE),
+                        codex_protocol::protocol::FileChange::Add {
+                            content: PRIVATE.to_string(),
+                        },
+                    )]),
+                    reason: None,
+                    grant_root: None,
+                },
+            ),
+            RealtimeInteractiveRequestKind::Approval,
+        ),
+        (
+            EventMsg::RequestUserInput(codex_protocol::request_user_input::RequestUserInputEvent {
+                call_id: "input-call".to_string(),
+                turn_id: "turn".to_string(),
+                questions: vec![
+                    codex_protocol::request_user_input::RequestUserInputQuestion {
+                        id: "question".to_string(),
+                        header: "Input".to_string(),
+                        question: PRIVATE.to_string(),
+                        is_other: false,
+                        is_secret: true,
+                        options: None,
+                    },
+                ],
+                is_blocking: true,
+                auto_resolution_ms: None,
+            }),
+            RealtimeInteractiveRequestKind::Input,
+        ),
+        (
+            EventMsg::ElicitationRequest(codex_protocol::approvals::ElicitationRequestEvent {
+                turn_id: Some("turn".to_string()),
+                server_name: "private-server".to_string(),
+                id: codex_protocol::mcp::RequestId::String("elicitation".to_string()),
+                request: codex_protocol::approvals::ElicitationRequest::Url {
+                    meta: None,
+                    message: PRIVATE.to_string(),
+                    url: PRIVATE.to_string(),
+                    elicitation_id: "elicitation".to_string(),
+                },
+            }),
+            RealtimeInteractiveRequestKind::Input,
+        ),
+    ];
+
+    for (event, kind) in cases {
+        let expected = Some((RealtimeInteractiveRequestNotice::new(kind).render(), None));
+        let actual = realtime_text_for_event(&event);
+        assert_eq!(actual, expected);
+        assert!(
+            !actual
+                .expect("interactive request notice")
+                .0
+                .contains(PRIVATE)
+        );
+    }
 }

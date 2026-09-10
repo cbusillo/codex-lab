@@ -370,9 +370,12 @@ impl Session {
         }
 
         let (pending_items, start_options) = self.input_queue.drain_mailbox_input_items().await;
-        if turn_context.turn_metadata_state.root_turn_id().is_none()
-            && let Some(root_turn_id) = start_options.root_turn_id
-        {
+        if turn_context.turn_metadata_state.root_turn_id().is_none() {
+            // Inherited or recovered roots win; otherwise this task owns its turn, including
+            // background work. Later mail cannot change it.
+            let root_turn_id = start_options
+                .root_turn_id
+                .unwrap_or_else(|| turn_context.sub_id.clone());
             turn_context
                 .turn_metadata_state
                 .set_root_turn_id(root_turn_id);
@@ -732,6 +735,7 @@ impl Session {
         run_hooks_and_record_inputs(
             self,
             &turn_context,
+            &turn_context.capture_current_model_info(),
             &pending_input,
             PersistContext::Standard,
         )

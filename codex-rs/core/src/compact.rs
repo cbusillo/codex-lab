@@ -1,3 +1,4 @@
+use crate::context::GuardianContextMode;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,8 +17,7 @@ use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
-#[cfg(test)]
-use crate::session::PreviousTurnSettings;
+use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn::get_last_assistant_message_from_turn;
@@ -36,6 +36,7 @@ use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -88,6 +89,7 @@ pub(crate) struct CompactedHistoryMetadata {
     pub(crate) window_number: u64,
     pub(crate) window_ids: AutoCompactWindowIds,
     pub(crate) compaction_response_id: Option<String>,
+    pub(crate) compaction_model_hash: Option<String>,
 }
 
 pub(crate) async fn build_compaction_initial_context(
@@ -101,10 +103,7 @@ pub(crate) async fn build_compaction_initial_context(
             step_context,
         } => {
             let items = sess
-                .build_initial_context_with_world_state(
-                    step_context.turn.as_ref(),
-                    world_state.as_ref(),
-                )
+                .build_initial_context_with_world_state(step_context, world_state.as_ref())
                 .await;
             let mut items = items
                 .into_iter()
@@ -369,7 +368,12 @@ async fn run_compact_task_inner_impl(
     let summary_suffix =
         get_last_assistant_message_from_turn(&history_items_for_message).unwrap_or_default();
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let user_messages = collect_annotated_user_messages(history_items);
+    let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
+        CompactedMessageIdentity::Preserve
+    } else {
+        CompactedMessageIdentity::Regenerate
+    };
+    let user_messages = collect_annotated_user_messages(history_items, identity);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     new_history =
@@ -389,8 +393,8 @@ async fn run_compact_task_inner_impl(
     }
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { .. } => {
-            Some(turn_context.to_turn_context_item())
+        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
+            Some(step_context.to_turn_context_item())
         }
     };
     sess.replace_compacted_history(
@@ -402,6 +406,7 @@ async fn run_compact_task_inner_impl(
             window_number,
             window_ids,
             compaction_response_id: Some(compaction_response_id),
+            compaction_model_hash: turn_context.model_info().comp_hash.clone(),
         },
     )
     .await;
@@ -542,6 +547,9 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CompactedUserMessage {
+    // Keep source identity even when compaction shortens the text, so rollback can
+    // correlate the rebuilt message with thread-owned retained evidence.
+    id: Option<ResponseItemId>,
     message: String,
     internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
     harness_metadata: Option<CodexHarnessMetadata>,
@@ -555,12 +563,24 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUser
         .collect()
 }
 
+pub(crate) enum CompactedMessageIdentity {
+    Preserve,
+    Regenerate,
+}
+
 pub(crate) fn collect_annotated_user_messages(
     items: &[ResponseItemEnvelope],
+    identity: CompactedMessageIdentity,
 ) -> Vec<CompactedUserMessage> {
     items
         .iter()
         .filter_map(|envelope| compacted_user_message(&envelope.item, envelope.metadata.clone()))
+        .map(|mut message| {
+            if matches!(identity, CompactedMessageIdentity::Regenerate) {
+                message.id = None;
+            }
+            message
+        })
         .collect()
 }
 
@@ -575,6 +595,7 @@ fn compacted_user_message(
         return None;
     }
     Some(CompactedUserMessage {
+        id: item.id().cloned(),
         message: user.message(),
         internal_chat_message_metadata_passthrough: match item {
             ResponseItem::Message {
@@ -722,6 +743,7 @@ fn build_compacted_history_with_limit(
                 let truncated =
                     truncate_text(&message.message, TruncationPolicy::Tokens(remaining));
                 selected_messages.push(CompactedUserMessage {
+                    id: message.id.clone(),
                     message: truncated,
                     internal_chat_message_metadata_passthrough: message
                         .internal_chat_message_metadata_passthrough
@@ -736,7 +758,7 @@ fn build_compacted_history_with_limit(
 
     for message in &selected_messages {
         let mut item = ResponseItem::Message {
-            id: None,
+            id: message.id.clone(),
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: message.message.clone(),
@@ -791,7 +813,11 @@ async fn drain_to_completed(
             prompt,
             turn_context.model_info(),
             &turn_context.session_telemetry,
-            turn_context.reasoning_effort().cloned(),
+            sess.reasoning_effort_for_request(
+                &turn_context.initial_settings,
+                RequestEffortUsage::Compaction,
+            )
+            .await,
             turn_context.reasoning_summary(),
             turn_context.config.service_tier.clone(),
             responses_metadata,
@@ -809,8 +835,12 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
+                sess.record_conversation_items(
+                    turn_context,
+                    turn_context.model_info(),
+                    std::slice::from_ref(&item),
+                )
+                .await;
             }
             Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
                 sess.set_server_reasoning_included(included).await;

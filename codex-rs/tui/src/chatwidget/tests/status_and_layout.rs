@@ -3,11 +3,36 @@ use crate::bottom_pane::goal_status_indicator_line;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::rate_limits::NUDGE_MODEL_SLUG;
 use crate::chatwidget::rate_limits::get_limits_duration;
+use crate::chatwidget::realtime::tests::activate_voice_for_thread;
 use codex_app_server_protocol::SpendControlLimitSnapshot;
 use codex_app_server_protocol::ThreadUsage;
 use pretty_assertions::assert_eq;
+use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serial_test::serial;
+
+#[tokio::test]
+async fn voice_live_transcript_renders_beside_the_streamed_cell() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.animations = false;
+    activate_voice_for_thread(&mut chat, ThreadId::new());
+    chat.transcript.active_cell = Some(Box::new(history_cell::StreamingAgentTailCell::new(
+        vec![Line::from("Agent answer arriving").into()],
+        /*is_first_line*/ true,
+    )));
+    chat.on_realtime_transcript_delta("user".into(), "pick a number".into());
+
+    let width = 60;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|frame| chat.render(frame.area(), frame.buffer_mut()))
+        .expect("render live voice transcript");
+    let rendered = normalized_backend_snapshot(terminal.backend());
+    assert!(rendered.contains("Agent answer arriving"), "{rendered}");
+    assert!(rendered.contains("pick a number"), "{rendered}");
+    assert_chatwidget_snapshot!("voice_live_transcript_and_stream", rendered);
+}
 
 fn enable_test_ambient_pet(chat: &mut ChatWidget) {
     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Supported(
@@ -67,7 +92,7 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
         @"(hidden)"
     );
 
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "context-remaining".to_string(),
         "context-used".to_string(),
         "total-input-tokens".to_string(),
@@ -91,7 +116,10 @@ async fn resumed_session_hides_unknown_token_usage_until_an_update_arrives() {
 
 #[tokio::test]
 async fn app_server_cyber_policy_error_renders_dedicated_notice() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
+    chat.cyber_policy_notice
+        .set(crate::daybreak::Notice::Apply)
+        .unwrap();
 
     handle_error(
         &mut chat,
@@ -102,27 +130,10 @@ async fn app_server_cyber_policy_error_renders_dedicated_notice() {
     let cells = drain_insert_history(&mut rx);
     assert_eq!(cells.len(), 1);
     let rendered = lines_to_single_string(&cells[0]);
-    assert!(rendered.contains("This content can't be shown"));
-    assert!(rendered.contains("extra caution with cybersecurity requests"));
-    assert!(rendered.contains("openai.com/form/enterprise-trusted-access-for-cyber"));
+    assert!(rendered.contains("This content can’t be shown"));
+    assert!(rendered.contains("We take extra care with some cybersecurity requests"));
+    assert!(rendered.contains("Apply for Daybreak"));
     assert!(!rendered.contains("server fallback message"));
-}
-
-#[tokio::test]
-async fn app_server_cyber_policy_error_uses_individual_link_for_personal_plan() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.plan_type = Some(PlanType::Free);
-    chat.has_chatgpt_account = true;
-
-    handle_error(
-        &mut chat,
-        "server fallback message",
-        Some(CodexErrorInfo::CyberPolicy),
-    );
-
-    let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1);
-    assert!(lines_to_single_string(&cells[0]).contains("https://chatgpt.com/cyber/"));
 }
 
 #[tokio::test]
@@ -490,6 +501,8 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
         product_identity: codex_version::ProductIdentity::Codex,
+        requires_openai_auth: true,
+        local_settings: crate::local_settings::LocalSettings::from(&cfg),
         config: cfg.clone(),
         frame_requester: FrameRequester::test_dummy(),
         app_event_tx: tx,
@@ -502,7 +515,6 @@ async fn configured_pet_load_is_deferred_until_after_construction() {
         feedback: codex_feedback::CodexFeedback::new(),
         is_first_run: true,
         status_account_display: None,
-        runtime_model_provider_base_url: None,
         initial_plan_type: None,
         model: Some(resolved_model),
         startup_tooltip_override: None,
@@ -533,10 +545,14 @@ async fn prefetch_rate_limits_is_gated_on_chatgpt_auth_provider() {
 
     assert!(!chat.should_prefetch_rate_limits());
 
+    // The server requires auth even if the local provider does not.
+    chat.config.model_provider.requires_openai_auth = false;
     set_chatgpt_auth(&mut chat);
     assert!(chat.should_prefetch_rate_limits());
 
-    chat.config.model_provider.requires_openai_auth = false;
+    // Conversely, a local OpenAI provider cannot enable usage for a different server.
+    chat.config.model_provider.requires_openai_auth = true;
+    chat.requires_openai_auth = false;
     assert!(!chat.should_prefetch_rate_limits());
 
     chat.prefetch_rate_limits();
@@ -701,6 +717,7 @@ async fn status_line_uses_secondary_fallback_for_unsupported_window() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: None,
         secondary: Some(RateLimitWindow {
             used_percent: 50,
@@ -727,6 +744,7 @@ async fn status_line_legacy_limit_items_prefer_matching_windows() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 94,
             window_duration_mins: Some(7 * 24 * 60),
@@ -761,6 +779,7 @@ async fn status_line_shows_secondary_non_weekly_when_primary_is_weekly() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 94,
             window_duration_mins: Some(7 * 24 * 60),
@@ -795,6 +814,7 @@ async fn status_line_five_hour_item_omits_weekly_only_limit() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 9,
             window_duration_mins: Some(7 * 24 * 60),
@@ -825,6 +845,7 @@ async fn status_line_single_monthly_primary_omits_weekly_limit_item() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 35,
             window_duration_mins: Some(30 * 24 * 60),
@@ -855,6 +876,7 @@ async fn status_line_secondary_only_non_weekly_limit_omits_primary_limit_item() 
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: None,
         secondary: Some(RateLimitWindow {
             used_percent: 35,
@@ -885,7 +907,12 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
-        primary: None,
+        normal_model_slug: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 10,
+            window_duration_mins: Some(60),
+            resets_at: Some(123),
+        }),
         secondary: None,
         credits: Some(CreditsSnapshot {
             has_credits: true,
@@ -907,6 +934,7 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     chat.on_rolling_rate_limit_snapshot(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 80,
             window_duration_mins: Some(60),
@@ -933,7 +961,7 @@ async fn rate_limit_snapshot_keeps_prior_credits_when_missing_from_headers() {
     assert!(!credits.unlimited);
     assert_eq!(
         display.primary.as_ref().map(|window| window.used_percent),
-        Some(80.0)
+        Some(10.0)
     );
 }
 
@@ -978,6 +1006,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 10,
             window_duration_mins: Some(60),
@@ -999,6 +1028,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 25,
             window_duration_mins: Some(30),
@@ -1020,6 +1050,7 @@ async fn rate_limit_snapshot_updates_and_retains_plan_type() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 30,
             window_duration_mins: Some(60),
@@ -1046,6 +1077,7 @@ async fn rate_limit_snapshots_keep_separate_entries_per_limit_id() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: Some("codex".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 20,
             window_duration_mins: Some(300),
@@ -1066,6 +1098,7 @@ async fn rate_limit_snapshots_keep_separate_entries_per_limit_id() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("codex_other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 90,
             window_duration_mins: Some(60),
@@ -1121,6 +1154,7 @@ async fn rate_limit_switch_prompt_skips_non_codex_limit() {
     chat.on_rate_limit_snapshot(Some(RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("codex_other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 95,
             window_duration_mins: Some(60),
@@ -1700,7 +1734,7 @@ async fn account_update_clears_derived_usage_limit_state_and_prompt() {
 async fn rate_limit_switch_prompt_respects_hidden_notice() {
     let (mut chat, _, _) = make_chatwidget_manual(Some("gpt-5")).await;
     chat.has_chatgpt_account = true;
-    chat.config.notices.hide_rate_limit_model_nudge = Some(true);
+    chat.local_settings.notices.hide_rate_limit_model_nudge = Some(true);
 
     chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 95.0)));
 
@@ -2475,7 +2509,7 @@ async fn ambient_pet_screen_bottom_anchor_uses_terminal_bottom() {
         .expect("composer-anchored pet draw request");
     assert_eq!(default_draw.y, 14);
 
-    chat.config.tui_pet_anchor = TuiPetAnchor::ScreenBottom;
+    chat.local_settings.tui.pet_anchor = TuiPetAnchor::ScreenBottom;
     let screen_bottom_draw = chat
         .ambient_pet_draw(terminal_area, composer_bottom_y)
         .expect("screen-bottom anchored pet draw request");
@@ -2524,7 +2558,6 @@ async fn added_history_uses_pet_adjusted_terminal_width() {
     chat.add_to_history(WidthCell(std::sync::Arc::clone(&width)));
 
     assert_eq!(width.load(std::sync::atomic::Ordering::Relaxed), 69);
-    assert!(chat.transcript.needs_final_message_separator);
     let backend = VT100Backend::new(/*width*/ 80, /*height*/ 4);
     let mut terminal = crate::custom_terminal::Terminal::with_options(backend).expect("terminal");
     terminal.set_viewport_area(Rect::new(
@@ -2862,7 +2895,7 @@ async fn repeated_generic_warning_is_not_hidden() {
 #[tokio::test]
 async fn status_line_invalid_items_warn_once() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model_name".to_string(),
         "bogus_item".to_string(),
         "lines_changed".to_string(),
@@ -2891,7 +2924,7 @@ async fn status_line_invalid_items_warn_once() {
 async fn status_line_hostname_renders_current_machine_hostname() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["hostname".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["hostname".to_string()]);
 
     chat.refresh_status_line();
 
@@ -2906,7 +2939,7 @@ async fn status_line_hostname_renders_current_machine_hostname() {
 async fn status_line_context_used_renders_labeled_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["context-used".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["context-used".to_string()]);
 
     chat.refresh_status_line();
 
@@ -2921,7 +2954,7 @@ async fn status_line_context_used_renders_labeled_percent() {
 async fn status_line_context_remaining_renders_labeled_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["context-remaining".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["context-remaining".to_string()]);
 
     chat.refresh_status_line();
 
@@ -2939,7 +2972,7 @@ async fn status_line_context_remaining_renders_labeled_percent() {
 async fn status_line_legacy_context_usage_renders_context_used_percent() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["context-usage".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["context-usage".to_string()]);
 
     chat.refresh_status_line();
 
@@ -2957,7 +2990,7 @@ async fn status_line_estimated_thread_cost_fetches_and_renders_backend_estimate(
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
 
     chat.refresh_status_line();
     assert_eq!(status_line_text(&chat), None);
@@ -2993,7 +3026,7 @@ async fn status_line_thread_credits_fetches_and_renders_fractional_credits() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["thread-credits".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["thread-credits".to_string()]);
 
     chat.refresh_status_line();
     assert_eq!(status_line_text(&chat), None);
@@ -3029,7 +3062,7 @@ async fn status_line_thread_credits_and_cost_share_one_backend_request() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "thread-credits".to_string(),
         "estimated-thread-cost".to_string(),
     ]);
@@ -3065,7 +3098,7 @@ async fn status_line_thread_credits_remain_visible_when_usd_is_unavailable() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "thread-credits".to_string(),
         "estimated-thread-cost".to_string(),
     ]);
@@ -3100,8 +3133,8 @@ async fn terminal_title_thread_usage_fetches_and_renders_without_status_line() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(Vec::new());
-    chat.config.tui_terminal_title = Some(vec![
+    chat.local_settings.tui.status_line = Some(Vec::new());
+    chat.local_settings.tui.terminal_title = Some(vec![
         "thread-credits".to_string(),
         "estimated-thread-cost".to_string(),
     ]);
@@ -3143,8 +3176,8 @@ async fn terminal_title_thread_credits_remain_visible_when_usd_is_unavailable() 
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(Vec::new());
-    chat.config.tui_terminal_title = Some(vec![
+    chat.local_settings.tui.status_line = Some(Vec::new());
+    chat.local_settings.tui.terminal_title = Some(vec![
         "thread-credits".to_string(),
         "estimated-thread-cost".to_string(),
     ]);
@@ -3179,8 +3212,8 @@ async fn terminal_title_and_status_line_share_one_thread_usage_request() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
-    chat.config.tui_terminal_title = Some(vec!["thread-credits".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.terminal_title = Some(vec!["thread-credits".to_string()]);
 
     chat.refresh_status_surfaces();
     let request_id = match rx.try_recv() {
@@ -3212,7 +3245,7 @@ async fn status_line_estimated_thread_cost_avoids_unsupported_plan_requests() {
     chat.thread_id = Some(ThreadId::new());
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Pro);
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "estimated-thread-cost".to_string(),
         "run-state".to_string(),
     ]);
@@ -3233,7 +3266,7 @@ async fn status_line_estimated_thread_cost_stops_after_backend_disables_feature(
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::EnterpriseCbpAutomation);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
     let request_id = match rx.try_recv() {
         Ok(AppEvent::RefreshThreadUsage { request_id, .. }) => request_id,
@@ -3258,7 +3291,7 @@ async fn status_line_estimated_thread_cost_preserves_cached_amount_during_settle
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
     let initial_request_id = match rx.try_recv() {
         Ok(AppEvent::RefreshThreadUsage { request_id, .. }) => request_id,
@@ -3305,7 +3338,7 @@ async fn completed_turn_refreshes_estimated_thread_cost() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
 
     let initial_request_id = match rx.try_recv() {
@@ -3324,7 +3357,7 @@ async fn completed_turn_refreshes_estimated_thread_cost() {
     ));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let request_id = std::iter::from_fn(|| rx.try_recv().ok())
@@ -3356,8 +3389,8 @@ async fn completed_turn_refreshes_credits_only_terminal_title() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(Vec::new());
-    chat.config.tui_terminal_title = Some(vec!["thread-credits".to_string()]);
+    chat.local_settings.tui.status_line = Some(Vec::new());
+    chat.local_settings.tui.terminal_title = Some(vec!["thread-credits".to_string()]);
     chat.refresh_terminal_title();
 
     let initial_request_id = match rx.try_recv() {
@@ -3376,7 +3409,7 @@ async fn completed_turn_refreshes_credits_only_terminal_title() {
     ));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
 
     let request_id = std::iter::from_fn(|| rx.try_recv().ok())
@@ -3408,7 +3441,7 @@ async fn interrupted_turn_refreshes_estimated_thread_usage() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
 
     let initial_request_id = match rx.try_recv() {
@@ -3449,7 +3482,7 @@ async fn failed_turn_refreshes_estimated_thread_usage() {
     chat.thread_id = Some(thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
 
     let initial_request_id = match rx.try_recv() {
@@ -3494,7 +3527,7 @@ async fn status_line_estimated_thread_cost_rejects_stale_thread_completions() {
     chat.thread_id = Some(previous_thread_id);
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
-    chat.config.tui_status_line = Some(vec!["estimated-thread-cost".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["estimated-thread-cost".to_string()]);
     chat.refresh_status_line();
     let previous_request_id = match rx.try_recv() {
         Ok(AppEvent::RefreshThreadUsage { request_id, .. }) => request_id,
@@ -3543,7 +3576,7 @@ async fn status_line_estimated_thread_cost_footer_snapshot() {
     chat.has_codex_backend_auth = true;
     chat.plan_type = Some(PlanType::Business);
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "thread-credits".to_string(),
         "estimated-thread-cost".to_string(),
@@ -3580,7 +3613,7 @@ async fn status_line_estimated_thread_cost_footer_snapshot() {
 async fn status_line_workspace_headline_renders_cached_value() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
     chat.status_line_workspace_headline = Some("Workspace maintenance starts at 5pm".to_string());
 
     chat.refresh_status_line();
@@ -3599,7 +3632,7 @@ async fn status_line_workspace_headline_renders_cached_value() {
 async fn status_line_workspace_headline_omits_when_unavailable() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "workspace-headline".to_string(),
         "run-state".to_string(),
     ]);
@@ -3616,7 +3649,7 @@ async fn status_line_workspace_headline_omits_when_unavailable() {
 #[tokio::test]
 async fn workspace_headline_update_applies_feature_disabled_result() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
     chat.status_line_workspace_headline = Some("Old headline".to_string());
     let request_id = 3;
     chat.status_line_workspace_headline_pending_request_id = Some(request_id);
@@ -3633,7 +3666,7 @@ async fn workspace_headline_update_applies_feature_disabled_result() {
 #[tokio::test]
 async fn workspace_headline_update_applies_available_headline() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
     let request_id = 4;
     chat.status_line_workspace_headline_pending_request_id = Some(request_id);
 
@@ -3656,7 +3689,7 @@ async fn workspace_headline_update_applies_available_headline() {
 #[tokio::test]
 async fn account_update_clears_workspace_headline_state() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
     chat.status_line_workspace_headline = Some("Old workspace headline".to_string());
     chat.status_line_workspace_headline_pending_request_id = Some(5);
     chat.status_line_workspace_headline_last_requested_at = Some(Instant::now());
@@ -3681,7 +3714,7 @@ async fn account_update_clears_workspace_headline_state() {
 #[tokio::test]
 async fn workspace_headline_fetch_allows_backend_auth_without_chatgpt_account() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
 
     chat.update_account_state(
         /*status_account_display*/ None, /*plan_type*/ None,
@@ -3698,7 +3731,7 @@ async fn workspace_headline_fetch_allows_backend_auth_without_chatgpt_account() 
 #[tokio::test]
 async fn account_update_discards_stale_workspace_headline_results() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.config.tui_status_line = Some(vec!["workspace-headline".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["workspace-headline".to_string()]);
 
     chat.update_account_state(
         Some(StatusAccountDisplay::ChatGpt {
@@ -3768,7 +3801,7 @@ async fn status_line_branch_state_resets_when_git_branch_disabled() {
     chat.status_line_branch = Some("main".to_string());
     chat.status_line_branch_pending = true;
     chat.status_line_branch_lookup_complete = true;
-    chat.config.tui_status_line = Some(vec!["model_name".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["model_name".to_string()]);
 
     chat.refresh_status_line();
 
@@ -3781,7 +3814,7 @@ async fn status_line_branch_state_resets_when_git_branch_disabled() {
 async fn status_line_branch_refreshes_after_turn_complete() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_noop_workspace_command_runner(&mut chat);
-    chat.config.tui_status_line = Some(vec!["git-branch".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["git-branch".to_string()]);
     chat.status_line_branch_lookup_complete = true;
     chat.status_line_branch_pending = false;
 
@@ -3794,7 +3827,7 @@ async fn status_line_branch_refreshes_after_turn_complete() {
 async fn status_line_branch_refreshes_after_interrupt() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     install_noop_workspace_command_runner(&mut chat);
-    chat.config.tui_status_line = Some(vec!["git-branch".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["git-branch".to_string()]);
     chat.status_line_branch_lookup_complete = true;
     chat.status_line_branch_pending = false;
 
@@ -3892,7 +3925,7 @@ async fn completed_turn_clears_visible_running_hook() {
 async fn status_line_fast_mode_renders_on_and_off() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     set_fast_mode_test_catalog(&mut chat);
-    chat.config.tui_status_line = Some(vec!["fast-mode".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["fast-mode".to_string()]);
 
     chat.refresh_status_line();
     assert_eq!(status_line_text(&chat), Some("Fast off".to_string()));
@@ -3906,7 +3939,7 @@ async fn status_line_fast_mode_renders_on_and_off() {
 async fn status_line_fast_mode_updates_visibility_on_model_change() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     set_fast_mode_test_catalog(&mut chat);
-    chat.config.tui_status_line = Some(vec!["fast-mode".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["fast-mode".to_string()]);
 
     chat.refresh_status_line();
     assert_eq!(status_line_text(&chat), Some("Fast off".to_string()));
@@ -3931,7 +3964,7 @@ async fn status_line_fast_mode_footer_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     set_fast_mode_test_catalog(&mut chat);
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "fast-mode".to_string(),
     ]);
@@ -3956,7 +3989,7 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
     set_fast_mode_test_catalog(&mut chat);
     assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
     chat.config.cwd = test_project_path().abs();
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "context-used".to_string(),
         "current-dir".to_string(),
@@ -3986,7 +4019,7 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 #[tokio::test]
 async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_terminal_title = Some(vec!["model".to_string()]);
+    chat.local_settings.tui.terminal_title = Some(vec!["model".to_string()]);
     chat.refresh_terminal_title();
 
     assert_eq!(chat.last_terminal_title, Some("gpt-5.4".to_string()));
@@ -3999,8 +4032,8 @@ async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
 #[tokio::test]
 async fn status_line_and_terminal_title_reasoning_render_only_effort() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
-    chat.config.tui_status_line = Some(vec!["reasoning".to_string()]);
-    chat.config.tui_terminal_title = Some(vec!["reasoning".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["reasoning".to_string()]);
+    chat.local_settings.tui.terminal_title = Some(vec!["reasoning".to_string()]);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
     chat.set_service_tier(Some(ServiceTier::Fast.request_value().to_string()));
 
@@ -4015,7 +4048,7 @@ async fn status_line_and_terminal_title_reasoning_render_only_effort() {
 async fn status_line_reasoning_updates_on_mode_switch_without_manual_refresh() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
-    chat.config.tui_status_line = Some(vec!["reasoning".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["reasoning".to_string()]);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
 
     assert_eq!(status_line_text(&chat), Some("high".to_string()));
@@ -4031,7 +4064,7 @@ async fn status_line_reasoning_updates_on_mode_switch_without_manual_refresh() {
 async fn status_line_model_with_reasoning_updates_on_mode_switch_without_manual_refresh() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
-    chat.config.tui_status_line = Some(vec!["model-with-reasoning".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["model-with-reasoning".to_string()]);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
 
     assert_eq!(status_line_text(&chat), Some("gpt-5.2 high".to_string()));
@@ -4057,7 +4090,7 @@ async fn status_line_model_with_reasoning_plan_mode_footer_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.show_welcome_banner = false;
     chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
-    chat.config.tui_status_line = Some(vec!["model-with-reasoning".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["model-with-reasoning".to_string()]);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
 
     let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
@@ -4083,7 +4116,7 @@ async fn renamed_thread_footer_title_snapshot() {
 
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "thread-title".to_string(),
     ]);
@@ -4124,7 +4157,7 @@ async fn status_line_model_with_reasoning_fast_footer_snapshot() {
     assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
     chat.show_welcome_banner = false;
     chat.config.cwd = test_project_path().abs();
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "context-used".to_string(),
         "current-dir".to_string(),
@@ -4158,7 +4191,7 @@ async fn status_line_model_with_reasoning_context_remaining_footer_snapshot() {
     assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
     chat.show_welcome_banner = false;
     chat.config.cwd = test_project_path().abs();
-    chat.config.tui_status_line = Some(vec![
+    chat.local_settings.tui.status_line = Some(vec![
         "model-with-reasoning".to_string(),
         "context-remaining".to_string(),
         "current-dir".to_string(),
@@ -4190,7 +4223,7 @@ async fn status_line_goal_active_token_budget_footer_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec!["model-name".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["model-name".to_string()]);
     chat.refresh_status_line();
     chat.handle_server_notification(
         ServerNotification::ThreadGoalUpdated(
@@ -4227,7 +4260,7 @@ async fn status_line_goal_complete_elapsed_footer_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
-    chat.config.tui_status_line = Some(vec!["model-name".to_string()]);
+    chat.local_settings.tui.status_line = Some(vec!["model-name".to_string()]);
     chat.refresh_status_line();
     let mut goal = test_thread_goal(
         codex_app_server_protocol::ThreadGoalStatus::Complete,
@@ -4510,7 +4543,7 @@ async fn runtime_metrics_websocket_timing_logs_and_final_separator_sums_totals()
     assert!(second_log.contains("TTFT: 80ms (iapi)"));
 
     chat.on_task_complete(
-        /*last_agent_message*/ None, /*duration_ms*/ None, /*from_replay*/ false,
+        /*last_agent_message*/ None, /*completion*/ None, /*from_replay*/ false,
     );
     let mut final_separator = None;
     while let Ok(event) = rx.try_recv() {
@@ -4712,29 +4745,29 @@ async fn regular_commit_tick_clears_orphaned_plan_stream_tail() {
 }
 
 #[tokio::test]
-async fn reasoning_delta_redraws_only_when_header_becomes_visible() {
+async fn reasoning_delta_redraws_when_latest_usable_line_changes() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let (frame_requester, mut draw_rx) = FrameRequester::test_channel();
     chat.frame_requester = frame_requester;
 
-    chat.on_agent_reasoning_delta("still looking".to_string());
+    chat.on_agent_reasoning_delta("**Checking".to_string());
     assert!(matches!(
         draw_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
     assert_eq!(chat.reasoning_header, None);
 
-    chat.on_agent_reasoning_delta(" **Checking".to_string());
-    assert!(matches!(
-        draw_rx.try_recv(),
-        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-    ));
-
     chat.on_agent_reasoning_delta(" files**".to_string());
     assert!(draw_rx.try_recv().is_ok());
     assert_eq!(chat.reasoning_header.as_deref(), Some("Checking files"));
 
-    chat.on_agent_reasoning_delta(" and preparing a response".to_string());
+    chat.on_agent_reasoning_delta("\nPreparing a response".to_string());
+    assert!(draw_rx.try_recv().is_ok());
+    assert_eq!(
+        chat.reasoning_header.as_deref(),
+        Some("Preparing a response")
+    );
+    chat.on_agent_reasoning_delta("".to_string());
     assert!(matches!(
         draw_rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -4781,7 +4814,7 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should be recreated");
-    assert_eq!(status.header(), "Working");
+    assert_eq!(status.header(), "Checking files");
 
     chat.on_agent_reasoning_delta(" and preparing a response".to_string());
 
@@ -4789,7 +4822,7 @@ async fn reasoning_delta_restores_recreated_status_indicator_header() {
         .bottom_pane
         .status_widget()
         .expect("status indicator should remain visible");
-    assert_eq!(status.header(), "Checking files");
+    assert_eq!(status.header(), "Checking files and preparing a response");
 
     let width: u16 = 80;
     let height = chat.desired_height(width);
@@ -5721,7 +5754,9 @@ printf 'fenced within fenced\n'
 
     assert_chatwidget_snapshot!(
         "chatwidget_markdown_code_blocks_vt100_snapshot",
-        normalize_snapshot_paths(term.backend().vt100().screen().contents())
+        normalize_completion_timestamps(normalize_snapshot_paths(
+            term.backend().vt100().screen().contents()
+        ))
     );
 }
 

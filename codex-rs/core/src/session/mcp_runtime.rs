@@ -6,6 +6,7 @@
 
 use super::session::SessionConfiguration;
 use super::*;
+use crate::execution_account::ExecutionAccountSnapshot;
 use crate::mcp::McpRuntimeProjection;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
@@ -23,6 +24,7 @@ use std::collections::HashSet;
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
     pub(super) auth: Option<CodexAuth>,
+    pub(super) execution_snapshot: ExecutionAccountSnapshot,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) session_source: SessionSource,
@@ -85,6 +87,7 @@ impl Session {
             .and_then(|environment| environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let config = self.build_per_turn_config(&session_configuration, cwd);
+        let execution_snapshot = self.services.execution_account.snapshot().await;
         let local_process_cwd = environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
@@ -93,6 +96,7 @@ impl Session {
         McpDesiredState {
             config: Arc::new(config),
             auth,
+            execution_snapshot,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -116,9 +120,11 @@ impl Session {
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
             .to_path_buf();
+        let execution_snapshot = self.services.execution_account.snapshot().await;
         let desired = McpDesiredState {
             config: Arc::new(config),
             auth,
+            execution_snapshot,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -319,7 +325,34 @@ impl Session {
             ready_selected_capability_roots,
             elicitation_reviewer,
         );
-        self.services.mcp_runtime.replace(input).await;
+        let execution_auth = desired
+            .execution_snapshot
+            .auth
+            .clone()
+            .filter(CodexAuth::uses_codex_backend);
+        self.services
+            .mcp_runtime
+            .replace_with_codex_apps_execution_auth(
+                input,
+                codex_mcp::CodexAppsExecutionAuth {
+                    tools_cache_key: execution_auth
+                        .as_ref()
+                        .map(|auth| connector_runtime_context_key(Some(auth))),
+                    auth_provider: execution_auth
+                        .as_ref()
+                        .map(|_| Arc::clone(&desired.execution_snapshot.auth_provider)),
+                    auth_manager: execution_auth
+                        .as_ref()
+                        .map(|_| Arc::clone(&desired.execution_snapshot.auth_manager)),
+                    auth: execution_auth,
+                    connection_discriminator: desired
+                        .execution_snapshot
+                        .cache_identity
+                        .connection_discriminator(),
+                    revision: desired.execution_snapshot.revision,
+                },
+            )
+            .await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
 

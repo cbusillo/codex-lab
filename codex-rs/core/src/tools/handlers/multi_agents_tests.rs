@@ -27,6 +27,7 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::built_in_model_providers;
+use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -488,6 +489,334 @@ async fn multi_agent_v2_spawn_rejects_unknown_model_before_spawning() {
     assert!(manager.list_thread_ids().await.is_empty());
 }
 
+fn service_tier_test_catalog() -> codex_protocol::openai_models::ModelsResponse {
+    let mut catalog = codex_models_manager::bundled_models_response().expect("bundled models");
+    let mut model = catalog
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("current model")
+        .clone();
+    model.slug = "test-model-without-fast".to_string();
+    model.service_tiers.clear();
+    model.additional_speed_tiers.clear();
+    model.default_service_tier = None;
+    catalog.models.push(model);
+    catalog
+}
+
+#[tokio::test]
+async fn spawn_agent_service_tier_uses_root_preference_when_root_model_cannot_support_it() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.model = Some("test-model-without-fast".to_string());
+    config.model_catalog = Some(service_tier_test_catalog());
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    assert_eq!(root.thread.config_snapshot().await.service_tier, None);
+
+    config.model = Some("gpt-5.5".to_string());
+    apply_spawn_agent_service_tier(root.thread.session.as_ref(), &mut config)
+        .await
+        .expect("root preference should be resolved against the child model");
+
+    assert_eq!(
+        config.service_tier,
+        Some(ServiceTier::Fast.request_value().to_string())
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_service_tier_inheritance_uses_root_preference_and_child_model() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    {
+        let (mut session, turn) = make_session_and_context().await;
+        let mut turn = turn
+            .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+            .await;
+        let mut config = (*turn.config).clone();
+        config.model_catalog = Some(service_tier_test_catalog());
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        turn.config = Arc::new(config);
+        let manager = thread_manager();
+        let root = manager
+            .start_thread(StartThreadOptions::new((*turn.config).clone()))
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = root.thread.session.services.agent_control.clone();
+        session.services.models_manager = Arc::new(StaticModelsManager::new(
+            /*auth_manager*/ None,
+            service_tier_test_catalog(),
+        ));
+        session.thread_id = root.thread_id;
+
+        let output = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({"message": "inspect this repo"})),
+            ))
+            .await
+            .expect("spawn_agent should inherit a supported parent service tier");
+        let (content, _) = expect_text_output(output);
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let snapshot = manager
+            .get_thread(parse_agent_id(&result.agent_id))
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
+
+        assert_eq!(
+            snapshot.service_tier,
+            Some(ServiceTier::Fast.request_value().to_string())
+        );
+    }
+
+    {
+        let (mut session, turn) = make_session_and_context().await;
+        let mut turn = turn
+            .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+            .await;
+        let mut config = (*turn.config).clone();
+        config.model_catalog = Some(service_tier_test_catalog());
+        config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+        turn.config = Arc::new(config);
+        let manager = thread_manager();
+        let root = manager
+            .start_thread(StartThreadOptions::new((*turn.config).clone()))
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = root.thread.session.services.agent_control.clone();
+        session.services.models_manager = Arc::new(StaticModelsManager::new(
+            /*auth_manager*/ None,
+            service_tier_test_catalog(),
+        ));
+        session.thread_id = root.thread_id;
+
+        let output = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "model": "test-model-without-fast"
+                })),
+            ))
+            .await
+            .expect("spawn_agent should clear unsupported inherited service tier");
+        let (content, _) = expect_text_output(output);
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let snapshot = manager
+            .get_thread(parse_agent_id(&result.agent_id))
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
+
+        assert_eq!(snapshot.service_tier, None);
+    }
+
+    {
+        let (mut session, mut turn) = make_session_and_context().await;
+        tokio::fs::create_dir_all(&turn.config.codex_home)
+            .await
+            .expect("codex home should be created");
+        let role_config_path = turn
+            .config
+            .codex_home
+            .as_path()
+            .join("service-tier-role.toml");
+        tokio::fs::write(
+            &role_config_path,
+            r#"model = "gpt-5.5"
+service_tier = "priority"
+"#,
+        )
+        .await
+        .expect("role config should be written");
+
+        let role_name = "service-tier-role".to_string();
+        let mut config = (*turn.config).clone();
+        config.agent_roles.insert(
+            role_name.clone(),
+            AgentRoleConfig {
+                description: Some("Role with a child service tier".to_string()),
+                config_file: Some(role_config_path),
+                nickname_candidates: None,
+                backend: None,
+            },
+        );
+        turn.config = Arc::new(config);
+        let manager = thread_manager();
+        let root = manager
+            .start_thread(StartThreadOptions::new((*turn.config).clone()))
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.thread_id = root.thread_id;
+
+        let output = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "inspect this repo",
+                    "agent_type": role_name
+                })),
+            ))
+            .await
+            .expect("spawn_agent should ignore the child role service tier");
+        let (content, _) = expect_text_output(output);
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let snapshot = manager
+            .get_thread(parse_agent_id(&result.agent_id))
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
+
+        assert_eq!(snapshot.service_tier, None);
+    }
+}
+
+#[tokio::test]
+async fn spawn_agent_role_service_tier_cannot_override_root_preference() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+        .await;
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
+    let role_config_path = turn.config.codex_home.as_path().join("tiered-role.toml");
+    tokio::fs::write(
+        &role_config_path,
+        r#"model = "gpt-5.5"
+service_tier = "turbo"
+"#,
+    )
+    .await
+    .expect("role config should be written");
+
+    let role_name = "tiered-role".to_string();
+    let mut config = (*turn.config).clone();
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    config.agent_roles.insert(
+        role_name.clone(),
+        AgentRoleConfig {
+            description: Some("Role with an unsupported child tier".to_string()),
+            config_file: Some(role_config_path),
+            nickname_candidates: None,
+            backend: None,
+        },
+    );
+    turn.config = Arc::new(config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = root.thread.session.services.agent_control.clone();
+    session.thread_id = root.thread_id;
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "agent_type": role_name
+            })),
+        ))
+        .await
+        .expect("spawn_agent should fall back to the supported parent tier");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(
+        snapshot.service_tier,
+        Some(ServiceTier::Fast.request_value().to_string())
+    );
+}
+
+#[tokio::test]
+async fn spawn_agent_full_history_fork_inherits_root_service_tier() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+        .await;
+    let mut config = (*turn.config).clone();
+    config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
+    turn.config = Arc::new(config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = root.thread.session.services.agent_control.clone();
+    session.thread_id = root.thread_id;
+
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "fork_context": true
+            })),
+        ))
+        .await
+        .expect("full-history fork should inherit the root service tier");
+    let (content, _) = expect_text_output(output);
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let snapshot = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+
+    assert_eq!(
+        snapshot.service_tier,
+        Some(ServiceTier::Fast.request_value().to_string())
+    );
+}
+
 #[tokio::test]
 async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
     #[derive(Debug, Deserialize)]
@@ -497,7 +826,7 @@ async fn multi_agent_v2_full_history_fork_inherits_root_service_tier() {
 
     let (mut session, turn) = make_session_and_context().await;
     let mut turn = turn
-        .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+        .with_model("gpt-5.5".to_string(), &session.services.models_manager)
         .await;
     let mut config = (*turn.config).clone();
     config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
@@ -4122,7 +4451,252 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
 }
 
 #[tokio::test]
-async fn build_agent_spawn_config_uses_turn_context_values() {
+async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = turn.config.as_ref().clone();
+    config.agent_max_depth = 3;
+    config
+        .permissions
+        .set_permission_profile(PermissionProfile::workspace_write())
+        .expect("test config should allow workspace writes");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite");
+    let state_db = init_state_db(&config).await;
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        crate::thread_manager::build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        crate::thread_manager::passthrough_image_store(),
+        thread_store_from_config(&config, state_db.clone()),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        "11111111-1111-4111-8111-111111111111".to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let parent = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("parent thread should start");
+    let parent_thread_id = parent.thread_id;
+    let parent_session = parent.thread.session.clone();
+    let parent_turn = parent_session.new_default_turn().await;
+    let mut owner_config = parent_turn
+        .environments
+        .primary()
+        .expect("parent should have an environment")
+        .config()
+        .clone();
+    let owner_permission_profile = PermissionProfile::read_only();
+    owner_config.permission_profile =
+        PermissionProfileSnapshot::legacy(owner_permission_profile.clone());
+    let parent_environment = parent.thread.environment_selections().await.remove(0);
+    parent
+        .thread
+        .environment_ready(&parent_environment, owner_config)
+        .await
+        .expect("owner environment should be installed");
+
+    let child_turn = parent_session.new_default_turn().await;
+    let child_spawn_output = SpawnAgentHandler::default()
+        .handle(invocation(
+            parent_session.clone(),
+            child_turn,
+            "spawn_agent",
+            function_payload(json!({"message": "hello child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let (child_content, child_success) = expect_text_output(child_spawn_output);
+    let child_result: serde_json::Value =
+        serde_json::from_str(&child_content).expect("child spawn result should be json");
+    let child_thread_id = parse_agent_id(
+        child_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("child spawn result should include agent_id"),
+    );
+    assert_eq!(child_success, Some(true));
+
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_session = child_thread.session.clone();
+    let grandchild_spawn_output = SpawnAgentHandler::default()
+        .handle(invocation(
+            child_session.clone(),
+            child_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "hello grandchild"})),
+        ))
+        .await
+        .expect("grandchild spawn should succeed");
+    let (grandchild_content, grandchild_success) = expect_text_output(grandchild_spawn_output);
+    let grandchild_result: serde_json::Value =
+        serde_json::from_str(&grandchild_content).expect("grandchild spawn result should be json");
+    let grandchild_thread_id = parse_agent_id(
+        grandchild_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("grandchild spawn result should include agent_id"),
+    );
+    assert_eq!(grandchild_success, Some(true));
+
+    let close_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should close the child subtree");
+    let (close_content, close_success) = expect_text_output(close_output);
+    let close_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_content).expect("close_agent result should be json");
+    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+
+    let child_resume_output = ResumeAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("resume_agent should reopen the child subtree");
+    let (child_resume_content, child_resume_success) = expect_text_output(child_resume_output);
+    let child_resume_result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&child_resume_content).expect("resume result should be json");
+    assert_ne!(child_resume_result.status, AgentStatus::NotFound);
+    assert_eq!(child_resume_success, Some(true));
+    assert_ne!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("resumed child thread should exist")
+            .config_snapshot()
+            .await
+            .permission_profile,
+        owner_permission_profile
+    );
+    assert_ne!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+
+    let close_again_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should be repeatable for the child subtree");
+    let (close_again_content, close_again_success) = expect_text_output(close_again_output);
+    let close_again_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_again_content)
+            .expect("second close_agent result should be json");
+    assert_ne!(close_again_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_again_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+
+    let operator = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("operator thread should start");
+    let operator_session = operator.thread.session.clone();
+    let _ = manager
+        .agent_control()
+        .shutdown_live_agent(parent_thread_id)
+        .await
+        .expect("parent shutdown should succeed");
+    assert_eq!(
+        manager.agent_control().get_status(parent_thread_id).await,
+        AgentStatus::NotFound
+    );
+
+    let parent_resume_output = ResumeAgentHandler
+        .handle(invocation(
+            operator_session,
+            operator.thread.session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": parent_thread_id.to_string()})),
+        ))
+        .await
+        .expect("resume_agent should reopen the parent thread");
+    let (parent_resume_content, parent_resume_success) = expect_text_output(parent_resume_output);
+    let parent_resume_result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&parent_resume_content).expect("parent resume result should be json");
+    assert_ne!(parent_resume_result.status, AgentStatus::NotFound);
+    assert_eq!(parent_resume_success, Some(true));
+    assert_ne!(
+        manager.agent_control().get_status(parent_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+
+    let shutdown_report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    assert_eq!(shutdown_report.submit_failed, Vec::<ThreadId>::new());
+    assert_eq!(shutdown_report.timed_out, Vec::<ThreadId>::new());
+}
+
+#[test_case::test_case(false; "inactive_parent")]
+#[test_case::test_case(true; "active_parent")]
+#[tokio::test]
+async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool) {
     fn pick_allowed_sandbox_policy(
         permissions: &crate::config::Permissions,
         base: SandboxPolicy,
@@ -4194,8 +4768,26 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
         .expect("approval policy set");
     turn.config = Arc::new(config);
 
+    let parent_config = Arc::make_mut(&mut turn.config);
+    parent_config
+        .prepare_token_budget_for_startup()
+        .expect("capture configured token budget");
+    parent_config
+        .features
+        .set_enabled(Feature::TokenBudget, parent_enabled)
+        .expect("set parent experimental context");
+    parent_config
+        .token_budget
+        .get_or_insert_default()
+        .use_history_notes_extension = parent_enabled;
+    let mut expected = parent_config.clone();
+    turn.configured_token_budget = expected.token_budget.clone();
+    Arc::make_mut(&mut turn.config)
+        .token_budget
+        .get_or_insert_default()
+        .guidance_message = Some("Parent model's resolved guidance.".to_string());
+
     let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
-    let mut expected = (*turn.config).clone();
     expected.base_instructions = Some(base_instructions.text);
     expected.base_instructions_provenance = base_instructions.provenance;
     expected.model = Some(turn.model_info().slug.clone());

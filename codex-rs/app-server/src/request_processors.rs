@@ -600,6 +600,7 @@ mod initialize_processor;
 mod marketplace_processor;
 mod mcp_event_stream;
 mod mcp_processor;
+mod memory_status;
 mod persisted_resume_settings;
 mod plugins;
 mod process_exec_processor;
@@ -641,6 +642,7 @@ pub(crate) use search::SearchRequestProcessor;
 pub(crate) use structured_request_processor::StructuredRequestProcessor;
 pub(crate) use thread_goal_processor::ThreadGoalRequestProcessor;
 pub(crate) use thread_processor::ThreadRequestProcessor;
+pub(crate) use thread_processor::ThreadResumeTarget;
 pub(crate) use thread_queue_processor::ThreadQueueRequestProcessor;
 pub(crate) use turn_processor::TurnRequestProcessor;
 pub(crate) use windows_sandbox_processor::WindowsSandboxRequestProcessor;
@@ -656,12 +658,19 @@ use crate::thread_state::ThreadStateManager;
 use token_usage_replay::restored_token_usage_turn_id;
 use token_usage_replay::send_thread_token_usage_update_to_connection;
 
-pub(crate) fn apply_live_model_settings(
+pub(crate) fn apply_live_thread_settings(
     thread: &mut Thread,
     config_snapshot: &ThreadConfigSnapshot,
 ) {
     thread.model = Some(config_snapshot.model.clone());
     thread.reasoning_effort = config_snapshot.reasoning_effort.clone();
+    thread.environments = Some(
+        config_snapshot
+            .environment_selections()
+            .iter()
+            .map(Into::into)
+            .collect(),
+    );
 }
 
 fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {

@@ -175,7 +175,7 @@
         {
           "kind": "symbol",
           "path": "codex-rs/core/tests/suite/external_agent_preflight.rs",
-          "token": "async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance()",
+          "token": "async fn external_command_agent_routes_plaintext_call_without_encryption_metadata()",
           "ciTier": "nightly"
         },
         {

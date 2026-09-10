@@ -221,6 +221,34 @@ impl ToolPlanProbe {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn namespace_function_has_property(
+        &self,
+        namespace: &str,
+        function_name: &str,
+        property: &str,
+    ) -> bool {
+        let ToolSpec::Namespace(namespace) = self.visible_spec(namespace) else {
+            panic!("expected namespace tool");
+        };
+        let function = namespace
+            .tools
+            .iter()
+            .find_map(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(function) if function.name == function_name => {
+                    Some(function)
+                }
+                ResponsesApiNamespaceTool::Function(_) | ResponsesApiNamespaceTool::Custom(_) => {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("expected function `{function_name}`"));
+        function
+            .parameters
+            .properties
+            .as_ref()
+            .is_some_and(|properties| properties.contains_key(property))
+    }
+
     fn visible_spec(&self, name: &str) -> &ToolSpec {
         self.visible_specs
             .iter()
@@ -2741,7 +2769,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             "expected v1 spawn_agent to expose `{property}`"
         );
     }
-    assert!(!properties.contains_key("agent_type"));
+    assert!(properties.contains_key("agent_type"));
 
     let v2 = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
@@ -2797,12 +2825,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    for property in ["model", "reasoning_effort"] {
+    for property in ["model", "reasoning_effort", "agent_type"] {
         assert!(spawn_agent_properties.contains_key(property));
     }
-    for property in ["agent_type", "service_tier"] {
-        assert!(!spawn_agent_properties.contains_key(property));
-    }
+    assert!(!spawn_agent_properties.contains_key("service_tier"));
     let spawn_agent_description = spawn_agent.description.as_str();
     assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
     assert!(spawn_agent_description.contains(
@@ -2886,6 +2912,47 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
         ToolExposure::Direct
     );
+}
+
+#[tokio::test]
+async fn agent_type_is_hidden_when_every_external_selector_is_disabled() {
+    let disable_external_selectors = |turn: &mut TurnContext| {
+        update_config(turn, |config| {
+            config.agent_roles.clear();
+            for spec in codex_config::agent_defaults::agent_model_specs() {
+                config.agent_selector_overrides.insert(
+                    spec.slug.to_string(),
+                    codex_config::config_toml::AgentSelectorToml {
+                        enabled: Some(false),
+                        ..Default::default()
+                    },
+                );
+            }
+        });
+    };
+    let v1 = probe(|turn| {
+        set_feature(turn, Feature::Collab, /*enabled*/ true);
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        disable_external_selectors(turn);
+    })
+    .await;
+    let v2 = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        disable_external_selectors(turn);
+    })
+    .await;
+
+    assert!(!v1.namespace_function_has_property(
+        MULTI_AGENT_V1_NAMESPACE,
+        "spawn_agent",
+        "agent_type",
+    ));
+    assert!(!v2.namespace_function_has_property(
+        MULTI_AGENT_V2_NAMESPACE,
+        "spawn_agent",
+        "agent_type",
+    ));
 }
 
 #[tokio::test]

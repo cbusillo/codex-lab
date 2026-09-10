@@ -81,7 +81,7 @@ jobs:
               exit 0
             fi
             "${apt_prefix[@]}" apt-get update -y
-            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
           fi
 
       - name: Install Rust toolchain without changing the shared default (local)
@@ -391,7 +391,7 @@ jobs:
               exit 0
             fi
             "${apt_prefix[@]}" apt-get update -y
-            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+            "${apt_prefix[@]}" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev libasound2-dev bubblewrap
           fi
 
       - name: Install Rust toolchain without changing the shared default (local)

@@ -22,6 +22,7 @@ use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_thread_store::PersistContext;
 use tracing::Instrument;
 use tracing::trace_span;
 
@@ -88,7 +89,11 @@ impl SessionTask for RegularTask {
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
                 self.initial_input_recorder
-                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .record(
+                        Arc::clone(&sess),
+                        Arc::clone(&ctx),
+                        PersistContext::Standard,
+                    )
                     .await;
                 return Ok(None);
             }
@@ -106,7 +111,11 @@ impl SessionTask for RegularTask {
         let project_validation_worktree_at_turn_start = tokio::select! {
             _ = cancellation_token.cancelled() => {
                 self.initial_input_recorder
-                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .record(
+                        Arc::clone(&sess),
+                        Arc::clone(&ctx),
+                        PersistContext::Standard,
+                    )
                     .await;
                 return Ok(None);
             },
@@ -143,7 +152,11 @@ impl SessionTask for RegularTask {
             project_validation_model_used_tools |= turn_result.model_used_tools;
             if ctx.terminal_error.lock().await.is_some() {
                 self.initial_input_recorder
-                    .record(Arc::clone(&sess), Arc::clone(&ctx))
+                    .record(
+                        Arc::clone(&sess),
+                        Arc::clone(&ctx),
+                        PersistContext::Standard,
+                    )
                     .await;
                 return Ok(None);
             }
@@ -189,6 +202,7 @@ impl SessionTask for RegularTask {
                             ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
                         sess.record_conversation_items(
                             &ctx,
+                            ctx.model_info(),
                             &[correction_item, correction_consumed_item],
                         )
                         .await;
@@ -225,7 +239,9 @@ impl SessionTask for RegularTask {
     ) -> impl std::future::Future<Output = ()> + Send {
         let initial_input_recorder = Arc::clone(&self.initial_input_recorder);
         async move {
-            initial_input_recorder.record(sess, ctx).await;
+            initial_input_recorder
+                .record(sess, ctx, PersistContext::Standard)
+                .await;
         }
     }
 }

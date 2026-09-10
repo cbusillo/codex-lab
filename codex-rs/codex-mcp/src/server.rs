@@ -109,6 +109,7 @@ pub(crate) struct McpServerConnectionIdentity {
     runtime_auth: Option<CodexAuth>,
     runtime_auth_token: Option<String>,
     codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
+    codex_apps_execution_discriminator: Option<String>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
     agent_plugin: bool,
@@ -128,6 +129,7 @@ impl McpServerConnectionIdentity {
         runtime_auth_provider: Option<&SharedAuthProvider>,
         auth: Option<&CodexAuth>,
         codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
+        codex_apps_execution_discriminator: Option<String>,
         client_elicitation_capability: ElicitationCapability,
         client_mcp_extensions: ClientMcpExtensions,
         previous_identity: Option<&Self>,
@@ -229,6 +231,7 @@ impl McpServerConnectionIdentity {
             runtime_auth,
             runtime_auth_token,
             codex_apps_cache_identity,
+            codex_apps_execution_discriminator,
             client_elicitation_capability,
             client_mcp_extensions,
             agent_plugin: server.is_agent_plugin(),
@@ -261,6 +264,7 @@ impl McpServerConnectionIdentity {
             && same_runtime_auth
             && self.runtime_auth_token == other.runtime_auth_token
             && self.codex_apps_cache_identity == other.codex_apps_cache_identity
+            && self.codex_apps_execution_discriminator == other.codex_apps_execution_discriminator
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
             && self.agent_plugin == other.agent_plugin

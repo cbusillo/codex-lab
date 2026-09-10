@@ -7,40 +7,6 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use pretty_assertions::assert_eq;
-use std::sync::Arc;
-
-async fn process_compacted_history_with_test_session(
-    compacted_history: Vec<ResponseItem>,
-    previous_turn_settings: Option<&PreviousTurnSettings>,
-) -> (Vec<ResponseItem>, Vec<ResponseItem>) {
-    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
-    let turn_context = Arc::new(turn_context);
-    session
-        .set_previous_turn_settings(previous_turn_settings.cloned())
-        .await;
-    let step_context =
-        crate::session::step_context::StepContext::for_test(Arc::clone(&turn_context));
-    let world_state = Arc::new(
-        session
-            .build_world_state_for_step(&step_context)
-            .await
-            .expect("world state should build"),
-    );
-    let initial_context = session
-        .build_initial_context_with_world_state(&turn_context, world_state.as_ref())
-        .await;
-    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
-        world_state,
-        step_context,
-    };
-    let (refreshed, _) = crate::compact_remote::process_compacted_history(
-        &session,
-        compacted_history,
-        &initial_context_injection,
-    )
-    .await;
-    (refreshed, initial_context)
-}
 
 fn annotated(items: Vec<ResponseItem>) -> Vec<ResponseItemEnvelope> {
     items.into_iter().map(ResponseItemEnvelope::new).collect()
@@ -66,7 +32,7 @@ fn user_message(text: &str) -> ResponseItem {
 }
 
 #[tokio::test]
-async fn v1_compacted_history_retains_locally_injected_usage_hint_metadata() {
+async fn v2_compacted_history_retains_locally_injected_usage_hint_metadata() {
     let (session, turn_context) = crate::session::tests::make_session_and_context().await;
     let turn_context = Arc::new(turn_context);
     let step_context =
@@ -82,12 +48,12 @@ async fn v1_compacted_history_retains_locally_injected_usage_hint_metadata() {
         step_context,
     };
 
-    let (refreshed, _) = crate::compact_remote::process_annotated_compacted_history(
-        &session,
+    let (initial_context, _) =
+        build_compaction_initial_context(&session, &initial_context_injection).await;
+    let refreshed = insert_initial_context_before_last_real_user_or_summary(
         annotated(vec![user_message("summary")]),
-        &initial_context_injection,
-    )
-    .await;
+        initial_context,
+    );
 
     assert!(refreshed.iter().any(|envelope| {
         envelope.metadata.as_ref().is_some_and(|metadata| {
@@ -120,6 +86,7 @@ fn preserves_active_validation_correction_pair_before_summary() {
 
 fn compacted_user_message(text: &str) -> CompactedUserMessage {
     CompactedUserMessage {
+        id: None,
         message: text.to_string(),
         internal_chat_message_metadata_passthrough: None,
         harness_metadata: None,
@@ -183,7 +150,13 @@ fn collect_user_messages_extracts_user_text_only() {
 
     let collected = collect_user_messages(&items);
 
-    assert_eq!(vec![compacted_user_message("first")], collected);
+    assert_eq!(
+        vec![CompactedUserMessage {
+            id: Some(ResponseItemId::with_suffix("msg", "user")),
+            ..compacted_user_message("first")
+        }],
+        collected,
+    );
 }
 
 #[test]
@@ -196,10 +169,11 @@ fn collect_annotated_user_messages_extracts_user_text_only() {
         ResponseItemEnvelope::new(ResponseItem::Other),
     ];
 
-    let collected = collect_annotated_user_messages(&items);
+    let collected = collect_annotated_user_messages(&items, CompactedMessageIdentity::Preserve);
 
     assert_eq!(
         vec![CompactedUserMessage {
+            id: None,
             message: "first".to_string(),
             internal_chat_message_metadata_passthrough: None,
             harness_metadata: Some(CodexHarnessMetadata::default()),
@@ -277,6 +251,7 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
     let max_tokens = 16;
     let big = "word ".repeat(200);
     let user_message = CompactedUserMessage {
+        id: Some(ResponseItemId::with_suffix("msg", "long-user")),
         message: big.clone(),
         internal_chat_message_metadata_passthrough: None,
         harness_metadata: Some(CodexHarnessMetadata::default()),
@@ -315,6 +290,7 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
         other => panic!("unexpected item in history: {other:?}"),
     };
     assert_eq!(summary_text, "SUMMARY");
+    assert_eq!(history[0].id(), user_message.id.as_ref());
     assert_eq!(history[0].metadata, Some(CodexHarnessMetadata::default()));
     assert_eq!(history[1].metadata, None);
 }
@@ -346,6 +322,7 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata() {
     let history = build_compacted_history(
         Vec::new(),
         &[CompactedUserMessage {
+            id: Some(ResponseItemId::with_suffix("msg", "user")),
             message: "first user message".to_string(),
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
@@ -368,7 +345,7 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata() {
         vec![
             ResponseItemEnvelope {
                 item: ResponseItem::Message {
-                    id: None,
+                    id: Some(ResponseItemId::with_suffix("msg", "user")),
                     role: "user".to_string(),
                     content: vec![ContentItem::InputText {
                         text: "first user message".to_string(),
@@ -391,301 +368,6 @@ fn build_compacted_history_preserves_user_message_passthrough_metadata() {
             ))),
         ]
     );
-}
-
-#[tokio::test]
-async fn process_compacted_history_replaces_developer_messages() {
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "stale permissions".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "summary".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "stale personality".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let (refreshed, mut expected) = process_compacted_history_with_test_session(
-        compacted_history,
-        /*previous_turn_settings*/ None,
-    )
-    .await;
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    assert_eq!(refreshed, expected);
-}
-
-#[tokio::test]
-async fn process_compacted_history_reinjects_full_initial_context() {
-    let compacted_history = vec![ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    }];
-    let (refreshed, mut expected) = process_compacted_history_with_test_session(
-        compacted_history,
-        /*previous_turn_settings*/ None,
-    )
-    .await;
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    assert_eq!(refreshed, expected);
-}
-
-#[tokio::test]
-async fn process_compacted_history_drops_non_user_content_messages() {
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"# AGENTS.md instructions for /repo
-
-<INSTRUCTIONS>
-keep me updated
-</INSTRUCTIONS>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"<environment_context>
-  <cwd>/repo</cwd>
-  <shell>zsh</shell>
-</environment_context>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"<turn_aborted>
-  <turn_id>turn-1</turn_id>
-  <reason>interrupted</reason>
-</turn_aborted>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "summary".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "stale developer instructions".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let (refreshed, mut expected) = process_compacted_history_with_test_session(
-        compacted_history,
-        /*previous_turn_settings*/ None,
-    )
-    .await;
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    assert_eq!(refreshed, expected);
-}
-
-#[tokio::test]
-async fn process_compacted_history_drops_legacy_warnings() {
-    let latest_user = user_message("latest user");
-    let compacted_history = vec![
-        user_message(
-            "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes",
-        ),
-        user_message(
-            "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
-        ),
-        user_message(
-            "Warning: Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety",
-        ),
-        latest_user.clone(),
-    ];
-    let (refreshed, initial_context) = process_compacted_history_with_test_session(
-        compacted_history,
-        /*previous_turn_settings*/ None,
-    )
-    .await;
-    let mut expected = initial_context;
-    expected.push(latest_user);
-    assert_eq!(refreshed, expected);
-}
-
-#[tokio::test]
-async fn process_compacted_history_inserts_context_before_last_real_user_message_only() {
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "older user".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: format!("{SUMMARY_PREFIX}\nsummary text"),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "latest user".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-
-    let (refreshed, initial_context) = process_compacted_history_with_test_session(
-        compacted_history,
-        /*previous_turn_settings*/ None,
-    )
-    .await;
-    let mut expected = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "older user".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: format!("{SUMMARY_PREFIX}\nsummary text"),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    expected.extend(initial_context);
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "latest user".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    assert_eq!(refreshed, expected);
-}
-
-#[tokio::test]
-async fn process_compacted_history_reinjects_model_switch_message() {
-    let compacted_history = vec![ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    }];
-    let previous_turn_settings = PreviousTurnSettings {
-        model: "previous-regular-model".to_string(),
-        comp_hash: None,
-        realtime_active: None,
-    };
-
-    let (refreshed, initial_context) = process_compacted_history_with_test_session(
-        compacted_history,
-        Some(&previous_turn_settings),
-    )
-    .await;
-
-    let ResponseItem::Message { role, content, .. } = &initial_context[0] else {
-        panic!("expected developer message");
-    };
-    assert_eq!(role, "developer");
-    let [ContentItem::InputText { text }, ..] = content.as_slice() else {
-        panic!("expected developer text");
-    };
-    assert!(text.contains("<model_switch>"));
-
-    let mut expected = initial_context;
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
-    assert_eq!(refreshed, expected);
 }
 
 #[test]

@@ -4,7 +4,7 @@ on:
   workflow_call:
 
 jobs:
-  python-sdk:
+  python-sdk-installation:
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -24,23 +24,25 @@ jobs:
         with:
           version: "0.11.3"
 
-      - name: Test Python SDK
+      - name: Test the installed Python SDK and its default runtime
         working-directory: sdk/python
         shell: bash
         run: |
           set -euo pipefail
-          uv sync --group dev --frozen
-          uv run --frozen --no-sync ruff check --output-format=github .
-          uv run --frozen --no-sync ruff format --check .
-          uv run --frozen --no-sync pytest
+          stage="${RUNNER_TEMP}/installed-python-sdk"
+          uv build --wheel --out-dir "${stage}/dist"
+          uv venv "${stage}/venv"
+          uv pip install --python "${stage}/venv/bin/python" "${stage}"/dist/*.whl
+          mkdir -p "${stage}/home"
+          env -u PYTHONPATH -u CODEX_EXEC_PATH HOME="${stage}/home" \
+            "${stage}/venv/bin/python" tests/installed_sdk_smoke.py
 
-      - name: Check for a clean worktree
-        if: always() && !cancelled()
-        uses: ./.github/actions/check-clean-worktree
-
-  typescript-sdk:
+  sdks:
     runs-on: macos-26
-    timeout-minutes: 10
+    timeout-minutes: 20
+    environment:
+      name: bazel
+      deployment: false
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -59,6 +61,63 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Bazel CI
+        id: setup_bazel
+        uses: ./.github/actions/setup-bazel-ci
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Build codex and the code-mode host with Bazel
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Use the shared CI wrapper so fork PRs fall back cleanly when
+          # BuildBuddy credentials are unavailable. This workflow needs the
+          # built binaries on disk afterwards, so ask the wrapper to override
+          # CI's default remote_download_minimal behavior.
+          ./.github/scripts/run-bazel-ci.sh \
+            --remote-download-toplevel \
+            -- \
+            build \
+            --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) \
+            --build_metadata=TAG_job=sdk \
+            -- \
+            //codex-rs/cli:codex \
+            //codex-rs/code-mode-host:codex-code-mode-host
+
+          cquery_output="$(
+            ./.github/scripts/run-bazel-ci.sh \
+              -- \
+              cquery \
+              --output=files \
+              -- \
+              'set(//codex-rs/cli:codex //codex-rs/code-mode-host:codex-code-mode-host)' \
+              | grep -E '^(/|bazel-out/)'
+          )"
+          bazel_output_paths=()
+          while IFS= read -r output_path; do
+            bazel_output_paths+=("${output_path}")
+          done <<< "${cquery_output}"
+          if [[ ${#bazel_output_paths[@]} -ne 2 ]]; then
+            echo "Expected both Bazel-built binaries, found ${#bazel_output_paths[@]}." >&2
+            exit 1
+          fi
+
+          # Stage both binaries together so the CLI can discover its sibling
+          # code-mode host while the SDK tests spawn the CLI directly.
+          install_dir="${GITHUB_WORKSPACE}/.tmp/sdk-ci"
+          mkdir -p "${install_dir}"
+          install -m 755 "${bazel_output_paths[@]}" "${install_dir}"
+          echo "CODEX_EXEC_PATH=${install_dir}/codex" >> "$GITHUB_ENV"
+
+      - name: Warm up Bazel-built codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${CODEX_EXEC_PATH}" --version
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -67,6 +126,30 @@ jobs:
 
       - name: Lint SDK packages
         run: pnpm -r --filter ./sdk/typescript run lint
+
+      - name: Test SDK packages
+        run: pnpm -r --filter ./sdk/typescript run test
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+
+      - name: Test Python SDK against the same CLI
+        working-directory: sdk/python
+        run: |
+          uv sync --only-group dev --frozen
+          uv run --only-group dev --frozen --no-sync ruff check --output-format=github .
+          uv run --only-group dev --frozen --no-sync ruff format --check .
+          uv run --only-group dev --frozen --no-sync pytest
+
+      - name: Save bazel repository cache
+        if: always() && !cancelled() && steps.setup_bazel.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ steps.setup_bazel.outputs.repository-cache-path }}
+          key: bazel-cache-aarch64-apple-darwin-${{ hashFiles('MODULE.bazel', 'codex-rs/Cargo.lock', 'codex-rs/Cargo.toml') }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled()

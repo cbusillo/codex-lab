@@ -146,13 +146,6 @@
     {
       "disposition": "converged_with_upstream",
       "issue": 428,
-      "path": "codex-rs/tui/src/status/rate_limits.rs",
-      "reason": "Issue #428 adopts upstream credit-availability rendering under IDENTITY-1; the broader per-account reset-credit recommendation UX remains tracked by #383.",
-      "violation": "reverted_to_upstream"
-    },
-    {
-      "disposition": "converged_with_upstream",
-      "issue": 428,
       "path": "codex-rs/tui/src/status/snapshots/codex_tui__status__tests__status_snapshot_includes_credits_and_limits.snap",
       "reason": "Issue #428 adopts the current upstream status implementation and fixtures under IDENTITY-1; these deltas reflect API evolution and test data rather than Codex Lab product identity.",
       "violation": "reverted_to_upstream"

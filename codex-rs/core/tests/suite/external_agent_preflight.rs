@@ -1005,8 +1005,7 @@ printf 'external provider replied\n'
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance() -> Result<()>
-{
+async fn external_command_agent_routes_plaintext_call_without_encryption_metadata() -> Result<()> {
     let stub_dir = TempDir::new()?;
     let backend = stub_cli(
         &stub_dir,
@@ -1022,7 +1021,7 @@ async fn external_command_agent_routes_through_spawn_agent_with_provider_provena
         },
         sse(vec![
             ev_response_created("resp-spawn"),
-            ev_function_call_with_namespace(
+            raw_ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
                 COLLABORATION_NAMESPACE,
                 "spawn_agent",
