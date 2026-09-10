@@ -2,6 +2,7 @@ from pathlib import Path
 import hashlib
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_lab_package.supervisor import EngineIdentity
+from codex_lab_package.supervisor import BASE_SYSTEM_PATHS
 from codex_lab_package.supervisor import SupervisorPaths
 from codex_lab_package.supervisor import SupervisorTools
 from codex_lab_package.supervisor import build_launch_agent_plist
@@ -19,6 +21,7 @@ from codex_lab_package.supervisor import build_supervisor_runner
 from codex_lab_package.supervisor import inspect_engine
 from codex_lab_package.supervisor import inspect_code_mode_host
 from codex_lab_package.supervisor import install_supervisor
+from codex_lab_package.supervisor import provider_cli_search_path
 
 
 class SupervisorTest(unittest.TestCase):
@@ -111,6 +114,8 @@ __RUNTIME_OUTPUT__
             self.assertIn("com\\.apple\\.security\\.cs\\.allow-jit", runner)
             self.assertIn("LISTEN_URL=ws://127.0.0.1:4766", runner)
             self.assertIn("app-server --remote-control --listen", runner)
+            self.assertIn("PROVIDER_CLI_PATH=", runner)
+            self.assertIn('PATH="$PROVIDER_CLI_PATH"', runner)
             self.assertEqual(runner.count("in ''|*[!0-9]*) return 0"), 2)
             self.assertNotIn("app-server daemon start", runner)
             self.assertNotIn('"$MANAGED_CLI" app-server daemon pid-update-loop', runner)
@@ -119,6 +124,69 @@ __RUNTIME_OUTPUT__
             self.assertEqual(plist["Label"], paths.label)
             self.assertEqual(plist["ProgramArguments"], [str(paths.runner), "run"])
             self.assertTrue(plist["KeepAlive"])
+
+    def test_launch_agent_provider_path_reaches_child_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            home = root / "home"
+            agy = home / ".local/bin/agy"
+            agy.parent.mkdir(parents=True)
+            agy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(agy, 0o755)
+            provider_path = provider_cli_search_path(home)
+            paths = SupervisorPaths(
+                lab_home=root / "Codex Lab Home",
+                launch_agents_dir=root / "LaunchAgents",
+            )
+
+            plist = plistlib.loads(build_launch_agent_plist(paths))
+            runner = build_supervisor_runner(
+                paths,
+                self._identity(),
+                provider_cli_path=provider_path,
+            )
+            provider_path_from_runner = shlex.split(
+                next(
+                    line
+                    for line in runner.splitlines()
+                    if line.startswith("PROVIDER_CLI_PATH=")
+                )
+            )[0].split("=", maxsplit=1)[1]
+            child = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os, shutil; print(shutil.which('agy', path=os.environ['PATH']))",
+                ],
+                env={
+                    **os.environ,
+                    "PATH": provider_path_from_runner,
+                },
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(child.stdout.strip(), str(agy.resolve()))
+            self.assertEqual(
+                plist["EnvironmentVariables"]["PATH"],
+                os.pathsep.join(str(path) for path in BASE_SYSTEM_PATHS),
+            )
+            self.assertEqual(provider_path_from_runner, provider_path)
+
+    def test_provider_cli_search_path_rejects_unsafe_home(self) -> None:
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            provider_cli_search_path(Path("relative-home"))
+        with self.assertRaisesRegex(ValueError, "PATH separator"):
+            provider_cli_search_path(Path("/Users/owner:with-colon"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "owner:with-colon"
+            target.mkdir()
+            alias = root / "home-alias"
+            alias.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "resolved.*PATH separator"):
+                provider_cli_search_path(alias)
 
     def test_inspect_engine_records_signature_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -188,6 +256,7 @@ __RUNTIME_OUTPUT__
             paths = SupervisorPaths(
                 lab_home=root / "lab",
                 launch_agents_dir=root / "LaunchAgents",
+                user_home=root / "provider owner",
             )
             self._write_engine(paths.code_mode_host)
             codesign = root / "codesign"
@@ -279,6 +348,16 @@ __RUNTIME_OUTPUT__
             self.assertEqual(result["service"], f"gui/501/{paths.label}")
             self.assertEqual(result["websocketUrl"], "ws://127.0.0.1:4766/rpc")
             self.assertTrue(paths.runner.is_file())
+            expected_provider_path = provider_cli_search_path(paths.user_home)
+            plist = plistlib.loads(paths.plist.read_bytes())
+            self.assertEqual(
+                plist["EnvironmentVariables"]["PATH"],
+                os.pathsep.join(str(path) for path in BASE_SYSTEM_PATHS),
+            )
+            self.assertIn(
+                f"PROVIDER_CLI_PATH={shlex.quote(expected_provider_path)}",
+                paths.runner.read_text(encoding="utf-8"),
+            )
             run.assert_called_once_with([str(paths.runner), "check"], check=True)
             self.assertEqual(
                 [call.args for call in launchctl_call.call_args_list],
