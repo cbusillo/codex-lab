@@ -2,15 +2,17 @@
 
 import argparse
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 # Import only this script's siblings, including under PYTHONSAFEPATH.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from runtime import Binary as MachO
 from runtime import PLUGINS, RuntimeFormat, digest, prepare, required_library_paths
+from runtime import Binary as MachO
+
+__all__ = ["PLUGINS", "digest", "inspect", "project"]
 
 SYSTEM_IMPORTS = frozenset(
     {
@@ -136,7 +138,7 @@ def finalize_copy(destination, metadata, dependency_paths):
     return MachO(identity, tuple(imports), ())
 
 
-def project(prefix, receipts, target, output):
+def project(prefix, receipts, target, output, *, additional_libraries=()):
     if sys.platform != "darwin" or target not in (
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -153,7 +155,8 @@ def project(prefix, receipts, target, output):
         finalize_copy,
         required_libraries=tuple(
             Path(path).name for path in required_library_paths(target)
-        ),
+        )
+        + tuple(additional_libraries),
     )
     prepare(prefix, receipts, target, output, format)
 

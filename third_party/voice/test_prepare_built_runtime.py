@@ -1,20 +1,21 @@
 """Exercise the build receipt boundary and real runtime preparation adapter."""
 
 import json
-from pathlib import Path
-import sys
-import subprocess
+import os
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import macos_runtime
-from prepare_built_runtime import prepare_archive, prepare_built
-from runtime import digest
 import test_macos_runtime
 import test_sdk
+from prepare_built_runtime import prepare_archive, prepare_built
+from runtime import digest
 
 
 class BuiltRuntimeTests(unittest.TestCase):
@@ -131,6 +132,10 @@ class BuiltRuntimeTests(unittest.TestCase):
         sdk_fixture.setUp()
         for relative in ("include", "lib/glib-2.0", "lib/pkgconfig"):
             shutil.copytree(sdk_fixture.prefix / relative, fixture.prefix / relative)
+        for metadata in (fixture.prefix / "lib/pkgconfig").glob("*.pc"):
+            metadata.write_text(
+                metadata.read_text().replace("-lfixture", "-lfixture.1")
+            )
         self.receipt.write_text(json.dumps({**self.build, "target": fixture.target}))
         library = next((fixture.prefix / "lib").glob("*.dylib"))
         (library.parent / "development-alias.dylib").symlink_to(library.name)
@@ -193,6 +198,50 @@ class BuiltRuntimeTests(unittest.TestCase):
                         for record in manifest["libraries"]
                     )
                 )
+                for library in sdk_output.glob("lib/*.dylib"):
+                    metadata = macos_runtime.inspect(library, fixture.target)
+                    self.assertTrue(metadata.identity.startswith("@rpath/"))
+                    self.assertFalse(metadata.rpaths)
+                    self.assertTrue(
+                        all(
+                            dependency in macos_runtime.SYSTEM_IMPORTS
+                            or dependency.startswith("@loader_path/")
+                            for dependency in metadata.imports
+                        )
+                    )
+                if state == "absent":
+                    moved = self.root / "moved SDK with spaces"
+                    sdk_output.rename(moved)
+                    staged = self.root / "staged consumer with spaces"
+                    (staged / "bin").mkdir(parents=True)
+                    (staged / "lib").mkdir()
+                    for library in moved.glob("lib/*.dylib"):
+                        shutil.copy2(library, staged / "lib" / library.name)
+                    source = staged / "probe.c"
+                    source.write_text(
+                        "extern int voice_fixture(void);\n"
+                        "int main(void) { return voice_fixture() == 42 ? 0 : 1; }\n"
+                    )
+                    executable = staged / "bin/probe"
+                    subprocess.run(
+                        [
+                            "/usr/bin/xcrun",
+                            "clang",
+                            str(source),
+                            "-L" + str(moved / "lib"),
+                            "-lfixture.1",
+                            "-Wl,-rpath,@executable_path/../lib",
+                            "-o",
+                            str(executable),
+                        ],
+                        check=True,
+                    )
+                    environment = {
+                        key: value
+                        for key, value in os.environ.items()
+                        if not key.startswith("DYLD_")
+                    }
+                    subprocess.run([executable], env=environment, check=True)
 
     def test_archive_rejects_escaping_native_alias_before_inspection(self):
         archive = self.root / "prefix.tar"

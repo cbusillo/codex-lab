@@ -5,11 +5,12 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
-from pathlib import PurePosixPath
 import re
 import shlex
+import shutil
 import subprocess
+import sys
+from pathlib import Path, PurePosixPath
 
 
 def digest(path: Path) -> str:
@@ -38,6 +39,43 @@ MODULES = (
     "gstreamer-app-1.0",
     "gstreamer-audio-1.0",
 )
+
+
+def verify_macos_libraries(
+    sdk: Path, target: str, sources: Path, expected: set[str]
+) -> None:
+    libraries = sorted(
+        name for name in expected if re.fullmatch(r"lib/[A-Za-z0-9_+.-]+\.dylib", name)
+    )
+    if not libraries:
+        return
+    sys.path.insert(0, str(sources.resolve().parent))
+    import macos_runtime
+
+    names = {Path(name).name for name in libraries}
+    for name in libraries:
+        metadata = macos_runtime.inspect(sdk / name, target)
+        identity = re.fullmatch(r"@rpath/([A-Za-z0-9_+.-]+\.dylib)", metadata.identity)
+        if (
+            not identity
+            or identity[1] not in names
+            or metadata.rpaths
+            or any(
+                dependency not in macos_runtime.SYSTEM_IMPORTS
+                and (
+                    not (
+                        match := re.fullmatch(
+                            r"@loader_path/([A-Za-z0-9_+.-]+\.dylib)",
+                            dependency,
+                        )
+                    )
+                    or match[1] not in names
+                    or not (sdk / "lib" / match[1]).is_file()
+                )
+                for dependency in metadata.imports
+            )
+        ):
+            raise ValueError(f"voice SDK has nonrelocatable Mach-O metadata: {name}")
 
 
 def identity(repository: Path, target: str, toolchain: str) -> str:
@@ -125,6 +163,8 @@ def verify(sdk: Path, target: str, pkg_config: Path, sources: Path) -> None:
         raise ValueError("voice SDK contains a symlinked directory")
     if actual != expected | {"sdk.json"}:
         raise ValueError("voice SDK contains an unverified file")
+    if target.endswith("-apple-darwin"):
+        verify_macos_libraries(sdk, target, sources, expected)
     libdir = sdk / "lib/pkgconfig"
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -132,7 +172,7 @@ def verify(sdk: Path, target: str, pkg_config: Path, sources: Path) -> None:
         "PKG_CONFIG_PATH": "",
     }
     result = subprocess.run(
-        [pkg_config, "--atleast-version=1.28", "gstreamer-1.0"], env=env
+        [pkg_config, "--atleast-version=1.28", "gstreamer-1.0"], env=env, check=False
     )
     if result.returncode:
         raise ValueError("voice SDK does not provide GStreamer >= 1.28")
@@ -149,6 +189,41 @@ def verify(sdk: Path, target: str, pkg_config: Path, sources: Path) -> None:
             raise ValueError(f"pkg-config escaped the voice SDK: {flag}")
 
 
+def stage_runtime_libraries(sdk: Path, target: str, output: Path) -> None:
+    if not target.endswith("-apple-darwin"):
+        raise ValueError("voice SDK runtime staging currently requires macOS")
+    metadata = json.loads((sdk / "sdk.json").read_text())
+    records = [
+        record
+        for record in metadata.get("files", [])
+        if re.fullmatch(r"lib/[A-Za-z0-9_+.-]+\.dylib", record.get("path", ""))
+    ]
+    if metadata.get("target") != target or not 1 <= len(records) <= 128:
+        raise ValueError("voice SDK runtime inventory is invalid")
+    if output.is_symlink() or output.resolve().is_relative_to(sdk.resolve()):
+        raise ValueError("staged voice runtime must be outside the SDK")
+    output.mkdir(parents=True, exist_ok=True)
+    staged = []
+    for record in records:
+        source = sdk / record["path"]
+        if source.is_symlink() or digest(source) != record.get("sha256"):
+            raise ValueError("voice SDK runtime digest mismatch")
+        destination = output / source.name
+        temporary = output / ("." + source.name + ".tmp")
+        shutil.copy2(source, temporary)
+        if digest(temporary) != record["sha256"]:
+            temporary.unlink(missing_ok=True)
+            raise ValueError("staged voice runtime digest mismatch")
+        temporary.replace(destination)
+        staged.append({"path": destination.name, "sha256": record["sha256"]})
+    (output / "voice-sdk-runtime.json").write_text(
+        json.dumps(
+            {"schemaVersion": 1, "target": target, "libraries": staged}, indent=2
+        )
+        + "\n"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -161,11 +236,17 @@ def main() -> None:
     check.add_argument("--target", required=True)
     check.add_argument("--pkg-config", type=Path, required=True)
     check.add_argument("--sources", type=Path, required=True)
+    stage = sub.add_parser("stage")
+    stage.add_argument("--sdk", type=Path, required=True)
+    stage.add_argument("--target", required=True)
+    stage.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "identity":
         print(identity(args.repository, args.target, args.toolchain))
-    else:
+    elif args.command == "verify":
         verify(args.sdk, args.target, args.pkg_config, args.sources)
+    else:
+        stage_runtime_libraries(args.sdk, args.target, args.output)
 
 
 if __name__ == "__main__":

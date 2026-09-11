@@ -7,14 +7,15 @@ approval. The current build commit comes from Bazel's workspace status file.
 import argparse
 import importlib
 import json
-from pathlib import Path
 import re
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from runtime import digest
+
 from sdk import export_sdk
 
 
@@ -50,6 +51,7 @@ def prepare_built(prefix, build_receipt, status, target, output, *, sdk_output=N
         raise ValueError("unsupported native runtime target")
     platform = importlib.import_module(modules[suffix])
     records = []
+    sdk_libraries = set()
     for path in sorted(prefix.rglob("*")):
         if not re.fullmatch(r".+\.(?:dylib|dll|so(?:\.[0-9]+)*)", path.name):
             continue
@@ -61,7 +63,9 @@ def prepare_built(prefix, build_receipt, status, target, output, *, sdk_output=N
             continue
         if len(records) >= 128:
             raise ValueError("native inventory exceeds limits")
-        platform.inspect(path, target)
+        metadata = platform.inspect(path, target)
+        if suffix == "apple-darwin" and path.parent == prefix / "lib":
+            sdk_libraries.add(Path(metadata.identity).name)
         records.append(
             {
                 "path": path.relative_to(prefix).as_posix(),
@@ -88,7 +92,21 @@ def prepare_built(prefix, build_receipt, status, target, output, *, sdk_output=N
         )
         platform.project(prefix, receipts, target, output)
         if sdk_output is not None:
-            export_sdk(prefix, receipts, target, sdk_output)
+            if suffix == "apple-darwin":
+                with tempfile.TemporaryDirectory(
+                    prefix="voice-sdk-runtime-"
+                ) as temporary_runtime:
+                    runtime = Path(temporary_runtime) / "runtime"
+                    platform.project(
+                        prefix,
+                        receipts,
+                        target,
+                        runtime,
+                        additional_libraries=tuple(sorted(sdk_libraries)),
+                    )
+                    export_sdk(prefix, receipts, target, sdk_output, runtime=runtime)
+            else:
+                export_sdk(prefix, receipts, target, sdk_output)
 
 
 def prepare_archive(archive, build_receipt, status, target, output, *, sdk_output=None):

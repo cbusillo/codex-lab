@@ -1,16 +1,14 @@
 import hashlib
 import json
-from pathlib import Path
 import re
 import stat
 import subprocess
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
-from voice_sdk_ci import IDENTITY_PATHS
-from voice_sdk_ci import identity
-from voice_sdk_ci import verify
+from voice_sdk_ci import IDENTITY_PATHS, identity, stage_runtime_libraries, verify
 
 
 class VoiceSdkCiTest(unittest.TestCase):
@@ -158,6 +156,33 @@ class VoiceSdkCiTest(unittest.TestCase):
             sources.write_text("changed")
             with self.assertRaisesRegex(ValueError, "metadata"):
                 verify(sdk, "aarch64-apple-darwin", tool, sources)
+
+    def test_stages_only_receipt_verified_runtime_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sdk, _tool, _sources = self.fixture(root)
+            library = sdk / "lib/libfixture.0.dylib"
+            library.write_bytes(b"projected fixture")
+            receipt = json.loads((sdk / "sdk.json").read_text())
+            receipt["files"].append(
+                {
+                    "path": "lib/libfixture.0.dylib",
+                    "sha256": hashlib.sha256(library.read_bytes()).hexdigest(),
+                }
+            )
+            (sdk / "sdk.json").write_text(json.dumps(receipt))
+            output = root / "target/debug/lib"
+            stage_runtime_libraries(sdk, "aarch64-apple-darwin", output)
+            self.assertEqual(
+                (output / "libfixture.0.dylib").read_bytes(), b"projected fixture"
+            )
+            library.write_bytes(b"changed")
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                stage_runtime_libraries(sdk, "aarch64-apple-darwin", output)
+            linked = root / "linked-runtime"
+            linked.symlink_to(output, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "outside the SDK"):
+                stage_runtime_libraries(sdk, "aarch64-apple-darwin", linked)
 
 
 if __name__ == "__main__":

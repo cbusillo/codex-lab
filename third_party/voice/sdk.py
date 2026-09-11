@@ -6,9 +6,9 @@ and final helper linking remain the runtime preparer and consumer's jobs.
 """
 
 import json
-from pathlib import Path
 import re
 import shutil
+from pathlib import Path
 
 from runtime import digest
 
@@ -26,7 +26,79 @@ MODULES = (
 PKG_CONFIG_MODULES = (*MODULES, "libffi", "libpcre2-8", "zlib")
 
 
-def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
+def projected_macos_libraries(
+    runtime: Path, target: str, commit: str, source_hash: str
+) -> dict[str, tuple[Path, str]]:
+    runtime_input = runtime
+    runtime = runtime.resolve(strict=True)
+    manifest_path = runtime / "runtime.json"
+    if (
+        runtime_input.is_symlink()
+        or not runtime.is_dir()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.stat().st_size > 1024 * 1024
+    ):
+        raise ValueError("projected SDK runtime must have a bounded receipt")
+    manifest = json.loads(manifest_path.read_text())
+    records = manifest.get("libraries", [])
+    if (
+        manifest.get("schemaVersion") != 1
+        or manifest.get("target") != target
+        or manifest.get("sourceCommit") != commit
+        or manifest.get("sourceManifestSha256") != source_hash
+        or not 1 <= len(records) <= 128
+    ):
+        raise ValueError("projected SDK runtime does not match the native build")
+    projected = {}
+    for record in records:
+        source_name = record.get("sourcePath", "")
+        relative = Path(record.get("path", ""))
+        path = runtime / relative
+        if (
+            not re.fullmatch(
+                r"(?:lib|plugins)/[A-Za-z0-9_+.-]+\.dylib", relative.as_posix()
+            )
+            or not re.fullmatch(
+                r"lib(?:/gstreamer-1\.0)?/[A-Za-z0-9_+.-]+\.dylib",
+                source_name,
+            )
+            or source_name in projected
+            or path.is_symlink()
+            or not path.is_file()
+            or not path.resolve(strict=True).is_relative_to(runtime.resolve())
+            or digest(path) != record.get("sha256")
+            or not re.fullmatch(r"[0-9a-f]{64}", record.get("sourceSha256", ""))
+            or any(
+                dependency
+                not in {
+                    "/usr/lib/libSystem.B.dylib",
+                    "/usr/lib/libc++.1.dylib",
+                    "/usr/lib/libobjc.A.dylib",
+                    "/usr/lib/libiconv.2.dylib",
+                    "/usr/lib/libresolv.9.dylib",
+                    "/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+                    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                    "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+                    "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+                }
+                and not dependency.startswith("@loader_path/")
+                for dependency in record.get("imports", [])
+            )
+        ):
+            raise ValueError("projected SDK runtime library is invalid")
+        projected[source_name] = (path, record["sourceSha256"])
+    return projected
+
+
+def export_sdk(
+    prefix: Path,
+    receipts: Path,
+    target: str,
+    output: Path,
+    *,
+    runtime: Path | None = None,
+):
     prefix, receipts = prefix.resolve(strict=True), receipts.resolve(strict=True)
     output = output.absolute()
     if (
@@ -50,6 +122,13 @@ def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
         or not re.fullmatch(r"[0-9a-f]{40}", ci.get("commit", ""))
     ):
         raise ValueError("SDK build receipt does not match the sources and target")
+    projected = None
+    if target.endswith("-apple-darwin"):
+        if runtime is None:
+            raise ValueError("macOS SDK export requires the projected runtime")
+        projected = projected_macos_libraries(
+            runtime, target, ci["commit"], source_hash
+        )
     inventory = json.loads((receipts / "inspection/binaries.json").read_text())
     if not 1 <= len(inventory) <= 128:
         raise ValueError("unexpected native inventory size")
@@ -97,10 +176,12 @@ def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
             raise ValueError("SDK inputs exceed the size limit")
         source_name = source.relative_to(prefix).as_posix()
         expected = digest(source)
-        if re.search(r"\.(?:dylib|so(?:\.[0-9]+)*)$", name):
-            if binaries.get(source_name) != expected:
-                raise ValueError("SDK shared library is missing from the receipt")
-        selected.append((name, source, expected))
+        if (
+            re.search(r"\.(?:dylib|so(?:\.[0-9]+)*)$", name)
+            and binaries.get(source_name) != expected
+        ):
+            raise ValueError("SDK shared library is missing from the receipt")
+        selected.append((name, source_name, source, expected))
     for module in PKG_CONFIG_MODULES:
         path = prefix / f"lib/pkgconfig/{module}.pc"
         contents = path.read_text() if path.is_file() else ""
@@ -119,10 +200,23 @@ def export_sdk(prefix: Path, receipts: Path, target: str, output: Path):
     output.mkdir()
     try:
         files = []
-        for name, source, expected in selected:
+        for name, source_name, source, expected in selected:
+            copy_source = source
+            if projected is not None and re.search(r"\.dylib$", name):
+                projected_library = projected.get(source_name)
+                if projected_library is None:
+                    raise ValueError(
+                        f"macOS SDK library is missing from projected runtime: {source_name}"
+                    )
+                copy_source, source_digest = projected_library
+                if source_digest != expected:
+                    raise ValueError(
+                        "projected SDK runtime source digest is mismatched"
+                    )
+                expected = digest(copy_source)
             destination = output / name
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+            shutil.copy2(copy_source, destination)
             if digest(destination) != expected:
                 raise ValueError("SDK input changed while copying")
             files.append({"path": name, "sha256": expected})
