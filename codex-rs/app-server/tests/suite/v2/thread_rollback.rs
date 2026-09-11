@@ -10,6 +10,7 @@ use codex_app_server_protocol::DeprecationNoticeNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
@@ -292,7 +293,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         ),
         (Some("gpt-5.2"), Some(ReasoningEffort::High))
     );
-    assert_eq!(rolled_back_thread.turns[0].items.len(), 2);
+    assert_eq!(rolled_back_thread.turns[0].items.len(), 3);
     match &rolled_back_thread.turns[0].items[0] {
         ThreadItem::UserMessage { content, .. } => {
             assert_eq!(
@@ -305,6 +306,13 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         }
         other => panic!("expected user message item, got {other:?}"),
     }
+    assert!(matches!(
+        &rolled_back_thread.turns[0].items[2],
+        ThreadItem::ProjectValidation {
+            status: ProjectValidationStatus::Skipped,
+            ..
+        }
+    ));
     // Resume and confirm the history is pruned.
 
     let _: ThreadResumeResponse =
@@ -326,7 +334,7 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
 
     assert_eq!(thread.turns.len(), 1);
     assert_eq!(thread.status, ThreadStatus::Idle);
-    assert_eq!(thread.turns[0].items.len(), 2);
+    assert_eq!(thread.turns[0].items.len(), 3);
     match &thread.turns[0].items[0] {
         ThreadItem::UserMessage { content, .. } => {
             assert_eq!(
@@ -339,5 +347,12 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
         }
         other => panic!("expected user message item, got {other:?}"),
     }
+    assert!(matches!(
+        &thread.turns[0].items[2],
+        ThreadItem::ProjectValidation {
+            status: ProjectValidationStatus::Skipped,
+            ..
+        }
+    ));
     Ok(())
 }
