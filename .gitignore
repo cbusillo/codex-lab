@@ -8,6 +8,7 @@ node_modules
 !pnpm-lock.yaml
 
 # build
+/cargo-target/
 dist/
 bazel-*
 user.bazelrc

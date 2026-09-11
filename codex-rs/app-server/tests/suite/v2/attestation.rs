@@ -115,17 +115,23 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
             ..Default::default()
         })
         .await?;
-    let turn_response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
-    )
-    .await??;
-    let _: TurnStartResponse = to_response(turn_response)?;
-
     let mut attestation_requests = 0;
+    let mut turn_response: Option<JSONRPCResponse> = None;
+    let mut turn_completed = false;
+
+    // The server may issue attestation/generate before it sends the turn/start
+    // response, so service inbound requests while waiting for both messages.
     timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             match mcp.read_next_message().await? {
+                JSONRPCMessage::Response(response)
+                    if response.id == RequestId::Integer(turn_request_id) =>
+                {
+                    turn_response = Some(response);
+                }
+                JSONRPCMessage::Error(error) if error.id == RequestId::Integer(turn_request_id) => {
+                    bail!("turn/start returned an error: {error:?}");
+                }
                 JSONRPCMessage::Request(request) => {
                     let request = ServerRequest::try_from(request)?;
                     let ServerRequest::AttestationGenerate { request_id, .. } = request else {
@@ -143,13 +149,19 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
                 JSONRPCMessage::Notification(notification)
                     if notification.method == "turn/completed" =>
                 {
-                    break Ok(());
+                    turn_completed = true;
                 }
                 _ => {}
+            }
+
+            if turn_response.is_some() && turn_completed {
+                break Ok(());
             }
         }
     })
     .await??;
+    let turn_response = turn_response.expect("turn/start response should be observed");
+    let _: TurnStartResponse = to_response(turn_response)?;
     assert!(attestation_requests > 0);
 
     assert!(
