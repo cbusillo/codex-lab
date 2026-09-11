@@ -606,7 +606,8 @@ debug = "limited"
 inherits = "dev"
 opt-level = 0
 debug = "none"
-strip = "symbols"
+# Symbol stripping can produce unloadable macOS proc-macro dylibs.
+strip = false
 
 [profile.release]
 lto = "thin"
