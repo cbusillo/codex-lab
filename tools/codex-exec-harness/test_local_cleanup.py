@@ -715,6 +715,7 @@ class copied_cleanup_workspace:
 
         copy_file("justfile", workspace)
         copy_file("scripts/just-shell.py", workspace)
+        copy_file("scripts/local/target_lease.py", workspace)
         copy_file("scripts/local/cleanup-space.sh", workspace)
         copy_file("scripts/local/cargo-build-env.sh", workspace)
         copy_file("scripts/local/exec-harness-env.sh", workspace)
