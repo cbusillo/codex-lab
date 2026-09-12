@@ -287,6 +287,5 @@ class JustShellTest(unittest.TestCase):
             self.assertEqual(marker.read_text(), "forwarded")
 
 
-
 if __name__ == "__main__":
     unittest.main()
