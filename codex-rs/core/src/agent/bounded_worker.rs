@@ -151,10 +151,7 @@ impl BoundedWorkerRequest {
                             "bounded worker cannot prove baseline instructions for instruction-file changes",
                         );
                     }
-                    let directory = config
-                        .cwd
-                        .join(path.parent().unwrap_or(Path::new("")))
-                        .map_err(|_| "bounded worker task path is invalid")?;
+                    let directory = config.cwd.join(path.parent().unwrap_or(Path::new("")));
                     let required = crate::agents_md::agents_md_paths(
                         config,
                         &codex_utils_path_uri::PathUri::from_abs_path(&directory),

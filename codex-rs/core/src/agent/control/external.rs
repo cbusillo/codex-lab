@@ -149,26 +149,33 @@ impl AgentControl {
             provider.clone(),
         );
         reservation.commit(agent_metadata.clone());
-        let persistence = async {
-            self.persist_thread_spawn_edge(parent_thread_id, thread_id)
+        let control = self.clone();
+        let persisted_agent_path = agent_metadata.agent_path.as_ref().map(ToString::to_string);
+        let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let persistence = async move {
+            control
+                .persist_thread_spawn_edge(parent_thread_id, thread_id)
                 .await;
-            self.persist_external_agent_run_started(
-                parent_thread_id,
-                thread_id,
-                agent_metadata.agent_path.as_ref().map(ToString::to_string),
-                &routing,
-                &provider,
-            )
-            .await;
+            control
+                .persist_external_agent_run_started(
+                    parent_thread_id,
+                    thread_id,
+                    persisted_agent_path,
+                    &routing,
+                    &provider,
+                    started_at_ms,
+                )
+                .await;
         };
-        // Registration is committed: expiry must reach the runner's terminal path, not abandon it.
-        if let Err(err) =
-            crate::agent::bounded_worker::prepare(options.bounded_worker.as_ref(), persistence)
-                .await
-        {
-            warn!("external worker registration persistence exceeded its deadline: {err}");
-        }
+        // Committed registration owns its writes even if the worker deadline expires.
+        let registration = if options.bounded_worker.is_some() {
+            Some(tokio::spawn(persistence))
+        } else {
+            persistence.await;
+            None
+        };
         let launch = ExternalAgentLaunch {
+            registration,
             thread_id,
             parent_thread_id,
             author,
@@ -267,6 +274,7 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         terminal_state: &str,
+        registration: Option<tokio::task::JoinHandle<()>>,
     ) {
         let Ok(state) = self.upgrade() else {
             return;
@@ -305,6 +313,12 @@ impl AgentControl {
                 .map(|failure| failure.kind.as_str().to_string()),
             failure_message: failure.and_then(|failure| failure.message),
         };
+        // Keep the terminal snapshot above even if an explicit close releases the live runtime.
+        if let Some(registration) = registration
+            && let Err(err) = registration.await
+        {
+            warn!("external-agent registration task failed for {agent_id}: {err}");
+        }
         if let Err(err) = agent_graph_store
             .finish_external_agent_run(agent_id, outcome)
             .await
@@ -403,6 +417,7 @@ impl AgentControl {
         agent_path: Option<String>,
         routing: &ProviderRoutingSummary,
         provider: &ExternalAgentProviderProvenance,
+        started_at_ms: i64,
     ) {
         let Ok(state) = self.upgrade() else {
             return;
@@ -433,7 +448,7 @@ impl AgentControl {
             workspace: provider.workspace.clone(),
             model: provider.model.clone(),
             effort: provider.effort.clone(),
-            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            started_at_ms,
         };
         if let Err(err) = agent_graph_store.insert_external_agent_run(run).await {
             warn!("failed to persist external-agent run start for {child_thread_id}: {err}");
