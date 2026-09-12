@@ -512,6 +512,15 @@ async fn failed_external_agent_run_persists_terminal_failure_details() {
             &provider,
         )
         .await;
+    let mut observed_provider = provider;
+    observed_provider.cli_version = Some("2.3.4".to_string());
+    observed_provider.set_capability_observation(
+        crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
+        crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
+    );
+    harness
+        .control
+        .update_external_agent_provider(child_thread_id, observed_provider);
     harness.control.update_external_agent_failure(
         child_thread_id,
         AgentStatus::Errored("provider failed".to_string()),
@@ -536,6 +545,14 @@ async fn failed_external_agent_run_persists_terminal_failure_details() {
         .await
         .expect("external agent runs should load");
     assert_eq!(runs.len(), 1);
+    assert_eq!(
+        (
+            runs[0].cli_version.as_deref(),
+            runs[0].capability_source.as_str(),
+            runs[0].capability_freshness.as_deref()
+        ),
+        (Some("2.3.4"), "local_cli", Some("fresh")),
+    );
     assert_eq!(runs[0].terminal_state.as_deref(), Some("errored"));
     assert_eq!(runs[0].failure_kind.as_deref(), Some("provider_failed"));
     assert_eq!(runs[0].failure_message.as_deref(), Some("provider failed"));

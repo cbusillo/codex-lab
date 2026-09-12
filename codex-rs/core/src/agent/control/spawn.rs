@@ -669,20 +669,24 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
-        let multi_agent_version = state
-            .effective_multi_agent_version_for_spawn(
+        let multi_agent_version = crate::agent::bounded_worker::prepare(
+            options.bounded_worker.as_ref(),
+            state.effective_multi_agent_version_for_spawn(
                 &InitialHistory::New,
                 session_source.as_ref(),
                 options.parent_thread_id,
                 /*forked_from_thread_id*/ None,
                 &config,
-            )
-            .await;
+            ),
+        )
+        .await?;
         if let Some(session_source) = session_source.as_ref() {
             self.ensure_execution_capacity(multi_agent_version, session_source)?;
         }
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
-        let spawn_uses_v2_residency = multi_agent_version == MultiAgentVersion::V2
+        // External workers reserve agent capacity but never need to evict a native runtime.
+        let spawn_uses_v2_residency = options.bounded_worker.is_none()
+            && multi_agent_version == MultiAgentVersion::V2
             && session_source
                 .as_ref()
                 .is_some_and(is_v2_resident_session_source);
@@ -701,12 +705,16 @@ impl AgentControl {
         };
         let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
         let inheritance = SpawnAgentThreadInheritance {
-            environments: self
-                .inherited_environments_for_source(&state, session_source.as_ref())
-                .await,
-            exec_policy: self
-                .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
-                .await,
+            environments: crate::agent::bounded_worker::prepare(
+                options.bounded_worker.as_ref(),
+                self.inherited_environments_for_source(&state, session_source.as_ref()),
+            )
+            .await?,
+            exec_policy: crate::agent::bounded_worker::prepare(
+                options.bounded_worker.as_ref(),
+                self.inherited_exec_policy_for_source(&state, session_source.as_ref(), &config),
+            )
+            .await?,
         };
         let (session_source, mut agent_metadata) = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -752,6 +760,12 @@ impl AgentControl {
                 .await;
         }
 
+        if options.bounded_worker.is_some() {
+            return Err(CodexErr::UnsupportedOperation(
+                "bounded workers require an external backend; no native fallback was started"
+                    .to_string(),
+            ));
+        }
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref(), inheritance) {
             (Some(session_source), Some(_), inheritance) => {

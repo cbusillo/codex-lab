@@ -154,8 +154,13 @@ async fn handle_spawn_agent(
     let mut message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    let base_instructions = crate::agent::bounded_worker::prepare(
+        bounded_worker.as_ref(),
+        session.get_base_instructions(),
+    )
+    .await
+    .map_err(collab_spawn_error)?;
+    let mut config = build_agent_spawn_config(&base_instructions, turn.as_ref())?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
         .map_err(FunctionCallError::RespondToModel)?;
@@ -228,19 +233,32 @@ async fn handle_spawn_agent(
         .await?;
     }
     if !is_full_history_fork || explicit_role_name.is_some() {
-        apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name).await?;
+        crate::agent::bounded_worker::prepare(
+            bounded_worker.as_ref(),
+            apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name),
+        )
+        .await
+        .map_err(collab_spawn_error)??;
     }
     if let Some((role_name, role)) = preflighted_external_role {
         config.agent_roles.insert(role_name, role);
     }
-    apply_spawn_agent_service_tier(&session, &mut config).await?;
+    crate::agent::bounded_worker::prepare(
+        bounded_worker.as_ref(),
+        apply_spawn_agent_service_tier(&session, &mut config),
+    )
+    .await
+    .map_err(collab_spawn_error)??;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     if let (Some(request), Some(worker)) = (&args.bounded_worker, &bounded_worker) {
-        message = tokio::time::timeout_at(worker.deadline, request.message(&step_context, &config, &message))
-            .await
-            .map_err(|_| FunctionCallError::RespondToModel("bounded worker deadline expired while preparing instructions; nothing was launched".to_string()))?
-            .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+        message = crate::agent::bounded_worker::prepare(
+            Some(worker),
+            request.message(&step_context, &config, &message),
+        )
+        .await
+        .map_err(collab_spawn_error)?
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
     }
 
     // Remember an applied configured default so cold reload reapplies its restrictions.

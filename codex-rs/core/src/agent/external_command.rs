@@ -172,7 +172,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 ExternalAgentFailureKind::LaunchFailed,
                 anyhow::anyhow!("bounded external worker cancelled"),
             )),
-            result = tokio::time::timeout_at(worker.deadline, run_external_agent_inner(&launch)) => {
+            result = tokio::time::timeout_at(worker.deadline, run_external_agent_inner(&launch, &control)) => {
                 result.unwrap_or_else(|_| Err(ExternalAgentRunError::new(
                     ExternalAgentFailureKind::TimedOut,
                     anyhow::anyhow!("bounded external worker exceeded its deadline including preflight"),
@@ -180,7 +180,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
             }
         }
     } else {
-        run_external_agent_inner(&launch).await
+        run_external_agent_inner(&launch, &control).await
     };
     let result = match (&launch.bounded_worker, result) {
         (Some(worker), Ok(mut response)) => {
@@ -205,7 +205,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
             .persist_external_agent_run_finished(thread_id, "cancelled")
             .await;
         send_completion_to_parent(&launch, &control, "external agent cancelled".to_string()).await;
-        control.release_external_agent(thread_id);
+        if launch.bounded_worker.is_none() {
+            control.release_external_agent(thread_id);
+        }
         return;
     }
     match result {
@@ -262,7 +264,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                     "external agent cancelled".to_string(),
                 )
                 .await;
-                control.release_external_agent(thread_id);
+                if launch.bounded_worker.is_none() {
+                    control.release_external_agent(thread_id);
+                }
                 return;
             }
             let message = bound_external_agent_message(&err.to_string());
@@ -297,6 +301,7 @@ fn external_agent_parent_failure_message(
 
 async fn run_external_agent_inner(
     launch: &ExternalAgentLaunch,
+    control: &AgentControl,
 ) -> Result<ExternalAgentResponse, ExternalAgentRunError> {
     if launch
         .bounded_worker
@@ -370,6 +375,9 @@ async fn run_external_agent_inner(
     };
     let claude_stream_json_enabled =
         claude_stream_json_enabled(launch, preflight_provider.as_ref());
+    if let Some(provider) = preflight_provider.as_ref() {
+        control.update_external_agent_provider(launch.thread_id, provider.clone());
+    }
     let mut invocation =
         build_external_agent_invocation(launch, &message, claude_stream_json_enabled).map_err(
             |error| ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error),

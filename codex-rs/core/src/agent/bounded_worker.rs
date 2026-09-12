@@ -16,6 +16,28 @@ const MAX_INPUT_BYTES: usize = 8 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 
+/// Bound cancellation-safe preparation; committed engine registrations must still be finalized.
+pub(crate) async fn prepare<T>(
+    worker: Option<&BoundedWorker>,
+    preparation: impl std::future::Future<Output = T>,
+) -> codex_protocol::error::Result<T> {
+    let Some(worker) = worker else {
+        return Ok(preparation.await);
+    };
+    let expired = || {
+        codex_protocol::error::CodexErr::UnsupportedOperation(
+            "bounded worker deadline expired during preparation; no process was launched"
+                .to_string(),
+        )
+    };
+    if Instant::now() >= worker.deadline {
+        return Err(expired());
+    }
+    tokio::time::timeout_at(worker.deadline, preparation)
+        .await
+        .map_err(|_| expired())
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BoundedWorkerRequest {

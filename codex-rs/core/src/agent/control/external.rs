@@ -149,16 +149,25 @@ impl AgentControl {
             provider.clone(),
         );
         reservation.commit(agent_metadata.clone());
-        self.persist_thread_spawn_edge(parent_thread_id, thread_id)
+        let persistence = async {
+            self.persist_thread_spawn_edge(parent_thread_id, thread_id)
+                .await;
+            self.persist_external_agent_run_started(
+                parent_thread_id,
+                thread_id,
+                agent_metadata.agent_path.as_ref().map(ToString::to_string),
+                &routing,
+                &provider,
+            )
             .await;
-        self.persist_external_agent_run_started(
-            parent_thread_id,
-            thread_id,
-            agent_metadata.agent_path.as_ref().map(ToString::to_string),
-            &routing,
-            &provider,
-        )
-        .await;
+        };
+        // Registration is committed: expiry must reach the runner's terminal path, not abandon it.
+        if let Err(err) =
+            crate::agent::bounded_worker::prepare(options.bounded_worker.as_ref(), persistence)
+                .await
+        {
+            warn!("external worker registration persistence exceeded its deadline: {err}");
+        }
         let launch = ExternalAgentLaunch {
             thread_id,
             parent_thread_id,
@@ -214,6 +223,15 @@ impl AgentControl {
         let _ = self.state.update_external_agent_status(agent_id, status);
     }
 
+    pub(crate) fn update_external_agent_provider(
+        &self,
+        agent_id: ThreadId,
+        provider: ExternalAgentProviderProvenance,
+    ) {
+        self.state
+            .update_external_agent_provider(agent_id, provider);
+    }
+
     pub(crate) fn update_external_agent_status_with_quota(
         &self,
         agent_id: ThreadId,
@@ -256,16 +274,29 @@ impl AgentControl {
         let Some(agent_graph_store) = state.agent_graph_store() else {
             return;
         };
-        let (duration_ms, failure) = match self.state.external_agent_snapshot(agent_id) {
-            Some(snapshot) => (snapshot.duration_ms, snapshot.failure),
+        let (duration_ms, failure, provider) = match self.state.external_agent_snapshot(agent_id) {
+            Some(snapshot) => (
+                snapshot.duration_ms,
+                snapshot.failure,
+                Some(snapshot.provider),
+            ),
             None => {
                 warn!(
                     "external-agent runtime snapshot missing while persisting outcome for {agent_id}"
                 );
-                (0, None)
+                (0, None, None)
             }
         };
         let outcome = ExternalAgentRunOutcome {
+            cli_version: provider
+                .as_ref()
+                .and_then(|provider| provider.cli_version.clone()),
+            capability_source: provider
+                .as_ref()
+                .map(|provider| provider.capability_source.as_str().to_string()),
+            capability_freshness: provider
+                .and_then(|provider| provider.capability_freshness)
+                .map(|freshness| freshness.as_str().to_string()),
             completed_at_ms: chrono::Utc::now().timestamp_millis(),
             duration_ms,
             terminal_state: terminal_state.to_string(),

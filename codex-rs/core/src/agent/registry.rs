@@ -315,6 +315,21 @@ impl AgentRegistry {
             })
     }
 
+    pub(crate) fn update_external_agent_provider(
+        &self,
+        thread_id: ThreadId,
+        provider: ExternalAgentProviderProvenance,
+    ) {
+        if let Some(runtime) = self
+            .external_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&thread_id)
+        {
+            runtime.provider = provider;
+        }
+    }
+
     pub(crate) fn external_agent_status(&self, thread_id: ThreadId) -> Option<AgentStatus> {
         self.external_agents
             .lock()

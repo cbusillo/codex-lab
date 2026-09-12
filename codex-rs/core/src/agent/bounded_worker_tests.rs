@@ -1,6 +1,34 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+#[tokio::test(start_paused = true)]
+async fn preparation_cannot_outlive_or_restart_an_expired_deadline() {
+    let started = Instant::now();
+    let worker = BoundedWorkerRequest {
+        timeout_ms: 100,
+        max_input_bytes: 8192,
+        max_result_bytes: 256,
+        context: WorkerContext::Text,
+    }
+    .start(started)
+    .expect("limits");
+    assert!(
+        prepare(Some(&worker), std::future::pending::<()>())
+            .await
+            .is_err()
+    );
+    assert_eq!(Instant::now(), worker.deadline);
+    let mut polled = false;
+    assert!(
+        prepare(Some(&worker), async {
+            polled = true;
+        })
+        .await
+        .is_err()
+    );
+    assert!(!polled, "expired preparation must not be polled");
+}
+
 #[test]
 fn bounded_result_keeps_utf8_tail_and_honors_backend_deadline() {
     let start = Instant::now();

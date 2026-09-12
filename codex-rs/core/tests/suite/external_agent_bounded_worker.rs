@@ -38,7 +38,11 @@ async fn run_worker(
         ));
     }
     calls.push((WAIT_CALL_ID, "wait_agent", json!({"timeout_ms": 5000})));
-    calls.push((LIST_CALL_ID, "list_agents", json!({})));
+    calls.push((
+        LIST_CALL_ID,
+        "list_agents",
+        json!({"path_prefix":"/root/external_probe"}),
+    ));
     let mut previous = None;
     for (call_id, tool, arguments) in calls {
         responses::mount_sse_once_match(
@@ -101,14 +105,15 @@ async fn bounded_worker_preserves_complete_instructions_and_retains_bounded_resu
     std::fs::write(dir.path().join("AGENTS.md"), "Keep the widget blue.")?;
     std::fs::write(dir.path().join("widget.rs"), "")?;
     let received = dir.path().join("received");
-    let backend = stub_cli(
+    let mut backend = stub_cli(
         &dir,
         "worker.sh",
         &format!(
-            "printf '%s' \"$*\" > '{}'\nfor i in $(seq 1 100); do printf 'result-text-'; done\n",
+            "case \"$1\" in --version) echo 'Claude Code 2.1.220'; exit;; --help) echo '--effort'; exit;; auth) echo '{{\"loggedIn\":true}}'; exit;; esac\nprintf '%s' \"$*\" > '{}'\nfor i in $(seq 1 100); do printf 'result-text-'; done\n",
             received.display()
         ),
     );
+    backend.launch_family = Some("claude".to_string());
     let output = run_worker(
         backend,
         worker_arguments(json!({"type":"code", "paths":["widget.rs"]})),
@@ -128,7 +133,8 @@ async fn bounded_worker_preserves_complete_instructions_and_retains_bounded_resu
         .expect("completed result");
     assert!(result.len() <= 256, "{result}");
     assert!(result.starts_with("[bounded worker result truncated]"));
-    assert!(agent["provider"]["cli_version"].is_null());
+    assert_eq!(agent["provider"]["cli_version"], "Claude Code 2.1.220");
+    assert_eq!(agent["provider"]["capability_source"], "local_cli");
     assert!(agent["provider"]["model"].is_null());
     Ok(())
 }
