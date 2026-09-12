@@ -23,6 +23,16 @@ ManagedTargetStore = store_module.ManagedTargetStore
 
 class ManagedTargetStoreTest(unittest.TestCase):
     def setUp(self) -> None:
+        self.inherited_target_env = (
+            store_module.CARGO_TARGET_ENV,
+            store_module.OWNED_TARGET_ENV,
+            store_module.LEASE_FD_ENV,
+        )
+        self.saved_target_env = {
+            name: os.environ.get(name) for name in self.inherited_target_env
+        }
+        for name in self.inherited_target_env:
+            os.environ.pop(name, None)
         self.temp = tempfile.TemporaryDirectory(dir="/private/tmp")
         self.root = Path(self.temp.name)
         self.volume_root = self.root / "volume"
@@ -48,8 +58,15 @@ class ManagedTargetStoreTest(unittest.TestCase):
         self.statvfs_patch.start()
 
     def tearDown(self) -> None:
-        self.statvfs_patch.stop()
-        self.temp.cleanup()
+        try:
+            self.statvfs_patch.stop()
+            self.temp.cleanup()
+        finally:
+            for name, value in self.saved_target_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
     def store(self, **updates: object) -> ManagedTargetStore:
         config = self.config | updates
