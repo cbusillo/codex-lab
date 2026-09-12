@@ -758,15 +758,16 @@ class ManagedTargetStore:
         gc_fd: int | None = None
         try:
             if apply:
-                gc_fd = _private_file(self._gc_lock_path)
-                gc_info = os.fstat(gc_fd)
+                opened_gc_fd = _private_file(self._gc_lock_path)
+                gc_fd = opened_gc_fd
+                gc_info = os.fstat(opened_gc_fd)
                 if (
                     gc_info.st_dev != volume_dev
                     or gc_info.st_ino != layout["gc_lock"]["st_ino"]
                 ):
                     raise ManagedTargetError("managed GC lock identity changed")
                 try:
-                    _lock(gc_fd)
+                    _lock(opened_gc_fd)
                 except ManagedTargetError:
                     return {
                         "schema": SCHEMA_VERSION,

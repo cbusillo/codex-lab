@@ -341,7 +341,7 @@ class ManagedTargetStoreTest(unittest.TestCase):
         actual_inode = self.volume_root.stat().st_ino
         reported_device = actual_device
 
-        def remount_validator(path: Path, value: str) -> dict[str, object]:
+        def remount_validator(_path: Path, value: str) -> dict[str, object]:
             return {
                 "st_dev": reported_device,
                 "st_ino": actual_inode,
