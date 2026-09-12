@@ -4,8 +4,8 @@
 The sidecar lock provides mutual exclusion only. Persisted claims are never a
 deletion permit, and an unlocked claim does not prove that its owner crashed.
 This module deliberately has no adoption, cleanup, or garbage-collection path.
-Cooperative children receive ``CODEX_LAB_OWNED_TARGET``; no command is
-automatically routed or adopted into the target.
+Cooperative children receive ``CODEX_LAB_OWNED_TARGET`` and the lease
+descriptor; no command is automatically routed or adopted into the target.
 """
 
 import argparse
@@ -20,9 +20,10 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
@@ -30,6 +31,7 @@ REGISTRY_NAME = ".codex-target-ownership"
 EXIT_BUSY, EXIT_ACTIVE, EXIT_RELEASED = 75, 20, 21
 EXIT_UNKNOWN, EXIT_IDENTITY, EXIT_INTERNAL = 22, 23, 70
 CLAIM_LIMIT = 8192
+TARGET_LEASE_FD_ENV = "CODEX_LAB_TARGET_LEASE_FD"
 
 
 class OwnershipError(RuntimeError):
@@ -120,8 +122,9 @@ def _lock(path: Path, *, create: bool) -> int:
     return fd
 
 
-def _unlock(fd: int) -> None:
-    fcntl.flock(fd, fcntl.LOCK_UN)
+def _close_lock(fd: int) -> None:
+    # Closing the descriptor releases this process's flock. An explicit
+    # unlock would also release a lock held by an inherited descriptor.
     os.close(fd)
 
 
@@ -245,9 +248,16 @@ def _inspect(root_value: str, target_value: str) -> tuple[dict[str, object], int
     except OwnershipError as error:
         if error.reason == "target-lock-held" and claim["state"] == "active":
             return _result("active", "lock-held", key), EXIT_ACTIVE
+        if (
+            error.reason == "target-lock-held"
+            and claim["state"] == "released-unverified"
+        ):
+            return _result(
+                "released-unverified", "lease-held-after-release", key
+            ), EXIT_RELEASED
         return _result("unknown", error.reason, key), EXIT_UNKNOWN
     else:
-        _unlock(lock_fd)
+        _close_lock(lock_fd)
         if claim["state"] == "active":
             return _result("unknown", "active-claim-lock-free", key), EXIT_UNKNOWN
         return _result(
@@ -255,34 +265,58 @@ def _inspect(root_value: str, target_value: str) -> tuple[dict[str, object], int
         ), EXIT_RELEASED
 
 
-def _execute_command(command: Sequence[str], target: Path) -> int:
+def execute_command(
+    command: Sequence[str],
+    target: Path,
+    lease_fd: int | None = None,
+    *,
+    cwd: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> int:
     child: subprocess.Popen[bytes] | None = None
-    first_signal: int | None = None
+    received_signals: list[int] = []
 
     def forward(received: int, _frame: object) -> None:
-        nonlocal first_signal
-        if first_signal is None:
-            first_signal = received
+        if not received_signals:
+            received_signals.append(received)
         if child is not None and child.poll() is None:
             child.send_signal(received)
 
+    child_env = os.environ.copy() if environment is None else dict(environment)
+    child_env["CODEX_LAB_OWNED_TARGET"] = str(target)
+    child_env.pop(TARGET_LEASE_FD_ENV, None)
+    if lease_fd is not None:
+        child_env[TARGET_LEASE_FD_ENV] = str(lease_fd)
+    if threading.current_thread() is not threading.main_thread():
+        started_child = subprocess.Popen(
+            list(command),
+            close_fds=True,
+            cwd=cwd,
+            env=child_env,
+            pass_fds=(lease_fd,) if lease_fd is not None else (),
+        )
+        exit_code = started_child.wait()
+        return 128 - exit_code if exit_code < 0 else exit_code
     handlers = {
         number: signal.signal(number, forward)
         for number in (signal.SIGINT, signal.SIGTERM)
     }
     try:
-        if first_signal is not None:
-            return 128 + first_signal
-        child_env = os.environ.copy()
-        child_env["CODEX_LAB_OWNED_TARGET"] = str(target)
-        started_child = subprocess.Popen(list(command), close_fds=True, env=child_env)
+        if received_signals:
+            return 128 + received_signals[0]
+        started_child = subprocess.Popen(
+            list(command),
+            close_fds=True,
+            cwd=cwd,
+            env=child_env,
+            pass_fds=(lease_fd,) if lease_fd is not None else (),
+        )
         child = started_child
-        pending_signal = first_signal
-        if pending_signal is not None and started_child.poll() is None:
-            started_child.send_signal(pending_signal)
+        if received_signals and started_child.poll() is None:
+            started_child.send_signal(received_signals[0])
         exit_code = started_child.wait()
-        if pending_signal is not None:
-            return 128 + pending_signal
+        if received_signals:
+            return 128 + received_signals[0]
         return 128 - exit_code if exit_code < 0 else exit_code
     finally:
         for number, previous in handlers.items():
@@ -290,6 +324,8 @@ def _execute_command(command: Sequence[str], target: Path) -> int:
 
 
 def _run(root_value: str, target_value: str, command: Sequence[str]) -> int:
+    if TARGET_LEASE_FD_ENV in os.environ:
+        raise OwnershipError("nested-lease-unsupported", EXIT_UNKNOWN)
     if not command:
         raise OwnershipError("command-missing", EXIT_INTERNAL)
     root, root_before = _root_identity(Path(root_value))
@@ -329,9 +365,9 @@ def _run(root_value: str, target_value: str, command: Sequence[str]) -> int:
         setup_complete = True
     finally:
         if not setup_complete:
-            _unlock(target_lock)
+            _close_lock(target_lock)
     try:
-        exit_code = _execute_command(command, target)
+        exit_code = execute_command(command, target, target_lock)
         claim["state"] = "released-unverified"
         events = claim.get("events")
         if not isinstance(events, list):
@@ -341,7 +377,7 @@ def _run(root_value: str, target_value: str, command: Sequence[str]) -> int:
         _write_claim(claim_path, claim)
         return exit_code
     finally:
-        _unlock(target_lock)
+        _close_lock(target_lock)
 
 
 def _parser() -> argparse.ArgumentParser:

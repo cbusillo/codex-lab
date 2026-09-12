@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import os
+import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -11,6 +14,7 @@ from codex_package.cargo import build_source_binaries
 from codex_package.cargo import source_binaries_for_target
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import TARGET_SPECS
+from local.target_lease import TARGET_LEASE_FD_ENV
 
 
 class SourceBinariesForTargetTest(unittest.TestCase):
@@ -112,6 +116,57 @@ class SourceBinariesForTargetTest(unittest.TestCase):
         self.assertEqual(outputs.code_mode_host_bin, code_mode_host)
         self.assertEqual(outputs.codex_command_runner_bin, command_runner)
         self.assertEqual(outputs.codex_windows_sandbox_setup_bin, sandbox_setup)
+
+    def test_source_build_cargo_inherits_target_lease(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            lock_path = root / "lease.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            cargo = root / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env python3\n"
+                "import fcntl, os\n"
+                "from pathlib import Path\n"
+                f"fd = int(os.environ[{TARGET_LEASE_FD_ENV!r}])\n"
+                "assert os.get_inheritable(fd)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "target = Path(os.environ['CARGO_TARGET_DIR']) / "
+                "'x86_64-pc-windows-msvc' / 'release'\n"
+                "target.mkdir(parents=True)\n"
+                "for name in ('codex.exe', 'codex-code-mode-host.exe', "
+                "'codex-command-runner.exe', 'codex-windows-sandbox-setup.exe'):\n"
+                "    (target / name).write_text('fixture')\n",
+                encoding="utf-8",
+            )
+            cargo.chmod(cargo.stat().st_mode | stat.S_IXUSR)
+            environment = {
+                "CARGO_TARGET_DIR": str(root / "target"),
+                TARGET_LEASE_FD_ENV: str(fd),
+                "V8_FROM_SOURCE": "1",
+            }
+            try:
+                with mock.patch.dict(os.environ, environment, clear=False):
+                    outputs = build_source_binaries(
+                        TARGET_SPECS["x86_64-pc-windows-msvc"],
+                        PACKAGE_VARIANTS["codex"],
+                        cargo=str(cargo),
+                        profile="release",
+                        entrypoint_bin=None,
+                        code_mode_host_bin=None,
+                        bwrap_bin=None,
+                        codex_command_runner_bin=None,
+                        codex_windows_sandbox_setup_bin=None,
+                    )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertTrue(outputs.entrypoint_bin.is_file())
 
 
 def touch_file(path: Path) -> Path:
