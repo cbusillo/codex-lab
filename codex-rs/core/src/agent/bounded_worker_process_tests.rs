@@ -16,6 +16,7 @@ async fn cancellation_during_bounded_preflight_stops_the_probe_group() {
         &dir,
         ExternalCommandAgentBackendConfig {
             command: format!("/bin/sh {}", script.display()),
+            protocol: ExternalCommandProtocol::RawCli,
             launch_family: Some("claude".to_string()),
             ..Default::default()
         },

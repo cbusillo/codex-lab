@@ -210,8 +210,34 @@ async fn bounded_text_worker_sends_only_task_and_requires_explicit_supported_sel
         "{}",
         output.spawn
     );
-    assert_eq!(std::fs::read_to_string(&received)?, AGENT_MESSAGE);
+    assert_eq!(
+        std::fs::read_to_string(&received)?,
+        format!(
+            "Message Type: NEW_TASK\nTask name: /root/external_probe\nSender: /root\nPayload:\n{AGENT_MESSAGE}"
+        )
+    );
     std::fs::remove_file(&received)?;
+    for protocol in [
+        ExternalCommandProtocol::RawCli,
+        ExternalCommandProtocol::Json,
+    ] {
+        let mut limited = args.clone();
+        limited["bounded_worker"]["max_input_bytes"] = json!(AGENT_MESSAGE.len());
+        let mut limited_backend = backend.clone();
+        limited_backend.protocol = protocol;
+        if protocol == ExternalCommandProtocol::Json {
+            limited_backend.command = "/bin/sh".to_string();
+            limited_backend.args = vec![dir.path().join("worker.sh").display().to_string()];
+        }
+        let output = run_worker(limited_backend, limited, dir.path(), Completion::Wait).await?;
+        assert!(
+            output.agents["agents"][0]["agent_status"]["errored"]
+                .as_str()
+                .expect("bounded refusal")
+                .contains("exceeds max_input_bytes")
+        );
+        assert!(!received.exists());
+    }
     for patch in [
         json!({"agent_type":null}),
         json!({"service_tier":"priority"}),

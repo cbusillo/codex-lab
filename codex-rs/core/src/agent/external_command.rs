@@ -354,6 +354,21 @@ async fn run_external_agent_inner(
         ),
         ExternalCommandProtocol::RawCli => None,
     };
+    if let Some(worker) = &launch.bounded_worker {
+        let input_bytes = request_json
+            .as_ref()
+            .map_or(message.len(), |request| request.len() + 1);
+        crate::agent::bounded_worker::validate_input_size(
+            input_bytes,
+            worker.limits.max_input_bytes,
+        )
+        .map_err(|error| {
+            ExternalAgentRunError::new(
+                ExternalAgentFailureKind::LaunchFailed,
+                anyhow::anyhow!(error),
+            )
+        })?;
+    }
 
     let launch_cwd = external_agent_launch_cwd(launch);
     if launch.backend.launch_family.as_deref() == Some("antigravity") {

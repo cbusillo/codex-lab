@@ -8,7 +8,7 @@ pub(super) fn bounded_worker_input_schema() -> JsonSchema {
         "description": "Opt-in bounded external task. Requires explicit external selection and no history fork. Code context must name every task file; incomplete applicable instructions cause refusal. Text context is only for self-contained non-code tasks and receives no code history. One Lab invocation; no automatic retries or substitution. Process limits do not bound provider spending or internal API requests. Provider model/tier/usage remain unobserved; service_tier requests are rejected.",
         "properties": {
             "timeout_ms": {"type": "integer", "description": "End-to-end deadline including preparation and preflight, 1..300000 ms, also capped by the backend timeout."},
-            "max_input_bytes": {"type": "integer", "description": "Complete UTF-8 task and instruction payload limit, 1..8192 bytes. Oversized instructions are refused, never truncated."},
+            "max_input_bytes": {"type": "integer", "description": "Complete UTF-8 task, instructions and serialized routing-envelope limit, 1..8192 bytes. Oversized instructions are refused, never truncated."},
             "max_result_bytes": {"type": "integer", "description": "Retained final result or failure-message limit, 256..8192 UTF-8 bytes. Larger results retain a marked tail; this does not cap all subprocess output."},
             "context": {"anyOf": [
                 {"type":"object", "properties":{"type":{"type":"string", "enum":["text"]}}, "required":["type"], "additionalProperties":false},

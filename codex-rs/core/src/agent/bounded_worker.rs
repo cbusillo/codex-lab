@@ -16,6 +16,15 @@ const MAX_INPUT_BYTES: usize = 8 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 
+pub(crate) fn validate_input_size(bytes: usize, limit: usize) -> Result<(), &'static str> {
+    if bytes > limit {
+        return Err(
+            "complete bounded worker payload exceeds max_input_bytes; nothing was launched",
+        );
+    }
+    Ok(())
+}
+
 /// Bound cancellation-safe preparation; committed engine registrations must still be finalized.
 pub(crate) async fn prepare<T>(
     worker: Option<&BoundedWorker>,
@@ -108,9 +117,7 @@ impl BoundedWorkerRequest {
         config: &Config,
         task: &str,
     ) -> Result<String, &'static str> {
-        if task.len() > self.max_input_bytes {
-            return Err("bounded worker task exceeds max_input_bytes; nothing was launched");
-        }
+        validate_input_size(task.len(), self.max_input_bytes)?;
         let message = match &self.context {
             WorkerContext::Text => task.to_string(),
             WorkerContext::Code { paths } => {
@@ -175,11 +182,7 @@ impl BoundedWorkerRequest {
                 format!("{}\n\n{task}", context.render())
             }
         };
-        if message.len() > self.max_input_bytes {
-            return Err(
-                "complete bounded worker instructions and task exceed max_input_bytes; nothing was launched",
-            );
-        }
+        validate_input_size(message.len(), self.max_input_bytes)?;
         Ok(message)
     }
 }
