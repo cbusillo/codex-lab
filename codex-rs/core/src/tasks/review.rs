@@ -192,6 +192,9 @@ async fn run_review_task(
         .and_then(ReviewPersistenceContext::background_budget)
         .cloned();
     let budget_gate = budget.clone().map(BackgroundReviewBudgetGate::new);
+    let instructions_gate = ctx
+        .extension_data
+        .get::<super::BackgroundReviewInstructionsGate>();
     let codex_home = session.codex_home().await;
 
     // Start sub-codex conversation and get the receiver for events.
@@ -259,6 +262,9 @@ async fn run_review_task(
             }
         }
     };
+    if let Some(reason) = instructions_gate.as_ref().and_then(|gate| gate.failure()) {
+        start_error_summary = Some(reason);
+    }
     let cancelled = cancellation_token.is_cancelled();
     let should_exit_review_mode = persistence
         .as_ref()
@@ -449,6 +455,12 @@ async fn start_review_conversation(
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
     if let Some(budget_gate) = budget_gate.clone() {
         thread_extension_init.insert(budget_gate);
+        let instructions_gate = ctx
+            .extension_data
+            .get::<super::BackgroundReviewInstructionsGate>()
+            .map(|gate| gate.as_ref().clone())
+            .unwrap_or_default();
+        thread_extension_init.insert(instructions_gate);
     }
     run_codex_thread_one_shot(
         sub_agent_config,

@@ -103,7 +103,7 @@ pub(crate) struct TurnState {
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
-    pub(crate) completed_turn_diff: Option<String>,
+    pub(crate) completed_turn_diff: Option<crate::turn_diff_tracker::CompletedTurnDiff>,
     /// The last step captured for execution or selected from a speculative fallback.
     /// Remains absent until a step is captured; standalone local compaction has no step.
     pub(crate) last_known_step_context: Option<Arc<StepContext>>,

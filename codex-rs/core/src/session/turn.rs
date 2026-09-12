@@ -1978,6 +1978,15 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
+        if let Some(instructions_gate) = sess
+            .services
+            .thread_extension_data
+            .get::<crate::tasks::BackgroundReviewInstructionsGate>()
+        {
+            instructions_gate
+                .authorize_request(step_context.as_ref(), &prompt)
+                .await?;
+        }
         if let Some(budget_gate) = sess
             .services
             .thread_extension_data
@@ -3569,7 +3578,7 @@ async fn try_run_sampling_request(
     if should_emit_turn_diff {
         let unified_diff = {
             let tracker = turn_diff_tracker.lock().await;
-            tracker.get_unified_diff()
+            tracker.completed_diff()
         };
         if let Some(unified_diff) = unified_diff {
             let active_turn_state = {
@@ -3581,7 +3590,9 @@ async fn try_run_sampling_request(
             if let Some(turn_state) = active_turn_state {
                 turn_state.lock().await.completed_turn_diff = Some(unified_diff.clone());
             }
-            let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+            let msg = EventMsg::TurnDiff(TurnDiffEvent {
+                unified_diff: unified_diff.text,
+            });
             sess.clone().send_event(&turn_context, msg).await;
         }
     }
