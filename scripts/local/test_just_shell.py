@@ -1,9 +1,15 @@
 import importlib.util
 import os
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+from local.target_lease import TARGET_LEASE_FD_ENV
 
 
 MODULE_PATH = Path(__file__).parents[1] / "just-shell.py"
@@ -140,6 +146,71 @@ class JustShellTest(unittest.TestCase):
             env=environment,
         )
 
+    def test_codex_core_prerequisite_cargo_inherits_target_lease(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            lock_path = root / "lease.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            cargo = root / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env python3\n"
+                "import fcntl, os\n"
+                "from pathlib import Path\n"
+                f"fd = int(os.environ[{TARGET_LEASE_FD_ENV!r}])\n"
+                "assert os.get_inheritable(fd)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                f"Path({str(root / 'result')!r}).write_text('forwarded')\n",
+                encoding="utf-8",
+            )
+            cargo.chmod(cargo.stat().st_mode | stat.S_IXUSR)
+            environment = {
+                "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                "CARGO_TARGET_DIR": str(root / "target"),
+                TARGET_LEASE_FD_ENV: str(fd),
+            }
+            try:
+                just_shell.build_test_prerequisites(
+                    "test", ["-p", "codex-core"], environment
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual((root / "result").read_text(), "forwarded")
+
+    def test_invalid_target_lease_fails_before_prerequisite_spawn(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        environment = {
+            "CARGO_TARGET_DIR": "/tmp/target",
+            TARGET_LEASE_FD_ENV: "not-a-fd",
+        }
+        with mock.patch("subprocess.run") as run:
+            with self.assertRaisesRegex(ValueError, TARGET_LEASE_FD_ENV):
+                just_shell.build_test_prerequisites(
+                    "test", ["-p", "codex-core"], environment
+                )
+        run.assert_not_called()
+
+    def test_stripped_target_lease_refuses_before_cargo_spawn(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX target leases are not supported on Windows")
+        with tempfile.TemporaryFile() as lease, mock.patch("subprocess.run") as run:
+            os.set_inheritable(lease.fileno(), True)
+            with mock.patch.dict(
+                os.environ, {TARGET_LEASE_FD_ENV: str(lease.fileno())}
+            ):
+                with self.assertRaisesRegex(ValueError, "stripped"):
+                    just_shell.build_test_prerequisites(
+                        "test", ["-p", "codex-core"], {}
+                    )
+            run.assert_not_called()
+
     @staticmethod
     def test_codex_core_lib_tests_skip_runtime_binaries() -> None:
         with mock.patch("subprocess.run") as run:
@@ -172,6 +243,48 @@ class JustShellTest(unittest.TestCase):
             )
 
         run.assert_not_called()
+
+    def test_v8_resolver_inherits_target_lease(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(temporary_directory)
+            helper = root / "scripts" / "local" / "rusty_v8_env.py"
+            helper.parent.mkdir(parents=True)
+            marker = root / "forwarded"
+            helper.write_text(
+                "import fcntl, os\n"
+                "from pathlib import Path\n"
+                f"fd = int(os.environ[{TARGET_LEASE_FD_ENV!r}])\n"
+                "assert os.get_inheritable(fd)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                f"Path({str(marker)!r}).write_text('forwarded')\n"
+                "print('RUSTY_V8_ARCHIVE=/cache/archive')\n"
+                "print('RUSTY_V8_SRC_BINDING_PATH=/cache/binding')\n",
+                encoding="utf-8",
+            )
+            lock_path = root / "lease.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = just_shell.resolve_rusty_v8_environment(
+                    "test",
+                    {"CODEX_REPO_ROOT": str(root), TARGET_LEASE_FD_ENV: str(fd)},
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual(
+                result,
+                {
+                    "RUSTY_V8_ARCHIVE": "/cache/archive",
+                    "RUSTY_V8_SRC_BINDING_PATH": "/cache/binding",
+                },
+            )
+            self.assertEqual(marker.read_text(), "forwarded")
 
 
 if __name__ == "__main__":

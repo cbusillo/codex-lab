@@ -1,5 +1,28 @@
 # Local build measurements
 
+## Cooperative target ownership
+
+`target_ownership.py run --root ROOT --target NAME -- COMMAND ...` creates a
+new target and holds a private sidecar lease. Existing targets remain unsupported.
+Nested ownership commands refuse before creating another target; the helper
+currently supports one target lease per command tree.
+The command receives `CODEX_LAB_OWNED_TARGET` and
+`CODEX_LAB_TARGET_LEASE_FD`; callers still choose the command's actual target
+routing. This helper does not set `CARGO_TARGET_DIR` automatically.
+
+The lease descriptor survives cooperative child launches and foreground exit.
+Closing the supervisor's copy also preserves a descendant's copy after a
+supervisor crash. The Python `just` prerequisite-build and source-package Cargo
+launchers explicitly forward a configured descriptor and reject invalid ones.
+Other subprocess boundaries must preserve the descriptor themselves.
+
+`inspect` reports `lease-held-after-release` when a released claim still has a
+lease holder. A free lock remains **unverified**: a detached process can close
+its inherited descriptor and still need the target later. Every current claim
+state remains protected; this helper does not enable target reuse, automatic
+retention, or deletion. Programs that outlive a managed build must retain their
+lease or consume independently staged artifacts.
+
 ## Optional local storage admission
 
 `scripts/local/cargo-build-env.sh` keeps the existing precedence rules and

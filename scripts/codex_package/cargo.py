@@ -9,6 +9,7 @@ from .targets import REPO_ROOT
 from .targets import PackageVariant
 from .targets import TargetSpec
 from .v8 import resolve_codex_v8_cargo_env
+from local.target_lease import subprocess_lease_kwargs
 
 
 CODEX_RS_ROOT = REPO_ROOT / "codex-rs"
@@ -75,6 +76,7 @@ def build_source_binaries(
             cwd=CODEX_RS_ROOT,
             check=True,
             env=cargo_env,
+            **subprocess_lease_kwargs(cargo_env),
         )
 
     output_dir = cargo_profile_output_dir(spec, profile)

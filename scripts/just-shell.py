@@ -14,6 +14,12 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+# `just` loads this file from the Cargo working directory, so the
+# scripts directory is not necessarily on `sys.path`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from local.target_lease import subprocess_lease_kwargs
+
 
 ARGS_TOKEN = "{args}"
 STDERR_NULL_TOKEN = "{stderr-null}"
@@ -90,6 +96,7 @@ def resolve_cargo_environment(
         stdout=subprocess.PIPE,
         stderr=None,
         env=dict(environment),
+        **subprocess_lease_kwargs(environment),
     )
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
@@ -122,6 +129,7 @@ def resolve_rusty_v8_environment(
         stdout=subprocess.PIPE,
         stderr=None,
         env=dict(environment),
+        **subprocess_lease_kwargs(environment),
     )
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
@@ -154,7 +162,12 @@ def build_test_prerequisites(
     command = ["cargo", "build"]
     for package, binary in CODEX_CORE_TEST_BINARIES:
         command.extend(["-p", package, "--bin", binary])
-    completed = subprocess.run(command, check=False, env=dict(environment))
+    completed = subprocess.run(
+        command,
+        check=False,
+        env=dict(environment),
+        **subprocess_lease_kwargs(environment),
+    )
     if completed.returncode != 0:
         raise SystemExit(completed.returncode)
 
