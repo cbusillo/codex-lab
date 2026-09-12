@@ -293,6 +293,7 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
         for path in (
             "codex-rs/core/src/tasks/background_review_instructions.rs",
             "codex-rs/core/src/tasks/background_review_instructions_tests.rs",
+            "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__auto_review_status__tests__incomplete_instructions_explain_failed_background_review.snap",
             "codex-rs/core/src/agents_md.rs",
             "codex-rs/core/src/state/turn.rs",
             "codex-rs/core/src/turn_diff_tracker.rs",

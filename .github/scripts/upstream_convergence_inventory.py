@@ -565,6 +565,7 @@ POLICY_V4_RULES = (
             "codex-rs/core/src/state/turn.rs",
             "codex-rs/core/src/tasks/mod.rs",
             "codex-rs/core/src/tasks/background_review_instructions*",
+            "codex-rs/tui/src/history_cell/snapshots/*incomplete_instructions_explain_failed_background_review*",
         ),
         lane="intentionally_owned",
         contracts=("AGENT-1",),

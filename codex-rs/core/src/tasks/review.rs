@@ -230,7 +230,7 @@ async fn run_review_task(
             Ok(start_conversation.await)
         };
     let mut start_error_summary = None;
-    let execution = match start_result {
+    let mut execution = match start_result {
         Err(execution) => execution,
         Ok(Ok(review_conversation)) => {
             Box::pin(execute_review_conversation(
@@ -263,6 +263,8 @@ async fn run_review_task(
         }
     };
     if let Some(reason) = instructions_gate.as_ref().and_then(|gate| gate.failure()) {
+        // A denied follow-up must never accept any earlier child output as a complete review.
+        execution.output = None;
         start_error_summary = Some(reason);
     }
     let cancelled = cancellation_token.is_cancelled();
