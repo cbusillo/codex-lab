@@ -40,6 +40,7 @@ fn bounded_result_keeps_utf8_tail_and_honors_backend_deadline() {
     };
     let mut worker = request.start(start).expect("valid limits");
     worker.restrict_timeout(start, /*configured_ms*/ 1000);
+    worker.restrict_timeout(start, u64::MAX);
     assert_eq!(worker.deadline, start + Duration::from_secs(/*secs*/ 1));
     assert_eq!(worker.limits.timeout_ms, 1000);
     let message = "🙂".repeat(/*n*/ 100);

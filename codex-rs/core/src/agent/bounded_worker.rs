@@ -192,7 +192,7 @@ impl BoundedWorker {
         self.limits.timeout_ms = self.limits.timeout_ms.min(configured_ms);
         self.deadline = self
             .deadline
-            .min(started + Duration::from_millis(configured_ms));
+            .min(started + Duration::from_millis(self.limits.timeout_ms));
     }
 
     pub(crate) fn bound_result(&self, message: &str) -> String {

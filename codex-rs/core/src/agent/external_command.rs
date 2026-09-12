@@ -254,6 +254,11 @@ pub(crate) async fn run_external_agent(mut launch: ExternalAgentLaunch, control:
                     )
                 });
             failure.quota_diagnostic = quota_diagnostic;
+            if let Some(worker) = &launch.bounded_worker
+                && let Some(message) = failure.message.as_mut()
+            {
+                *message = worker.bound_result(message);
+            }
             let parent_message =
                 external_agent_parent_failure_message(&launch, &failure, message.as_str());
             control.update_external_agent_failure(

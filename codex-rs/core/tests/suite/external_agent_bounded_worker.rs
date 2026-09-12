@@ -138,7 +138,7 @@ async fn bounded_worker_preserves_complete_instructions_and_retains_bounded_resu
     assert!(result.len() <= 256, "{result}");
     assert!(result.starts_with("[bounded worker result truncated]"));
     assert_eq!(agent["provider"]["cli_version"], "Claude Code 2.1.220");
-    assert_eq!(agent["provider"]["capability_source"], "local_cli");
+    assert_eq!(agent["provider"]["capability_source"], "static_catalog");
     assert!(agent["provider"]["model"].is_null());
     Ok(())
 }
@@ -307,5 +307,37 @@ async fn bounded_worker_targeted_cancellation_has_truthful_terminal_state() -> R
         output.spawn
     );
     assert_eq!(output.agents["agents"][0]["agent_status"], "shutdown");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bounded_worker_caps_provider_failure_messages_after_quota_decoding() -> Result<()> {
+    let dir = TempDir::new()?;
+    let quota = json!({"type":"rate_limit_event", "rate_limit_info":{
+        "status":"rejected", "rateLimitType":"five_hour", "resetsAt":1783830000,
+        "overageStatus":"rejected", "overageDisabledReason":"x".repeat(/*n*/ 128),
+        "isUsingOverage":false
+    }});
+    let result = json!({"type":"result", "is_error":true, "result":"quota rejected"});
+    let mut backend = stub_cli(
+        &dir,
+        "quota.sh",
+        &format!(
+            "case \"$1\" in --version) echo 'Claude Code 2.1.220'; exit;; --help) echo '--verbose --output-format'; exit;; auth) echo '{{\"loggedIn\":true}}'; exit;; esac\nprintf '%s\\n' '{quota}' '{result}'\n",
+        ),
+    );
+    backend.launch_family = Some("claude".to_string());
+    let output = run_worker(
+        backend,
+        worker_arguments(json!({"type":"text"})),
+        dir.path(),
+        Completion::Wait,
+    )
+    .await?;
+    let failure = &output.agents["agents"][0]["failure"];
+    assert_eq!(failure["kind"], "quota_or_rate_limited");
+    let message = failure["message"].as_str().expect("failure message");
+    assert!(message.len() <= 256);
+    assert!(message.starts_with("[bounded worker result truncated]"));
     Ok(())
 }

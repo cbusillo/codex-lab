@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::bounded_worker::BoundedWorkerRequest;
 use crate::agent::bounded_worker::WorkerContext;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn cancellation_during_bounded_preflight_stops_the_probe_group() {
@@ -46,22 +47,26 @@ async fn cancellation_during_bounded_preflight_stops_the_probe_group() {
     })
     .await
     .expect("preflight started");
+    let process_group = unsafe { libc::getpgid(child_pid) };
+    assert!(process_group > 0);
     cancellation.cancel();
     tokio::time::timeout(Duration::from_secs(/*secs*/ 2), runner)
         .await
         .expect("cancelled promptly")
         .expect("runner");
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 2), async {
+    let observation = tokio::time::timeout(Duration::from_secs(/*secs*/ 2), async {
         // Signal zero observes the fixture process without modifying it.
         while unsafe {
-            libc::kill(child_pid, /*sig*/ 0)
+            libc::killpg(process_group, /*sig*/ 0)
         } == 0
         {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
         }
+        std::io::Error::last_os_error().raw_os_error()
     })
     .await
-    .expect("preflight descendant stopped");
+    .expect("entire preflight process group stopped");
+    assert_eq!(observation, Some(libc::ESRCH));
     assert!(
         !task_file.exists(),
         "task must never launch after cancellation"
