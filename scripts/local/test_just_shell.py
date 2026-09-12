@@ -62,6 +62,49 @@ class JustShellTest(unittest.TestCase):
         self.assertEqual(environment, {})
         run.assert_not_called()
 
+    def test_managed_recipe_forwards_engine_status(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {
+                "CODEX_REPO_ROOT": str(Path(__file__).parents[1].parent),
+                "CODEX_LAB_TARGET_RETENTION_CONFIG": str(config),
+            }
+            completed = mock.Mock(returncode=37)
+            with mock.patch("subprocess.run", return_value=completed) as run:
+                result = just_shell.run_managed_recipe(
+                    "build", ["-p", "codex-cli"], environment
+                )
+        self.assertEqual(result, 37)
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command[-4:], ["--recipe", "build", "--", "-p", "codex-cli"][-4:]
+        )
+
+    def test_managed_recipe_skips_explicit_target_override(self) -> None:
+        with mock.patch("subprocess.run") as run:
+            result = just_shell.run_managed_recipe(
+                "test", [], {"CARGO_TARGET_DIR": "/external/target"}
+            )
+        self.assertIsNone(result)
+        run.assert_not_called()
+
+    def test_managed_recipe_refuses_override_inside_managed_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "retention.json"
+            managed_root = root / "targets"
+            config.write_text(
+                '{"managed_root": "%s"}' % managed_root,
+                encoding="utf-8",
+            )
+            environment = {
+                "CODEX_LAB_TARGET_RETENTION_CONFIG": str(config),
+                "CARGO_TARGET_DIR": str(managed_root / "target"),
+            }
+            with self.assertRaisesRegex(RuntimeError, "inside"):
+                just_shell.run_managed_recipe("build", [], environment)
+
     def test_all_direct_cargo_recipes_resolve_target(self) -> None:
         expected = {
             "app-server-test-client",

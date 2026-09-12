@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from local.target_lease import subprocess_lease_kwargs
+from local import managed_targets
 
 
 ARGS_TOKEN = "{args}"
@@ -72,12 +73,59 @@ def main() -> int:
 
 
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
+    try:
+        managed_result = run_managed_recipe(recipe_name, recipe_args, os.environ)
+    except managed_targets.ManagedTargetsError as error:
+        print(f"managed-targets: {error}", file=sys.stderr)
+        return 2
+    if managed_result is not None:
+        return managed_result
     os.environ.update(resolve_cargo_environment(recipe_name, os.environ))
     os.environ.update(resolve_rusty_v8_environment(recipe_name, os.environ))
     build_test_prerequisites(recipe_name, recipe_args, os.environ)
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
+
+
+def run_managed_recipe(
+    recipe_name: str, recipe_args: list[str], environment: Mapping[str, str]
+) -> int | None:
+    source = dict(environment)
+    # A managed engine invocation already owns the lease.  Let its child
+    # recipe continue through the ordinary shell path without re-enrollment.
+    if (
+        managed_targets.LEASE_ENV in source
+        or recipe_name not in managed_targets.MANAGED_RECIPES
+    ):
+        return None
+    config = managed_targets.existing_config_path(
+        source.get(managed_targets.CONFIG_ENV)
+    )
+    if config is None:
+        return None
+    config_data, _ = managed_targets.load_config(str(config))
+    managed_targets.reject_managed_override(config_data, recipe_args, source)
+    if not managed_targets.managed_recipe_available(recipe_name, recipe_args, source):
+        return None
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("local") / "managed_targets.py"),
+        "--config",
+        str(config),
+        "run",
+        "--recipe",
+        recipe_name,
+        "--",
+        *recipe_args,
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        env=source,
+        **subprocess_lease_kwargs(source),
+    )
+    return completed.returncode
 
 
 def resolve_cargo_environment(

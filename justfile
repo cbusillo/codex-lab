@@ -41,6 +41,18 @@ code-mode-host *args:
 assemble-codex-package *args:
     {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py {args}
 
+# Run a Cargo build under the explicit managed-target contract.
+[no-cd]
+[unix]
+managed-build *args:
+    {{ python }} {{ justfile_directory() }}/scripts/local/managed_targets.py run --recipe build -- {args}
+
+# Preview or apply managed-target retention collection.
+[no-cd]
+[unix]
+managed-target-gc *args:
+    {{ python }} {{ justfile_directory() }}/scripts/local/managed_targets.py gc {args}
+
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli

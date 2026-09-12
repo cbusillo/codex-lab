@@ -23,6 +23,75 @@ state remains protected; this helper does not enable target reuse, automatic
 retention, or deletion. Programs that outlive a managed build must retain their
 lease or consume independently staged artifacts.
 
+## Managed target retention (macOS, opt-in)
+
+`managed_targets.py` creates a separate private store for newly enrolled Cargo
+targets. It never adopts existing `cargo-target` directories or v1 ownership
+claims. Each Git worktree gets its own reusable target; mutable targets are
+never shared between worktrees. The source identity includes a private nonce in
+the worktree's Git directory, so reusing a source path does not reuse its owner.
+Use Python 3.11 or newer for collection; older runtimes without safe
+directory-descriptor-relative deletion leave targets protected.
+
+Initialize an unused directory on the intended mounted volume:
+
+```sh
+python3 scripts/local/managed_targets.py --config /absolute/host-config.json init \
+  --volume-root /Volumes/BuildArtifacts --volume-uuid VOLUME-UUID \
+  --managed-root /Volumes/BuildArtifacts/managed-cargo
+```
+
+Select that configuration with `CODEX_LAB_TARGET_RETENTION_CONFIG`, or use the
+default `~/.config/codex-lab/target-retention.json`. With configuration present,
+supported `just test`, `clippy`, `fix`, and source `assemble-codex-package`
+invocations run under a lease, including their prerequisite builds. Use
+`just managed-build` for the explicit build entrypoint. Unknown arguments and
+explicit Cargo target/config overrides stay unmanaged; overrides pointing into
+the managed store are refused. Raw Cargo, IDE launches, runtime launches, older
+checkouts, and other projects are not automatically enrolled.
+
+This is a **cooperative workflow contract**, not a universal process detector.
+Every target-dependent child must preserve `CODEX_LAB_TARGET_LEASE_FD`.
+Detached programs must retain that lease or consume separate copies outside the
+managed store. Source packaging copies its executables out before completing;
+custom Cargo/prebuilt inputs and package outputs inside the store are excluded
+from managed enrollment. Do not launch programs directly from managed targets.
+
+Kache is started and checked before acquiring the build lease. Managed children
+set `KACHE_AUTO_GC=0` so a detached wrapper GC cannot inherit that lease and
+delay target reuse. The host configuration stays unchanged: the prestarted
+daemon continues its native periodic GC, and collection runs native GC again
+after deleting a target. The bare native GC command honors Kache's configured
+age and size policies independently of target retention.
+
+Preview with `just managed-target-gc`; pass `--apply` to collect. The default
+policy expires eligible targets after 14 days without use. Below 200 GiB free,
+it can select an eligible target idle for at least 24 hours. The 24-hour grace
+preserves recent warm output; it is not evidence that a process has finished.
+Each pass removes at most one whole target, then invokes Kache's native GC and
+remeasures available space. This bounds target count, not deletion time or
+bytes. Filesystem free space is a snapshot, not a concurrent-build reservation.
+
+Only a completed managed run with matching identities and a free lease can be
+collected. Active, interrupted, malformed, replaced, and unknown records remain
+protected. A missing source worktree alone is not a deletion permit. Collection
+never recovers an interrupted build automatically. A later managed invocation
+in that same worktree can resume its target after validating its identity and
+acquiring the exclusive lease; an existing lease holder still blocks reuse.
+Collection uses the same per-target lease as builds and quarantines the target before
+deleting it. Interrupted collection is left protected for inspection; it is not
+automatically retried by guessing ownership. An admission attempt below the
+floor performs one bounded collection and refuses if space remains insufficient.
+A failed initial creation can leave an unregistered directory, which is also
+protected and requires operator inspection; the collector does not scan for or
+automatically remove such leftovers.
+
+`init` does not install a scheduler. A host scheduler may invoke the `gc --apply`
+CLI from a stable, reviewed installation with an explicit configuration and
+logs. Keep that installation independent of disposable worktrees, and disable
+its scheduled invocation before changing the store protocol. Disabling the
+scheduler/configuration preserves all existing target data.
+
 ## Optional local storage admission
 
 `scripts/local/cargo-build-env.sh` keeps the existing precedence rules and
