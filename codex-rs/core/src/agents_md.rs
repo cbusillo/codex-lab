@@ -58,13 +58,14 @@ pub(crate) async fn load_project_instructions(
     environments: &TurnEnvironmentSnapshot,
 ) -> io::Result<Option<LoadedAgentsMd>> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
-    if config.active_project.is_untrusted() {
-        return Ok((!loaded.is_empty()).then_some(loaded));
+    if config.active_project.is_untrusted() || config.project_doc_max_bytes == 0 {
+        return Ok((!loaded.is_empty() || loaded.incomplete).then_some(loaded));
     }
 
     let mut remaining = config.project_doc_max_bytes;
     for turn_environment in environments.turn_environments() {
         if remaining == 0 {
+            loaded.incomplete = true;
             break;
         }
 
@@ -85,6 +86,7 @@ pub(crate) async fn load_project_instructions(
         .await
         {
             Ok(Some(docs)) => {
+                loaded.incomplete |= docs.incomplete;
                 for entry in docs.entries {
                     remaining = remaining.saturating_sub(entry.contents.len());
                     loaded.entries.push(entry);
@@ -92,6 +94,7 @@ pub(crate) async fn load_project_instructions(
             }
             Ok(None) => {}
             Err(error) if sandbox.is_none() => {
+                loaded.incomplete = true;
                 error!(
                     environment_id = turn_environment.selection.environment_id,
                     "error trying to find AGENTS.md docs: {error:#}"
@@ -109,7 +112,7 @@ pub(crate) async fn load_project_instructions(
         }
     }
 
-    Ok((!loaded.is_empty()).then_some(loaded))
+    Ok((!loaded.is_empty() || loaded.incomplete).then_some(loaded))
 }
 
 /// Attempt to locate and load AGENTS.md documentation.
@@ -127,11 +130,7 @@ async fn read_agents_md(
     max_total: usize,
     sandbox: Option<&FileSystemSandboxContext>,
 ) -> io::Result<Option<LoadedAgentsMd>> {
-    if max_total == 0 {
-        return Ok(None);
-    }
-
-    let paths = agents_md_paths(config, cwd, fs, sandbox).await?;
+    let paths = agents_md_paths(config, cwd, fs, sandbox, FindUpErrorPolicy::Ignore).await?;
     if paths.is_empty() {
         return Ok(None);
     }
@@ -141,6 +140,7 @@ async fn read_agents_md(
 
     for p in paths {
         if remaining == 0 {
+            loaded.incomplete = true;
             break;
         }
 
@@ -151,6 +151,7 @@ async fn read_agents_md(
         };
         let size = data.len() as u64;
         if size > remaining {
+            loaded.incomplete = true;
             data.truncate(remaining as usize);
         }
 
@@ -162,6 +163,7 @@ async fn read_agents_md(
             );
         }
 
+        loaded.incomplete |= std::str::from_utf8(&data).is_err();
         let text = String::from_utf8_lossy(&data).to_string();
         if !text.trim().is_empty() {
             loaded.entries.push(InstructionEntry {
@@ -176,7 +178,7 @@ async fn read_agents_md(
         }
     }
 
-    if loaded.is_empty() {
+    if loaded.is_empty() && !loaded.incomplete {
         Ok(None)
     } else {
         Ok(Some(loaded))
@@ -186,11 +188,12 @@ async fn read_agents_md(
 /// Discovers AGENTS.md files from the project root to the current working
 /// directory, inclusive. Symlinks are allowed.
 #[tracing::instrument(name = "agents_md.discover", skip_all)]
-async fn agents_md_paths(
+pub(crate) async fn agents_md_paths(
     config: &Config,
     cwd: &PathUri,
     fs: &dyn ExecutorFileSystem,
     sandbox: Option<&FileSystemSandboxContext>,
+    marker_error_policy: FindUpErrorPolicy,
 ) -> io::Result<Vec<PathUri>> {
     let dir = cwd.clone();
 
@@ -213,7 +216,7 @@ async fn agents_md_paths(
         fs,
         &dir,
         project_root_markers,
-        FindUpErrorPolicy::Ignore,
+        marker_error_policy,
         sandbox,
     )
     .await?;
@@ -266,7 +269,7 @@ async fn agents_md_paths(
     Ok(found)
 }
 
-fn candidate_filenames(config: &Config) -> Vec<&str> {
+pub(crate) fn candidate_filenames(config: &Config) -> Vec<&str> {
     let mut names: Vec<&str> = Vec::with_capacity(2 + config.project_doc_fallback_filenames.len());
     names.push(LOCAL_AGENTS_MD_FILENAME);
     names.push(DEFAULT_AGENTS_MD_FILENAME);
@@ -291,6 +294,7 @@ pub struct LoadedAgentsMd {
 
     /// Ordered instructions and their provenance.
     entries: Vec<InstructionEntry>,
+    incomplete: bool,
 }
 
 impl LoadedAgentsMd {
@@ -305,6 +309,7 @@ impl LoadedAgentsMd {
                 source: path,
             }),
             entries: Vec::new(),
+            incomplete: false,
         }
     }
 
@@ -313,6 +318,7 @@ impl LoadedAgentsMd {
             user_instructions: user_instructions
                 .filter(|instructions| !instructions.text.trim().is_empty()),
             entries: Vec::new(),
+            incomplete: false,
         }
     }
 
@@ -331,7 +337,12 @@ impl LoadedAgentsMd {
                 contents,
                 provenance: InstructionProvenance::Internal,
             }],
+            incomplete: false,
         }
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        !self.incomplete
     }
 
     fn is_empty(&self) -> bool {

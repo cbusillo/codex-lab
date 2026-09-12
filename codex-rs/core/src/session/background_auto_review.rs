@@ -54,6 +54,7 @@ struct DetachedBackgroundAutoReviewStart {
     fingerprint: String,
     persistence: ReviewPersistenceContext,
     turn_diff: String,
+    instruction_paths: Vec<codex_utils_path_uri::PathUri>,
     coordination: ReviewCoordination,
     review_lock_guard: ReviewLockGuard,
 }
@@ -79,7 +80,7 @@ impl Session {
     pub(crate) async fn maybe_schedule_background_auto_review(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
-        turn_diff: Option<String>,
+        turn_diff: Option<crate::turn_diff_tracker::CompletedTurnDiff>,
     ) {
         let sess = Arc::clone(self);
         tokio::spawn(async move {
@@ -91,7 +92,7 @@ impl Session {
     async fn schedule_background_auto_review_after_turn(
         self: Arc<Self>,
         turn_context: Arc<TurnContext>,
-        turn_diff: Option<String>,
+        turn_diff: Option<crate::turn_diff_tracker::CompletedTurnDiff>,
     ) {
         let start = {
             let mut state = self.state.lock().await;
@@ -110,7 +111,11 @@ impl Session {
             debug!("background auto review skipped: no single local worktree");
             return;
         };
-        let turn_diff = turn_diff.and_then(non_empty_turn_diff);
+        let instruction_paths = turn_diff
+            .as_ref()
+            .map(|diff| diff.paths.clone())
+            .unwrap_or_default();
+        let turn_diff = turn_diff.and_then(|diff| non_empty_turn_diff(diff.text));
         let turn_diff_fingerprint = turn_diff.as_deref().and_then(diff_fingerprint);
         let schedule = if let Some(fingerprint) = turn_diff_fingerprint.as_ref() {
             let mut state = self.state.lock().await;
@@ -338,6 +343,7 @@ impl Session {
                 fingerprint: schedule.fingerprint,
                 persistence,
                 turn_diff,
+                instruction_paths,
                 coordination,
                 review_lock_guard,
             })
@@ -367,6 +373,7 @@ impl Session {
             fingerprint,
             persistence,
             turn_diff,
+            instruction_paths,
             coordination,
             review_lock_guard,
         } = start;
@@ -489,6 +496,9 @@ impl Session {
             ))),
         )
         .await;
+        prepared.turn_context.extension_data.insert(
+            crate::tasks::BackgroundReviewInstructionsGate::new(instruction_paths),
+        );
         let Some(persistence) = prepared.task.persistence_context() else {
             self.record_failed_background_auto_review(
                 &prepared_persistence,

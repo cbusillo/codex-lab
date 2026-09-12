@@ -1,5 +1,6 @@
 mod abort_finalization;
 mod background_review_budget;
+mod background_review_instructions;
 mod compact;
 mod lifecycle;
 mod regular;
@@ -61,6 +62,7 @@ use codex_protocol::protocol::WarningEvent;
 use codex_thread_store::PersistContext;
 
 pub(crate) use background_review_budget::BackgroundReviewBudgetGate;
+pub(crate) use background_review_instructions::BackgroundReviewInstructionsGate;
 use codex_features::Feature;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;

@@ -5,6 +5,18 @@ use codex_app_server_protocol::AutoReviewStatusCount;
 use codex_app_server_protocol::AutoReviewUsage;
 
 #[test]
+fn incomplete_instructions_explain_failed_background_review() {
+    let cell = new_auto_review_status_cell(&BackgroundAutoReviewStatusChangedNotification {
+        thread_id: "thread-review".to_string(),
+        run_id: "run-instructions".to_string(),
+        status: BackgroundAutoReviewStatus::Failed,
+        review_target: ReviewTarget::Custom { instructions: "current turn".to_string() },
+        error_summary: Some("Background Review cannot verify complete AGENTS.md instructions: the complete instruction fragment exceeds its context limit. The review request was not sent.".to_string()),
+    });
+    insta::assert_snapshot!(render_lines(&cell.display_lines(/*width*/ 100)).join("\n"));
+}
+
+#[test]
 fn hidden_auto_review_summaries_explain_stale_and_detached_results() {
     let rendered = [
         AutoReviewFreshness::Current,

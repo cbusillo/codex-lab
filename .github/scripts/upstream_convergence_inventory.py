@@ -25,12 +25,13 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 LEGACY_POLICY_VERSION = 1
 PREVIOUS_POLICY_VERSION = 2
 SUPPORTED_POLICY_VERSIONS = (
     LEGACY_POLICY_VERSION,
     PREVIOUS_POLICY_VERSION,
+    3,
     POLICY_VERSION,
 )
 
@@ -552,6 +553,28 @@ POLICY_V3_RULES = (
 )
 
 
+# Version 4 adds instruction-completeness ownership without changing any
+# classification used to reproduce the pinned v1-v3 upstream snapshots.
+POLICY_V4_RULES = (
+    Rule(
+        patterns=(
+            "codex-rs/core/src/agents_md.rs",
+            "codex-rs/core/src/agents_md_tests.rs",
+            "codex-rs/core/src/turn_diff_tracker.rs",
+            "codex-rs/core/src/turn_diff_tracker_tests.rs",
+            "codex-rs/core/src/state/turn.rs",
+            "codex-rs/core/src/tasks/mod.rs",
+            "codex-rs/core/src/tasks/background_review_instructions*",
+            "codex-rs/tui/src/history_cell/snapshots/*incomplete_instructions_explain_failed_background_review*",
+        ),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="exact instruction snapshot and changed-path proof for Background Review (#787)",
+    ),
+    *POLICY_V3_RULES,
+)
+
+
 def git_environment(**updates: str) -> dict[str, str]:
     env = {
         key: value
@@ -694,8 +717,10 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
         return POLICY_V1_RULES
     if policy_version == PREVIOUS_POLICY_VERSION:
         return POLICY_V2_RULES
-    if policy_version == POLICY_VERSION:
+    if policy_version == 3:
         return POLICY_V3_RULES
+    if policy_version == POLICY_VERSION:
+        return POLICY_V4_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"
