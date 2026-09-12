@@ -126,6 +126,7 @@ async fn bounded_worker_preserves_complete_instructions_and_retains_bounded_resu
     .await?;
     let mut spawn: Value = serde_json::from_str(&output.spawn)?;
     spawn["nickname"] = json!("[generated nickname]");
+    spawn.sort_all_objects();
     insta::assert_snapshot!(
         "bounded_worker_accepted",
         serde_json::to_string_pretty(&spawn)?
