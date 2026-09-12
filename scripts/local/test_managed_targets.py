@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -58,6 +59,13 @@ class PressureStore(FakeStore):
 
 
 class ManagedTargetsTest(unittest.TestCase):
+    def clear_target_overrides(self) -> None:
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in managed_targets.TARGET_OVERRIDE_ENV_NAMES:
+            os.environ.pop(name, None)
+
     def test_explicit_missing_config_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             missing = Path(temp_dir) / "missing.json"
@@ -132,6 +140,7 @@ class ManagedTargetsTest(unittest.TestCase):
         )
 
     def test_run_recipe_transparently_returns_engine_status(self) -> None:
+        self.clear_target_overrides()
         fake_store = FakeStore({"schema": 1, "kache_gc": False})
         with (
             mock.patch.object(
@@ -161,6 +170,7 @@ class ManagedTargetsTest(unittest.TestCase):
         store.assert_not_called()
 
     def test_run_recipe_performs_at_most_one_pressure_collection(self) -> None:
+        self.clear_target_overrides()
         fake_store = PressureStore({"schema": 1, "kache_gc": False})
         with (
             mock.patch.object(
@@ -181,6 +191,7 @@ class ManagedTargetsTest(unittest.TestCase):
         self.assertEqual(fake_store.collect_calls, [False, True, False])
 
     def test_package_outputs_cannot_use_managed_root(self) -> None:
+        self.clear_target_overrides()
         with tempfile.TemporaryDirectory() as temp_dir:
             managed_root = Path(temp_dir) / "targets"
             with self.assertRaisesRegex(ManagedTargetsError, "inside"):
