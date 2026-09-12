@@ -11,6 +11,7 @@ fn test_launch(
     is_read_only: bool,
 ) -> ExternalAgentLaunch {
     ExternalAgentLaunch {
+        bounded_worker: None,
         thread_id: ThreadId::new(),
         parent_thread_id: ThreadId::new(),
         author: AgentPath::root(),
@@ -128,6 +129,7 @@ async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
     cancellation_token.cancel();
 
     let launch = ExternalAgentLaunch {
+        bounded_worker: None,
         thread_id: ThreadId::new(),
         parent_thread_id: ThreadId::new(),
         author: AgentPath::root(),

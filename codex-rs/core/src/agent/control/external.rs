@@ -178,6 +178,7 @@ impl AgentControl {
             resolved_command,
             claude_stream_json_enabled,
             hide_provider_metadata: config.multi_agent_v2.hide_spawn_agent_metadata,
+            bounded_worker: options.bounded_worker,
         };
         self.spawn_external_agent_task(launch);
         Ok(LiveAgent {

@@ -420,6 +420,7 @@ async fn production_cancel_path_finishes_run_before_releasing_runtime_state() {
     cancellation_token.cancel();
     crate::agent::external_command::run_external_agent(
         crate::agent::external_command::ExternalAgentLaunch {
+            bounded_worker: None,
             thread_id: child_thread_id,
             parent_thread_id,
             author: AgentPath::root(),

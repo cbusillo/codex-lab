@@ -135,6 +135,7 @@ async fn handle_spawn_agent(
             root_turn_id: turn.turn_metadata_state.root_turn_id(),
             environments: Some(step_context.environments.to_selections()),
             external_agent_provider: None,
+            bounded_worker: None,
             external_agent_routing: Some(ProviderRoutingSummary {
                 kind: ProviderRoutingKind::Explicit,
                 requested: role_name.map(str::to_string),
