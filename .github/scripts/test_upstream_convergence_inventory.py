@@ -305,6 +305,13 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
                     inventory.classify_path(path, 3)["lane"], "intentionally_owned"
                 )
 
+    def test_bounded_worker_context_preserves_legacy_classification(self) -> None:
+        path = "codex-rs/core/src/context/bounded_worker_instructions.rs"
+        self.assert_owned(path, "AGENT-1")
+        self.assertNotEqual(
+            inventory.classify_path(path, 4)["lane"], "intentionally_owned"
+        )
+
     def test_background_review_engine_and_session_state_are_owned(self) -> None:
         # The engine that runs a background review and the durable per-session
         # state it reads back. Upstream owns both filenames, so only these exact
