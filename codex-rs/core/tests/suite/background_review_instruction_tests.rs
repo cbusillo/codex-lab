@@ -94,7 +94,7 @@ async fn oversized_nested_instructions_fail_without_a_review_request() -> Result
         background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Failed).await;
     let run = single_run(&AutoReviewStore::for_scope(
         test.codex_home_path(),
-        cwd.as_path(),
+        repo.path(),
     ));
     assert_eq!(run.status, AutoReviewRunStatus::Failed);
     assert_eq!(run.finding_count, 0);

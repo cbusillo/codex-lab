@@ -58,7 +58,7 @@ pub(crate) async fn load_project_instructions(
     environments: &TurnEnvironmentSnapshot,
 ) -> io::Result<Option<LoadedAgentsMd>> {
     let mut loaded = LoadedAgentsMd::from_user_instructions(user_instructions);
-    if config.active_project.is_untrusted() {
+    if config.active_project.is_untrusted() || config.project_doc_max_bytes == 0 {
         return Ok((!loaded.is_empty() || loaded.incomplete).then_some(loaded));
     }
 
