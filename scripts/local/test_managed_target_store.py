@@ -673,15 +673,16 @@ class ManagedTargetStoreTest(unittest.TestCase):
             "def stop(_signum, _frame):\n"
             "    ready.write_text('caught')\n"
             "    raise SystemExit(0)\n"
-            "signal.signal(signal.SIGTERM, stop)\n"
+            "signal.signal(signal.SIGINT, stop)\n"
             "ready.write_text('ready')\n"
             "while True: time.sleep(.1)\n"
         )
+        supervisor_config = self.config | {"min_free_bytes": 0}
         wrapper = (
             "import importlib.util,sys\n"
             f"spec=importlib.util.spec_from_file_location('store',{str(MODULE_PATH)!r})\n"
             "module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n"
-            f"config={self.config!r}\n"
+            f"config={supervisor_config!r}\n"
             "validator=lambda path,value: {'st_dev':path.stat().st_dev,'st_ino':path.stat().st_ino,'uuid':value}\n"
             "store=module.ManagedTargetStore(config, volume_validator=validator)\n"
             "store.initialize()\n"
@@ -690,8 +691,10 @@ class ManagedTargetStoreTest(unittest.TestCase):
         owner = subprocess.Popen([sys.executable, "-c", wrapper])
         try:
             self.wait_for(ready)
-            owner.send_signal(signal.SIGTERM)
+            owner.send_signal(signal.SIGINT)
             owner.wait(timeout=5)
+            self.assertEqual(130, owner.returncode)
+            self.assertEqual("caught", ready.read_text())
             store = self.store()
             _, _, record = self.record(store, self.worktree)
             self.assertEqual("active", record["state"])
