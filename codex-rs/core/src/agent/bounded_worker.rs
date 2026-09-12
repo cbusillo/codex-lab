@@ -176,7 +176,9 @@ impl BoundedWorkerRequest {
                 }
                 let context = BoundedWorkerInstructions {
                     paths: paths.clone(),
-                    instructions: loaded.map(|loaded| loaded.text()).unwrap_or_default(),
+                    instructions: loaded
+                        .map(super::super::agents_md::LoadedAgentsMd::text)
+                        .unwrap_or_default(),
                     developer_instructions: config.developer_instructions.clone(),
                 };
                 format!("{}\n\n{task}", context.render())
