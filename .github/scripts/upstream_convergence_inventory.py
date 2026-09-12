@@ -25,13 +25,14 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
-POLICY_VERSION = 4
+POLICY_VERSION = 5
 LEGACY_POLICY_VERSION = 1
 PREVIOUS_POLICY_VERSION = 2
 SUPPORTED_POLICY_VERSIONS = (
     LEGACY_POLICY_VERSION,
     PREVIOUS_POLICY_VERSION,
     3,
+    4,
     POLICY_VERSION,
 )
 
@@ -575,6 +576,17 @@ POLICY_V4_RULES = (
 )
 
 
+POLICY_V5_RULES = (
+    Rule(
+        patterns=feature_paths("bounded_worker"),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="bounded external-worker product controls (#910), not convergence savings",
+    ),
+    *POLICY_V4_RULES,
+)
+
+
 def git_environment(**updates: str) -> dict[str, str]:
     env = {
         key: value
@@ -719,8 +731,10 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
         return POLICY_V2_RULES
     if policy_version == 3:
         return POLICY_V3_RULES
-    if policy_version == POLICY_VERSION:
+    if policy_version == 4:
         return POLICY_V4_RULES
+    if policy_version == POLICY_VERSION:
+        return POLICY_V5_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"

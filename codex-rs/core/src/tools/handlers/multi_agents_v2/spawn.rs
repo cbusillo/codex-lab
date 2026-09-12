@@ -1,4 +1,6 @@
 use super::*;
+use crate::agent::bounded_worker::BoundedWorkerLimits;
+use crate::agent::bounded_worker::BoundedWorkerRequest;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
@@ -107,6 +109,7 @@ async fn handle_spawn_agent(
     ),
     FunctionCallError,
 > {
+    let worker_started = tokio::time::Instant::now();
     let ToolInvocation {
         session,
         step_context,
@@ -118,6 +121,20 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    let mut bounded_worker = args
+        .bounded_worker
+        .as_ref()
+        .map(|request| {
+            request
+                .start(worker_started)
+                .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))
+        })
+        .transpose()?;
+    if bounded_worker.is_some() && args.service_tier.is_some() {
+        return Err(FunctionCallError::RespondToModel(
+            "bounded external workers cannot enforce a requested provider service tier".to_string(),
+        ));
+    }
     let selectors = resolve_spawn_selectors(args.agent_type.as_deref(), args.model.as_deref())?;
     enforce_explicit_user_agent_intent(turn, &selectors)?;
     let requested_role_name = selectors.agent_type.as_deref();
@@ -134,11 +151,16 @@ async fn handle_spawn_agent(
         )));
     }
 
-    let message = message_content(args.message.clone())?;
+    let mut message = message_content(args.message.clone())?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+    let base_instructions = crate::agent::bounded_worker::prepare(
+        bounded_worker.as_ref(),
+        session.get_base_instructions(),
+    )
+    .await
+    .map_err(collab_spawn_error)?;
+    let mut config = build_agent_spawn_config(&base_instructions, turn.as_ref())?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     crate::agent::selector_defaults::install_configured_provider_selectors(&mut config)
         .map_err(FunctionCallError::RespondToModel)?;
@@ -154,14 +176,31 @@ async fn handle_spawn_agent(
         )
         .map_err(FunctionCallError::RespondToModel)?;
     }
-    let routing = select_provider_route(
-        &config,
-        explicit_role_name.as_deref(),
-        args.task_kind,
-        args.task_size,
-    )
-    .await
-    .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?;
+    let routing = if let Some(worker) = bounded_worker.as_mut() {
+        let role_name = explicit_role_name.as_deref().ok_or_else(|| {
+            FunctionCallError::RespondToModel(
+                "bounded_worker requires an explicit external agent_type or model selector"
+                    .to_string(),
+            )
+        })?;
+        let Some(crate::config::AgentRoleBackendConfig::ExternalCommand(backend)) =
+            crate::agent::role::resolve_role_config_owned(&config, role_name)
+                .and_then(|role| role.backend)
+        else {
+            return Err(FunctionCallError::RespondToModel("bounded_worker requires an external command backend; no native fallback was started".to_string()));
+        };
+        worker.restrict_timeout(worker_started, backend.timeout_ms);
+        crate::agent::provider_routing::ProviderRoutingDecision::deferred_external(role_name)
+    } else {
+        select_provider_route(
+            &config,
+            explicit_role_name.as_deref(),
+            args.task_kind,
+            args.task_size,
+        )
+        .await
+        .map_err(|failure| FunctionCallError::RespondToModel(failure.message()))?
+    };
     enforce_routed_user_agent_intent(turn, routing.agent_type())?;
     let role_name = routing.role_name();
     let preflighted_external_role = if routing.is_external() {
@@ -194,13 +233,33 @@ async fn handle_spawn_agent(
         .await?;
     }
     if !is_full_history_fork || explicit_role_name.is_some() {
-        apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name).await?;
+        crate::agent::bounded_worker::prepare(
+            bounded_worker.as_ref(),
+            apply_spawn_agent_role_for_multi_agent_v2(&session, &mut config, role_name),
+        )
+        .await
+        .map_err(collab_spawn_error)??;
     }
     if let Some((role_name, role)) = preflighted_external_role {
         config.agent_roles.insert(role_name, role);
     }
-    apply_spawn_agent_service_tier(&session, &mut config).await?;
+    crate::agent::bounded_worker::prepare(
+        bounded_worker.as_ref(),
+        apply_spawn_agent_service_tier(&session, &mut config),
+    )
+    .await
+    .map_err(collab_spawn_error)??;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+
+    if let (Some(request), Some(worker)) = (&args.bounded_worker, &bounded_worker) {
+        message = crate::agent::bounded_worker::prepare(
+            Some(worker),
+            request.message(&step_context, &config, &message),
+        )
+        .await
+        .map_err(collab_spawn_error)?
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+    }
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
     let persisted_role_name = role_name.or_else(|| {
@@ -272,6 +331,7 @@ async fn handle_spawn_agent(
                 context,
                 Some(spawn_source),
                 SpawnAgentOptions {
+                    bounded_worker: bounded_worker.clone(),
                     fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
                     fork_mode,
                     parent_thread_id: Some(session.thread_id),
@@ -329,12 +389,14 @@ async fn handle_spawn_agent(
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
         SpawnAgentResult::HiddenMetadata {
+            bounded_worker: bounded_worker.map(|worker| worker.limits),
             task_name,
             supports_followup_messages,
             routing: routing.redacted_summary(),
         }
     } else {
         SpawnAgentResult::WithNickname {
+            bounded_worker: bounded_worker.map(|worker| worker.limits),
             task_name,
             nickname,
             agent_type: routing.agent_type().to_string(),
@@ -559,6 +621,7 @@ impl CoreToolRuntime for Handler {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnAgentArgs {
+    bounded_worker: Option<BoundedWorkerRequest>,
     message: String,
     task_name: String,
     agent_type: Option<String>,
@@ -617,6 +680,8 @@ impl SpawnAgentArgs {
 #[serde(untagged)]
 pub(crate) enum SpawnAgentResult {
     WithNickname {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bounded_worker: Option<BoundedWorkerLimits>,
         task_name: String,
         nickname: Option<String>,
         agent_type: String,
@@ -624,6 +689,8 @@ pub(crate) enum SpawnAgentResult {
         routing: ProviderRoutingSummary,
     },
     HiddenMetadata {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bounded_worker: Option<BoundedWorkerLimits>,
         task_name: String,
         supports_followup_messages: bool,
         routing: ProviderRoutingSummary,

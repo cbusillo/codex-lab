@@ -5,12 +5,18 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 
+#[cfg(unix)]
+#[path = "bounded_worker_process_tests.rs"]
+mod bounded_worker_process_tests;
+
 fn test_launch(
     temp_dir: &TempDir,
     backend: ExternalCommandAgentBackendConfig,
     is_read_only: bool,
 ) -> ExternalAgentLaunch {
     ExternalAgentLaunch {
+        registration: None,
+        bounded_worker: None,
         thread_id: ThreadId::new(),
         parent_thread_id: ThreadId::new(),
         author: AgentPath::root(),
@@ -77,7 +83,7 @@ printf 'tail-marker"}'
         /*is_read_only*/ true,
     );
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("failed json response should parse");
     let final_message = response.final_message.expect("failed json final message");
@@ -112,7 +118,7 @@ async fn failed_json_response_without_message_stays_absent() {
         /*is_read_only*/ true,
     );
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("failed json response should parse");
 
@@ -128,6 +134,8 @@ async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
     cancellation_token.cancel();
 
     let launch = ExternalAgentLaunch {
+        registration: None,
+        bounded_worker: None,
         thread_id: ThreadId::new(),
         parent_thread_id: ThreadId::new(),
         author: AgentPath::root(),
@@ -159,7 +167,7 @@ async fn pre_cancelled_external_agent_does_not_launch_subprocess() {
         hide_provider_metadata: false,
     };
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("pre-cancelled external agent should fail before launch");
     assert!(err.to_string().contains("cancelled before launch"));
@@ -341,7 +349,7 @@ async fn claude_stream_json_preserves_assistant_result_without_transport_events(
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("structured Claude success should complete");
 
@@ -388,7 +396,7 @@ async fn claude_stream_json_falls_back_to_successful_plaintext_json_output() {
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("successful JSON wrapper output should remain compatible");
 
@@ -429,7 +437,7 @@ async fn claude_stream_json_falls_back_to_successful_malformed_json_like_output(
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("successful JSON-like wrapper output should remain compatible");
 
@@ -471,7 +479,7 @@ async fn claude_incomplete_assistant_stream_is_not_accepted_as_success() {
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("incomplete Claude stream should not complete successfully");
 
@@ -505,7 +513,7 @@ async fn claude_stream_quota_rejection_outranks_contradictory_result_prose() {
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("structured quota rejection should fail");
 
@@ -554,7 +562,7 @@ async fn claude_malformed_stream_returns_bounded_diagnostic_without_transport_ou
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("malformed stream should fail without transport output");
 
@@ -589,7 +597,7 @@ async fn claude_plaintext_auth_failure_is_preserved_without_transport_output() {
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("plaintext authentication failure should be preserved");
 
@@ -625,7 +633,7 @@ async fn generic_429_does_not_infer_structured_quota_details() {
     );
     launch.preflight_completed = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("generic 429 should fail");
 
@@ -662,7 +670,7 @@ async fn claude_stream_mode_preserves_generic_429_stderr_classification() {
     launch.preflight_completed = true;
     launch.claude_stream_json_enabled = true;
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("generic 429 should remain classifiable in stream mode");
 
@@ -704,7 +712,7 @@ async fn cancelling_claude_stream_stops_the_external_command() {
         cancellation_token.cancel();
     });
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("cancelling Claude stream should stop the command");
 
@@ -917,7 +925,7 @@ echo "RUNTIME_OK"
     );
     launch.preflight_completed = true;
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("completed preflight should not run again");
 
@@ -991,7 +999,7 @@ exit 2
     launch.resolved_command = provider
         .resolved_command()
         .map(std::path::Path::to_path_buf);
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("resolved command should launch successfully");
     assert_eq!(response.status, ExternalAgentResponseStatus::Completed);
@@ -1137,7 +1145,7 @@ async fn raw_cli_auth_failure_is_classified() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("authentication failure should fail the external agent");
 
@@ -1166,7 +1174,7 @@ async fn raw_cli_rate_limit_failure_is_classified() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("rate limit should fail the external agent");
 
@@ -1191,7 +1199,7 @@ async fn raw_cli_empty_output_is_classified() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("empty output should fail the external agent");
 
@@ -1215,7 +1223,7 @@ async fn raw_cli_empty_output_preserves_stderr_diagnostic() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("stderr-only success should fail the external agent");
 
@@ -1243,7 +1251,7 @@ async fn raw_cli_empty_output_with_benign_stderr_stays_empty_output() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("stderr-only success should fail the external agent");
 
@@ -1269,7 +1277,7 @@ async fn malformed_json_output_is_classified() {
         /*is_read_only*/ true,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("request echo should not parse as an external response");
 
@@ -1444,7 +1452,7 @@ async fn antigravity_launch_requires_existing_workspace_dir() {
     );
     launch.cwd = missing_workspace.clone();
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("missing antigravity workspace should fail before spawn");
 
@@ -1541,7 +1549,7 @@ async fn raw_cli_uses_argv_prompt_and_configured_env() {
         /*is_read_only*/ false,
     );
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("raw cli helper should complete");
 
@@ -1623,7 +1631,7 @@ async fn raw_cli_receives_artifact_target_scope_env() {
     );
     let expected_thread_id = launch.thread_id.to_string();
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("raw cli helper should complete");
     let expected = format!("{EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE}|{expected_thread_id}");
@@ -1735,7 +1743,7 @@ async fn oversized_subprocess_stdout_keeps_tail_without_sigpipe_failure() {
             /*is_read_only*/ false,
         );
 
-    let response = run_external_agent_inner(&launch)
+    let response = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect("oversized stdout should truncate without killing the child");
 
@@ -1763,7 +1771,7 @@ async fn timeout_kills_external_agent_background_children() {
         /*is_read_only*/ false,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("external agent wrapper should time out");
     assert!(
@@ -1796,7 +1804,7 @@ async fn timeout_kills_background_children_after_wrapper_exits() {
         /*is_read_only*/ false,
     );
 
-    let err = run_external_agent_inner(&launch)
+    let err = run_external_agent_inner(&launch, &AgentControl::default())
         .await
         .expect_err("external agent descendant should hold stdout open until timeout");
     assert!(

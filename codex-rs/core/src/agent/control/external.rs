@@ -149,17 +149,33 @@ impl AgentControl {
             provider.clone(),
         );
         reservation.commit(agent_metadata.clone());
-        self.persist_thread_spawn_edge(parent_thread_id, thread_id)
-            .await;
-        self.persist_external_agent_run_started(
-            parent_thread_id,
-            thread_id,
-            agent_metadata.agent_path.as_ref().map(ToString::to_string),
-            &routing,
-            &provider,
-        )
-        .await;
+        let control = self.clone();
+        let persisted_agent_path = agent_metadata.agent_path.as_ref().map(ToString::to_string);
+        let started_at_ms = chrono::Utc::now().timestamp_millis();
+        let persistence = async move {
+            control
+                .persist_thread_spawn_edge(parent_thread_id, thread_id)
+                .await;
+            control
+                .persist_external_agent_run_started(
+                    parent_thread_id,
+                    thread_id,
+                    persisted_agent_path,
+                    &routing,
+                    &provider,
+                    started_at_ms,
+                )
+                .await;
+        };
+        // Committed registration owns its writes even if the worker deadline expires.
+        let registration = if options.bounded_worker.is_some() {
+            Some(tokio::spawn(persistence))
+        } else {
+            persistence.await;
+            None
+        };
         let launch = ExternalAgentLaunch {
+            registration,
             thread_id,
             parent_thread_id,
             author,
@@ -178,6 +194,7 @@ impl AgentControl {
             resolved_command,
             claude_stream_json_enabled,
             hide_provider_metadata: config.multi_agent_v2.hide_spawn_agent_metadata,
+            bounded_worker: options.bounded_worker,
         };
         self.spawn_external_agent_task(launch);
         Ok(LiveAgent {
@@ -211,6 +228,15 @@ impl AgentControl {
 
     pub(crate) fn update_external_agent_status(&self, agent_id: ThreadId, status: AgentStatus) {
         let _ = self.state.update_external_agent_status(agent_id, status);
+    }
+
+    pub(crate) fn update_external_agent_provider(
+        &self,
+        agent_id: ThreadId,
+        provider: ExternalAgentProviderProvenance,
+    ) {
+        self.state
+            .update_external_agent_provider(agent_id, provider);
     }
 
     pub(crate) fn update_external_agent_status_with_quota(
@@ -248,6 +274,7 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         terminal_state: &str,
+        registration: Option<tokio::task::JoinHandle<()>>,
     ) {
         let Ok(state) = self.upgrade() else {
             return;
@@ -255,16 +282,29 @@ impl AgentControl {
         let Some(agent_graph_store) = state.agent_graph_store() else {
             return;
         };
-        let (duration_ms, failure) = match self.state.external_agent_snapshot(agent_id) {
-            Some(snapshot) => (snapshot.duration_ms, snapshot.failure),
+        let (duration_ms, failure, provider) = match self.state.external_agent_snapshot(agent_id) {
+            Some(snapshot) => (
+                snapshot.duration_ms,
+                snapshot.failure,
+                Some(snapshot.provider),
+            ),
             None => {
                 warn!(
                     "external-agent runtime snapshot missing while persisting outcome for {agent_id}"
                 );
-                (0, None)
+                (0, None, None)
             }
         };
         let outcome = ExternalAgentRunOutcome {
+            cli_version: provider
+                .as_ref()
+                .and_then(|provider| provider.cli_version.clone()),
+            capability_source: provider
+                .as_ref()
+                .map(|provider| provider.capability_source.as_str().to_string()),
+            capability_freshness: provider
+                .and_then(|provider| provider.capability_freshness)
+                .map(|freshness| freshness.as_str().to_string()),
             completed_at_ms: chrono::Utc::now().timestamp_millis(),
             duration_ms,
             terminal_state: terminal_state.to_string(),
@@ -273,6 +313,12 @@ impl AgentControl {
                 .map(|failure| failure.kind.as_str().to_string()),
             failure_message: failure.and_then(|failure| failure.message),
         };
+        // Keep the terminal snapshot above even if an explicit close releases the live runtime.
+        if let Some(registration) = registration
+            && let Err(err) = registration.await
+        {
+            warn!("external-agent registration task failed for {agent_id}: {err}");
+        }
         if let Err(err) = agent_graph_store
             .finish_external_agent_run(agent_id, outcome)
             .await
@@ -371,6 +417,7 @@ impl AgentControl {
         agent_path: Option<String>,
         routing: &ProviderRoutingSummary,
         provider: &ExternalAgentProviderProvenance,
+        started_at_ms: i64,
     ) {
         let Ok(state) = self.upgrade() else {
             return;
@@ -401,7 +448,7 @@ impl AgentControl {
             workspace: provider.workspace.clone(),
             model: provider.model.clone(),
             effort: provider.effort.clone(),
-            started_at_ms: chrono::Utc::now().timestamp_millis(),
+            started_at_ms,
         };
         if let Err(err) = agent_graph_store.insert_external_agent_run(run).await {
             warn!("failed to persist external-agent run start for {child_thread_id}: {err}");

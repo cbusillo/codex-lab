@@ -55,6 +55,8 @@ const EXTERNAL_AGENT_CARGO_TARGET_SCOPE_VALUE: &str = "agent";
 
 #[derive(Debug)]
 pub(crate) struct ExternalAgentLaunch {
+    pub(crate) registration: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) bounded_worker: Option<crate::agent::bounded_worker::BoundedWorker>,
     pub(crate) thread_id: ThreadId,
     pub(crate) parent_thread_id: ThreadId,
     pub(crate) author: AgentPath,
@@ -161,17 +163,65 @@ pub(super) fn bounded_preflight_output(stdout: &[u8], stderr: &[u8]) -> String {
     output[start..].trim().to_string()
 }
 
-pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: AgentControl) {
+pub(crate) async fn run_external_agent(mut launch: ExternalAgentLaunch, control: AgentControl) {
     let thread_id = launch.thread_id;
     control.update_external_agent_status(thread_id, AgentStatus::Running);
-    let result = run_external_agent_inner(&launch).await;
+    let mut registration = launch.registration.take();
+    let run = async {
+        let registered = if let Some(handle) = registration.as_mut() {
+            handle.await.map_err(|error| {
+                ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error)
+            })
+        } else {
+            Ok(())
+        };
+        registration = None;
+        registered?;
+        run_external_agent_inner(&launch, &control).await
+    };
+    let result = if let Some(worker) = &launch.bounded_worker {
+        tokio::select! {
+            biased;
+            _ = launch.cancellation_token.cancelled() => Err(ExternalAgentRunError::new(
+                ExternalAgentFailureKind::LaunchFailed,
+                anyhow::anyhow!("bounded external worker cancelled"),
+            )),
+            result = tokio::time::timeout_at(worker.deadline, run) => {
+                result.unwrap_or_else(|_| Err(ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::TimedOut,
+                    anyhow::anyhow!("bounded external worker exceeded its deadline including preflight"),
+                )))
+            }
+        }
+    } else {
+        run.await
+    };
+    let result = match (&launch.bounded_worker, result) {
+        (Some(worker), Ok(mut response)) => {
+            response.final_message = response
+                .final_message
+                .map(|message| worker.bound_result(&message));
+            Ok(response)
+        }
+        (Some(worker), Err(mut error)) => {
+            error.detail.message = error
+                .detail
+                .message
+                .map(|message| worker.bound_result(&message));
+            error.source = anyhow::anyhow!(worker.bound_result(&error.to_string()));
+            Err(error)
+        }
+        (_, result) => result,
+    };
     if launch.cancellation_token.is_cancelled() {
         control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
         control
-            .persist_external_agent_run_finished(thread_id, "cancelled")
+            .persist_external_agent_run_finished(thread_id, "cancelled", registration)
             .await;
         send_completion_to_parent(&launch, &control, "external agent cancelled".to_string()).await;
-        control.release_external_agent(thread_id);
+        if launch.bounded_worker.is_none() {
+            control.release_external_agent(thread_id);
+        }
         return;
     }
     match result {
@@ -183,7 +233,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 response.quota_diagnostic,
             );
             control
-                .persist_external_agent_run_finished(thread_id, "completed")
+                .persist_external_agent_run_finished(thread_id, "completed", registration)
                 .await;
             send_completion_to_parent(&launch, &control, final_message.clone()).await;
         }
@@ -204,6 +254,11 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                     )
                 });
             failure.quota_diagnostic = quota_diagnostic;
+            if let Some(worker) = &launch.bounded_worker
+                && let Some(message) = failure.message.as_mut()
+            {
+                *message = worker.bound_result(message);
+            }
             let parent_message =
                 external_agent_parent_failure_message(&launch, &failure, message.as_str());
             control.update_external_agent_failure(
@@ -212,7 +267,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 failure,
             );
             control
-                .persist_external_agent_run_finished(thread_id, "errored")
+                .persist_external_agent_run_finished(thread_id, "errored", registration)
                 .await;
             send_completion_to_parent(&launch, &control, parent_message).await;
         }
@@ -220,7 +275,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
             if launch.cancellation_token.is_cancelled() {
                 control.update_external_agent_status(thread_id, AgentStatus::Shutdown);
                 control
-                    .persist_external_agent_run_finished(thread_id, "cancelled")
+                    .persist_external_agent_run_finished(thread_id, "cancelled", registration)
                     .await;
                 send_completion_to_parent(
                     &launch,
@@ -228,7 +283,9 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                     "external agent cancelled".to_string(),
                 )
                 .await;
-                control.release_external_agent(thread_id);
+                if launch.bounded_worker.is_none() {
+                    control.release_external_agent(thread_id);
+                }
                 return;
             }
             let message = bound_external_agent_message(&err.to_string());
@@ -240,7 +297,7 @@ pub(crate) async fn run_external_agent(launch: ExternalAgentLaunch, control: Age
                 err.detail,
             );
             control
-                .persist_external_agent_run_finished(thread_id, "errored")
+                .persist_external_agent_run_finished(thread_id, "errored", registration)
                 .await;
             send_completion_to_parent(&launch, &control, parent_message).await;
         }
@@ -263,7 +320,18 @@ fn external_agent_parent_failure_message(
 
 async fn run_external_agent_inner(
     launch: &ExternalAgentLaunch,
+    control: &AgentControl,
 ) -> Result<ExternalAgentResponse, ExternalAgentRunError> {
+    if launch
+        .bounded_worker
+        .as_ref()
+        .is_some_and(|worker| tokio::time::Instant::now() >= worker.deadline)
+    {
+        return Err(ExternalAgentRunError::new(
+            ExternalAgentFailureKind::TimedOut,
+            anyhow::anyhow!("bounded worker deadline expired before launch"),
+        ));
+    }
     if launch.cancellation_token.is_cancelled() {
         return Err(ExternalAgentRunError::new(
             ExternalAgentFailureKind::LaunchFailed,
@@ -291,6 +359,21 @@ async fn run_external_agent_inner(
         ),
         ExternalCommandProtocol::RawCli => None,
     };
+    if let Some(worker) = &launch.bounded_worker {
+        let input_bytes = request_json
+            .as_ref()
+            .map_or(message.len(), |request| request.len() + 1);
+        crate::agent::bounded_worker::validate_input_size(
+            input_bytes,
+            worker.limits.max_input_bytes,
+        )
+        .map_err(|error| {
+            ExternalAgentRunError::new(
+                ExternalAgentFailureKind::LaunchFailed,
+                anyhow::anyhow!(error),
+            )
+        })?;
+    }
 
     let launch_cwd = external_agent_launch_cwd(launch);
     if launch.backend.launch_family.as_deref() == Some("antigravity") {
@@ -326,6 +409,9 @@ async fn run_external_agent_inner(
     };
     let claude_stream_json_enabled =
         claude_stream_json_enabled(launch, preflight_provider.as_ref());
+    if let Some(provider) = preflight_provider.as_ref() {
+        control.update_external_agent_provider(launch.thread_id, provider.clone());
+    }
     let mut invocation =
         build_external_agent_invocation(launch, &message, claude_stream_json_enabled).map_err(
             |error| ExternalAgentRunError::new(ExternalAgentFailureKind::LaunchFailed, error),
@@ -362,6 +448,16 @@ async fn run_external_agent_inner(
         ));
     }
 
+    if launch
+        .bounded_worker
+        .as_ref()
+        .is_some_and(|worker| tokio::time::Instant::now() >= worker.deadline)
+    {
+        return Err(ExternalAgentRunError::new(
+            ExternalAgentFailureKind::TimedOut,
+            anyhow::anyhow!("bounded worker deadline expired before process execution"),
+        ));
+    }
     let child = command.spawn().map_err(|error| {
         ExternalAgentRunError::new(
             if error.kind() == std::io::ErrorKind::NotFound {

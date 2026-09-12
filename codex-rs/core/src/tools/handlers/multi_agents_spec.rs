@@ -1,3 +1,5 @@
+use super::multi_agents_bounded_worker_spec::bounded_worker_input_schema;
+use super::multi_agents_bounded_worker_spec::bounded_worker_output_schema;
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use super::multi_agents_common::model_supports_multi_agent_backend;
 use super::multi_agents_routing_spec::create_agent_task_kind_schema;
@@ -431,7 +433,8 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                     "type": "boolean",
                     "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
                 },
-                "routing": routing
+                "routing": routing,
+                "bounded_worker": bounded_worker_output_schema()
             },
             "required": ["task_name", "supports_followup_messages", "routing"],
             "additionalProperties": false
@@ -458,7 +461,8 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "type": "boolean",
                 "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
             },
-            "routing": routing
+            "routing": routing,
+            "bounded_worker": bounded_worker_output_schema()
         },
         "required": ["task_name", "nickname", "agent_type", "supports_followup_messages", "routing"],
         "additionalProperties": false
@@ -666,6 +670,7 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
 
 fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
+        ("bounded_worker".to_string(), bounded_worker_input_schema()),
         (
             "message".to_string(),
             JsonSchema::string(Some(

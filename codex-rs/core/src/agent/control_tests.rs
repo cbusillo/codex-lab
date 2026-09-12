@@ -245,6 +245,7 @@ async fn external_followup_rejection_preserves_running_state_and_provenance() {
             Some("reviewer".to_string()),
             &routing,
             &provider,
+            chrono::Utc::now().timestamp_millis(),
         )
         .await;
 
@@ -346,6 +347,7 @@ async fn cancelled_external_agent_run_remains_durable_after_release() {
             Some("reviewer".to_string()),
             &routing,
             &provider,
+            chrono::Utc::now().timestamp_millis(),
         )
         .await;
     harness
@@ -353,7 +355,11 @@ async fn cancelled_external_agent_run_remains_durable_after_release() {
         .update_external_agent_status(child_thread_id, AgentStatus::Shutdown);
     harness
         .control
-        .persist_external_agent_run_finished(child_thread_id, "cancelled")
+        .persist_external_agent_run_finished(
+            child_thread_id,
+            "cancelled",
+            /*registration*/ None,
+        )
         .await;
     harness.control.release_external_agent(child_thread_id);
 
@@ -415,11 +421,14 @@ async fn production_cancel_path_finishes_run_before_releasing_runtime_state() {
             Some("reviewer".to_string()),
             &routing,
             &provider,
+            chrono::Utc::now().timestamp_millis(),
         )
         .await;
     cancellation_token.cancel();
     crate::agent::external_command::run_external_agent(
         crate::agent::external_command::ExternalAgentLaunch {
+            registration: None,
+            bounded_worker: None,
             thread_id: child_thread_id,
             parent_thread_id,
             author: AgentPath::root(),
@@ -501,16 +510,32 @@ async fn failed_external_agent_run_persists_terminal_failure_details() {
         AgentStatus::Running,
         provider.clone(),
     );
+    let started_at_ms = chrono::Utc::now().timestamp_millis();
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let control = harness.control.clone();
+    let provider_at_start = provider.clone();
+    let registration = tokio::spawn(async move {
+        blocked.await.expect("release registration");
+        control
+            .persist_external_agent_run_started(
+                parent_thread_id,
+                child_thread_id,
+                Some("reviewer".to_string()),
+                &routing,
+                &provider_at_start,
+                started_at_ms,
+            )
+            .await;
+    });
+    let mut observed_provider = provider;
+    observed_provider.cli_version = Some("2.3.4".to_string());
+    observed_provider.set_capability_observation(
+        crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
+        crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
+    );
     harness
         .control
-        .persist_external_agent_run_started(
-            parent_thread_id,
-            child_thread_id,
-            Some("reviewer".to_string()),
-            &routing,
-            &provider,
-        )
-        .await;
+        .update_external_agent_provider(child_thread_id, observed_provider);
     harness.control.update_external_agent_failure(
         child_thread_id,
         AgentStatus::Errored("provider failed".to_string()),
@@ -519,10 +544,19 @@ async fn failed_external_agent_run_persists_terminal_failure_details() {
             "provider failed",
         ),
     );
-    harness
-        .control
-        .persist_external_agent_run_finished(child_thread_id, "errored")
-        .await;
+    let control = harness.control.clone();
+    let finish = tokio::spawn(async move {
+        control
+            .persist_external_agent_run_finished(child_thread_id, "errored", Some(registration))
+            .await;
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !finish.is_finished(),
+        "terminal persistence must wait for its start row"
+    );
+    release.send(()).expect("release pending registration");
+    finish.await.expect("finish persistence");
 
     let state = harness
         .control
@@ -535,6 +569,20 @@ async fn failed_external_agent_run_persists_terminal_failure_details() {
         .await
         .expect("external agent runs should load");
     assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].started_at_ms, started_at_ms);
+    assert!(
+        runs[0]
+            .completed_at_ms
+            .is_some_and(|completed| completed >= started_at_ms)
+    );
+    assert_eq!(
+        (
+            runs[0].cli_version.as_deref(),
+            runs[0].capability_source.as_str(),
+            runs[0].capability_freshness.as_deref()
+        ),
+        (Some("2.3.4"), "local_cli", Some("fresh")),
+    );
     assert_eq!(runs[0].terminal_state.as_deref(), Some("errored"));
     assert_eq!(runs[0].failure_kind.as_deref(), Some("provider_failed"));
     assert_eq!(runs[0].failure_message.as_deref(), Some("provider failed"));

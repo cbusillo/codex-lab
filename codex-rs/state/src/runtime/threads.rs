@@ -310,7 +310,10 @@ SET completed_at_ms = ?,
     duration_ms = ?,
     terminal_state = ?,
     failure_kind = ?,
-    failure_message = ?
+    failure_message = ?,
+    cli_version = COALESCE(?, cli_version),
+    capability_source = COALESCE(?, capability_source),
+    capability_freshness = COALESCE(?, capability_freshness)
 WHERE child_thread_id = ?
             "#,
         )
@@ -319,6 +322,9 @@ WHERE child_thread_id = ?
         .bind(outcome.terminal_state)
         .bind(outcome.failure_kind)
         .bind(outcome.failure_message)
+        .bind(outcome.cli_version)
+        .bind(outcome.capability_source)
+        .bind(outcome.capability_freshness)
         .bind(child_thread_id.to_string())
         .execute(self.pool.as_ref())
         .await?;

@@ -22,6 +22,10 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+#[path = "external_agent_bounded_worker.rs"]
+mod bounded_worker;
+
 const PROMPT: &str = "probe the configured external agent";
 const AGENT_MESSAGE: &str = "reply without changing files";
 const SPAWN_CALL_ID: &str = "spawn-external-probe";

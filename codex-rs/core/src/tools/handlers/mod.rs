@@ -17,6 +17,7 @@ mod mcp;
 mod mcp_resource;
 pub(crate) mod mcp_resource_spec;
 pub(crate) mod multi_agents;
+mod multi_agents_bounded_worker_spec;
 pub(crate) mod multi_agents_common;
 mod multi_agents_routing_spec;
 pub(crate) mod multi_agents_spec;
