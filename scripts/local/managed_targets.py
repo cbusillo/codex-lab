@@ -23,9 +23,8 @@ TARGET_OVERRIDE_ENV_NAMES = (
     "CODEX_LAB_CARGO_TARGET_DIR",
     "CARGO_BUILD_TARGET_DIR",
 )
-MANAGED_RECIPES = frozenset(
-    {"test", "clippy", "fix", "assemble-codex-package", "build"}
-)
+AUTO_ENROLL_RECIPES = frozenset({"test", "clippy", "fix", "assemble-codex-package"})
+MANAGED_RECIPES = AUTO_ENROLL_RECIPES | {"build"}
 COMMON_VALUE_FLAGS = frozenset(
     {"-p", "--package", "--bin", "--example", "--features", "--profile", "--target"}
 )
@@ -377,7 +376,9 @@ def validate_package_outputs(
 
 
 def managed_recipe_available(
-    recipe: str, arguments: Sequence[str], environment: dict[str, str] | None = None
+    recipe: str,
+    arguments: Sequence[str],
+    environment: dict[str, str] | None = None,
 ) -> bool:
     """Return whether this invocation may enroll in the managed engine."""
 
@@ -467,6 +468,8 @@ def prewarm_kache(config: dict[str, object]) -> None:
         return
     status = _kache_status(kache)
     client_version = status.get("version")
+    if not isinstance(client_version, str) or not client_version:
+        raise ManagedTargetsError("Kache daemon status has no valid client version")
     if status.get("service_executable_mismatch"):
         raise ManagedTargetsError("Kache daemon is running with a version mismatch")
     if status.get("daemon_running") and status.get("daemon_version") == client_version:
@@ -521,7 +524,9 @@ def _deleted_items(report: dict[str, object]) -> list[object]:
 
 def run_kache_gc(config: dict[str, object], report: dict[str, object]) -> bool:
     kache_enabled = config.get("kache_gc", True)
-    if not _deleted_items(report) or (isinstance(kache_enabled, bool) and not kache_enabled):
+    if not _deleted_items(report) or (
+        isinstance(kache_enabled, bool) and not kache_enabled
+    ):
         return True
     kache = shutil.which("kache")
     if kache is None:

@@ -72,14 +72,34 @@ class JustShellTest(unittest.TestCase):
             }
             completed = mock.Mock(returncode=37)
             with mock.patch("subprocess.run", return_value=completed) as run:
-                result = just_shell.run_managed_recipe(
-                    "build", ["-p", "codex-cli"], environment
-                )
+                result = just_shell.run_managed_recipe("test", [], environment)
         self.assertEqual(result, 37)
         command = run.call_args.args[0]
-        self.assertEqual(
-            command[-4:], ["--recipe", "build", "--", "-p", "codex-cli"][-4:]
-        )
+        self.assertEqual(command[-3:], ["--recipe", "test", "--"])
+
+    def test_plain_build_stays_unmanaged(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {"CODEX_LAB_TARGET_RETENTION_CONFIG": str(config)}
+            with mock.patch("subprocess.run") as run:
+                result = just_shell.run_managed_recipe("build", [], environment)
+        self.assertIsNone(result)
+        run.assert_not_called()
+
+    def test_managed_recipe_maps_signal_status_and_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {"CODEX_LAB_TARGET_RETENTION_CONFIG": str(config)}
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=-2)):
+                self.assertEqual(
+                    just_shell.run_managed_recipe("test", [], environment), 130
+                )
+            with mock.patch("subprocess.run", side_effect=KeyboardInterrupt):
+                self.assertEqual(
+                    just_shell.run_managed_recipe("test", [], environment), 130
+                )
 
     def test_managed_recipe_skips_explicit_target_override(self) -> None:
         with mock.patch("subprocess.run") as run:
@@ -88,6 +108,46 @@ class JustShellTest(unittest.TestCase):
             )
         self.assertIsNone(result)
         run.assert_not_called()
+
+    def test_absent_default_config_preserves_unmanaged_route(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            missing = Path(temporary_directory) / "missing.json"
+            with (
+                mock.patch.object(
+                    just_shell.managed_targets, "DEFAULT_CONFIG_PATH", missing
+                ),
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                self.assertIsNone(just_shell.run_managed_recipe("test", [], {}))
+
+    def test_leased_resolver_preserves_store_target(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(__file__).parents[2]
+            target = Path(temporary_directory) / "managed-target"
+            target.mkdir()
+            fd = os.open(
+                Path(temporary_directory) / "lease.lock", os.O_CREAT | os.O_RDWR, 0o600
+            )
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = just_shell.resolve_cargo_environment(
+                    "test",
+                    {
+                        "CODEX_REPO_ROOT": str(root),
+                        "CARGO_TARGET_DIR": str(target),
+                        "PATH": os.environ["PATH"],
+                        TARGET_LEASE_FD_ENV: str(fd),
+                    },
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertIn(result, ({}, {"CARGO_TARGET_DIR": str(target)}))
 
     def test_managed_recipe_refuses_override_inside_managed_root(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
@@ -103,7 +163,7 @@ class JustShellTest(unittest.TestCase):
                 "CARGO_TARGET_DIR": str(managed_root / "target"),
             }
             with self.assertRaisesRegex(RuntimeError, "inside"):
-                just_shell.run_managed_recipe("build", [], environment)
+                just_shell.run_managed_recipe("test", [], environment)
 
     def test_all_direct_cargo_recipes_resolve_target(self) -> None:
         expected = {
@@ -328,7 +388,6 @@ class JustShellTest(unittest.TestCase):
                 },
             )
             self.assertEqual(marker.read_text(), "forwarded")
-
 
 
 if __name__ == "__main__":

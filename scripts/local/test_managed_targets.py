@@ -58,12 +58,21 @@ class PressureStore(FakeStore):
 
 
 class ManagedTargetsTest(unittest.TestCase):
-    def test_default_missing_config_preserves_unmanaged_route(self) -> None:
+    def test_explicit_missing_config_is_an_error(self) -> None:
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
             missing = Path(temp_dir) / "missing.json"
             with mock.patch.dict("os.environ", {CONFIG_ENV: str(missing)}):
                 with self.assertRaisesRegex(ManagedTargetsError, "missing"):
                     existing_config_path()
+
+    def test_absent_default_config_is_unmanaged(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            missing = Path(temp_dir) / "missing.json"
+            with (
+                mock.patch.object(managed_targets, "DEFAULT_CONFIG_PATH", missing),
+                mock.patch.dict("os.environ", {}, clear=True),
+            ):
+                self.assertIsNone(existing_config_path())
 
     def test_explicit_target_overrides_skip_enrollment(self) -> None:
         self.assertFalse(managed_recipe_available("test", [], {"CARGO_TARGET_DIR": ""}))
@@ -75,6 +84,7 @@ class ManagedTargetsTest(unittest.TestCase):
         self.assertFalse(managed_recipe_available("test", ["--config=other"], {}))
         self.assertFalse(managed_recipe_available("test", [], {LEASE_ENV: "3"}))
         self.assertTrue(managed_recipe_available("test", ["-p", "codex-core"], {}))
+        self.assertTrue(managed_recipe_available("build", [], {}))
 
     def test_unknown_flags_cannot_enter_managed_recipe(self) -> None:
         self.assertFalse(managed_recipe_available("build", ["--jobs", "4"], {}))
@@ -124,7 +134,9 @@ class ManagedTargetsTest(unittest.TestCase):
     def test_run_recipe_transparently_returns_engine_status(self) -> None:
         fake_store = FakeStore({"schema": 1, "kache_gc": False})
         with (
-            mock.patch.object(managed_targets, "_repo_root", return_value=Path("/repo")),
+            mock.patch.object(
+                managed_targets, "_repo_root", return_value=Path("/repo")
+            ),
             mock.patch.object(managed_targets, "_store", return_value=fake_store),
         ):
             result = run_recipe(
@@ -151,7 +163,9 @@ class ManagedTargetsTest(unittest.TestCase):
     def test_run_recipe_performs_at_most_one_pressure_collection(self) -> None:
         fake_store = PressureStore({"schema": 1, "kache_gc": False})
         with (
-            mock.patch.object(managed_targets, "_repo_root", return_value=Path("/repo")),
+            mock.patch.object(
+                managed_targets, "_repo_root", return_value=Path("/repo")
+            ),
             mock.patch.object(managed_targets, "_store", return_value=fake_store),
         ):
             result = run_recipe(
@@ -254,8 +268,12 @@ class ManagedTargetsTest(unittest.TestCase):
             mock.Mock(returncode=0, stdout=ready, stderr=""),
         ]
         with (
-            mock.patch.object(managed_targets.shutil, "which", return_value="/bin/kache"),
-            mock.patch.object(managed_targets.subprocess, "run", side_effect=completed) as run,
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
+            mock.patch.object(
+                managed_targets.subprocess, "run", side_effect=completed
+            ) as run,
         ):
             prewarm_kache({"kache_gc": True})
         start_call = run.call_args_list[1]
@@ -279,7 +297,9 @@ class ManagedTargetsTest(unittest.TestCase):
             }
         )
         with (
-            mock.patch.object(managed_targets.shutil, "which", return_value="/bin/kache"),
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
             mock.patch.object(
                 managed_targets.subprocess,
                 "run",
@@ -302,7 +322,9 @@ class ManagedTargetsTest(unittest.TestCase):
             }
         )
         with (
-            mock.patch.object(managed_targets.shutil, "which", return_value="/bin/kache"),
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
             mock.patch.object(
                 managed_targets.subprocess,
                 "run",
@@ -313,12 +335,35 @@ class ManagedTargetsTest(unittest.TestCase):
                 prewarm_kache({"kache_gc": True})
         run.assert_called_once()
 
+    def test_kache_status_requires_client_version(self) -> None:
+        status = json.dumps(
+            {
+                "daemon_running": True,
+                "daemon_version": None,
+                "service_executable_mismatch": False,
+            }
+        )
+        with (
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
+            mock.patch.object(
+                managed_targets.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0, stdout=status, stderr=""),
+            ),
+        ):
+            with self.assertRaisesRegex(ManagedTargetsError, "client version"):
+                prewarm_kache({"kache_gc": True})
+
     def test_kache_gc_runs_only_after_real_deletion(self) -> None:
         with (
-            mock.patch.object(managed_targets.shutil, "which", return_value="/bin/kache"),
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
             mock.patch.object(managed_targets.subprocess, "run") as run,
         ):
-            run_kache_gc({"max_age_days": 14}, {"deleted": []})
+            run_kache_gc({"max_age_days": 14}, {"actions": [{"status": "skipped"}]})
             run.assert_not_called()
 
             run.return_value = subprocess.CompletedProcess(
@@ -335,7 +380,9 @@ class ManagedTargetsTest(unittest.TestCase):
 
     def test_kache_gc_failure_keeps_deletion_receipt(self) -> None:
         with (
-            mock.patch.object(managed_targets.shutil, "which", return_value="/bin/kache"),
+            mock.patch.object(
+                managed_targets.shutil, "which", return_value="/bin/kache"
+            ),
             mock.patch.object(
                 managed_targets.subprocess,
                 "run",

@@ -96,7 +96,7 @@ def run_managed_recipe(
     # recipe continue through the ordinary shell path without re-enrollment.
     if (
         managed_targets.LEASE_ENV in source
-        or recipe_name not in managed_targets.MANAGED_RECIPES
+        or recipe_name not in managed_targets.AUTO_ENROLL_RECIPES
     ):
         return None
     config = managed_targets.existing_config_path(
@@ -119,13 +119,18 @@ def run_managed_recipe(
         "--",
         *recipe_args,
     ]
-    completed = subprocess.run(
-        command,
-        check=False,
-        env=source,
-        **subprocess_lease_kwargs(source),
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            env=source,
+            **subprocess_lease_kwargs(source),
+        )
+    except KeyboardInterrupt:
+        return 130
+    return (
+        128 - completed.returncode if completed.returncode < 0 else completed.returncode
     )
-    return completed.returncode
 
 
 def resolve_cargo_environment(
