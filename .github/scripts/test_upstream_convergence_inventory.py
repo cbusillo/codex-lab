@@ -287,7 +287,9 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_owned(path, "AGENT-1")
 
-    def test_instruction_safety_ownership_does_not_reclassify_frozen_snapshots(self) -> None:
+    def test_instruction_safety_ownership_does_not_reclassify_frozen_snapshots(
+        self,
+    ) -> None:
         for path in (
             "codex-rs/core/src/tasks/background_review_instructions.rs",
             "codex-rs/core/src/tasks/background_review_instructions_tests.rs",
