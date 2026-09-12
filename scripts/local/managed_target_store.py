@@ -466,8 +466,10 @@ class ManagedTargetStore:
                 raise ManagedTargetError(f"managed {name} is on the wrong volume")
             current_dirs[name] = {"st_ino": info.st_ino}
         fd = _private_file(self._gc_lock_path)
-        lock_info = os.fstat(fd)
-        os.close(fd)
+        try:
+            lock_info = os.fstat(fd)
+        finally:
+            os.close(fd)
         if lock_info.st_dev != volume["st_dev"]:
             raise ManagedTargetError("managed GC lock is on the wrong volume")
         expected = self._manifest(volume, root)
@@ -754,34 +756,27 @@ class ManagedTargetStore:
             self.min_idle_hours * 3600,
         )
         gc_fd: int | None = None
-        if apply:
-            try:
-                opened_gc_fd = _private_file(self._gc_lock_path)
-                gc_fd = opened_gc_fd
-                gc_info = os.fstat(opened_gc_fd)
+        try:
+            if apply:
+                gc_fd = _private_file(self._gc_lock_path)
+                gc_info = os.fstat(gc_fd)
                 if (
                     gc_info.st_dev != volume_dev
                     or gc_info.st_ino != layout["gc_lock"]["st_ino"]
                 ):
                     raise ManagedTargetError("managed GC lock identity changed")
-                _lock(opened_gc_fd)
-            except ManagedTargetError:
-                if gc_fd is not None:
-                    os.close(gc_fd)
-                return {
-                    "schema": SCHEMA_VERSION,
-                    "under_pressure": None,
-                    "actual_free_bytes": None,
-                    "selected_ids": [],
-                    "inventory": [],
-                    "actions": [],
-                    "reason": "gc-busy",
-                }
-            except BaseException:
-                if gc_fd is not None:
-                    os.close(gc_fd)
-                raise
-        try:
+                try:
+                    _lock(gc_fd)
+                except ManagedTargetError:
+                    return {
+                        "schema": SCHEMA_VERSION,
+                        "under_pressure": None,
+                        "actual_free_bytes": None,
+                        "selected_ids": [],
+                        "inventory": [],
+                        "actions": [],
+                        "reason": "gc-busy",
+                    }
             before, inventory, candidates = self._free_bytes(), [], []
             volume_dev = self._volume()["st_dev"]
             names = []
@@ -861,8 +856,8 @@ class ManagedTargetStore:
             ):
                 raise ManagedTargetError("target identity mismatch")
             lock_fd = _private_file(self._targets_path / f"{key}.lock")
-            lock_info = os.fstat(lock_fd)
             try:
+                lock_info = os.fstat(lock_fd)
                 if lock_info.st_dev != volume_dev or lock_info.st_ino != record.get(
                     "lock_st_ino"
                 ):

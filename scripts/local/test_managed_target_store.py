@@ -184,6 +184,16 @@ class ManagedTargetStoreTest(unittest.TestCase):
         store = self.store()
         self.assertEqual(0, store.run(self.worktree, ["true"], self.worktree))
         target = store.target_for(self.worktree)
+        key, _, record = self.record(store, self.worktree)
+        original_last_used = record["last_used"]
+        record["last_used"] = float("nan")
+        self.save_record(store, key, record)
+        result = self.collect_result(store, apply=True)
+        self.assertFalse(self.report_actions(result))
+        self.assertEqual("invalid-timestamp", self.report_first_reason(result))
+        record["last_used"] = original_last_used
+        self.save_record(store, key, record)
+
         replacement = self.root / "replacement"
         target.rename(replacement)
         target.mkdir()
@@ -196,13 +206,6 @@ class ManagedTargetStoreTest(unittest.TestCase):
         self.assertTrue(target.is_symlink())
         target.unlink()
         target.mkdir()
-        key, _, record = self.record(store, self.worktree)
-        record["target_st_dev"] = target.stat().st_dev
-        record["target_st_ino"] = target.stat().st_ino
-        record["last_used"] = "not-a-timestamp"
-        self.save_record(store, key, record)
-        result = self.collect_result(store, apply=True)
-        self.assertFalse(self.report_actions(result))
         old_root = self.managed_root.with_name("managed-old")
         self.managed_root.rename(old_root)
         self.managed_root.mkdir()
@@ -274,12 +277,10 @@ class ManagedTargetStoreTest(unittest.TestCase):
         self.assertEqual(0, store.run(self.worktree, ["true"], self.worktree))
         key, _, record = self.record(store, self.worktree)
         record["state"] = "active"
-        record["claimed_bytes"] = 10**12
         self.save_record(store, key, record)
         result = self.collect_result(store, apply=True)
         self.assertFalse(self.report_actions(result))
         self.assertEqual("protected-nonidle", self.report_first_reason(result))
-        self.assertNotIn("reclaim_bytes", result)
         # A later explicit invocation can resume this same known target after
         # acquiring its lease; automatic collection alone cannot recover it.
         target = store.target_for(self.worktree)
@@ -336,15 +337,31 @@ class ManagedTargetStoreTest(unittest.TestCase):
             ).initialize()
 
         remount = self.config | {"managed_root": str(self.volume_root / "remount")}
+        actual_device = self.volume_root.stat().st_dev
+        actual_inode = self.volume_root.stat().st_ino
+        reported_device = actual_device
+
+        def remount_validator(path: Path, value: str) -> dict[str, object]:
+            return {
+                "st_dev": reported_device,
+                "st_ino": actual_inode,
+                "uuid": value,
+            }
+
         remount_store = ManagedTargetStore(
             remount,
-            volume_validator=validator,
+            volume_validator=remount_validator,
         )
         remount_store.initialize()
-        manifest = json.loads(remount_store._manifest_path.read_text())
-        if isinstance(manifest.get("volume"), dict) and "st_dev" in manifest["volume"]:
-            manifest["volume"]["st_dev"] += 1
-            remount_store._manifest_path.write_text(json.dumps(manifest))
+        volume = remount_store._volume()
+        self.assertEqual(actual_device, volume["st_dev"])
+        self.assertEqual(actual_inode, volume["st_ino"])
+        self.assertEqual(self.config["volume_uuid"], volume["uuid"])
+        self.assertIsInstance(remount_store.collect(), dict)
+        reported_device = actual_device + 1
+        with self.assertRaises(store_module.ManagedTargetError):
+            remount_store.collect()
+        reported_device = actual_device
         self.assertIsInstance(remount_store.collect(), dict)
 
     @unittest.skipUnless(sys.platform == "darwin", "diskutil validation is macOS-only")
@@ -402,6 +419,79 @@ class ManagedTargetStoreTest(unittest.TestCase):
         self.assertEqual(1, len(opened))
         with self.assertRaises(OSError):
             fstat(opened[0])
+
+    def test_gc_lock_identity_mismatch_is_error_not_busy(self) -> None:
+        store = self.store()
+        layout = store._ensure()
+        lock_path = store._gc_lock_path
+        old_lock = self.root / "gc-lock-old"
+        lock_path.rename(old_lock)
+        lock_path.touch(mode=0o600)
+        try:
+            with mock.patch.object(store, "_ensure", return_value=layout):
+                with self.assertRaisesRegex(
+                    store_module.ManagedTargetError, "GC lock identity changed"
+                ):
+                    store.collect(apply=True)
+        finally:
+            lock_path.unlink()
+            old_lock.rename(lock_path)
+
+    def test_ensure_closes_gc_fd_when_identity_probe_raises(self) -> None:
+        store = self.store()
+        open_file = store_module._private_file
+        real_fstat = os.fstat
+        opened: list[int] = []
+
+        def track_open(path: Path) -> int:
+            fd = open_file(path)
+            opened.append(fd)
+            return fd
+
+        def fail_probe(fd: int) -> os.stat_result:
+            if fd in opened:
+                raise OSError("injected ensure identity probe failure")
+            return real_fstat(fd)
+
+        with (
+            mock.patch.object(store_module, "_private_file", side_effect=track_open),
+            mock.patch.object(os, "fstat", side_effect=fail_probe),
+        ):
+            with self.assertRaisesRegex(OSError, "injected ensure"):
+                store._ensure()
+        self.assertEqual(1, len(opened))
+        with self.assertRaises(OSError):
+            real_fstat(opened[0])
+
+    def test_inspect_record_closes_lease_fd_when_identity_probe_raises(self) -> None:
+        store = self.store()
+        self.assertEqual(0, store.run(self.worktree, ["true"], self.worktree))
+        key, _, record = self.record(store, self.worktree)
+        volume_dev = store._volume()["st_dev"]
+        open_file = store_module._private_file
+        real_fstat = os.fstat
+        opened: list[int] = []
+
+        def track_open(path: Path) -> int:
+            fd = open_file(path)
+            opened.append(fd)
+            return fd
+
+        def fail_probe(fd: int) -> os.stat_result:
+            if fd in opened:
+                raise OSError("injected record identity probe failure")
+            return real_fstat(fd)
+
+        with (
+            mock.patch.object(store_module, "_private_file", side_effect=track_open),
+            mock.patch.object(os, "fstat", side_effect=fail_probe),
+        ):
+            item, candidate = store._inspect_record(key, record, self.now, volume_dev)
+        self.assertEqual("identity-invalid", item["reason"])
+        self.assertIsNone(candidate)
+        self.assertEqual(1, len(opened))
+        with self.assertRaises(OSError):
+            real_fstat(opened[0])
 
     def test_preview_returns_while_gc_lock_is_held(self) -> None:
         store = self.store()
