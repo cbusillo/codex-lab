@@ -157,7 +157,7 @@ async fn loader_truncation_cannot_be_mistaken_for_a_complete_small_fragment() ->
     let mock = responses::mount_sse_sequence(&server, code_changing_turn_responses("loader")).await;
     let test_cwd = cwd.clone();
     let mut builder = test_codex().with_config(move |config| {
-        config.cwd = test_cwd.clone();
+        config.cwd = test_cwd;
         config.project_doc_max_bytes = 8;
     });
     let test = builder.build(&server).await?;

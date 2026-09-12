@@ -82,7 +82,7 @@ impl BackgroundReviewInstructionsGate {
         .then(|| environment.sandbox_context(/*additional_permissions*/ None));
         let sources = loaded
             .into_iter()
-            .flat_map(|loaded| loaded.sources())
+            .flat_map(super::super::agents_md::LoadedAgentsMd::sources)
             .collect::<HashSet<_>>();
         let directories = self
             .paths
@@ -132,11 +132,11 @@ fn validate_rendered_instructions(
             internal_chat_message_metadata_passthrough: Some(metadata),
             ..
         } if role == "user" => content.iter().enumerate().any(|(index, item)| {
-            if !metadata
+            if metadata
                 .content_item_kinds
                 .as_ref()
                 .and_then(|kinds| kinds.get(index))
-                .is_some_and(|kind| kind.0 == "agents_md.instructions")
+                .is_none_or(|kind| kind.0 != "agents_md.instructions")
             {
                 return false;
             }
