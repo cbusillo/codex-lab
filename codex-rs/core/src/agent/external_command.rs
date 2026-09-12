@@ -1079,8 +1079,7 @@ async fn send_completion_to_parent(
             launch.parent_thread_id,
             communication,
             context,
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            codex_protocol::turn_input::TurnStartOptions::default(),
         )
         .await;
 }
@@ -1103,7 +1102,7 @@ fn render_external_agent_message(initial_operation: &Op) -> Result<String, Exter
             })
             .collect::<Vec<_>>()
             .join("\n")),
-        Op::InterAgentCommunication { communication } => {
+        Op::InterAgentCommunication { communication, .. } => {
             if communication
                 .encrypted_content
                 .as_ref()

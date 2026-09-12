@@ -1,4 +1,4 @@
-//! Turn-scoped state and active turn metadata scaffolding.
+//! Turn-scoped state, input waiters, and active turn metadata.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,7 +9,6 @@ use tokio_util::task::AbortOnDropHandle;
 
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
-use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
@@ -21,7 +20,9 @@ use tokio::sync::oneshot;
 use crate::agent::control::AgentExecutionGuard;
 use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::session::TurnInputQueue;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::session::turn_context::TurnEnvironment;
 use crate::tasks::AnySessionTask;
 use crate::tasks::TaskStart;
 use codex_protocol::models::AdditionalPermissionProfile;
@@ -75,7 +76,6 @@ pub(crate) enum TaskKind {
 pub(crate) struct RunningTask {
     pub(crate) done: Arc<Notify>,
     pub(crate) kind: TaskKind,
-    pub(crate) background_review_trigger_eligible: bool,
     pub(crate) task: Arc<dyn AnySessionTask>,
     pub(crate) start: TaskStart,
     pub(crate) cancellation_token: CancellationToken,
@@ -92,7 +92,7 @@ pub(crate) struct RunningTask {
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
-    pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
+    pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     mcp_tool_approval_metadata: HashMap<String, (Option<McpInvocation>, McpToolApprovalMetadata)>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
@@ -104,12 +104,22 @@ pub(crate) struct TurnState {
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
     pub(crate) completed_turn_diff: Option<String>,
+    /// The last step captured for execution or selected from a speculative fallback.
+    /// Remains absent until a step is captured; standalone local compaction has no step.
+    pub(crate) last_known_step_context: Option<Arc<StepContext>>,
+}
+
+/// Host receipt metadata follows the response through the asynchronous tool waiter.
+pub(crate) struct AcceptedUserInputResponse {
+    pub(crate) response: RequestUserInputResponse,
+    /// Absent in legacy mode, which does not reserve or persist acceptance order.
+    pub(crate) acceptance_order: Option<u64>,
 }
 
 pub(crate) struct PendingRequestPermissions {
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
-    pub(crate) environment: TurnEnvironmentSelection,
+    pub(crate) environment: TurnEnvironment,
 }
 
 impl TurnState {
@@ -156,15 +166,15 @@ impl TurnState {
     pub(crate) fn insert_pending_user_input(
         &mut self,
         key: String,
-        tx: oneshot::Sender<RequestUserInputResponse>,
-    ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+        tx: oneshot::Sender<AcceptedUserInputResponse>,
+    ) -> Option<oneshot::Sender<AcceptedUserInputResponse>> {
         self.pending_user_input.insert(key, tx)
     }
 
     pub(crate) fn remove_pending_user_input(
         &mut self,
         key: &str,
-    ) -> Option<oneshot::Sender<RequestUserInputResponse>> {
+    ) -> Option<oneshot::Sender<AcceptedUserInputResponse>> {
         self.pending_user_input.remove(key)
     }
 

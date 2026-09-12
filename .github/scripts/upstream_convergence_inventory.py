@@ -645,9 +645,7 @@ def run_process_bounded(
         reader.join()
     if process.poll() is None:
         try:
-            returncode = process.wait(
-                timeout=max(0.0, deadline - time.monotonic())
-            )
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             if failure is None:
                 failure = RuntimeError(
@@ -704,7 +702,9 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
     )
 
 
-def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_git(
+    repo: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     result = run_git_process(repo, *args)
     if not isinstance(result.stdout, str) or not isinstance(result.stderr, str):
         raise RuntimeError(f"git {' '.join(args)} returned binary output")
@@ -773,9 +773,15 @@ def parse_conflict_message(line: str) -> tuple[str, str]:
 def merge_conflicts(
     repo: Path, upstream: str, local: str, policy_version: int = POLICY_VERSION
 ) -> tuple[dict[str, str], list[dict[str, object]]]:
-    raw_objects = Path(run_git(repo, "rev-parse", "--git-path", "objects").stdout.strip())
-    objects = raw_objects if raw_objects.is_absolute() else (repo / raw_objects).resolve()
-    with tempfile.TemporaryDirectory(prefix="upstream-convergence-objects-") as temporary:
+    raw_objects = Path(
+        run_git(repo, "rev-parse", "--git-path", "objects").stdout.strip()
+    )
+    objects = (
+        raw_objects if raw_objects.is_absolute() else (repo / raw_objects).resolve()
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="upstream-convergence-objects-"
+    ) as temporary:
         env = git_environment(
             GIT_OBJECT_DIRECTORY=temporary,
             GIT_ALTERNATE_OBJECT_DIRECTORIES=str(objects),
@@ -814,9 +820,7 @@ def merge_conflicts(
     return result_objects, classified
 
 
-def classify_path(
-    path: str, policy_version: int = POLICY_VERSION
-) -> dict[str, object]:
+def classify_path(path: str, policy_version: int = POLICY_VERSION) -> dict[str, object]:
     lane = "green_bulk_adopt"
     contracts: set[str] = set()
     reasons: list[str] = []
@@ -914,7 +918,9 @@ def build_inventory(
         "conflictTypeCounts": dict(
             sorted(Counter(entry["conflictType"] for entry in conflicts).items())
         ),
-        "laneCounts": dict(sorted(Counter(entry["lane"] for entry in conflicts).items())),
+        "laneCounts": dict(
+            sorted(Counter(entry["lane"] for entry in conflicts).items())
+        ),
         "residualLaneCounts": dict(
             sorted(Counter(entry["lane"] for entry in residuals).items())
         ),
@@ -926,7 +932,9 @@ def build_inventory(
 def render_records(header: dict[str, object], key: str, records: list[object]) -> str:
     lines = ["{"]
     for header_key, value in header.items():
-        lines.append(f"  {json.dumps(header_key)}: {json.dumps(value, sort_keys=True)},")
+        lines.append(
+            f"  {json.dumps(header_key)}: {json.dumps(value, sort_keys=True)},"
+        )
     lines.append(f"  {json.dumps(key)}: [")
     for index, record in enumerate(records):
         comma = "," if index + 1 < len(records) else ""
@@ -957,7 +965,9 @@ def render_residuals(inventory: dict[str, object]) -> str:
                 "differs from upstream, so local content survives without review."
             ),
         },
-        "summary": {"residualLocalInfluence": inventory["summary"]["residualLocalInfluence"]},
+        "summary": {
+            "residualLocalInfluence": inventory["summary"]["residualLocalInfluence"]
+        },
         "residualLaneCounts": inventory["residualLaneCounts"],
     }
     return render_records(header, "residuals", inventory["residuals"])

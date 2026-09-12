@@ -34,7 +34,10 @@ impl ToolExecutor<ToolInvocation> for BrowserHandler {
         create_browser_tool(self.full_cdp_access)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         let full_cdp_access = self.full_cdp_access;
         Box::pin(async move {
             let ToolInvocation { turn, payload, .. } = invocation;

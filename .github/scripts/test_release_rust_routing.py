@@ -165,7 +165,9 @@ class ReleaseRustRoutingTests(unittest.TestCase):
         for executable, caller in itertools.product(
             ("bash", "/bin/bash"), ("codex-lab-release.yml", "rust-ci-local.yml")
         ):
-            workflow_ref = f"cbusillo/codex-lab/.github/workflows/{caller}@refs/heads/main"
+            workflow_ref = (
+                f"cbusillo/codex-lab/.github/workflows/{caller}@refs/heads/main"
+            )
             with self.subTest(executable=executable, caller=caller):
                 code, output, _, _, error = self.run_shell(
                     script, executable=executable, WORKFLOW_REF=workflow_ref

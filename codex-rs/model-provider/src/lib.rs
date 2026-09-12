@@ -2,8 +2,10 @@ mod amazon_bedrock;
 mod auth;
 mod bearer_auth_provider;
 mod models_endpoint;
+mod models_identity;
 mod provider;
 mod shared_state;
+pub mod test_support;
 
 pub use amazon_bedrock::is_supported_amazon_bedrock_region;
 pub use auth::AgentIdentitySessionFallback;
@@ -23,6 +25,7 @@ pub use provider::ModelProviderFuture;
 pub use provider::ProviderAccountError;
 pub use provider::ProviderAccountResult;
 pub use provider::ProviderAccountState;
+pub use provider::ProviderAuthRecoveryMessages;
 pub use provider::ProviderCapabilities;
 pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;

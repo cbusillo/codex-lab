@@ -105,6 +105,7 @@ fn snapshots() -> Result<()> {
             EnvironmentState {
                 cwd: PathUri::parse("file:///repo")?,
                 status: EnvironmentStatus::Available,
+                error: None,
                 shell: None,
                 is_primary: false,
             },
@@ -331,6 +332,7 @@ fn available(cwd: &str, shell: &str) -> Result<EnvironmentState> {
     Ok(EnvironmentState {
         cwd: PathUri::parse(cwd)?,
         status: EnvironmentStatus::Available,
+        error: None,
         shell: Some(shell.to_string()),
         is_primary: false,
     })
@@ -347,7 +349,168 @@ fn starting(cwd: &str) -> Result<EnvironmentState> {
     Ok(EnvironmentState {
         cwd: PathUri::parse(cwd)?,
         status: EnvironmentStatus::Starting,
+        error: None,
         shell: None,
         is_primary: false,
     })
+}
+
+#[test]
+fn failure_context_is_escaped_incremental_and_cleared_on_recovery() -> Result<()> {
+    let failed = EnvironmentsState {
+        environments: [(
+            "remote".to_string(),
+            EnvironmentState {
+                cwd: PathUri::parse("file:///workspace")?,
+                status: EnvironmentStatus::Failed,
+                error: Some("Repository <empty> & unavailable".to_string()),
+                shell: None,
+                is_primary: false,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    insta::assert_snapshot!(failed.body(), @r#"
+
+      <environments>
+        <environment id="remote">
+          <cwd>/workspace</cwd>
+          <status>failed</status>
+          <error>Repository &lt;empty&gt; &amp; unavailable</error>
+        </environment>
+      </environments>
+    "#);
+    assert!(
+        failed
+            .render_diff(PreviousSectionState::Known(&failed.snapshot()))
+            .is_none()
+    );
+    let recovered = EnvironmentsState {
+        environments: [(
+            "remote".to_string(),
+            available("file:///workspace", "bash")?,
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let update = recovered
+        .render_diff(PreviousSectionState::Known(&failed.snapshot()))
+        .expect("recovery must be visible to the model");
+    assert!(!update.body().contains("<error>"));
+    assert!(update.body().contains("<shell>bash</shell>"));
+    Ok(())
+}
+
+#[test]
+fn failure_context_limits_total_detail_bytes_at_utf8_boundaries() {
+    use codex_protocol::protocol::EnvironmentConfigState;
+    use codex_protocol::protocol::TurnEnvironmentSelection;
+    let snapshot = TurnEnvironmentSnapshot {
+        environments: (0..4)
+            .map(|index| TurnEnvironmentState::Failed {
+                selection: TurnEnvironmentSelection {
+                    environment_id: format!("remote-{index}"),
+                    cwd: PathUri::parse("file:///workspace").unwrap(),
+                    workspace_roots: Vec::new(),
+                    config: EnvironmentConfigState::FromThread,
+                },
+                error: "界".repeat(300),
+            })
+            .collect(),
+    };
+    let states = environment_states(&snapshot);
+    let details: Vec<_> = states
+        .values()
+        .map(|state| state.error.as_deref())
+        .collect();
+    let truncated = "界".repeat(85);
+    assert_eq!(
+        details,
+        vec![
+            Some(truncated.as_str()),
+            Some(truncated.as_str()),
+            None,
+            None
+        ]
+    );
+}
+
+#[tokio::test]
+async fn overloaded_failure_context_preserves_primary_and_available_environments() {
+    use crate::environment_selection::EnvironmentConfigOrigin;
+    use crate::session::turn_context::TurnEnvironment;
+    use codex_exec_server::Environment;
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfileSnapshot;
+    use codex_protocol::protocol::EnvironmentConfig;
+    use codex_protocol::protocol::EnvironmentConfigState;
+    use codex_protocol::protocol::TurnEnvironmentSelection;
+    use std::sync::Arc;
+
+    let config = EnvironmentConfig {
+        allow_login_shell: true,
+        workspace_roots: Vec::new(),
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: true,
+        use_legacy_landlock: false,
+        permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::read_only()),
+        shell_environment_policy: Default::default(),
+        exec_policy: None,
+        mcp_policy: None,
+        network_policy: None,
+        selected_capability_roots: Vec::new(),
+    };
+    let environment = Arc::new(Environment::default_for_tests());
+    let mut states = vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
+        TurnEnvironmentSelection {
+            environment_id: "zz-primary".to_string(),
+            cwd: PathUri::parse("file:///primary").unwrap(),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::Ready(config.clone()),
+        },
+        EnvironmentConfigOrigin::Thread,
+        Arc::clone(&environment),
+        /*shell*/ None,
+    ))];
+    states.extend((0..3).map(|index| {
+        TurnEnvironmentState::Ready(TurnEnvironment::new(
+            TurnEnvironmentSelection {
+                environment_id: format!("zz-available-{index}"),
+                cwd: PathUri::parse(&format!("file:///available-{index}")).unwrap(),
+                workspace_roots: Vec::new(),
+                config: EnvironmentConfigState::Ready(config.clone()),
+            },
+            EnvironmentConfigOrigin::Thread,
+            Arc::clone(&environment),
+            /*shell*/ None,
+        ))
+    }));
+    states.extend((0..8).map(|index| TurnEnvironmentState::Failed {
+        selection: TurnEnvironmentSelection {
+            environment_id: format!("aa-failed-{index}"),
+            cwd: PathUri::parse(&format!("file:///failed-{index}")).unwrap(),
+            workspace_roots: Vec::new(),
+            config: EnvironmentConfigState::FromThread,
+        },
+        error: "界".repeat(300),
+    }));
+
+    let rendered = EnvironmentsState {
+        environments: environment_states(&TurnEnvironmentSnapshot {
+            environments: states,
+        }),
+        ..Default::default()
+    }
+    .body();
+
+    insta::assert_snapshot!(rendered);
+    assert!(rendered.contains("id=\"zz-primary\" primary=\"true\""));
+    for index in 0..3 {
+        assert!(rendered.contains(&format!("id=\"zz-available-{index}\"")));
+    }
+    assert_eq!(rendered.matches("status>failed").count(), 4);
+    assert_eq!(rendered.matches("<error>").count(), 2);
 }

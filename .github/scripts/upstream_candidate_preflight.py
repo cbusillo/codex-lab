@@ -79,7 +79,9 @@ def candidate_v8_package(candidate_dir: Path) -> tuple[str, str]:
     try:
         lock_data = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as error:
-        raise CandidatePreflightError(f"unable to read candidate Cargo.lock: {error}") from error
+        raise CandidatePreflightError(
+            f"unable to read candidate Cargo.lock: {error}"
+        ) from error
     packages = lock_data.get("package")
     if not isinstance(packages, list):
         raise CandidatePreflightError("candidate Cargo.lock has no package list")
@@ -89,7 +91,9 @@ def candidate_v8_package(candidate_dir: Path) -> tuple[str, str]:
         if isinstance(package, dict) and package.get("name") == "v8"
     ]
     if len(matches) != 1:
-        raise CandidatePreflightError("candidate Cargo.lock must contain exactly one v8 package")
+        raise CandidatePreflightError(
+            "candidate Cargo.lock must contain exactly one v8 package"
+        )
     package = matches[0]
     version = package.get("version")
     checksum = package.get("checksum")
@@ -97,9 +101,13 @@ def candidate_v8_package(candidate_dir: Path) -> tuple[str, str]:
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise CandidatePreflightError("candidate Cargo.lock has an invalid v8 version")
     if not isinstance(checksum, str) or not SHA256_RE.fullmatch(checksum):
-        raise CandidatePreflightError("candidate Cargo.lock has an invalid v8 crate checksum")
+        raise CandidatePreflightError(
+            "candidate Cargo.lock has an invalid v8 crate checksum"
+        )
     if source != REGISTRY_SOURCE:
-        raise CandidatePreflightError("candidate Cargo.lock has an unexpected v8 source")
+        raise CandidatePreflightError(
+            "candidate Cargo.lock has an unexpected v8 source"
+        )
     return version, checksum
 
 
@@ -136,7 +144,10 @@ def verified_download(url: str, expected_checksum: str, destination: Path) -> in
     digest = hashlib.sha256()
     size = 0
     try:
-        with urllib.request.urlopen(url, timeout=120) as response, destination.open("wb") as output:
+        with (
+            urllib.request.urlopen(url, timeout=120) as response,
+            destination.open("wb") as output,
+        ):
             while chunk := response.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_DOWNLOAD_BYTES:
@@ -192,7 +203,9 @@ def run_preflight(candidate_dir: Path, download_dir: Path, output: Path) -> int:
             "error": bounded(error, MAX_ERROR_LENGTH),
         }
         return_code = 3 if error.classification == "preflight-blocked" else 1
-    output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return return_code
 
 
@@ -219,29 +232,41 @@ def read_conflict_paths(path: Path | None) -> list[str]:
 def read_path_list(path: Path) -> list[str]:
     try:
         if path.stat().st_size > MAX_CHANGED_PATH_BYTES:
-            raise CandidatePreflightError("changed-path input exceeds the bounded size", "infrastructure")
+            raise CandidatePreflightError(
+                "changed-path input exceeds the bounded size", "infrastructure"
+            )
         values = path.read_bytes().split(b"\0")
         if values and not values[-1]:
             values.pop()
         values = [value.decode("utf-8") for value in values]
     except (OSError, UnicodeError) as error:
-        raise CandidatePreflightError(f"unable to read changed paths: {error}", "infrastructure") from error
+        raise CandidatePreflightError(
+            f"unable to read changed paths: {error}", "infrastructure"
+        ) from error
     if any(not value or len(value) > 512 for value in values):
-        raise CandidatePreflightError("changed-path input contains an invalid path", "infrastructure")
+        raise CandidatePreflightError(
+            "changed-path input contains an invalid path", "infrastructure"
+        )
     return sorted(set(values))
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, object]:
     try:
         if path.stat().st_size > MAX_JSON_BYTES:
-            raise CandidatePreflightError(f"{label} exceeds the bounded JSON size", "infrastructure")
+            raise CandidatePreflightError(
+                f"{label} exceeds the bounded JSON size", "infrastructure"
+            )
         value = json.loads(path.read_text(encoding="utf-8"))
     except CandidatePreflightError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise CandidatePreflightError(f"unable to read {label}: {error}", "infrastructure") from error
+        raise CandidatePreflightError(
+            f"unable to read {label}: {error}", "infrastructure"
+        ) from error
     if not isinstance(value, dict):
-        raise CandidatePreflightError(f"{label} must be a JSON object", "infrastructure")
+        raise CandidatePreflightError(
+            f"{label} must be a JSON object", "infrastructure"
+        )
     return value
 
 
@@ -253,7 +278,10 @@ def _bounded_stream(stream: object) -> str:
             del data[:-MAX_LOG_BYTES]
     lines = bytes(data).splitlines(keepends=True)[-MAX_LOG_LINES:]
     text = b"".join(lines).decode("utf-8", errors="replace")
-    return "".join(f" {line}" if line.startswith("::") else line for line in text.splitlines(keepends=True))
+    return "".join(
+        f" {line}" if line.startswith("::") else line
+        for line in text.splitlines(keepends=True)
+    )
 
 
 def bounded_log(path: Path) -> str:
@@ -261,7 +289,9 @@ def bounded_log(path: Path) -> str:
         with path.open("rb") as input_file:
             return _bounded_stream(input_file)
     except OSError as error:
-        raise CandidatePreflightError(f"unable to read command log: {error}", "infrastructure") from error
+        raise CandidatePreflightError(
+            f"unable to read command log: {error}", "infrastructure"
+        ) from error
 
 
 def bounded_log_from_stdin() -> str:
@@ -312,11 +342,15 @@ def _package_for_path(candidate_dir: Path, relative_path: str) -> str | None:
         cargo_toml = current / "Cargo.toml"
         if cargo_toml.is_file():
             try:
-                package = tomllib.loads(cargo_toml.read_text(encoding="utf-8")).get("package")
+                package = tomllib.loads(cargo_toml.read_text(encoding="utf-8")).get(
+                    "package"
+                )
             except (OSError, UnicodeError, tomllib.TOMLDecodeError):
                 return None
             name = package.get("name") if isinstance(package, dict) else None
-            return name if isinstance(name, str) and PACKAGE_RE.fullmatch(name) else None
+            return (
+                name if isinstance(name, str) and PACKAGE_RE.fullmatch(name) else None
+            )
         if current == root:
             break
         current = current.parent
@@ -337,24 +371,38 @@ def select_affected_contracts(
         overlap = sorted(upstream_paths & local_paths)
         contracts = gates.get("contracts")
         if not isinstance(contracts, list):
-            raise CandidatePreflightError("convergence gates has no contract list", "infrastructure")
+            raise CandidatePreflightError(
+                "convergence gates has no contract list", "infrastructure"
+            )
         selected = []
         suggested_tests: set[str] = set()
         for contract in contracts:
             if not isinstance(contract, dict):
-                raise CandidatePreflightError("convergence gate contract is not an object", "infrastructure")
+                raise CandidatePreflightError(
+                    "convergence gate contract is not an object", "infrastructure"
+                )
             contract_id = contract.get("id")
             evidence = contract.get("evidence")
-            if not isinstance(contract_id, str) or not contract_id or len(contract_id) > 128:
-                raise CandidatePreflightError("convergence gate contract has an invalid id", "infrastructure")
+            if (
+                not isinstance(contract_id, str)
+                or not contract_id
+                or len(contract_id) > 128
+            ):
+                raise CandidatePreflightError(
+                    "convergence gate contract has an invalid id", "infrastructure"
+                )
             if not isinstance(evidence, list):
-                raise CandidatePreflightError(f"contract {contract_id} has invalid evidence", "infrastructure")
+                raise CandidatePreflightError(
+                    f"contract {contract_id} has invalid evidence", "infrastructure"
+                )
             matches = []
             tiers = set()
             packages = set()
             for item in evidence:
                 if not isinstance(item, dict):
-                    raise CandidatePreflightError(f"contract {contract_id} has invalid evidence", "infrastructure")
+                    raise CandidatePreflightError(
+                        f"contract {contract_id} has invalid evidence", "infrastructure"
+                    )
                 if item.get("kind") in EXCLUDED_EVIDENCE_KINDS:
                     continue
                 path = item.get("path")
@@ -386,7 +434,10 @@ def select_affected_contracts(
             len(selected) > MAX_AFFECTED_CONTRACTS
             or len(overlap) > MAX_AFFECTED_PATHS
             or len(suggested_tests) > MAX_SUGGESTED_TESTS
-            or any(contract["matchedPathTotal"] > MAX_AFFECTED_PATHS for contract in selected)
+            or any(
+                contract["matchedPathTotal"] > MAX_AFFECTED_PATHS
+                for contract in selected
+            )
         )
         result = {
             "status": "passed",
@@ -398,12 +449,18 @@ def select_affected_contracts(
             "suggestedTests": suggested_tests[:MAX_SUGGESTED_TESTS],
             "truncated": truncated,
         }
-        output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output.write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         return 0
     except CandidatePreflightError as error:
         output.write_text(
             json.dumps(
-                {"status": "failed", "classification": error.classification, "error": bounded(error, MAX_ERROR_LENGTH)},
+                {
+                    "status": "failed",
+                    "classification": error.classification,
+                    "error": bounded(error, MAX_ERROR_LENGTH),
+                },
                 sort_keys=True,
             )
             + "\n",
@@ -417,7 +474,9 @@ def record_stage3b(args: argparse.Namespace) -> int:
         evidence = _read_json_object(args.evidence, "candidate evidence")
         repo_checks = _read_json_object(args.repo_checks, "repository-check outcome")
         cargo_check = _read_json_object(args.cargo_check, "cargo outcome")
-        affected = _read_json_object(args.affected_contracts, "affected-contract outcome")
+        affected = _read_json_object(
+            args.affected_contracts, "affected-contract outcome"
+        )
         root_failures = _read_json_object(args.root_failures, "root-failure outcome")
         evidence["repoChecks"] = repo_checks
         evidence["cargoCheck"] = cargo_check
@@ -433,17 +492,36 @@ def record_stage3b(args: argparse.Namespace) -> int:
             evidence["classification"] = "infrastructure"
         else:
             evidence["classification"] = "clean"
-        args.evidence.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        args.evidence.write_text(
+            json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         text_path = args.evidence.with_name("candidate-evidence.txt")
-        prefixes = ("classification:", "reason:", "repo checks:", "cargo check:", "affected contracts:", "root failures:", "temporary worktree removed:", "primary checkout clean:")
+        prefixes = (
+            "classification:",
+            "reason:",
+            "repo checks:",
+            "cargo check:",
+            "affected contracts:",
+            "root failures:",
+            "temporary worktree removed:",
+            "primary checkout clean:",
+        )
         existing = text_path.read_text(encoding="utf-8") if text_path.exists() else ""
-        lines = [line for line in existing.splitlines() if not line.startswith(prefixes)]
-        lines.extend([
-            f"classification: {evidence.get('classification')}", f"reason: {evidence.get('reason', '')}",
-            f"repo checks: {repo_checks.get('status')}", f"cargo check: {cargo_check.get('status')}",
-            f"affected contracts: {affected.get('contractTotal', 0)}", f"root failures: {root_failures.get('status')}",
-            f"temporary worktree removed: {evidence.get('temporaryWorktreeRemoved')}", f"primary checkout clean: {evidence.get('primaryCheckoutClean')}",
-        ])
+        lines = [
+            line for line in existing.splitlines() if not line.startswith(prefixes)
+        ]
+        lines.extend(
+            [
+                f"classification: {evidence.get('classification')}",
+                f"reason: {evidence.get('reason', '')}",
+                f"repo checks: {repo_checks.get('status')}",
+                f"cargo check: {cargo_check.get('status')}",
+                f"affected contracts: {affected.get('contractTotal', 0)}",
+                f"root failures: {root_failures.get('status')}",
+                f"temporary worktree removed: {evidence.get('temporaryWorktreeRemoved')}",
+                f"primary checkout clean: {evidence.get('primaryCheckoutClean')}",
+            ]
+        )
         text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return 0
     except CandidatePreflightError as error:
@@ -452,9 +530,9 @@ def record_stage3b(args: argparse.Namespace) -> int:
 
 
 def _canonical_json(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    return json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
 
 
 def _packet_tokens(packet: dict[str, object]) -> int:
@@ -502,7 +580,9 @@ def _fit_packet(
         packet["includedPathTotal"] = len(packet["paths"])
         packet["includedAnchorTotal"] = len(packet["anchors"])
         packet["deferredPathTotal"] = packet["pathTotal"] - packet["includedPathTotal"]
-        packet["deferredAnchorTotal"] = packet["anchorTotal"] - packet["includedAnchorTotal"]
+        packet["deferredAnchorTotal"] = (
+            packet["anchorTotal"] - packet["includedAnchorTotal"]
+        )
         packet["estimatedPromptTokens"] = 0
         for _ in range(4):
             estimated_tokens = _packet_tokens(packet)
@@ -547,12 +627,19 @@ def _packet_from_contract(
         for item in evidence
         if item.get("kind") not in EXCLUDED_EVIDENCE_KINDS
     ]
-    anchors.sort(key=lambda item: (item.get("kind", ""), item.get("path", ""), item.get("token", "")))
+    anchors.sort(
+        key=lambda item: (
+            item.get("kind", ""),
+            item.get("path", ""),
+            item.get("token", ""),
+        )
+    )
     lanes = sorted(
         {
             guard_by_path[path].get("lane")
             for path in matched
-            if path in guard_by_path and isinstance(guard_by_path[path].get("lane"), str)
+            if path in guard_by_path
+            and isinstance(guard_by_path[path].get("lane"), str)
         }
     )
     reasons = []
@@ -560,7 +647,9 @@ def _packet_from_contract(
         reasons.append("red_manual_review_lane")
     if any(len(attribution.get(path, set())) > 1 for path in matched):
         reasons.append("ambiguous_contract_attribution")
-    excluded = sum(1 for item in evidence if item.get("kind") in EXCLUDED_EVIDENCE_KINDS)
+    excluded = sum(
+        1 for item in evidence if item.get("kind") in EXCLUDED_EVIDENCE_KINDS
+    )
     packet = {
         "schemaVersion": 1,
         "packetId": f"contract:{contract_id}",
@@ -599,7 +688,11 @@ def _root_packets(root_failures: dict[str, object] | None) -> list[dict[str, obj
                 value = source.get(key)
                 if isinstance(value, str):
                     safe_source[key] = bounded(value, 256)
-                elif key == "id" and isinstance(value, int) and not isinstance(value, bool):
+                elif (
+                    key == "id"
+                    and isinstance(value, int)
+                    and not isinstance(value, bool)
+                ):
                     safe_source[key] = value
             safe_sources.append(safe_source)
         root = bounded(failure["root"], 512)
@@ -641,7 +734,9 @@ def _write_packet_artifacts(
         f"invocation: {telemetry['invocation']}",
     ]
     lines.extend(f"warning: {warning}" for warning in packets_result["warnings"])
-    (output_dir / "model-packets.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (output_dir / "model-packets.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
     (output_dir / "model-telemetry.json").write_text(
         json.dumps(telemetry, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -656,7 +751,9 @@ def _write_packet_artifacts(
                 "packetTotal": packets_result["packetTotal"],
                 "plannedPacketTotal": packets_result["plannedPacketTotal"],
                 "deferredPacketTotal": packets_result["deferredPacketTotal"],
-                "aggregatePlannedPromptTokens": packets_result["aggregatePlannedPromptTokens"],
+                "aggregatePlannedPromptTokens": packets_result[
+                    "aggregatePlannedPromptTokens"
+                ],
             }
             evidence["modelTelemetry"] = {
                 "status": telemetry["status"],
@@ -671,11 +768,17 @@ def _write_packet_artifacts(
                 "plannedModelTier": telemetry["plannedModelTier"],
                 "outcome": telemetry["outcome"],
             }
-            evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            evidence_path.write_text(
+                json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
             text_path = evidence_path.with_name("candidate-evidence.txt")
-            existing = text_path.read_text(encoding="utf-8") if text_path.exists() else ""
+            existing = (
+                text_path.read_text(encoding="utf-8") if text_path.exists() else ""
+            )
             prefixes = ("model packets:", "model telemetry:")
-            lines = [line for line in existing.splitlines() if not line.startswith(prefixes)]
+            lines = [
+                line for line in existing.splitlines() if not line.startswith(prefixes)
+            ]
             lines.extend(
                 [
                     f"model packets: {packets_result['plannedPacketTotal']} of {packets_result['packetTotal']}",
@@ -689,7 +792,9 @@ def build_model_packets(args: argparse.Namespace) -> int:
     try:
         args.output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
-        print(f"unable to materialize packet output directory: {error}", file=sys.stderr)
+        print(
+            f"unable to materialize packet output directory: {error}", file=sys.stderr
+        )
         return 1
     started_at = bounded(args.started_at, 128)
     started_time = None
@@ -717,23 +822,35 @@ def build_model_packets(args: argparse.Namespace) -> int:
         conflict_paths = read_conflict_paths(args.conflicts)
         if not conflict_paths:
             fallback = evidence.get("conflictPaths", [])
-            conflict_paths = [bounded(path, 512) for path in fallback if isinstance(path, str)]
+            conflict_paths = [
+                bounded(path, 512) for path in fallback if isinstance(path, str)
+            ]
         conflicts = set(conflict_paths)
         guarded = guard.get("guardedPaths")
         contracts = gates.get("contracts")
         if not isinstance(guarded, list) or not isinstance(contracts, list):
-            raise TrustedPacketInputError("trusted guard or gates schema is missing required lists")
+            raise TrustedPacketInputError(
+                "trusted guard or gates schema is missing required lists"
+            )
         attribution: dict[str, set[str]] = {}
         guard_by_path = {}
         for entry in guarded:
             if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                 raise TrustedPacketInputError("trusted guard has an invalid path entry")
-            if not isinstance(entry.get("lane"), str) or not isinstance(entry.get("contracts"), list):
-                raise TrustedPacketInputError("trusted guard has an invalid contract lane")
+            if not isinstance(entry.get("lane"), str) or not isinstance(
+                entry.get("contracts"), list
+            ):
+                raise TrustedPacketInputError(
+                    "trusted guard has an invalid contract lane"
+                )
             if any(not isinstance(contract, str) for contract in entry["contracts"]):
-                raise TrustedPacketInputError("trusted guard has an invalid contract id")
+                raise TrustedPacketInputError(
+                    "trusted guard has an invalid contract id"
+                )
             if entry["path"] in guard_by_path:
-                raise TrustedPacketInputError("trusted guard has duplicate path entries")
+                raise TrustedPacketInputError(
+                    "trusted guard has duplicate path entries"
+                )
             guard_by_path[entry["path"]] = entry
             if entry["path"] in conflicts and entry["contracts"]:
                 attribution.setdefault(entry["path"], set()).update(
@@ -741,40 +858,60 @@ def build_model_packets(args: argparse.Namespace) -> int:
                 )
         contract_data = {}
         for contract in contracts:
-            if not isinstance(contract, dict) or not isinstance(contract.get("id"), str):
+            if not isinstance(contract, dict) or not isinstance(
+                contract.get("id"), str
+            ):
                 raise TrustedPacketInputError("trusted gates has an invalid contract")
             items = contract.get("evidence")
             if not isinstance(items, list):
-                raise TrustedPacketInputError("trusted gates has invalid contract evidence")
+                raise TrustedPacketInputError(
+                    "trusted gates has invalid contract evidence"
+                )
             contract_id = bounded(contract["id"], 128)
             if contract_id in contract_data:
-                raise TrustedPacketInputError("trusted gates has duplicate contract ids")
+                raise TrustedPacketInputError(
+                    "trusted gates has duplicate contract ids"
+                )
             contract_data[contract_id] = items
             for item in items:
                 if not isinstance(item, dict) or not isinstance(item.get("kind"), str):
                     raise TrustedPacketInputError("trusted gates has invalid evidence")
                 path = item.get("path")
                 if path is not None and not isinstance(path, str):
-                    raise TrustedPacketInputError("trusted gates has an invalid evidence path")
+                    raise TrustedPacketInputError(
+                        "trusted gates has an invalid evidence path"
+                    )
                 if item["kind"] in EXCLUDED_EVIDENCE_KINDS:
                     continue
                 if path in conflicts:
                     attribution.setdefault(path, set()).add(contract_id)
         packets = []
-        attributed_contracts = {contract for values in attribution.values() for contract in values}
+        attributed_contracts = {
+            contract for values in attribution.values() for contract in values
+        }
         for contract_id in sorted(set(contract_data) | attributed_contracts):
-            matched = {path for path, values in attribution.items() if contract_id in values}
+            matched = {
+                path for path, values in attribution.items() if contract_id in values
+            }
             if matched:
                 packets.append(
                     _packet_from_contract(
-                        contract_id, contract_data.get(contract_id, []), matched, guard_by_path, attribution
+                        contract_id,
+                        contract_data.get(contract_id, []),
+                        matched,
+                        guard_by_path,
+                        attribution,
                     )[0]
                 )
         packets.extend(_root_packets(root_failures))
         excluded_anchor_total = sum(
-            packet["excludedAnchorTotal"] for packet in packets if packet["kind"] == "contract"
+            packet["excludedAnchorTotal"]
+            for packet in packets
+            if packet["kind"] == "contract"
         )
-        packets.sort(key=lambda packet: (packet["modelTier"] != "frontier", packet["packetId"]))
+        packets.sort(
+            key=lambda packet: (packet["modelTier"] != "frontier", packet["packetId"])
+        )
         unattributed = conflicts - set(attribution)
         mechanical = sorted(path for path in unattributed if path not in guard_by_path)
         guarded_unattributed = sorted(unattributed & set(guard_by_path))
@@ -783,11 +920,17 @@ def build_model_packets(args: argparse.Namespace) -> int:
             warnings.append(f"mechanical_or_unattributed_paths:{len(unattributed)}")
         if guarded_unattributed:
             warnings.append(f"guarded_unattributed_paths:{len(guarded_unattributed)}")
-        root_status = "missing" if root_failures is None else bounded(root_failures.get("status", "unknown"), 64)
+        root_status = (
+            "missing"
+            if root_failures is None
+            else bounded(root_failures.get("status", "unknown"), 64)
+        )
         if root_status != "extracted":
             warnings.append(f"root_failures_unavailable:{root_status}")
         if excluded_anchor_total:
-            warnings.append(f"excluded_narrative_or_semantic_anchors:{excluded_anchor_total}")
+            warnings.append(
+                f"excluded_narrative_or_semantic_anchors:{excluded_anchor_total}"
+            )
         if any(packet["modelTier"] == "frontier" for packet in packets):
             warnings.append("frontier_escalation_requires_named_reason")
         deferred_packets = []
@@ -822,7 +965,11 @@ def build_model_packets(args: argparse.Namespace) -> int:
             warnings.append(f"packet_paths_truncated:{truncated_path_total}")
         planned.sort(key=lambda packet: packet["packetId"])
         deferred_packets.sort(key=lambda packet: packet["packetId"])
-        outcome = "packets-deferred" if deferred_packets else ("packets-built" if planned else "no-exception")
+        outcome = (
+            "packets-deferred"
+            if deferred_packets
+            else ("packets-built" if planned else "no-exception")
+        )
         result = {
             "schemaVersion": 1,
             "stage": "3c",
@@ -873,7 +1020,9 @@ def build_model_packets(args: argparse.Namespace) -> int:
                 "guardedUnattributedPathTotal": 0,
                 "excludedAnchorTotal": 0,
             },
-            "warnings": [f"packet_build_unavailable:{bounded(error, MAX_ERROR_LENGTH)}"],
+            "warnings": [
+                f"packet_build_unavailable:{bounded(error, MAX_ERROR_LENGTH)}"
+            ],
             "trustedInputSchemas": {},
         }
         tiers = []
@@ -883,7 +1032,15 @@ def build_model_packets(args: argparse.Namespace) -> int:
     finished_at = finished_time.isoformat().replace("+00:00", "Z")
     if started_time is not None:
         duration_ms = max(0, int((finished_time - started_time).total_seconds() * 1000))
-    planned_tier = "frontier" if tiers == ["frontier"] else ("budget" if tiers == ["budget"] else ("frontier-and-budget" if tiers else "none"))
+    planned_tier = (
+        "frontier"
+        if tiers == ["frontier"]
+        else (
+            "budget"
+            if tiers == ["budget"]
+            else ("frontier-and-budget" if tiers else "none")
+        )
+    )
     telemetry = {
         "schemaVersion": 1,
         "stage": "3c",
@@ -905,11 +1062,13 @@ def build_model_packets(args: argparse.Namespace) -> int:
         "aggregatePlannedPromptTokens": result["aggregatePlannedPromptTokens"],
         "plannedPromptTokens": result["aggregatePlannedPromptTokens"],
         "modelFree": True,
-        "escalationReasons": sorted({
-            reason
-            for packet in result["packets"]
-            for reason in packet.get("escalationReasons", [])
-        }),
+        "escalationReasons": sorted(
+            {
+                reason
+                for packet in result["packets"]
+                for reason in packet.get("escalationReasons", [])
+            }
+        ),
         "packetBuild": {
             "startedAt": started_at,
             "finishedAt": finished_at,
@@ -931,10 +1090,14 @@ def write_evidence(args: argparse.Namespace) -> int:
     if not all(SHA1_RE.fullmatch(value) for value in refs.values()):
         raise CandidatePreflightError("candidate evidence requires exact 40-hex refs")
     if not SHA1_RE.fullmatch(args.workflow_sha):
-        raise CandidatePreflightError("candidate evidence requires an exact workflow SHA")
+        raise CandidatePreflightError(
+            "candidate evidence requires an exact workflow SHA"
+        )
     conflicts = read_conflict_paths(args.conflicts)
     if args.conflict_total < len(conflicts):
-        raise CandidatePreflightError("candidate conflict total is smaller than evidence")
+        raise CandidatePreflightError(
+            "candidate conflict total is smaller than evidence"
+        )
     preflight = load_preflight(args.preflight)
     result = {
         "schemaVersion": 1,
@@ -951,7 +1114,10 @@ def write_evidence(args: argparse.Namespace) -> int:
         "primaryCheckoutClean": args.primary_checkout_clean == "true",
         "rustyV8Preflight": preflight,
         "repoChecks": {"status": "not-run"},
-        "cargoCheck": {"status": "not-run", "command": "cargo check --workspace --tests --locked"},
+        "cargoCheck": {
+            "status": "not-run",
+            "command": "cargo check --workspace --tests --locked",
+        },
         "affectedContracts": {"status": "not-run"},
         "rootFailures": {"status": "not-run"},
         "workflow": {"sha": args.workflow_sha, "runId": bounded(args.run_id, 128)},
@@ -959,7 +1125,9 @@ def write_evidence(args: argparse.Namespace) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = args.output_dir / "candidate-evidence.json"
     text_path = args.output_dir / "candidate-evidence.txt"
-    json_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    json_path.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     lines = [
         "Upstream convergence candidate stages 3a and 3b",
         f"classification: {result['classification']}",
@@ -984,7 +1152,13 @@ def parse_args() -> argparse.Namespace:
     evidence = commands.add_parser("write-evidence")
     evidence.add_argument(
         "--classification",
-        choices=("clean", "conflict", "infrastructure", "preflight-blocked", "validation-pending"),
+        choices=(
+            "clean",
+            "conflict",
+            "infrastructure",
+            "preflight-blocked",
+            "validation-pending",
+        ),
         required=True,
     )
     evidence.add_argument("--reason", required=True)
@@ -996,8 +1170,12 @@ def parse_args() -> argparse.Namespace:
     evidence.add_argument("--conflicts", type=Path)
     evidence.add_argument("--conflict-total", type=int, default=0)
     evidence.add_argument("--preflight", type=Path)
-    evidence.add_argument("--worktree-removed", choices=("true", "false"), required=True)
-    evidence.add_argument("--primary-checkout-clean", choices=("true", "false"), required=True)
+    evidence.add_argument(
+        "--worktree-removed", choices=("true", "false"), required=True
+    )
+    evidence.add_argument(
+        "--primary-checkout-clean", choices=("true", "false"), required=True
+    )
     evidence.add_argument("--output-dir", type=Path, required=True)
     evidence.add_argument("--workflow-sha", required=True)
     evidence.add_argument("--run-id", required=True)

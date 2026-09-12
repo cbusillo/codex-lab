@@ -29,7 +29,7 @@ class DiscoveryRegistrationsTest(unittest.TestCase):
     def test_repeated_directory_collects_every_pattern(self) -> None:
         workflow = (
             "run: python3 -m unittest discover -s pkg -p 'test_a.py'\n"
-            "run: python3 -m unittest discover -s pkg -p \"test_b.py\"\n"
+            'run: python3 -m unittest discover -s pkg -p "test_b.py"\n'
         )
 
         self.assertEqual(
@@ -47,9 +47,7 @@ class UnregisteredTestsTest(unittest.TestCase):
 
             problems = unregistered_tests({"pkg": ["test_registered.py"]}, root)
 
-            self.assertEqual(
-                [path for path, _ in problems], ["pkg/test_forgotten.py"]
-            )
+            self.assertEqual([path for path, _ in problems], ["pkg/test_forgotten.py"])
 
     def test_directory_wide_pattern_covers_new_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

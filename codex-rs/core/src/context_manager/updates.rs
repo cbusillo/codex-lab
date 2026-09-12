@@ -17,26 +17,6 @@ enum MessageGroup {
     Mergeable,
 }
 
-pub(crate) fn build_rendered_message(fragments: Vec<RenderedFragment>) -> Option<ResponseItem> {
-    let role = fragments.first()?.role();
-    debug_assert!(fragments.iter().all(|fragment| fragment.role() == role));
-    let (content, content_item_kinds): (Vec<_>, Vec<_>) = fragments
-        .into_iter()
-        .map(|fragment| fragment.into_parts().1.into_parts())
-        .unzip();
-
-    Some(ResponseItem::Message {
-        id: None,
-        role: role.to_string(),
-        content,
-        phase: None,
-        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
-            content_item_kinds: Some(content_item_kinds),
-            ..Default::default()
-        }),
-    })
-}
-
 pub(crate) fn annotate_multi_agent_usage_hint(
     items: &mut [ResponseItemEnvelope],
     world_state_snapshot: &WorldStateSnapshot,
@@ -80,6 +60,26 @@ pub(crate) fn annotate_multi_agent_usage_hint(
             ..items[index].metadata.take().unwrap_or_default()
         });
     }
+}
+
+pub(crate) fn build_rendered_message(fragments: Vec<RenderedFragment>) -> Option<ResponseItem> {
+    let role = fragments.first()?.role();
+    debug_assert!(fragments.iter().all(|fragment| fragment.role() == role));
+    let (content, content_item_kinds): (Vec<_>, Vec<_>) = fragments
+        .into_iter()
+        .map(|fragment| fragment.into_parts().1.into_parts())
+        .unzip();
+
+    Some(ResponseItem::Message {
+        id: None,
+        role: role.to_string(),
+        content,
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(content_item_kinds),
+            ..Default::default()
+        }),
+    })
 }
 
 pub(crate) fn merge_contextual_fragments(

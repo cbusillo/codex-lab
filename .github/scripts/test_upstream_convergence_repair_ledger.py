@@ -37,25 +37,37 @@ class RepairLedgerTest(unittest.TestCase):
             "warnings": [],
         }
         self.packets.write_text(json.dumps(packets), encoding="utf-8")
-        self.telemetry.write_text(json.dumps({
-            "schemaVersion": 1,
-            "stage": "3c",
-            "modelFree": True,
-            "invocation": "not-invoked",
-            "calls": 0,
-            "promptTokens": 0,
-            "completionTokens": 0,
-            "totalTokens": 0,
-            "actualTotalTokens": 0,
-        }), encoding="utf-8")
-        self.evidence.write_text(json.dumps({
-            "schemaVersion": 1,
-            "classification": "conflict",
-            "refs": {"base": BASE, "upstream": UPSTREAM, "local": LOCAL},
-            "workflow": {"sha": LOCAL, "runId": "run-1"},
-        }), encoding="utf-8")
+        self.telemetry.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "stage": "3c",
+                    "modelFree": True,
+                    "invocation": "not-invoked",
+                    "calls": 0,
+                    "promptTokens": 0,
+                    "completionTokens": 0,
+                    "totalTokens": 0,
+                    "actualTotalTokens": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.evidence.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "classification": "conflict",
+                    "refs": {"base": BASE, "upstream": UPSTREAM, "local": LOCAL},
+                    "workflow": {"sha": LOCAL, "runId": "run-1"},
+                }
+            ),
+            encoding="utf-8",
+        )
 
-    def cycle(self, unit, head, paths, calls=1, prompt=1, completion=1, status="repaired"):
+    def cycle(
+        self, unit, head, paths, calls=1, prompt=1, completion=1, status="repaired"
+    ):
         return {
             "repairUnitId": unit,
             "status": status,
@@ -78,22 +90,47 @@ class RepairLedgerTest(unittest.TestCase):
 
     def execute(self, ledger=True, require_live=False):
         env = os.environ | {"RUNNER_TEMP": str(self.root)}
-        command = [sys.executable, str(SCRIPT), "checkpoint", "--packets", str(self.packets), "--telemetry", str(self.telemetry), "--evidence", str(self.evidence), "--output-dir", str(self.output), "--cycle-id", "cycle-1"]
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "checkpoint",
+            "--packets",
+            str(self.packets),
+            "--telemetry",
+            str(self.telemetry),
+            "--evidence",
+            str(self.evidence),
+            "--output-dir",
+            str(self.output),
+            "--cycle-id",
+            "cycle-1",
+        ]
         if ledger:
             command += ["--ledger", str(self.ledger)]
         if require_live:
             command.append("--require-live")
         return subprocess.run(command, env=env, capture_output=True, text=True)
 
-    def write_ledger(self, cycles, provenance="synthetic-fixture", accounting=None, **extra):
-        value = {"schemaVersion": 1, "stage": "3d", "provenance": provenance, "refs": {"base": BASE, "upstream": UPSTREAM, "local": LOCAL}, "cycles": cycles, "repairHead": cycles[-1]["repairHead"] if cycles else None}
+    def write_ledger(
+        self, cycles, provenance="synthetic-fixture", accounting=None, **extra
+    ):
+        value = {
+            "schemaVersion": 1,
+            "stage": "3d",
+            "provenance": provenance,
+            "refs": {"base": BASE, "upstream": UPSTREAM, "local": LOCAL},
+            "cycles": cycles,
+            "repairHead": cycles[-1]["repairHead"] if cycles else None,
+        }
         if accounting is not None:
             value["accounting"] = accounting
         value.update(extra)
         self.ledger.write_text(json.dumps(value), encoding="utf-8")
 
     def checkpoint(self):
-        return json.loads((self.output / "repair-checkpoint.json").read_text(encoding="utf-8"))
+        return json.loads(
+            (self.output / "repair-checkpoint.json").read_text(encoding="utf-8")
+        )
 
     def test_absent_ledger_is_zero_cycle_exact_local_sha(self):
         result = self.execute(ledger=False, require_live=True)
@@ -108,7 +145,12 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(evidence["classification"], "conflict")
 
     def test_two_unrelated_components_stop(self):
-        self.write_ledger([self.cycle("packet:0", "a" * 40, ["one"]), self.cycle("packet:1", "b" * 40, ["two"])])
+        self.write_ledger(
+            [
+                self.cycle("packet:0", "a" * 40, ["one"]),
+                self.cycle("packet:1", "b" * 40, ["two"]),
+            ]
+        )
         result = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.checkpoint()["decision"], "handoff")
@@ -117,7 +159,12 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(self.checkpoint()["checkpointSha"], "b" * 40)
 
     def test_shared_touched_path_is_one_component(self):
-        self.write_ledger([self.cycle("packet:0", "a" * 40, ["same"]), self.cycle("packet:1", "b" * 40, ["same", "other"])])
+        self.write_ledger(
+            [
+                self.cycle("packet:0", "a" * 40, ["same"]),
+                self.cycle("packet:1", "b" * 40, ["same", "other"]),
+            ]
+        )
         result = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.checkpoint()["unrelatedComponentTotal"], 1)
@@ -129,7 +176,11 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(self.execute().returncode, 0)
         self.assertEqual(self.checkpoint()["handoffReason"], "attempt_cap")
         self.assertEqual(self.checkpoint()["checkpointSha"], "c" * 40)
-        cycles.append(self.cycle("packet:1", "d" * 40, ["different"], prompt=20_001, completion=20_001))
+        cycles.append(
+            self.cycle(
+                "packet:1", "d" * 40, ["different"], prompt=20_001, completion=20_001
+            )
+        )
         self.write_ledger(cycles)
         self.assertEqual(self.execute().returncode, 0)
         self.assertEqual(self.checkpoint()["handoffReason"], "unrelated_cycle_cap")
@@ -151,17 +202,46 @@ class RepairLedgerTest(unittest.TestCase):
         self.write_ledger([self.cycle("packet:0", BASE, ["one"])])
         self.assertNotEqual(self.execute().returncode, 0)
         cycle = self.cycle("packet:0", "a" * 40, ["one"])
-        cycle["repairAgent"], cycle["modelTier"], cycle["accountingConfidence"], cycle["accounting"] = "human", "none", "explicit_zero", {"calls": 0, "promptTokens": 0, "completionTokens": 0, "totalTokens": 0}
+        (
+            cycle["repairAgent"],
+            cycle["modelTier"],
+            cycle["accountingConfidence"],
+            cycle["accounting"],
+        ) = (
+            "human",
+            "none",
+            "explicit_zero",
+            {"calls": 0, "promptTokens": 0, "completionTokens": 0, "totalTokens": 0},
+        )
         self.write_ledger([cycle])
         self.assertEqual(self.execute().returncode, 0)
-        self.assertEqual(self.checkpoint()["accounting"]["accountingConfidence"], "explicit_zero")
-        self.write_ledger([self.cycle("packet:0", "a" * 40, ["one"], status="not-invoked")])
+        self.assertEqual(
+            self.checkpoint()["accounting"]["accountingConfidence"], "explicit_zero"
+        )
+        self.write_ledger(
+            [self.cycle("packet:0", "a" * 40, ["one"], status="not-invoked")]
+        )
         self.assertNotEqual(self.execute().returncode, 0)
-        self.write_ledger([self.cycle("packet:0", "a" * 40, ["one"])], accounting={"calls": 2, "promptTokens": 1, "completionTokens": 1, "totalTokens": 2})
+        self.write_ledger(
+            [self.cycle("packet:0", "a" * 40, ["one"])],
+            accounting={
+                "calls": 2,
+                "promptTokens": 1,
+                "completionTokens": 1,
+                "totalTokens": 2,
+            },
+        )
         self.assertNotEqual(self.execute().returncode, 0)
         self.write_ledger([], repairsPerformed=True)
         self.assertNotEqual(self.execute().returncode, 0)
-        self.write_ledger([self.cycle("packet:0", "a" * 40, ["one"], prompt=19_999, completion=20_000), self.cycle("packet:1", "b" * 40, ["one"], prompt=0, completion=1)])
+        self.write_ledger(
+            [
+                self.cycle(
+                    "packet:0", "a" * 40, ["one"], prompt=19_999, completion=20_000
+                ),
+                self.cycle("packet:1", "b" * 40, ["one"], prompt=0, completion=1),
+            ]
+        )
         self.assertEqual(self.execute().returncode, 0)
         self.assertEqual(self.checkpoint()["handoffReason"], "token_budget_exhausted")
         self.assertEqual(self.checkpoint()["checkpointSha"], "b" * 40)
@@ -172,14 +252,16 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.checkpoint()["decision"], "no-cycles")
         self.assertEqual(self.checkpoint()["accounting"]["calls"], 0)
-        self.assertEqual(self.checkpoint()["accounting"]["accountingConfidence"], "unavailable")
+        self.assertEqual(
+            self.checkpoint()["accounting"]["accountingConfidence"], "unavailable"
+        )
 
     def test_live_rejects_synthetic_and_oversized_ledger(self):
         self.write_ledger([])
         self.assertNotEqual(self.execute(require_live=True).returncode, 0)
         self.write_ledger([], provenance="workflow-executor")
         self.assertEqual(self.execute(require_live=True).returncode, 0)
-        self.ledger.write_bytes(b"{" + b"\"x\":\"" + b"a" * (256 * 1024) + b"\"}")
+        self.ledger.write_bytes(b"{" + b'"x":"' + b"a" * (256 * 1024) + b'"}')
         self.assertNotEqual(self.execute().returncode, 0)
 
     def test_bounded_stage3c_inputs_accept_valid_max_packet_volume(self):
@@ -201,7 +283,9 @@ class RepairLedgerTest(unittest.TestCase):
 
     def test_attempt_cap_precedes_token_budget(self):
         cycles = [
-            self.cycle("packet:0", letter * 40, ["same"], prompt=7_000, completion=7_000)
+            self.cycle(
+                "packet:0", letter * 40, ["same"], prompt=7_000, completion=7_000
+            )
             for letter in "abc"
         ]
         self.write_ledger(cycles)

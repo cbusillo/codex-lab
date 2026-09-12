@@ -72,7 +72,6 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use tracing_test::traced_test;
 use wiremock::MockServer;
-use wiremock::ResponseTemplate;
 
 fn test_codex() -> TestCodexBuilder {
     base_test_codex()
@@ -570,7 +569,6 @@ fn request_message_input_texts(body: &Value, role: &str) -> Vec<String> {
 #[derive(Clone, Copy, Debug)]
 enum CorrectionCompactionBackend {
     Local,
-    LegacyRemote,
     RemoteV2,
 }
 
@@ -578,17 +576,10 @@ impl CorrectionCompactionBackend {
     fn configure(self, config: &mut Config) {
         match self {
             Self::Local => config.model_provider.name = "local-test-provider".to_string(),
-            Self::LegacyRemote => {
-                let _ = config.features.disable(Feature::RemoteCompactionV2);
-            }
             Self::RemoteV2 => {
                 let _ = config.features.enable(Feature::RemoteCompactionV2);
             }
         }
-    }
-
-    fn is_legacy_remote(self) -> bool {
-        matches!(self, Self::LegacyRemote)
     }
 
     fn compaction_response(self, response_id: &str, summary: &str) -> String {
@@ -607,7 +598,6 @@ impl CorrectionCompactionBackend {
                 }),
                 ev_completed_with_tokens(response_id, /*total_tokens*/ 1),
             ]),
-            Self::LegacyRemote => panic!("legacy remote compaction uses /responses/compact"),
         }
     }
 }
@@ -3685,7 +3675,6 @@ async fn project_validation_steering_during_rerun_does_not_reopen_correction_cyc
 }
 
 #[test_case(CorrectionCompactionBackend::Local; "local")]
-#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
 #[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_validation_interrupt_during_correction_prevents_rerun(
@@ -3704,29 +3693,13 @@ async fn project_validation_interrupt_during_correction_prevents_rerun(
         ev_response_created("resp-1"),
         ev_completed_with_tokens("resp-1", /*total_tokens*/ 100),
     ]))];
-    if !backend.is_legacy_remote() {
-        response_templates.push(
-            responses::sse_response(
-                backend.compaction_response("compact-1", "compacted correction context"),
-            )
-            .set_delay(Duration::from_secs(30)),
-        );
-    }
-    let response_mock = responses::mount_response_sequence(&server, response_templates).await;
-    let compact_mock = if backend.is_legacy_remote() {
-        Some(
-            responses::mount_compact_response_once(
-                &server,
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "application/json")
-                    .set_body_json(serde_json::json!({ "output": [] }))
-                    .set_delay(Duration::from_secs(30)),
-            )
-            .await,
+    response_templates.push(
+        responses::sse_response(
+            backend.compaction_response("compact-1", "compacted correction context"),
         )
-    } else {
-        None
-    };
+        .set_delay(Duration::from_secs(30)),
+    );
+    let response_mock = responses::mount_response_sequence(&server, response_templates).await;
     let mut builder = test_codex().with_config(move |config| {
         config.validation.project_command = Some(command);
         config.model_auto_compact_token_limit = Some(10);
@@ -3748,17 +3721,12 @@ async fn project_validation_interrupt_during_correction_prevents_rerun(
         first_validation,
         EventMsg::ProjectValidationCompleted(_)
     ));
-    let compaction_request = if let Some(compact_mock) = compact_mock.as_ref() {
-        wait_for_recorded_requests(compact_mock, /*count*/ 1).await?;
-        compact_mock.single_request()
-    } else {
-        wait_for_recorded_requests(&response_mock, /*count*/ 2).await?;
-        response_mock
-            .requests()
-            .into_iter()
-            .nth(1)
-            .expect("compaction request")
-    };
+    wait_for_recorded_requests(&response_mock, /*count*/ 2).await?;
+    let compaction_request = response_mock
+        .requests()
+        .into_iter()
+        .nth(1)
+        .expect("compaction request");
     assert_active_project_validation_correction(&compaction_request.message_input_texts("user"));
 
     test.codex.submit(Op::Interrupt).await?;
@@ -3772,10 +3740,7 @@ async fn project_validation_interrupt_during_correction_prevents_rerun(
         std::fs::read_to_string(test.codex.rollout_path().context("rollout path")?)?;
     assert!(in_flight_rollout.contains("<project_validation_failure>"));
     assert!(in_flight_rollout.contains("<project_validation_correction_consumed>"));
-    assert_eq!(
-        response_mock.requests().len(),
-        usize::from(!backend.is_legacy_remote()) + 1
-    );
+    assert_eq!(response_mock.requests().len(), 2);
     let rollout_path = test.codex.rollout_path().context("rollout path")?;
     let home = Arc::clone(&test.home);
     let resumed_cwd = test.config.cwd.clone();
@@ -3807,7 +3772,6 @@ async fn project_validation_interrupt_during_correction_prevents_rerun(
 }
 
 #[test_case(CorrectionCompactionBackend::Local; "local")]
-#[test_case(CorrectionCompactionBackend::LegacyRemote; "legacy_remote")]
 #[test_case(CorrectionCompactionBackend::RemoteV2; "remote_v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_validation_correction_survives_pre_turn_compaction(
@@ -3826,26 +3790,12 @@ async fn project_validation_correction_survives_pre_turn_compaction(
         ev_response_created("initial-response"),
         ev_completed_with_tokens("initial-response", /*total_tokens*/ 100),
     ])];
-    if !backend.is_legacy_remote() {
-        responses
-            .push(backend.compaction_response("compact-response", "compacted correction context"));
-    }
+    responses.push(backend.compaction_response("compact-response", "compacted correction context"));
     responses.push(responses::sse(vec![
         ev_response_created("correction-response"),
         ev_completed_with_tokens("correction-response", /*total_tokens*/ 1),
     ]));
     let response_mock = responses::mount_sse_sequence(&server, responses).await;
-    let compact_mock = if backend.is_legacy_remote() {
-        Some(
-            responses::mount_compact_user_history_with_summary_once(
-                &server,
-                "compacted correction context",
-            )
-            .await,
-        )
-    } else {
-        None
-    };
     let mut builder = test_codex().with_config(move |config| {
         config.validation.project_command = Some(command);
         config.model_auto_compact_token_limit = Some(10);
@@ -3857,15 +3807,8 @@ async fn project_validation_correction_survives_pre_turn_compaction(
     collect_events_until_terminal(&test.codex).await?;
 
     let requests = response_mock.requests();
-    let correction_request_index = if let Some(compact_mock) = compact_mock {
-        assert_active_project_validation_correction(
-            &compact_mock.single_request().message_input_texts("user"),
-        );
-        1
-    } else {
-        assert_active_project_validation_correction(&requests[1].message_input_texts("user"));
-        2
-    };
+    assert_active_project_validation_correction(&requests[1].message_input_texts("user"));
+    let correction_request_index = 2;
     assert_active_project_validation_correction(
         &requests[correction_request_index].message_input_texts("user"),
     );

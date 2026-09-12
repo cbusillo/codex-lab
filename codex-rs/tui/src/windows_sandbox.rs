@@ -2,13 +2,14 @@
 //!
 //! TODO: These helpers inspect and modify the TUI host, so they do not support
 //! cross-platform remote app servers. Move readiness and setup to the existing
-//! `windowsSandbox/*` RPCs while preserving the pending permission profile,
-//! use the server platform reported during initialization, and add a remote
-//! equivalent for read-root grants.
+//! `windowsSandbox/*` RPCs while preserving the pending permission profile and
+//! using the server platform reported during initialization.
 
 use crate::legacy_core::config::Config;
 use codex_config::types::WindowsSandboxModeToml;
 use codex_features::Feature;
+#[cfg(target_os = "windows")]
+use codex_otel::SessionTelemetry;
 use codex_protocol::config_types::WindowsSandboxLevel;
 #[cfg(target_os = "windows")]
 use codex_protocol::models::PermissionProfile;
@@ -17,8 +18,22 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(target_os = "windows")]
 use std::collections::HashMap;
 use std::path::Path;
+
 #[cfg(target_os = "windows")]
-use std::path::PathBuf;
+pub(crate) fn record_world_writable_scan_result(
+    session_telemetry: &SessionTelemetry,
+    result: &anyhow::Result<usize>,
+) {
+    let (flagged_count, result) = match result {
+        Ok(flagged_count) => (*flagged_count as i64, "success"),
+        Err(_) => (0, "error"),
+    };
+    session_telemetry.histogram(
+        "codex.windows_sandbox.world_writable_scan_flagged_directories",
+        flagged_count,
+        &[("result", result)],
+    );
+}
 
 pub(crate) fn level_from_config(config: &Config) -> WindowsSandboxLevel {
     match config.permissions.windows_sandbox_mode {
@@ -43,26 +58,33 @@ pub(crate) fn sandbox_setup_is_complete(_codex_home: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn run_elevated_setup(
+pub(crate) fn prepare_elevated_sandbox(
     permission_profile: &PermissionProfile,
     workspace_roots: &[AbsolutePathBuf],
     command_cwd: &Path,
     env_map: &HashMap<String, String>,
     codex_home: &Path,
 ) -> anyhow::Result<()> {
-    let permissions = codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
-        permission_profile,
-        workspace_roots,
-    )?;
-    codex_windows_sandbox::run_elevated_setup(
-        codex_windows_sandbox::SandboxSetupRequest {
+    if !sandbox_setup_is_complete(codex_home) {
+        let permissions = codex_windows_sandbox::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
+            permission_profile,
+            workspace_roots,
+        )?;
+        codex_windows_sandbox::run_elevated_setup(codex_windows_sandbox::SandboxSetupRequest {
             permissions: &permissions,
             command_cwd,
             env_map,
             codex_home,
             proxy_enforced: false,
-        },
-        codex_windows_sandbox::SetupRootOverrides::default(),
+        })?;
+    }
+    codex_windows_sandbox::run_setup_refresh(
+        permission_profile,
+        workspace_roots,
+        command_cwd,
+        env_map,
+        codex_home,
+        /*proxy_enforced*/ false,
     )
 }
 
@@ -87,36 +109,4 @@ pub(crate) fn elevated_setup_failure_metric_name(err: &anyhow::Error) -> &'stati
     } else {
         "codex.windows_sandbox.elevated_setup_failure"
     }
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn grant_read_root_non_elevated(
-    permission_profile: &PermissionProfile,
-    workspace_roots: &[AbsolutePathBuf],
-    command_cwd: &Path,
-    env_map: &HashMap<String, String>,
-    codex_home: &Path,
-    read_root: &Path,
-) -> anyhow::Result<PathBuf> {
-    if !read_root.is_absolute() {
-        anyhow::bail!("path must be absolute: {}", read_root.display());
-    }
-    if !read_root.exists() {
-        anyhow::bail!("path does not exist: {}", read_root.display());
-    }
-    if !read_root.is_dir() {
-        anyhow::bail!("path must be a directory: {}", read_root.display());
-    }
-
-    let canonical_root = dunce::canonicalize(read_root)?;
-    codex_windows_sandbox::run_setup_refresh_with_extra_read_roots(
-        permission_profile,
-        workspace_roots,
-        command_cwd,
-        env_map,
-        codex_home,
-        vec![canonical_root.clone()],
-        /*proxy_enforced*/ false,
-    )?;
-    Ok(canonical_root)
 }

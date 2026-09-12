@@ -380,7 +380,10 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
                 "codex-rs/app-server/tests/suite/v2/background_review_control.rs",
                 "AGENT-1",
             ),
-            ("codex-rs/app-server/tests/suite/v2/project_validation.rs", "VALIDATION-1"),
+            (
+                "codex-rs/app-server/tests/suite/v2/project_validation.rs",
+                "VALIDATION-1",
+            ),
         ):
             with self.subTest(path=path):
                 self.assert_owned(path, contract)
@@ -569,7 +572,9 @@ class CheckedInSnapshotTest(unittest.TestCase):
                     len(residuals["residuals"]),
                 )
                 residual_lane_counts = dict(
-                    sorted(Counter(item["lane"] for item in residuals["residuals"]).items())
+                    sorted(
+                        Counter(item["lane"] for item in residuals["residuals"]).items()
+                    )
                 )
                 self.assertEqual(
                     residual_lane_counts,

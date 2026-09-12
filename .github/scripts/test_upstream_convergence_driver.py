@@ -82,9 +82,7 @@ class RemoteIdentityTest(GitFixture):
     def test_preserves_nondefault_port_in_remote_identity(self) -> None:
         self.assertEqual(
             "https://github.com:444/openai/codex",
-            convergence.normalize_remote_url(
-                "https://github.com:444/openai/codex.git"
-            ),
+            convergence.normalize_remote_url("https://github.com:444/openai/codex.git"),
         )
 
     def test_rejects_insecure_remote_transport(self) -> None:
@@ -320,7 +318,15 @@ class RecordIntegrationTest(GitFixture):
 
         def cleanup() -> None:
             subprocess.run(
-                ["git", "-C", str(self.root), "worktree", "remove", "--force", str(linked)],
+                [
+                    "git",
+                    "-C",
+                    str(self.root),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(linked),
+                ],
                 capture_output=True,
                 text=True,
             )
@@ -352,7 +358,9 @@ class RecordIntegrationTest(GitFixture):
             sorted(path.name for path in snapshot.iterdir()),
         )
         document = json.loads((snapshot / "inventory.json").read_text(encoding="utf-8"))
-        self.assertEqual(convergence.inventory.POLICY_VERSION, document["policy"]["version"])
+        self.assertEqual(
+            convergence.inventory.POLICY_VERSION, document["policy"]["version"]
+        )
         run(linked, "add", str(snapshot.relative_to(linked)))
         run(linked, "commit", "-m", "record snapshot")
         change_errors, added, existing = convergence.snapshot_change_analysis(
@@ -372,14 +380,20 @@ class RecordIntegrationTest(GitFixture):
                 existing,
             ),
         )
-        with self.assertRaisesRegex(convergence.ConvergenceError, "snapshot already exists"):
+        with self.assertRaisesRegex(
+            convergence.ConvergenceError, "snapshot already exists"
+        ):
             convergence.record(linked, self.policy, base, upstream, local)
 
-    def test_rejects_generated_snapshot_over_size_limit_before_publication(self) -> None:
+    def test_rejects_generated_snapshot_over_size_limit_before_publication(
+        self,
+    ) -> None:
         linked, base, upstream, local = self.make_linked_candidate()
 
         with patch.object(convergence, "MAX_SNAPSHOT_FILE_BYTES", 1):
-            with self.assertRaisesRegex(convergence.ConvergenceError, "generated snapshot"):
+            with self.assertRaisesRegex(
+                convergence.ConvergenceError, "generated snapshot"
+            ):
                 convergence.record(linked, self.policy, base, upstream, local)
 
         evidence_root = linked / self.policy.evidence_root
@@ -422,11 +436,15 @@ class SafetyStateTest(unittest.TestCase):
         return state
 
     def test_inspection_rejects_shallow_history(self) -> None:
-        with self.assertRaisesRegex(convergence.ConvergenceError, "complete Git history"):
+        with self.assertRaisesRegex(
+            convergence.ConvergenceError, "complete Git history"
+        ):
             convergence.require_read_safety(self.state(shallow=True))
 
     def test_inspection_rejects_dirty_worktree(self) -> None:
-        with self.assertRaisesRegex(convergence.ConvergenceError, "worktree must be clean"):
+        with self.assertRaisesRegex(
+            convergence.ConvergenceError, "worktree must be clean"
+        ):
             convergence.require_read_safety(self.state(clean=False))
 
     def test_inspection_rejects_replacement_refs(self) -> None:
@@ -438,11 +456,7 @@ class SafetyStateTest(unittest.TestCase):
 
 class SnapshotAvailabilityTest(GitFixture):
     def write_snapshot(self) -> Path:
-        snapshot = (
-            self.root
-            / self.policy.evidence_root
-            / "aaaaaaaa-bbbbbbbb"
-        )
+        snapshot = self.root / self.policy.evidence_root / "aaaaaaaa-bbbbbbbb"
         snapshot.mkdir(parents=True)
         (snapshot / "inventory.json").write_text(
             json.dumps(
@@ -522,9 +536,7 @@ class SnapshotAvailabilityTest(GitFixture):
 
 class CheckedInSnapshotTest(unittest.TestCase):
     def test_checked_in_snapshots_are_valid(self) -> None:
-        policy = governance.load_policy(
-            convergence.POLICY_PATH, convergence.REPO_ROOT
-        )
+        policy = governance.load_policy(convergence.POLICY_PATH, convergence.REPO_ROOT)
 
         report = convergence.validate_snapshots(convergence.REPO_ROOT, policy)
 

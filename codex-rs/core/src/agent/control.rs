@@ -20,6 +20,7 @@ use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
+use crate::session::multi_agents::ResolvedMultiAgentV2UsageHints;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
@@ -28,6 +29,7 @@ use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::default_thread_id_generator;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use crate::turn_timing::now_unix_timestamp_ms;
+use arc_swap::ArcSwapOption;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
@@ -55,6 +57,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
@@ -76,8 +79,12 @@ mod execution;
 mod external;
 mod legacy;
 mod residency;
+mod service_tier;
 mod spawn;
 mod user_authorization;
+
+const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
+const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -95,6 +102,8 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) external_agent_provider: Option<ExternalAgentProviderProvenance>,
     pub(crate) external_agent_routing: Option<ProviderRoutingSummary>,
+    pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+    pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,8 +138,7 @@ pub(crate) const EXTERNAL_AGENT_FOLLOWUP_UNSUPPORTED: &str = "external command a
 /// which keeps the registry scoped to that root thread rather than the entire `ThreadManager`.
 #[derive(Clone)]
 pub(crate) struct AgentControl {
-    /// ID shared by the whole agent control session. This means every sub-agents from a common
-    /// root share the same session ID.
+    /// session_id is equal to the root thread's ID.
     session_id: SessionId,
     /// Weak handle back to the global thread registry/state.
     /// This is `Weak` to avoid reference cycles and shadow persistence of the form
@@ -143,6 +151,8 @@ pub(crate) struct AgentControl {
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
+    /// The user-selected root routing tier, shared by the entire agent tree.
+    root_service_tier: Arc<ArcSwapOption<String>>,
 }
 
 impl Default for AgentControl {
@@ -170,6 +180,7 @@ impl AgentControl {
             v2_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
             rollout_budget: Arc::default(),
+            root_service_tier: Arc::new(ArcSwapOption::from(None)),
         };
         if let Some(rollout_budget) = rollout_budget {
             control.rollout_budget.configure(rollout_budget);
@@ -214,20 +225,13 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         input: Vec<UserInput>,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.ensure_followup_supported(agent_id)?;
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
-            .start_or_steer_turn(
-                TurnInputRequest::user_input(input).on_start(TurnStartOptions {
-                    parent_turn_id,
-                    root_turn_id,
-                    ..Default::default()
-                }),
-            )
+            .start_or_steer_turn(TurnInputRequest::user_input(input).on_start(start_options))
             .await
         {
             Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
@@ -252,8 +256,7 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.ensure_followup_supported(agent_id)?;
         let state = self.upgrade()?;
@@ -267,8 +270,7 @@ impl AgentControl {
             &state,
             communication,
             agent_communication_context,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
@@ -328,16 +330,14 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.submit_inter_agent_communication(
             agent_id,
             state,
             communication,
             context,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
@@ -348,13 +348,18 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
-        let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
-        let root_turn_id = root_turn_id.filter(|_| communication.trigger_turn);
+        let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
+            (
+                start_options.parent_turn_id.clone(),
+                start_options.root_turn_id.clone(),
+            )
+        } else {
+            (None, None)
+        };
         let result = self
             .handle_thread_request_result(
                 agent_id,
@@ -362,7 +367,10 @@ impl AgentControl {
                 state
                     .send_op(
                         agent_id,
-                        Op::InterAgentCommunication { communication },
+                        Op::InterAgentCommunication {
+                            communication,
+                            start_options,
+                        },
                         parent_turn_id,
                         root_turn_id,
                     )
@@ -522,23 +530,70 @@ impl AgentControl {
     pub(crate) async fn format_environment_context_subagents(
         &self,
         parent_thread_id: ThreadId,
+        multi_agent_version: MultiAgentVersion,
     ) -> String {
-        let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
+        if multi_agent_version != MultiAgentVersion::V2 {
+            let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
+                return String::new();
+            };
+            return agents
+                .into_iter()
+                .map(|(thread_id, metadata)| {
+                    let reference = metadata
+                        .agent_path
+                        .as_ref()
+                        .map(|path| path.name().to_string())
+                        .unwrap_or_else(|| thread_id.to_string());
+                    format_subagent_context_line(&reference, metadata.agent_nickname.as_deref())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+
+        let Some(parent_path) = self
+            .state
+            .agent_metadata_for_thread(parent_thread_id)
+            .and_then(|metadata| metadata.agent_path)
+        else {
             return String::new();
         };
-
-        agents
+        let parent_prefix = format!("{parent_path}/");
+        let mut agent_paths = self
+            .state
+            .live_agents()
             .into_iter()
-            .map(|(thread_id, metadata)| {
-                let reference = metadata
-                    .agent_path
-                    .as_ref()
-                    .map(|agent_path| agent_path.name().to_string())
-                    .unwrap_or_else(|| thread_id.to_string());
-                format_subagent_context_line(reference.as_str(), metadata.agent_nickname.as_deref())
+            .filter_map(|metadata| metadata.agent_path)
+            .filter(|path| {
+                path.as_str()
+                    .strip_prefix(&parent_prefix)
+                    .is_some_and(|name| !name.contains('/'))
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect::<Vec<_>>();
+        let loaded_paths = self
+            .open_thread_spawn_children(parent_thread_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(_, metadata)| metadata.agent_path)
+            .collect::<HashSet<_>>();
+        agent_paths.sort();
+        // Stable sorting preserves alphabetical order within each group.
+        agent_paths.sort_by_key(|path| !loaded_paths.contains(path));
+
+        let mut lines = Vec::with_capacity(agent_paths.len().min(MAX_ENVIRONMENT_SUBAGENTS));
+        let mut rendered_bytes = "  <subagents>\n  </subagents>\n".len();
+        for agent_path in agent_paths {
+            if lines.len() == MAX_ENVIRONMENT_SUBAGENTS {
+                break;
+            }
+            let line = format!(r#"<agent name="{agent_path}" />"#);
+            let line_bytes = "    \n".len() + line.len();
+            if rendered_bytes + line_bytes <= MAX_ENVIRONMENT_SUBAGENT_BYTES {
+                rendered_bytes += line_bytes;
+                lines.push(line);
+            }
+        }
+        lines.join("\n")
     }
 
     pub(crate) async fn list_agents(
@@ -720,8 +775,7 @@ impl AgentControl {
                         parent_thread_id,
                         communication,
                         context,
-                        /*parent_turn_id*/ None,
-                        /*root_turn_id*/ None,
+                        TurnStartOptions::default(),
                     )
                     .await;
                 return;

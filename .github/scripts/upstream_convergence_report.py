@@ -51,7 +51,10 @@ def commit_exists(commit: str) -> bool:
 
 
 def ref_is_ancestor(ancestor: str, descendant: str) -> bool:
-    return run_git_result("merge-base", "--is-ancestor", ancestor, descendant).returncode == 0
+    return (
+        run_git_result("merge-base", "--is-ancestor", ancestor, descendant).returncode
+        == 0
+    )
 
 
 def snapshot_inventory(path: str, integration_ref: str) -> dict[str, object]:
@@ -100,12 +103,15 @@ def unique_ancestry_tip(records: list[dict[str, object]]) -> dict[str, object]:
     for record in records:
         upstream = str(record["upstream"])
         if not any(
-            upstream != str(other["upstream"]) and ref_is_ancestor(upstream, str(other["upstream"]))
+            upstream != str(other["upstream"])
+            and ref_is_ancestor(upstream, str(other["upstream"]))
             for other in records
         ):
             tips.append(record)
     if len(tips) != 1:
-        raise ValueError("ambiguous snapshot provenance: latest integrated snapshot is not unique")
+        raise ValueError(
+            "ambiguous snapshot provenance: latest integrated snapshot is not unique"
+        )
     return tips[0]
 
 
@@ -167,9 +173,7 @@ def collect_cycle_telemetry(now: datetime) -> dict[str, object]:
         if not value
     ]
     if missing:
-        raise ValueError(
-            f"missing inspection telemetry: {', '.join(missing)}"
-        )
+        raise ValueError(f"missing inspection telemetry: {', '.join(missing)}")
     run_attempt_number = int(run_attempt)
     if run_attempt_number < 1:
         raise ValueError("run attempt must be positive")
@@ -217,14 +221,18 @@ def build_candidate_gate(
     latest_snapshot = resolve_latest_integrated_snapshot()
     snapshot_upstream = latest_snapshot["refs"]["upstream"]
     if not commit_exists(snapshot_upstream):
-        raise ValueError(f"latest snapshot upstream is unavailable: {snapshot_upstream}")
+        raise ValueError(
+            f"latest snapshot upstream is unavailable: {snapshot_upstream}"
+        )
     if not commit_exists(upstream):
         raise ValueError(f"current upstream is unavailable: {upstream}")
     if not ref_is_ancestor(snapshot_upstream, upstream):
         raise ValueError(
             "latest integrated snapshot is not an ancestor of current upstream"
         )
-    upstream_commits = int(run_git("rev-list", "--count", f"{snapshot_upstream}..{upstream}"))
+    upstream_commits = int(
+        run_git("rev-list", "--count", f"{snapshot_upstream}..{upstream}")
+    )
     recorded_at = parse_timestamp(str(latest_snapshot["recordedAt"]))
     age_hours = max(0.0, (now - recorded_at).total_seconds() / 3600.0)
     reasons = []
@@ -326,7 +334,9 @@ def build_report(
             f"{previous_report_age_hours:.1f} hours exceeds {max_report_age_hours}-hour threshold"
         )
     if candidate_gate["due"]:
-        alerts.extend(f"candidate due: {reason}" for reason in candidate_gate["reasons"])
+        alerts.extend(
+            f"candidate due: {reason}" for reason in candidate_gate["reasons"]
+        )
     if candidate_gate["status"] == "error":
         alerts.append(f"candidate gate error: {candidate_gate['error']}")
 

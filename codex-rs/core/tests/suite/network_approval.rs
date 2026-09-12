@@ -3,11 +3,13 @@ use anyhow::Result;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::EnvironmentConfig;
 use codex_core::EnvironmentNetworkPolicy;
+use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::config::Constrained;
 use codex_core::config::NetworkProxySpec;
 use codex_core::shell::ShellType;
 use codex_core::shell::get_shell;
+use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
@@ -21,6 +23,7 @@ use codex_protocol::approvals::NetworkPolicyRuleAction;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
@@ -885,7 +888,7 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
     assert_eq!(approval.approval_id.as_deref(), None);
     let first_approval_call_id = approval.call_id.clone();
     assert!(!approval.turn_id.is_empty());
-    assert_eq!(approval.cwd, test.config.cwd);
+    assert_eq!(approval.cwd, test.config.cwd.clone().into());
     assert_eq!(
         approval.reason.as_deref(),
         Some("codex-network-test.invalid is not in the allowed_domains")
@@ -1385,7 +1388,7 @@ async fn unattributed_network_request_uses_active_turn_environment_fallback() ->
     let proxy_request = tokio::spawn(raw_http_proxy_request(proxy_addr, NETWORK_TEST_HOST));
     let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
     assert_eq!(approval.command, ["network-access", NETWORK_TEST_TARGET]);
-    assert_eq!(approval.cwd, test.config.cwd);
+    assert_eq!(approval.cwd, test.config.cwd.clone().into());
     test.codex
         .submit(Op::ExecApproval {
             id: approval.effective_approval_id(),
@@ -1501,6 +1504,104 @@ async fn ambiguous_unattributed_network_request_is_not_assigned_to_active_calls(
     .await
     .context("timed out waiting for background terminal cleanup")?;
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thread_turnover_closes_managed_proxy_tunnels() -> Result<()> {
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_test(&server).await?;
+    let mut config = test.config.clone();
+    let mut network = NetworkProxyConfig {
+        enabled: true,
+        mode: codex_network_proxy::NetworkMode::Full,
+        allow_local_binding: true,
+        allow_upstream_proxy: false,
+        ..NetworkProxyConfig::default()
+    };
+    network.set_allowed_domains(vec!["127.0.0.1".to_string()]);
+    config.permissions.network = Some(NetworkProxySpec::from_config_and_constraints(
+        network,
+        /*requirements*/ None,
+        config.permissions.permission_profile(),
+    )?);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let target = listener.local_addr()?;
+
+    for cycle in 0..3 {
+        let started = test
+            .thread_manager
+            .start_thread(StartThreadOptions::new(config.clone()))
+            .await?;
+        let proxy = started
+            .session_configured
+            .network_proxy
+            .as_ref()
+            .context("expected managed network proxy for new thread")?;
+        let (mut client, upstream) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut client = tokio::net::TcpStream::connect(&proxy.http_addr).await?;
+            client
+                .write_all(
+                    format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+                )
+                .await?;
+            let (mut upstream, _) = listener.accept().await?;
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(client.read_u8().await?);
+            }
+            let headers = String::from_utf8(headers)?;
+            assert!(headers.starts_with("HTTP/1.1 200 "), "{headers:?}");
+            client.write_all(b"request").await?;
+            client.shutdown().await?;
+            let mut request = Vec::new();
+            upstream.read_to_end(&mut request).await?;
+            assert_eq!(request, b"request");
+            // Preserve valid half-close behavior while the thread is alive; its
+            // upstream peer deliberately keeps the write half open through unload.
+            upstream.write_all(b"response").await?;
+            let mut response = [0_u8; 8];
+            client.read_exact(&mut response).await?;
+            assert_eq!(&response, b"response");
+            Ok::<_, anyhow::Error>((client, upstream))
+        })
+        .await
+        .with_context(|| {
+            format!("thread cycle {cycle} did not establish a half-closed tunnel")
+        })??;
+
+        tokio::time::timeout(Duration::from_secs(5), started.thread.shutdown_and_wait())
+            .await
+            .with_context(|| format!("thread cycle {cycle} did not shut down"))??;
+        // Unloading releases both the manager's and caller's strong session owners.
+        drop(
+            test.thread_manager
+                .remove_thread(&started.thread_id)
+                .await
+                .context("expected stopped thread in manager")?,
+        );
+        drop(started);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), client.read(&mut [0_u8; 1]))
+            .await
+            .with_context(|| format!("thread cycle {cycle} retained its tunnel after unload"))?;
+        match result {
+            Ok(bytes) => assert_eq!(bytes, 0),
+            Err(error) => assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ),
+                "unexpected tunnel error after thread unload: {error}"
+            ),
+        }
+        drop(upstream);
+    }
+    test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -2018,12 +2119,19 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
             proxy_config.set_allowed_domains(vec![allowed_domain.to_string()]);
             let owner_config = EnvironmentConfig {
                 allow_login_shell: test.config.permissions.allow_login_shell,
+                workspace_roots: remote.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(if restricted {
                     PermissionProfile::workspace_write()
                 } else {
                     test.config.permissions.permission_profile().clone()
                 }),
                 shell_environment_policy: test.config.permissions.shell_environment_policy.clone(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
+                windows_sandbox_private_desktop: test
+                    .config
+                    .permissions
+                    .windows_sandbox_private_desktop,
+                use_legacy_landlock: test.config.features.use_legacy_landlock(),
                 exec_policy: None,
                 mcp_policy: None,
                 network_policy: Some(EnvironmentNetworkPolicy::from_config(
@@ -2034,6 +2142,7 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
             };
             let mut primary = local(test.cwd.path().abs());
             primary.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+                workspace_roots: primary.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
                 network_policy: None,
                 ..owner_config.clone()

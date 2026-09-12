@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
+  # --- Detect changed paths so the fast PR workflow only runs relevant jobs ---
   changed:
     name: Detect changed areas
     runs-on: macos-26
@@ -44,6 +44,8 @@ jobs:
           for f in "${files[@]}"; do
             [[ $f == codex-rs/* || $f == justfile || $f == .github/workflows/rust-ci.yml ]] && codex=true
             [[ $f == scripts/local/feedback_latency.py ]] && codex=true
+            [[ $f == third_party/voice/* || $f == patches/* || $f == BUILD.bazel || $f == .bazelrc || $f == .bazelversion || $f == MODULE.bazel || $f == MODULE.bazel.lock ]] && codex=true
+            [[ $f == .github/actions/setup-voice-sdk/* || $f == .github/scripts/voice_sdk_ci.py || $f == .github/scripts/test_voice_sdk_ci.py ]] && codex=true
             [[ $f == .github/actions/setup-rusty-v8/* || $f == .github/scripts/local_build_resources.py || $f == .github/scripts/run_bazel_with_buildbuddy.py || $f == .github/scripts/rusty_v8_bazel.py || $f == .github/scripts/rusty_v8_module_bazel.py || $f == third_party/v8/rusty_v8_*_codex_release.sha256 ]] && codex=true
             [[ $f == tools/argument-comment-lint/* || $f == .github/workflows/rust-ci.yml || $f == .github/workflows/rust-ci-full.yml || $f == .github/workflows/rust-ci-full-argument-comment-lint.yml ]] && argument_comment_lint_package=true
             [[ $f == .github/* ]] && workflows=true
@@ -160,6 +162,13 @@ jobs:
           echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
           echo "Compiler cache UTC-day bucket: $cache_day"
           echo "Compiler cache save permitted: $may_save"
+      - name: Configure pinned voice SDK
+        id: voice_sdk
+        uses: ./.github/actions/setup-voice-sdk
+        with:
+          target: aarch64-apple-darwin
+          toolchain-key: ${{ steps.toolchain.outputs.cachekey }}
+          may-save: ${{ steps.compiler_cache_scope.outputs.may-save }}
       # sccache writes to a bounded local directory. actions/cache owns
       # persistence. Each compatibility tuple gets at most one immutable main
       # archive per UTC day; pull requests and other events are restore-only.
@@ -168,9 +177,9 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ runner.temp }}/sccache/
-          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-${{ steps.compiler_cache_scope.outputs.cache-day }}
+          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-voice-${{ steps.voice_sdk.outputs.key }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-${{ steps.compiler_cache_scope.outputs.cache-day }}
           restore-keys: |
-            sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-
+            sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-voice-${{ steps.voice_sdk.outputs.key }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-
       - name: Install sccache
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
@@ -232,7 +241,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ runner.temp }}/sccache/
-          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-${{ steps.compiler_cache_scope.outputs.cache-day }}
+          key: sccache-v0.7.5-v1-${{ steps.setup_ci.outputs.cache-scope }}-${{ runner.os }}-${{ runner.arch }}-aarch64-apple-darwin-dev-toolchain-${{ steps.toolchain.outputs.cachekey }}-voice-${{ steps.voice_sdk.outputs.key }}-toolchain-file-${{ hashFiles('codex-rs/rust-toolchain.toml') }}-lock-${{ hashFiles('codex-rs/Cargo.lock') }}-trusted-main-${{ steps.compiler_cache_scope.outputs.cache-day }}
 
       - name: Upload Rust feedback evidence
         if: always() && !cancelled()

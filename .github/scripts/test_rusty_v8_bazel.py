@@ -167,70 +167,6 @@ class RustyV8BazelTest(unittest.TestCase):
             ),
         )
 
-    def test_write_release_checksums_selects_target_pair(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            manifest = root / "release.sha256"
-            output = root / "target.sha256"
-            manifest.write_text(
-                "a" * 64
-                + "  librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz\n"
-                + "b" * 64
-                + "  src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs\n"
-                + "c" * 64
-                + "  librusty_v8_ptrcomp_sandbox_release_x86_64-apple-darwin.a.gz\n",
-                encoding="utf-8",
-            )
-
-            rusty_v8_bazel.write_release_checksums(
-                "aarch64-apple-darwin",
-                manifest,
-                output,
-            )
-
-            self.assertEqual(
-                "a" * 64
-                + "  librusty_v8_ptrcomp_sandbox_release_aarch64-apple-darwin.a.gz\n"
-                + "b" * 64
-                + "  src_binding_ptrcomp_sandbox_release_aarch64-apple-darwin.rs\n",
-                output.read_text(encoding="utf-8"),
-            )
-
-    def test_codex_release_manifest_covers_supported_targets(self) -> None:
-        version = rusty_v8_bazel.resolved_v8_crate_version()
-        manifest = (
-            rusty_v8_bazel.RUSTY_V8_CHECKSUMS_DIR
-            / f"rusty_v8_{version.replace('.', '_')}_codex_release.sha256"
-        )
-        checksums = rusty_v8_module_bazel.parse_checksum_manifest(manifest)
-        targets = (
-            "aarch64-apple-darwin",
-            "x86_64-apple-darwin",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-musl",
-            "x86_64-unknown-linux-musl",
-            "aarch64-pc-windows-msvc",
-            "x86_64-pc-windows-msvc",
-        )
-        expected_names = {
-            name
-            for target in targets
-            for name in (
-                rusty_v8_bazel.staged_archive_name(
-                    target,
-                    Path(),
-                    rusty_v8_bazel.SANDBOX_ARTIFACT_PROFILE,
-                ),
-                rusty_v8_bazel.staged_binding_name(
-                    target,
-                    rusty_v8_bazel.SANDBOX_ARTIFACT_PROFILE,
-                ),
-            )
-        }
-
-        self.assertEqual(expected_names, set(checksums))
-
     def test_stage_artifacts(self) -> None:
         with TemporaryDirectory() as source_dir, TemporaryDirectory() as output_dir:
             source_root = Path(source_dir)
@@ -300,12 +236,7 @@ class RustyV8BazelTest(unittest.TestCase):
             TemporaryDirectory() as target_dir,
             TemporaryDirectory() as output_dir,
         ):
-            gn_out = (
-                Path(target_dir)
-                / "x86_64-pc-windows-msvc"
-                / "release"
-                / "gn_out"
-            )
+            gn_out = Path(target_dir) / "x86_64-pc-windows-msvc" / "release" / "gn_out"
             (gn_out / "obj").mkdir(parents=True)
             (gn_out / "obj" / "rusty_v8.lib").write_bytes(b"archive")
             (gn_out / "src_binding.rs").write_text("binding")

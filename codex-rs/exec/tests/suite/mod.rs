@@ -19,3 +19,4 @@ mod sandbox;
 mod seatbelt;
 mod server_error_exit;
 mod shared_cli_options;
+mod worktree;

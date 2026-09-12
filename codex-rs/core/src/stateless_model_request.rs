@@ -207,7 +207,7 @@ pub(crate) async fn run_stateless_model_request(
                 break;
             }
             ResponseEvent::ServerModel(model) => response_model = model,
-            ResponseEvent::Created
+            ResponseEvent::Created { .. }
             | ResponseEvent::SafetyBuffering(_)
             | ResponseEvent::OutputItemAdded(_)
             | ResponseEvent::ModelVerifications(_)

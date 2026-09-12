@@ -57,7 +57,7 @@ pub(crate) async fn run_codex_thread_interactive(
     cancel_token: CancellationToken,
     subagent_source: SubAgentSource,
     initial_history: Option<InitialHistory>,
-    thread_extension_init: codex_extension_api::ExtensionDataInit,
+    mut thread_extension_init: codex_extension_api::ExtensionDataInit,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
@@ -72,8 +72,6 @@ pub(crate) async fn run_codex_thread_interactive(
         .model_client
         .responses_websocket_enabled();
 
-    let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
-    let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let conversation_history = initial_history.unwrap_or(InitialHistory::New);
     let forked_from_thread_id = conversation_history.forked_from_id();
     let user_instructions = LoadedUserInstructions {
@@ -87,13 +85,17 @@ pub(crate) async fn run_codex_thread_interactive(
     } else {
         Arc::clone(&parent_session.services.extensions)
     };
-    let (session, io) = Box::pin(Session::spawn(SessionSpawnArgs {
+    // Inline delegates never register with ThreadManager or receive on_thread_ready.
+    // Bind their standalone spawn path before inherited extensions run.
+    thread_extension_init.insert(crate::guardian::GuardianReviewSessionHost::default());
+    let (session, io) = Session::spawn(SessionSpawnArgs {
         config,
         allow_provider_model_fallback: false,
         user_instructions,
         installation_id: parent_session.installation_id.clone(),
         auth_manager,
         models_manager,
+        git_root_discovery: Arc::clone(&parent_session.services.git_root_discovery),
         environment_manager: parent_session
             .services
             .turn_environments
@@ -107,6 +109,7 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions,
         conversation_history,
+        disabled_plugin_ids: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,
@@ -138,7 +141,7 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_multi_agent_version: Some(MultiAgentVersion::Disabled),
         git_enrichment_policy,
         windows_sandbox_proxy_settings_mode,
-    }))
+    })
     .or_cancel(&cancel_token)
     .await??;
     let thread_config = session.thread_config_snapshot().await;
@@ -152,12 +155,18 @@ pub(crate) async fn run_codex_thread_interactive(
         thread_config,
         subagent_source,
     );
+    Ok((session, forward_session_io(Arc::new(io), cancel_token)))
+}
+
+/// Keeps delegate IO cancellation identical for standalone and manager-owned reviewers.
+pub(crate) fn forward_session_io(io: Arc<SessionIo>, cancel_token: CancellationToken) -> SessionIo {
+    let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+    let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     // Use a child token so parent cancel cascades but we can scope it to this task
     let cancel_token_events = cancel_token.child_token();
     let cancel_token_ops = cancel_token.child_token();
 
     // Forward public events from the sub-agent to the consumer.
-    let io = Arc::new(io);
     let caller_io = SessionIo {
         tx_sub: tx_ops,
         rx_event: rx_sub,
@@ -174,7 +183,7 @@ pub(crate) async fn run_codex_thread_interactive(
         forward_ops(io, rx_ops, cancel_token_ops).await;
     });
 
-    Ok((session, caller_io))
+    caller_io
 }
 
 /// Convenience wrapper for one-time use with an initial prompt.
@@ -221,8 +230,10 @@ pub(crate) async fn run_codex_thread_one_shot(
         .submit_turn_input(
             TurnInputRequest::user_input(input).on_start(TurnStartOptions {
                 final_output_json_schema,
+                service_tier: None,
                 parent_turn_id: Some(parent_turn_id),
                 root_turn_id,
+                ..Default::default()
             }),
             TurnInputMode::StartIfIdle,
         )

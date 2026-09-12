@@ -26,6 +26,7 @@ pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
 pub use model::Project;
 pub use model::ProjectRoot;
+pub use model::ProjectSortKey;
 pub use model::ProjectsPage;
 pub use model::QueuedUserSubmissionRecord;
 pub use model::RolloutMigrationCursor;
@@ -42,6 +43,7 @@ pub use audit::read_thread_state_audit_rows;
 /// Most consumers should prefer [`StateRuntime`].
 pub use extract::apply_rollout_item;
 pub use extract::rollout_item_affects_thread_metadata;
+pub use model::AddThreadAttachmentOutcome;
 pub use model::Anchor;
 pub use model::BackfillState;
 pub use model::BackfillStats;
@@ -51,16 +53,15 @@ pub use model::ExternalAgentRun;
 pub use model::ExternalAgentRunOutcome;
 pub use model::ExternalAgentRunStart;
 pub use model::ExtractionOutcome;
+pub use model::RemoveThreadAttachmentOutcome;
 pub use model::SortDirection;
 pub use model::SortKey;
 pub use model::Stage1JobClaim;
 pub use model::Stage1JobClaimOutcome;
 pub use model::Stage1Output;
 pub use model::Stage1StartupClaimParams;
-pub use model::ThreadArtifact;
-pub use model::ThreadArtifactAttachmentOutcome;
-pub use model::ThreadArtifactPage;
-pub use model::ThreadArtifactRemovalOutcome;
+pub use model::ThreadAttachment;
+pub use model::ThreadAttachmentPage;
 pub use model::ThreadGoal;
 pub use model::ThreadGoalStatus;
 pub use model::ThreadMetadata;
@@ -81,6 +82,7 @@ pub use runtime::GoalUpdate;
 pub use runtime::MemoryStore;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
+pub use runtime::SqliteIntegrityCheck;
 pub use runtime::SqliteQueueStore;
 pub use runtime::ThreadFilterOptions;
 pub use runtime::backup_runtime_db_for_fresh_start;
@@ -99,6 +101,21 @@ pub use telemetry::record_fallback;
 
 /// Maximum number of pending user submissions permitted for one thread.
 pub const MAX_QUEUE_ITEMS: usize = 100;
+
+/// Maximum serialized size of one persisted thread-attachment payload.
+pub const MAX_THREAD_ATTACHMENT_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Maximum byte length of a persisted attachment type.
+pub const MAX_THREAD_ATTACHMENT_TYPE_BYTES: usize = 256;
+
+/// Maximum byte length of a persisted stable attachment identity key.
+pub const MAX_THREAD_ATTACHMENT_IDENTITY_KEY_BYTES: usize = 256;
+
+/// Maximum number of attachments returned in one page.
+pub const MAX_THREAD_ATTACHMENT_LIST_PAGE_SIZE: usize = 100;
+
+/// Maximum number of active attachments retained for one thread.
+pub const MAX_THREAD_ATTACHMENTS_PER_THREAD: usize = 100;
 
 /// Stable UUIDv7 identifying the built-in pinned thread section.
 pub const PINNED_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
@@ -121,3 +138,15 @@ pub const DB_INIT_METRIC: &str = "codex.sqlite.init.count";
 pub const DB_INIT_DURATION_METRIC: &str = "codex.sqlite.init.duration_ms";
 /// Rollout fallback attempts. Tags: [caller, reason]
 pub const DB_FALLBACK_METRIC: &str = "codex.sqlite.fallback.count";
+/// SQLite log batch write attempts. Tags: [status, error]
+pub const LOG_WRITE_METRIC: &str = "codex.sqlite.logs.write.count";
+/// SQLite log batch write latency. Tags: [status, error]
+pub const LOG_WRITE_DURATION_METRIC: &str = "codex.sqlite.logs.write.duration_ms";
+/// Estimated bytes in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_BYTES_METRIC: &str = "codex.sqlite.logs.write.bytes";
+/// Number of entries in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_ENTRIES_METRIC: &str = "codex.sqlite.logs.write.entries";
+/// Largest estimated entry size in each SQLite log batch. Tags: [status, error]
+pub const LOG_WRITE_MAX_ENTRY_BYTES_METRIC: &str = "codex.sqlite.logs.write.max_entry_bytes";
+/// SQLite log entries discarded before they can be queued. Tags: [reason]
+pub const LOG_QUEUE_DROPPED_METRIC: &str = "codex.sqlite.logs.queue.dropped";

@@ -175,7 +175,7 @@
         {
           "kind": "symbol",
           "path": "codex-rs/core/tests/suite/external_agent_preflight.rs",
-          "token": "async fn external_command_agent_routes_through_spawn_agent_with_provider_provenance()",
+          "token": "async fn external_command_agent_routes_plaintext_call_without_encryption_metadata()",
           "ciTier": "nightly"
         },
         {
@@ -326,6 +326,18 @@
     {
       "id": "VALIDATION-1",
       "evidence": [
+        {
+          "kind": "symbol",
+          "path": "codex-rs/rollout/src/policy.rs",
+          "token": "#[path = \"policy_tests.rs\"]",
+          "ciTier": "blocking"
+        },
+        {
+          "kind": "symbol",
+          "path": "codex-rs/rollout/src/policy_tests.rs",
+          "token": "fn project_validation_dispositions_are_persisted_in_all_history_modes()",
+          "ciTier": "nightly"
+        },
         {
           "kind": "file",
           "path": "codex-rs/core/tests/suite/project_validation.rs",

@@ -107,7 +107,10 @@ impl AgentControl {
                         "external_command agents require plaintext task content".to_string(),
                     ));
                 }
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication {
+                    communication,
+                    start_options: Default::default(),
+                }
             }
         };
         let thread_id = ThreadId::new();

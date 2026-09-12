@@ -23,10 +23,10 @@ use codex_login::default_client::create_client_for_route_async;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::ModelsEndpointClient;
 use codex_models_manager::manager::ModelsEndpointFuture;
+use codex_models_manager::manager::ModelsEndpointResponse;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
-use codex_protocol::openai_models::ModelInfo;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
@@ -77,10 +77,11 @@ impl OpenAiModelsEndpoint {
         &self,
         client_version: &str,
         http_client_factory: HttpClientFactory,
-    ) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
+    ) -> CoreResult<ModelsEndpointResponse> {
         let _timer =
             codex_otel::start_global_timer("codex.remote_models.fetch_update.duration_ms", &[]);
         let auth = self.auth().await;
+        let identity = crate::models_identity::identity(&self.provider_info, auth.as_ref())?;
         let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
         let mut api_provider = self.provider_info.to_api_provider(auth_mode)?;
         enforce_managed_residency(&mut api_provider);
@@ -100,7 +101,7 @@ impl OpenAiModelsEndpoint {
             agent_identity_telemetry,
             auth_env: self.auth_env(),
         });
-        timeout(MODELS_REFRESH_TIMEOUT, async {
+        let (models, etag) = timeout(MODELS_REFRESH_TIMEOUT, async {
             let transport = self
                 .transport_builder
                 .build(http_client_factory, request_url.clone())
@@ -118,7 +119,12 @@ impl OpenAiModelsEndpoint {
                 .map_err(map_api_error)
         })
         .await
-        .map_err(|_| CodexErr::Timeout)?
+        .map_err(|_| CodexErr::Timeout)??;
+        Ok(ModelsEndpointResponse {
+            models,
+            etag,
+            identity,
+        })
     }
 
     fn auth_env(&self) -> AuthEnvTelemetry {
@@ -135,6 +141,18 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_configured_credentials()
     }
 
+    fn identity(&self) -> Option<String> {
+        let auth = self
+            .auth_manager
+            .as_ref()
+            .and_then(|manager| manager.auth_cached());
+        crate::models_identity::identity(&self.provider_info, auth.as_ref()).ok()
+    }
+
+    fn has_command_auth(&self) -> bool {
+        self.provider_info.has_command_auth()
+    }
+
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(OpenAiModelsEndpoint::uses_codex_backend(self))
     }
@@ -143,7 +161,7 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         &'a self,
         client_version: &'a str,
         http_client_factory: HttpClientFactory,
-    ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
+    ) -> ModelsEndpointFuture<'a, CoreResult<ModelsEndpointResponse>> {
         Box::pin(OpenAiModelsEndpoint::list_models(
             self,
             client_version,
@@ -298,6 +316,7 @@ mod tests {
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
     use wiremock::matchers::header;
+    use wiremock::matchers::header_regex;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use wiremock::matchers::query_param;
@@ -342,23 +361,23 @@ mod tests {
     }
 
     #[test]
-    fn command_auth_provider_reports_configured_credentials_without_cached_auth() {
+    fn command_auth_provider_reports_command_auth_without_cached_auth() {
         let endpoint = OpenAiModelsEndpoint::new(
             provider_info_with_command_auth(),
             /*auth_manager*/ None,
         );
 
-        assert!(endpoint.has_configured_credentials());
+        assert!(endpoint.has_command_auth());
     }
 
     #[test]
-    fn provider_without_command_auth_reports_no_configured_credentials() {
+    fn provider_without_command_auth_reports_no_command_auth() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,
         );
 
-        assert!(!endpoint.has_configured_credentials());
+        assert!(!endpoint.has_command_auth());
     }
 
     #[tokio::test]
@@ -367,6 +386,8 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/models"))
             .and(query_param("client_version", "0.0.0"))
+            .and(header("version", "0.0.0"))
+            .and(header_regex("user-agent", r"/0\.0\.0 "))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(ModelsResponse { models: Vec::new() }),
             )
@@ -445,6 +466,106 @@ mod tests {
                 .as_ref()
                 .and_then(|headers| headers.get(RESIDENCY_HEADER_NAME)),
             Some(&"eu".into())
+        );
+    }
+
+    #[derive(Debug)]
+    struct RotatingAuth(std::sync::atomic::AtomicUsize);
+
+    impl codex_login::ExternalAuth for RotatingAuth {
+        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async move {
+                let generation = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(CodexAuth::from_api_key(&format!("token-{generation}")))
+            })
+        }
+
+        fn refresh(
+            &self,
+            _context: codex_login::ExternalAuthRefreshContext,
+        ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            self.resolve()
+        }
+    }
+
+    #[tokio::test]
+    async fn command_auth_refresh_fetches_a_catalog_for_the_current_credentials() {
+        use codex_models_manager::manager::ModelsManager;
+        use codex_models_manager::manager::OpenAiModelsManager;
+        use codex_models_manager::manager::RefreshStrategy;
+
+        let server = MockServer::start().await;
+        let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("initial"));
+        auth.set_external_auth(Arc::new(RotatingAuth(std::sync::atomic::AtomicUsize::new(
+            0,
+        ))))
+        .await
+        .unwrap();
+        let model = codex_protocol::openai_models::ModelInfo {
+            used_fallback_model_metadata: false,
+            ..codex_models_manager::model_info::model_info_from_slug("command-auth-model")
+        };
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ModelsResponse {
+                models: vec![model.clone()],
+            }))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut provider = provider_info_with_command_auth();
+        provider.base_url = Some(server.uri());
+        // Keep this test independent of the residency override exercised in parallel.
+        provider.http_headers = Some(std::collections::HashMap::from([(
+            RESIDENCY_HEADER_NAME.to_string(),
+            "us".into(),
+        )]));
+        let manager = OpenAiModelsManager::new_without_cache(
+            Arc::new(OpenAiModelsEndpoint::new(provider, Some(auth.clone()))),
+            Some(auth.clone()),
+        );
+        let catalog = manager
+            .raw_model_catalog(
+                RefreshStrategy::OnlineIfUncached,
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .await;
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .find(|candidate| candidate.slug == model.slug),
+            Some(&model)
+        );
+        auth.auth().await;
+        let bundled = codex_models_manager::bundled_models_response().unwrap();
+        assert_eq!(manager.get_remote_models().await, bundled.models);
+        assert_eq!(manager.try_get_remote_models().unwrap(), bundled.models);
+        assert_eq!(
+            manager
+                .raw_model_catalog(
+                    RefreshStrategy::Offline,
+                    HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                )
+                .await,
+            bundled
+        );
+        assert_eq!(
+            manager
+                .raw_model_catalog(
+                    RefreshStrategy::OnlineIfUncached,
+                    HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                )
+                .await,
+            catalog
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.headers["authorization"].to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["Bearer token-2", "Bearer token-6"]
         );
     }
 }

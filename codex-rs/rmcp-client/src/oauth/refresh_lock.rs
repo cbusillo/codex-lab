@@ -25,12 +25,12 @@ const REFRESH_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(/*millis*/ 50);
 // WouldBlock contention from a contender that merely started late and observed persisted tokens.
 const LOCK_CONTENTION_EVENT_TARGET: &str = "codex_rmcp_client::oauth::refresh_lock::contention";
 
-pub(super) struct RefreshCredentialLock {
+pub(crate) struct RefreshCredentialLock {
     _file: File,
 }
 
 impl RefreshCredentialLock {
-    pub(super) async fn acquire_for_server(server_name: &str, url: &str) -> Result<Self> {
+    pub(crate) async fn acquire_for_server(server_name: &str, url: &str) -> Result<Self> {
         let store_key = super::compute_store_key(server_name, url)?;
         let codex_home = find_codex_home()?;
         Self::acquire_in(&codex_home, &store_key, REFRESH_LOCK_ACQUIRE_TIMEOUT)
@@ -43,7 +43,7 @@ impl RefreshCredentialLock {
         store_key: &str,
         acquire_timeout: Duration,
     ) -> Result<Self> {
-        // Scope coordination to CODEX_LAB_HOME alongside File and Secrets state. Direct keyring
+        // Scope coordination to CODEX_HOME alongside File and Secrets state. Direct keyring
         // coordination across homes needs a separate cross-platform rendezvous.
         // TODO(stevenlee): define that rendezvous before expanding this lock's scope.
         let mut hasher = Sha256::new();

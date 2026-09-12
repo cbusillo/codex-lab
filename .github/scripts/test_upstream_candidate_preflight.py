@@ -24,7 +24,9 @@ class CandidatePreflightTest(unittest.TestCase):
     def candidate_tree(self, root: Path) -> Path:
         candidate = root / "candidate"
         lock = candidate / "codex-rs" / "Cargo.lock"
-        manifest = candidate / "third_party" / "v8" / "rusty_v8_1_2_3_codex_release.sha256"
+        manifest = (
+            candidate / "third_party" / "v8" / "rusty_v8_1_2_3_codex_release.sha256"
+        )
         lock.parent.mkdir(parents=True)
         manifest.parent.mkdir(parents=True)
         lock.write_text(
@@ -60,7 +62,9 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         )
 
-    def test_preflight_verifies_downloads_without_executing_candidate_code(self) -> None:
+    def test_preflight_verifies_downloads_without_executing_candidate_code(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             candidate = self.candidate_tree(root)
@@ -79,7 +83,7 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             )
 
             def download(url: str, expected_checksum: str, destination: Path) -> int:
-                payload = payloads[url.rsplit('/', 1)[1]]
+                payload = payloads[url.rsplit("/", 1)[1]]
                 destination.write_bytes(payload)
                 self.assertEqual(hashlib.sha256(payload).hexdigest(), expected_checksum)
                 return len(payload)
@@ -134,7 +138,9 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertTrue(result["temporaryWorktreeRemoved"])
         self.assertTrue(result["primaryCheckoutClean"])
 
-    def test_selects_deterministic_exact_overlap_and_excludes_non_test_evidence(self) -> None:
+    def test_selects_deterministic_exact_overlap_and_excludes_non_test_evidence(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             candidate = root / "candidate"
@@ -152,15 +158,31 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                             {
                                 "id": "B-CONTRACT",
                                 "evidence": [
-                                    {"kind": "file", "path": "codex-rs/core/src/lib.rs", "ciTier": "blocking"},
+                                    {
+                                        "kind": "file",
+                                        "path": "codex-rs/core/src/lib.rs",
+                                        "ciTier": "blocking",
+                                    },
                                 ],
                             },
                             {
                                 "id": "A-CONTRACT",
                                 "evidence": [
-                                    {"kind": "narrative", "path": "codex-rs/core/src/lib.rs", "ciTier": "release"},
-                                    {"kind": "semantic_reachability", "path": "codex-rs/core/src/lib.rs", "ciTier": "nightly"},
-                                    {"kind": "symbol", "path": "codex-rs/core/src/lib.rs", "ciTier": "nightly"},
+                                    {
+                                        "kind": "narrative",
+                                        "path": "codex-rs/core/src/lib.rs",
+                                        "ciTier": "release",
+                                    },
+                                    {
+                                        "kind": "semantic_reachability",
+                                        "path": "codex-rs/core/src/lib.rs",
+                                        "ciTier": "nightly",
+                                    },
+                                    {
+                                        "kind": "symbol",
+                                        "path": "codex-rs/core/src/lib.rs",
+                                        "ciTier": "nightly",
+                                    },
                                 ],
                             },
                         ]
@@ -174,18 +196,25 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             local.write_bytes(b"codex-rs/core/src/lib.rs\0local-only\0")
             output = root / "affected.json"
 
-            status = preflight.select_affected_contracts(gates, upstream, local, candidate, output)
+            status = preflight.select_affected_contracts(
+                gates, upstream, local, candidate, output
+            )
             result = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(status, 0)
-        self.assertEqual([contract["id"] for contract in result["contracts"]], ["A-CONTRACT", "B-CONTRACT"])
+        self.assertEqual(
+            [contract["id"] for contract in result["contracts"]],
+            ["A-CONTRACT", "B-CONTRACT"],
+        )
         self.assertEqual(result["overlapPaths"], ["codex-rs/core/src/lib.rs"])
         self.assertEqual(result["suggestedTests"], ["just test -p codex-core"])
         self.assertEqual(result["suggestedTestTotal"], 1)
         self.assertEqual(result["contracts"][0]["ciTiers"], ["nightly"])
         self.assertEqual(result["contracts"][0]["matchedPathTotal"], 1)
 
-    def test_stage3b_evidence_preserves_bounded_logs_and_classifies_regression(self) -> None:
+    def test_stage3b_evidence_preserves_bounded_logs_and_classifies_regression(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             evidence = root / "candidate-evidence.json"
@@ -200,16 +229,35 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 ),
                 encoding="utf-8",
             )
-            evidence.with_name("candidate-evidence.txt").write_text("refs: base=a upstream=b local=c\n", encoding="utf-8")
+            evidence.with_name("candidate-evidence.txt").write_text(
+                "refs: base=a upstream=b local=c\n", encoding="utf-8"
+            )
             log = "".join(f"line-{number}\n" for number in range(250))
             repo = root / "repo.json"
-            repo.write_text(json.dumps({"status": "failed", "classification": "regression", "log": log[-65536:]}), encoding="utf-8")
+            repo.write_text(
+                json.dumps(
+                    {
+                        "status": "failed",
+                        "classification": "regression",
+                        "log": log[-65536:],
+                    }
+                ),
+                encoding="utf-8",
+            )
             cargo = root / "cargo.json"
-            cargo.write_text(json.dumps({"status": "passed", "classification": "passed"}), encoding="utf-8")
+            cargo.write_text(
+                json.dumps({"status": "passed", "classification": "passed"}),
+                encoding="utf-8",
+            )
             affected = root / "affected.json"
-            affected.write_text(json.dumps({"status": "passed", "contractTotal": 0}), encoding="utf-8")
+            affected.write_text(
+                json.dumps({"status": "passed", "contractTotal": 0}), encoding="utf-8"
+            )
             roots = root / "roots.json"
-            roots.write_text(json.dumps({"status": "extracted", "classification": "passed"}), encoding="utf-8")
+            roots.write_text(
+                json.dumps({"status": "extracted", "classification": "passed"}),
+                encoding="utf-8",
+            )
 
             preflight.record_stage3b(
                 type(
@@ -225,7 +273,9 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 )()
             )
             result = json.loads(evidence.read_text(encoding="utf-8"))
-            summary = evidence.with_name("candidate-evidence.txt").read_text(encoding="utf-8")
+            summary = evidence.with_name("candidate-evidence.txt").read_text(
+                encoding="utf-8"
+            )
 
         self.assertEqual(result["classification"], "regression")
         self.assertEqual(result["repoChecks"]["status"], "failed")
@@ -233,10 +283,16 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertIn("primary checkout clean: True", summary)
         self.assertIn("refs: base=a upstream=b local=c", summary)
 
-    def test_logs_keep_last_200_lines_and_classify_runner_failures_as_infrastructure(self) -> None:
+    def test_logs_keep_last_200_lines_and_classify_runner_failures_as_infrastructure(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             log_path = Path(temporary_directory) / "command.log"
-            log_path.write_text("".join(f"line-{number}\n" for number in range(250)) + "::warning::fake\n", encoding="utf-8")
+            log_path.write_text(
+                "".join(f"line-{number}\n" for number in range(250))
+                + "::warning::fake\n",
+                encoding="utf-8",
+            )
 
             bounded = preflight.bounded_log(log_path)
 
@@ -247,10 +303,18 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertEqual(preflight.classify_failure(137, bounded), "infrastructure")
         self.assertEqual(preflight.classify_failure(1, bounded), "regression")
 
-    def packet_inputs(self, root: Path, conflicts: list[str]) -> tuple[Path, Path, Path, Path]:
+    def packet_inputs(
+        self, root: Path, conflicts: list[str]
+    ) -> tuple[Path, Path, Path, Path]:
         evidence = root / "candidate-evidence.json"
         evidence.write_text(
-            json.dumps({"schemaVersion": 1, "classification": "conflict", "conflictPaths": conflicts}),
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "classification": "conflict",
+                    "conflictPaths": conflicts,
+                }
+            ),
             encoding="utf-8",
         )
         guard = root / "guard.json"
@@ -280,9 +344,17 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                         {
                             "id": "RED-CONTRACT",
                             "evidence": [
-                                {"kind": "symbol", "path": "trusted-anchor.rs", "ciTier": "blocking", "token": "safe"},
+                                {
+                                    "kind": "symbol",
+                                    "path": "trusted-anchor.rs",
+                                    "ciTier": "blocking",
+                                    "token": "safe",
+                                },
                                 {"kind": "narrative", "description": "not injected"},
-                                {"kind": "semantic_reachability", "description": "not injected"},
+                                {
+                                    "kind": "semantic_reachability",
+                                    "description": "not injected",
+                                },
                             ],
                         }
                     ],
@@ -297,22 +369,34 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
     def test_build_packets_is_deterministic_red_manual_and_zero_token(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            inputs = self.packet_inputs(root, ["codex-rs/core/src/lib.rs", "mechanical.txt"])
+            inputs = self.packet_inputs(
+                root, ["codex-rs/core/src/lib.rs", "mechanical.txt"]
+            )
             args = type(
                 "Args",
                 (),
                 {
-                    "evidence": inputs[0], "guard": inputs[1], "gates": inputs[2], "conflicts": inputs[3],
-                    "root_failures": None, "output_dir": root / "packets", "cycle_id": "cycle-1",
-                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "17",
+                    "evidence": inputs[0],
+                    "guard": inputs[1],
+                    "gates": inputs[2],
+                    "conflicts": inputs[3],
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-1",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "17",
                 },
             )()
             self.assertEqual(preflight.build_model_packets(args), 0)
             first = (args.output_dir / "model-packets.json").read_bytes()
             self.assertEqual(preflight.build_model_packets(args), 0)
-            self.assertEqual(first, (args.output_dir / "model-packets.json").read_bytes())
+            self.assertEqual(
+                first, (args.output_dir / "model-packets.json").read_bytes()
+            )
             result = json.loads(first)
-            telemetry = json.loads((args.output_dir / "model-telemetry.json").read_text(encoding="utf-8"))
+            telemetry = json.loads(
+                (args.output_dir / "model-telemetry.json").read_text(encoding="utf-8")
+            )
             evidence = json.loads(inputs[0].read_text(encoding="utf-8"))
 
         self.assertEqual(result["plannedPacketTotal"], 1)
@@ -334,10 +418,14 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             gate_data = json.loads(gates.read_text(encoding="utf-8"))
             gate_data["contracts"][0]["id"] = "A-CONTRACT"
             gate_data["contracts"][0]["evidence"] = [
-                {"kind": "file", "path": path, "ciTier": "blocking"} for path in conflicts
+                {"kind": "file", "path": path, "ciTier": "blocking"}
+                for path in conflicts
             ]
             gate_data["contracts"].extend(
-                {"id": f"CONTRACT-{index:02d}", "evidence": [{"kind": "file", "path": conflicts[index]}]}
+                {
+                    "id": f"CONTRACT-{index:02d}",
+                    "evidence": [{"kind": "file", "path": conflicts[index]}],
+                }
                 for index in range(20)
             )
             gates.write_text(json.dumps(gate_data), encoding="utf-8")
@@ -345,40 +433,82 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 "Args",
                 (),
                 {
-                    "evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflict_file,
-                    "root_failures": None, "output_dir": root / "packets", "cycle_id": "cycle-2",
-                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "1",
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-2",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "1",
                 },
             )()
             self.assertEqual(preflight.build_model_packets(args), 0)
-            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
 
         self.assertLessEqual(result["plannedPacketTotal"], 12)
         self.assertLessEqual(result["aggregatePlannedPromptTokens"], 40_000)
-        self.assertTrue(all(len(preflight._canonical_json(packet)) <= 40_000 for packet in result["packets"]))
-        self.assertTrue(all(packet["estimatedPromptTokens"] <= 10_000 for packet in result["packets"]))
+        self.assertTrue(
+            all(
+                len(preflight._canonical_json(packet)) <= 40_000
+                for packet in result["packets"]
+            )
+        )
+        self.assertTrue(
+            all(
+                packet["estimatedPromptTokens"] <= 10_000
+                for packet in result["packets"]
+            )
+        )
         self.assertLessEqual(len(result["packets"][0]["paths"]), 25)
         self.assertGreater(result["packets"][0]["deferredPathTotal"], 0)
         self.assertGreater(result["deferredPacketTotal"], 0)
-        self.assertTrue(any(warning.startswith("packets_deferred:") for warning in result["warnings"]))
-        self.assertTrue(any(warning.startswith("packet_paths_truncated:") for warning in result["warnings"]))
-        self.assertEqual(result["packets"], sorted(result["packets"], key=lambda packet: packet["packetId"]))
+        self.assertTrue(
+            any(
+                warning.startswith("packets_deferred:")
+                for warning in result["warnings"]
+            )
+        )
+        self.assertTrue(
+            any(
+                warning.startswith("packet_paths_truncated:")
+                for warning in result["warnings"]
+            )
+        )
+        self.assertEqual(
+            result["packets"],
+            sorted(result["packets"], key=lambda packet: packet["packetId"]),
+        )
         for packet in result["packets"]:
             self.assertLessEqual(len(preflight._canonical_json(packet)), 40_000)
             self.assertLessEqual(packet["estimatedPromptTokens"], 10_000)
             self.assertLessEqual(len(packet["paths"]), 25)
             self.assertLessEqual(len(packet["anchors"]), 20)
 
-    def test_build_packets_adds_root_failure_packet_without_candidate_reads(self) -> None:
+    def test_build_packets_adds_root_failure_packet_without_candidate_reads(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            evidence, guard, gates, conflict_file = self.packet_inputs(root, ["unattributed.txt"])
+            evidence, guard, gates, conflict_file = self.packet_inputs(
+                root, ["unattributed.txt"]
+            )
             root_failures = root / "roots.json"
             root_failures.write_text(
                 json.dumps(
                     {
                         "status": "extracted",
-                        "report": {"failures": [{"root": "cargo-check", "sources": [{"id": 42, "name": "Cargo"}]}]},
+                        "report": {
+                            "failures": [
+                                {
+                                    "root": "cargo-check",
+                                    "sources": [{"id": 42, "name": "Cargo"}],
+                                }
+                            ]
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -387,17 +517,33 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 "Args",
                 (),
                 {
-                    "evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflict_file,
-                    "root_failures": root_failures, "output_dir": root / "packets", "cycle_id": "cycle-3",
-                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "2",
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": root_failures,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-3",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "2",
                 },
             )()
             self.assertEqual(preflight.build_model_packets(args), 0)
-            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result["packetTotal"], 2)
         self.assertIn("root_failure", [packet["kind"] for packet in result["packets"]])
-        self.assertIn(42, [source.get("id") for packet in result["packets"] if packet["kind"] == "root_failure" for source in packet["rootFailure"]["sources"]])
+        self.assertIn(
+            42,
+            [
+                source.get("id")
+                for packet in result["packets"]
+                if packet["kind"] == "root_failure"
+                for source in packet["rootFailure"]["sources"]
+            ],
+        )
         self.assertEqual(result["counts"]["mechanicalOrUnattributedPathTotal"], 0)
 
     def test_build_packets_missing_inputs_is_unavailable_but_green(self) -> None:
@@ -407,14 +553,21 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 "Args",
                 (),
                 {
-                    "evidence": root / "missing-evidence.json", "guard": root / "missing-guard.json",
-                    "gates": root / "missing-gates.json", "conflicts": None, "root_failures": None,
-                    "output_dir": root / "packets", "cycle_id": "cycle-4",
-                    "started_at": "2026-08-28T00:00:00Z", "duration_ms": "0",
+                    "evidence": root / "missing-evidence.json",
+                    "guard": root / "missing-guard.json",
+                    "gates": root / "missing-gates.json",
+                    "conflicts": None,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-4",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "0",
                 },
             )()
             self.assertEqual(preflight.build_model_packets(args), 0)
-            result = json.loads((args.output_dir / "model-packets.json").read_text(encoding="utf-8"))
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["aggregatePlannedPromptTokens"], 0)
@@ -422,9 +575,28 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
     def test_build_packets_rejects_malformed_trusted_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            for trusted_name, value in (("guard", {"guardedPaths": [{}]}), ("gates", {"contracts": [{}]})):
-                evidence, guard, gates, conflicts = self.packet_inputs(root, ["owned.rs"])
+            for trusted_name, value in (
+                ("guard", {"guardedPaths": [{}]}),
+                ("gates", {"contracts": [{}]}),
+            ):
+                evidence, guard, gates, conflicts = self.packet_inputs(
+                    root, ["owned.rs"]
+                )
                 trusted_path = guard if trusted_name == "guard" else gates
                 trusted_path.write_text(json.dumps(value), encoding="utf-8")
-                args = type("Args", (), {"evidence": evidence, "guard": guard, "gates": gates, "conflicts": conflicts, "root_failures": None, "output_dir": root / trusted_path.stem, "cycle_id": "cycle-5", "started_at": "2026-08-28T00:00:00Z", "duration_ms": "1"})()
+                args = type(
+                    "Args",
+                    (),
+                    {
+                        "evidence": evidence,
+                        "guard": guard,
+                        "gates": gates,
+                        "conflicts": conflicts,
+                        "root_failures": None,
+                        "output_dir": root / trusted_path.stem,
+                        "cycle_id": "cycle-5",
+                        "started_at": "2026-08-28T00:00:00Z",
+                        "duration_ms": "1",
+                    },
+                )()
                 self.assertEqual(preflight.build_model_packets(args), 1)

@@ -50,7 +50,11 @@ pub(super) async fn finalize_aborted_turn(
             ))
     {
         session
-            .record_conversation_items(task.turn_context.as_ref(), std::slice::from_ref(&marker))
+            .record_conversation_items(
+                task.turn_context.as_ref(),
+                task.turn_context.model_info(),
+                std::slice::from_ref(&marker),
+            )
             .await;
         if let Err(err) = session.flush_rollout().await {
             warn!("failed to flush interrupted-turn marker before emitting TurnAborted: {err}");
@@ -58,7 +62,7 @@ pub(super) async fn finalize_aborted_turn(
     }
 
     if reason == TurnAbortReason::Interrupted {
-        run_turn_interrupt_hooks(&session, &task.turn_context).await;
+        run_turn_interrupt_hooks(&session, &task.turn_context, &active_turn.turn_state).await;
     }
 
     let started_at = task
@@ -96,7 +100,7 @@ pub(super) async fn finalize_aborted_turn(
         warn!("failed to flush rollout after emitting terminal turn event: {err}");
     }
     session
-        .emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
+        .emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
         .await;
     session.input_queue.clear_pending(&active_turn).await;
     if let Some(generation) = interrupt_generation {

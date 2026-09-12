@@ -382,10 +382,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertEqual(local_matrix, [{"shard": 1, "partition_count": 1}])
         self.assertEqual(
             hosted_matrix,
-            [
-                {"shard": shard, "partition_count": 4}
-                for shard in range(1, 5)
-            ],
+            [{"shard": shard, "partition_count": 4} for shard in range(1, 5)],
         )
         self.assertEqual(
             {entry["shard"] for entry in hosted_matrix},
@@ -453,10 +450,21 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         action = SETUP_RUSTY_V8_ACTION.read_text()
         release_workflow = CODEX_LAB_RELEASE_WORKFLOW.read_text()
 
-        self.assertIn("write-release-checksums", action)
-        self.assertNotIn(
-            'curl -fsSL "${base_url}/${checksums_name}"',
-            action,
+        self.assertIn("release_manifests.sha256", action)
+        self.assertIn(
+            "hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()", action
+        )
+        self.assertLess(
+            action.index(
+                'if [[ "${actual_manifest_checksum}" != "${expected_manifest_checksum}" ]]'
+            ),
+            action.index('curl -fsSL "${base_url}/${archive_name}"'),
+        )
+        self.assertLess(
+            action.index(
+                'if [[ "${actual_manifest_checksum}" != "${expected_manifest_checksum}" ]]'
+            ),
+            action.index('curl -fsSL "${base_url}/${binding_name}"'),
         )
         self.assertIn("uses: ./.github/actions/setup-rusty-v8", release_workflow)
 

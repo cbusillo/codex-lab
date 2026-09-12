@@ -18,7 +18,6 @@ use codex_core::config::Config;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_history::CodexHarnessMetadata;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -85,7 +84,7 @@ fn remove_multi_agent_usage_hint_world_state_section(rollout_path: &Path) -> Res
     let mut removed_section = false;
     let retained = rollout
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .map(|mut line| {
@@ -122,7 +121,7 @@ fn seed_first_checkpoint_harness_metadata(path: &Path, retained_text: &str) -> R
     let mut lines = std::fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
     let replacement_history = lines
         .iter_mut()
@@ -155,7 +154,7 @@ fn assert_latest_checkpoint_retains_harness_metadata(
     let replacement_history = std::fs::read_to_string(path)?
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .rev()
@@ -917,6 +916,7 @@ async fn start_test_conversation(
     let base_url = format!("{}/v1", server.uri());
     let model = model.map(str::to_string);
     let mut builder = test_codex().with_config(move |config| {
+        config.update_plan_enabled = true;
         config.model_provider.name = "Non-OpenAI Model provider".to_string();
         config.model_provider.base_url = Some(base_url);
         config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
@@ -1000,10 +1000,8 @@ async fn fork_thread(
 ) -> Arc<CodexThread> {
     Box::pin(manager.fork_thread(
         nth_user_message,
-        config.clone(),
+        codex_core::StartThreadOptions::new(config.clone()),
         path,
-        /*thread_source*/ None,
-        /*parent_trace*/ None,
     ))
     .await
     .expect("fork conversation")

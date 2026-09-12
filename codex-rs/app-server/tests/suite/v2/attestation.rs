@@ -56,7 +56,6 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
     .await;
 
     let codex_home = TempDir::new()?;
-    write_models_cache(codex_home.path())?;
     create_chatgpt_websocket_config(
         codex_home.path(),
         &websocket_server.uri().replacen("ws://", "http://", 1),
@@ -66,6 +65,7 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
         ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
+    write_models_cache(codex_home.path()).await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -115,17 +115,16 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
             ..Default::default()
         })
         .await?;
-    let turn_response: JSONRPCResponse = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
-    )
-    .await??;
-    let _: TurnStartResponse = to_response(turn_response)?;
-
     let mut attestation_requests = 0;
+    let mut turn_response = None;
     timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             match mcp.read_next_message().await? {
+                JSONRPCMessage::Response(response)
+                    if response.id == RequestId::Integer(turn_request_id) =>
+                {
+                    turn_response = Some(response);
+                }
                 JSONRPCMessage::Request(request) => {
                     let request = ServerRequest::try_from(request)?;
                     let ServerRequest::AttestationGenerate { request_id, .. } = request else {
@@ -150,6 +149,10 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
         }
     })
     .await??;
+    let Some(turn_response) = turn_response else {
+        bail!("turn/start response was not received before turn completion");
+    };
+    let _: TurnStartResponse = to_response(turn_response)?;
     assert!(attestation_requests > 0);
 
     assert!(

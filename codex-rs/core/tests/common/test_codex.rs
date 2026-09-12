@@ -15,7 +15,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use codex_config::CloudConfigBundleLoader;
 use codex_core::CodexThread;
-use codex_core::StartThreadOptions;
+pub use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::TimeProvider;
 pub use codex_core::TurnInputRequest;
@@ -40,12 +40,15 @@ use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::TruncationPolicyConfig;
+use codex_protocol::openai_models::WebSearchToolType;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
@@ -378,8 +381,23 @@ impl TestCodexBuilder {
         let model = model.to_string();
         self.with_config(move |config| {
             let model_catalog = config.model_catalog.get_or_insert_with(|| {
-                bundled_models_response().expect("bundled models.json should parse")
+                bundled_models_response().expect("test model catalog should parse")
             });
+            if !model_catalog
+                .models
+                .iter()
+                .any(|candidate| candidate.slug == model)
+            {
+                let mut fixture = bundled_models_response()
+                    .expect("bundled model catalog should parse")
+                    .models
+                    .into_iter()
+                    .find(|candidate| candidate.slug == "gpt-5.5")
+                    .expect("missing bundled model gpt-5.5");
+                fixture.slug = model.clone();
+                fixture.display_name = model.clone();
+                model_catalog.models.push(fixture);
+            }
             let model_info = model_catalog
                 .models
                 .iter_mut()
@@ -494,12 +512,21 @@ impl TestCodexBuilder {
         &mut self,
         server: &wiremock::MockServer,
     ) -> anyhow::Result<TestCodex> {
+        let test_env = test_env().await?;
+        self.build_with_environment(server, test_env).await
+    }
+
+    /// Builds a test runtime using an explicitly selected execution environment.
+    pub async fn build_with_environment(
+        &mut self,
+        server: &wiremock::MockServer,
+        test_env: TestEnv,
+    ) -> anyhow::Result<TestCodex> {
         let home = match self.home.clone() {
             Some(home) => home,
             None => Arc::new(TempDir::new()?),
         };
         let base_url = format!("{}/v1", server.uri());
-        let test_env = test_env().await?;
         Box::pin(self.build_with_home_and_base_url(
             base_url, home, /*resume_from*/ None, test_env,
             /*include_local_environment*/ false,
@@ -553,9 +580,7 @@ impl TestCodexBuilder {
             Some(home) => home,
             None => Arc::new(TempDir::new()?),
         };
-        let base_url_clone = base_url.clone();
         self.config_mutators.push(Box::new(move |config| {
-            config.model_provider.base_url = Some(base_url_clone);
             config.model_provider.supports_websockets = true;
             config.experimental_realtime_ws_model = Some("realtime-test-model".to_string());
             config.realtime.version = RealtimeWsVersion::V1;
@@ -695,6 +720,7 @@ impl TestCodexBuilder {
             Arc::clone(&self.extensions),
             user_instructions_provider,
             /*analytics_events_client*/ None,
+            codex_core::passthrough_image_store(),
             Arc::clone(&thread_store),
             codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
@@ -867,16 +893,23 @@ fn ensure_test_model_catalog(config: &mut Config) -> Result<()> {
         return Ok(());
     }
 
-    let bundled_models = bundled_models_response().expect("bundled models.json should parse");
+    let bundled_models = bundled_models_response().expect("test model catalog should parse");
     let mut model = bundled_models
         .models
         .iter()
-        .find(|candidate| candidate.slug == "gpt-5.2")
+        .find(|candidate| candidate.slug == "gpt-5.5")
         .cloned()
-        .expect("missing bundled model gpt-5.2");
+        .expect("missing bundled model gpt-5.5");
     model.slug = TEST_MODEL_WITH_EXPERIMENTAL_TOOLS.to_string();
     model.display_name = TEST_MODEL_WITH_EXPERIMENTAL_TOOLS.to_string();
     model.experimental_supported_tools = vec!["test_sync_tool".to_string()];
+    model.truncation_policy = TruncationPolicyConfig::bytes(/*limit*/ 10_000);
+    model.default_reasoning_summary = ReasoningSummary::Auto;
+    model.comp_hash = None;
+    model.service_tiers.clear();
+    model.additional_speed_tiers.clear();
+    model.web_search_tool_type = WebSearchToolType::Text;
+    model.supports_image_detail_original = false;
     config.model_catalog = Some(ModelsResponse {
         models: vec![model],
     });
@@ -1339,10 +1372,6 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
-            config
-                .features
-                .enable(Feature::ContentItemKinds)
-                .expect("test config should allow ContentItemKinds override");
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],
