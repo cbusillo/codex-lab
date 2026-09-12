@@ -4,6 +4,7 @@ use pretty_assertions::assert_eq;
 struct WorkerOutput {
     spawn: String,
     agents: Value,
+    model_request: String,
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +88,7 @@ async fn run_worker(
     test.submit_turn(PROMPT).await?;
     let request = final_response.single_request();
     Ok(WorkerOutput {
+        model_request: request.body_json().to_string(),
         spawn: request.function_call_output(SPAWN_CALL_ID)["output"]
             .as_str()
             .expect("spawn output")
@@ -318,7 +320,8 @@ async fn bounded_worker_caps_provider_failure_messages_after_quota_decoding() ->
         "overageStatus":"rejected", "overageDisabledReason":"x".repeat(/*n*/ 128),
         "isUsingOverage":false
     }});
-    let result = json!({"type":"result", "is_error":true, "result":"quota rejected"});
+    let result =
+        json!({"type":"result", "is_error":true, "result":"provider failure ".repeat(/*n*/ 100)});
     let mut backend = stub_cli(
         &dir,
         "quota.sh",
@@ -334,7 +337,18 @@ async fn bounded_worker_caps_provider_failure_messages_after_quota_decoding() ->
         Completion::Wait,
     )
     .await?;
-    let failure = &output.agents["agents"][0]["failure"];
+    let agent = &output.agents["agents"][0];
+    let status = agent["agent_status"]["errored"]
+        .as_str()
+        .expect("errored status");
+    assert!(status.len() <= 256);
+    assert!(status.starts_with("[bounded worker result truncated]"));
+    assert!(
+        !output
+            .model_request
+            .contains(&"provider failure ".repeat(/*n*/ 32))
+    );
+    let failure = &agent["failure"];
     assert_eq!(failure["kind"], "quota_or_rate_limited");
     let message = failure["message"].as_str().expect("failure message");
     assert!(message.len() <= 256);
