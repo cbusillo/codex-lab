@@ -38,7 +38,7 @@ async fn cancellation_during_bounded_preflight_stops_the_probe_group() {
             if let Ok(pid) = tokio::fs::read_to_string(&pid_file).await
                 && let Ok(pid) = pid.trim().parse::<i32>()
             {
-                break nix::unistd::Pid::from_raw(pid);
+                break pid;
             }
             tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
         }
@@ -51,7 +51,11 @@ async fn cancellation_during_bounded_preflight_stops_the_probe_group() {
         .expect("cancelled promptly")
         .expect("runner");
     tokio::time::timeout(Duration::from_secs(/*secs*/ 2), async {
-        while nix::sys::signal::kill(child_pid, /*signal*/ None).is_ok() {
+        // Signal zero observes the fixture process without modifying it.
+        while unsafe {
+            libc::kill(child_pid, /*sig*/ 0)
+        } == 0
+        {
             tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
         }
     })

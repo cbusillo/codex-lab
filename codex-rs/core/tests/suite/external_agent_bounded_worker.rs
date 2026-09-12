@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 struct WorkerOutput {
     spawn: String,
@@ -123,7 +124,10 @@ async fn bounded_worker_preserves_complete_instructions_and_retains_bounded_resu
     .await?;
     let mut spawn: Value = serde_json::from_str(&output.spawn)?;
     spawn["nickname"] = json!("[generated nickname]");
-    insta::assert_json_snapshot!("bounded_worker_accepted", spawn);
+    insta::assert_snapshot!(
+        "bounded_worker_accepted",
+        serde_json::to_string_pretty(&spawn)?
+    );
     let message = std::fs::read_to_string(received)?;
     assert!(message.contains("Keep the widget blue."));
     assert!(message.ends_with(AGENT_MESSAGE));
