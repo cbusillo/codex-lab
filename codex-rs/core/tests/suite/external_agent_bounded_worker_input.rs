@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bounded_code_worker_explicit_budget_delivers_complete_large_instructions() -> Result<()> {
