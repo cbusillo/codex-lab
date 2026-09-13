@@ -39,7 +39,7 @@ pub(super) fn bounded_worker_input_schema() -> JsonSchema {
                 ),
                 (
                     "max_input_bytes".to_string(),
-                    JsonSchema::integer(Some("Complete UTF-8 task, instructions and serialized routing-envelope limit, 1..8192 bytes. Oversized instructions are refused, never truncated.".to_string())),
+                    JsonSchema::integer(Some("Explicit complete UTF-8 task, instructions and serialized routing-envelope limit: 1..8192 bytes for text, 1..32768 for code. Never increased automatically. Each supplied context item and complete payload must also fit 10000 o200k_base tokens under Lab's local meter; provider-internal tokens remain unobserved. Oversized instructions are refused, never truncated.".to_string())),
                 ),
                 (
                     "max_result_bytes".to_string(),

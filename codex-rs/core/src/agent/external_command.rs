@@ -342,7 +342,7 @@ async fn run_external_agent_inner(
     let message = render_external_agent_message(&launch.initial_operation)?;
     let request_json = match launch.backend.protocol {
         ExternalCommandProtocol::Json => Some(
-            serde_json::to_vec(&ExternalAgentRequest {
+            serde_json::to_string(&ExternalAgentRequest {
                 protocol_version: 1,
                 thread_id: launch.thread_id,
                 parent_thread_id: launch.parent_thread_id,
@@ -373,6 +373,17 @@ async fn run_external_agent_inner(
                 anyhow::anyhow!(error),
             )
         })?;
+        let context_payload = request_json
+            .as_ref()
+            .map_or_else(|| message.clone(), |request| format!("{request}\n"));
+        crate::agent::bounded_worker::validate_context_tokens(&context_payload)
+            .await
+            .map_err(|error| {
+                ExternalAgentRunError::new(
+                    ExternalAgentFailureKind::LaunchFailed,
+                    anyhow::anyhow!(error),
+                )
+            })?;
     }
 
     let launch_cwd = external_agent_launch_cwd(launch);
@@ -488,7 +499,7 @@ async fn run_external_agent_inner(
             let mut stdin = stdin
                 .take()
                 .ok_or_else(|| anyhow::anyhow!("failed to open external agent stdin"))?;
-            stdin.write_all(&request_json).await?;
+            stdin.write_all(request_json.as_bytes()).await?;
             stdin.write_all(b"\n").await?;
             stdin.shutdown().await?;
             drop(stdin);

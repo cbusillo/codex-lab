@@ -2,7 +2,7 @@ use super::ContextualUserFragment;
 use codex_protocol::models::ContentItemKind;
 
 /// Complete captured instructions for the declared files of one bounded external task.
-/// The caller enforces the total instruction-plus-task byte limit before launch.
+/// The caller enforces byte limits and the Lab supplied-context token limit before launch.
 pub(crate) struct BoundedWorkerInstructions {
     pub(crate) paths: Vec<String>,
     pub(crate) instructions: String,
