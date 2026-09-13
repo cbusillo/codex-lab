@@ -1,6 +1,9 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+#[path = "external_agent_bounded_worker_input.rs"]
+mod input;
+
 struct WorkerOutput {
     spawn: String,
     agents: Value,

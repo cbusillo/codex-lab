@@ -68,3 +68,56 @@ fn worker_rejects_unbounded_limits_and_ambiguous_paths() {
     request.max_input_bytes = usize::MAX;
     assert!(request.start(Instant::now()).is_err());
 }
+
+#[test]
+fn code_input_budget_is_explicit_and_does_not_raise_other_limits() {
+    let mut request = BoundedWorkerRequest {
+        timeout_ms: 5000,
+        max_input_bytes: 8192,
+        max_result_bytes: 256,
+        context: WorkerContext::Code {
+            paths: vec!["widget.rs".to_string()],
+        },
+    };
+    for max_input_bytes in [1, 8192, 20_000, 32_768] {
+        request.max_input_bytes = max_input_bytes;
+        assert_eq!(
+            request
+                .start(Instant::now())
+                .expect("explicit budget")
+                .limits,
+            BoundedWorkerLimits {
+                timeout_ms: 5000,
+                max_input_bytes,
+                max_result_bytes: 256,
+            }
+        );
+    }
+    request.max_input_bytes = 32_769;
+    assert!(request.start(Instant::now()).is_err());
+    request.max_input_bytes = 8192;
+    request.max_result_bytes = 8193;
+    assert!(request.start(Instant::now()).is_err());
+    request.max_result_bytes = 8192;
+    request.context = WorkerContext::Text;
+    assert!(request.start(Instant::now()).is_ok());
+    request.max_input_bytes = 8193;
+    assert!(request.start(Instant::now()).is_err());
+}
+
+#[tokio::test]
+async fn context_token_limit_is_independent_of_bytes_and_inclusive() {
+    let text = " a".repeat(/*n*/ 10_000);
+    assert_eq!(validate_context_tokens(&text).await, Ok(()));
+    assert_eq!(
+        validate_context_tokens(&format!("{text} a")).await,
+        Err(
+            "complete bounded worker context exceeds 10000 o200k_base tokens; nothing was launched"
+        )
+    );
+    assert!(
+        validate_context_tokens(&"🙂".repeat(/*n*/ 2500))
+            .await
+            .is_ok()
+    );
+}

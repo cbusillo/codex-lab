@@ -9,12 +9,41 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::path::Component;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::time::Instant;
 
-const MAX_INPUT_BYTES: usize = 8 * 1024;
+const MAX_TEXT_INPUT_BYTES: usize = 8 * 1024;
+const MAX_CODE_INPUT_BYTES: usize = 32 * 1024;
 const MAX_RESULT_BYTES: usize = 8 * 1024;
 const MAX_TIMEOUT_MS: u64 = 300_000;
+const MAX_CONTEXT_TOKENS: usize = 10_000;
+
+/// Meter supplied context using Lab's pinned o200k_base encoding, not provider usage.
+/// The byte ceiling alone does not establish the per-item token ceiling.
+pub(crate) async fn validate_context_tokens(text: &str) -> Result<(), &'static str> {
+    // Byte fallback makes this a conservative shortcut, including non-ASCII text.
+    if text.len() <= MAX_CONTEXT_TOKENS {
+        return Ok(());
+    }
+    let text = text.to_string();
+    // Initialization and counting must not block the caller's deadline/cancellation timer.
+    tokio::task::spawn_blocking(move || {
+        static TOKENIZER: OnceLock<Result<tiktoken_rs::CoreBPE, ()>> = OnceLock::new();
+        let tokenizer = TOKENIZER
+            .get_or_init(|| tiktoken_rs::o200k_base().map_err(|_| ()))
+            .as_ref()
+            .map_err(|()| "bounded worker context tokenizer is unavailable; nothing was launched")?;
+        if tokenizer.count_ordinary(&text) > MAX_CONTEXT_TOKENS {
+            return Err(
+                "complete bounded worker context exceeds 10000 o200k_base tokens; nothing was launched",
+            );
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "bounded worker context counting failed; nothing was launched")?
+}
 
 pub(crate) fn validate_input_size(bytes: usize, limit: usize) -> Result<(), &'static str> {
     if bytes > limit {
@@ -78,12 +107,16 @@ pub(crate) struct BoundedWorkerLimits {
 
 impl BoundedWorkerRequest {
     pub(crate) fn start(&self, started: Instant) -> Result<BoundedWorker, &'static str> {
+        let max_input_bytes = match &self.context {
+            WorkerContext::Text => MAX_TEXT_INPUT_BYTES,
+            WorkerContext::Code { .. } => MAX_CODE_INPUT_BYTES,
+        };
         if !(1..=MAX_TIMEOUT_MS).contains(&self.timeout_ms)
-            || !(1..=MAX_INPUT_BYTES).contains(&self.max_input_bytes)
+            || !(1..=max_input_bytes).contains(&self.max_input_bytes)
             || !(256..=MAX_RESULT_BYTES).contains(&self.max_result_bytes)
         {
             return Err(
-                "bounded_worker requires timeout_ms 1..300000, max_input_bytes 1..8192, and max_result_bytes 256..8192",
+                "bounded_worker requires timeout_ms 1..300000, max_input_bytes 1..8192 for text or 1..32768 for code, and max_result_bytes 256..8192",
             );
         }
         if let WorkerContext::Code { paths } = &self.context
@@ -181,10 +214,14 @@ impl BoundedWorkerRequest {
                         .unwrap_or_default(),
                     developer_instructions: config.developer_instructions.clone(),
                 };
-                format!("{}\n\n{task}", context.render())
+                let instructions = context.render();
+                validate_input_size(instructions.len(), self.max_input_bytes)?;
+                validate_context_tokens(&instructions).await?;
+                format!("{instructions}\n\n{task}")
             }
         };
         validate_input_size(message.len(), self.max_input_bytes)?;
+        validate_context_tokens(&message).await?;
         Ok(message)
     }
 }
