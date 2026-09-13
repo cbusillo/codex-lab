@@ -973,7 +973,7 @@ mod tests {
     #[test]
     fn execution_revision_match_requires_an_execution_owned_publication() {
         let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ false);
-        assert!(!runtime.current_codex_apps_execution_revision_matches(7));
+        assert!(!runtime.current_codex_apps_execution_revision_matches(/*revision*/ 7));
 
         let current = runtime.current.load_full();
         runtime.current.store(Arc::new(PublishedMcpRuntime {
@@ -988,8 +988,8 @@ mod tests {
             cached_binding: Mutex::new(None),
         }));
 
-        assert!(runtime.current_codex_apps_execution_revision_matches(7));
-        assert!(!runtime.current_codex_apps_execution_revision_matches(8));
+        assert!(runtime.current_codex_apps_execution_revision_matches(/*revision*/ 7));
+        assert!(!runtime.current_codex_apps_execution_revision_matches(/*revision*/ 8));
     }
 
     #[tokio::test]
