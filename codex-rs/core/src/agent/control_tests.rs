@@ -2807,7 +2807,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
-        assistant_message("compacted non-final assistant", None),
+        assistant_message("compacted non-final assistant", /*phase*/ None),
         assistant_message(
             "compacted final assistant",
             Some(MessagePhase::FinalAnswer),

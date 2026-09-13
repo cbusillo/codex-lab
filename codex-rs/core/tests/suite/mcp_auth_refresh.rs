@@ -281,7 +281,7 @@ async fn execution_account_switch_replaces_codex_apps_connection() -> Result<()>
         assert_eq!(tool_result.is_error, Some(false));
         assert!(runtime.current_codex_apps_execution_revision_matches(revision));
         if revision == 2 {
-            assert!(!runtime.current_codex_apps_execution_revision_matches(1));
+            assert!(!runtime.current_codex_apps_execution_revision_matches(/*revision*/ 1));
         }
     }
 
