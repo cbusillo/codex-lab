@@ -254,7 +254,8 @@ async fn handle_spawn_agent(
     if let (Some(request), Some(worker)) = (&args.bounded_worker, &bounded_worker) {
         message = crate::agent::bounded_worker::prepare(
             Some(worker),
-            request.message(&step_context, &config, &message),
+            // Ordinary agent-message truncation cannot satisfy the bounded complete-input contract.
+            request.message(&step_context, &config, &args.message),
         )
         .await
         .map_err(collab_spawn_error)?

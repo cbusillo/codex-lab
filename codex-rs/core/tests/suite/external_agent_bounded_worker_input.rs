@@ -126,6 +126,16 @@ async fn bounded_code_worker_counts_final_raw_and_json_context_tokens() -> Resul
     assert!(at_limit.len() < 32_768);
     std::fs::remove_file(&received)?;
     args["message"] = json!(task);
+    args["bounded_worker"]["max_input_bytes"] = json!(8192);
+    let refused = run_worker(backend.clone(), args.clone(), dir.path(), Completion::Wait).await?;
+    assert!(
+        refused.spawn.contains("exceeds max_input_bytes"),
+        "{}",
+        refused.spawn
+    );
+    assert_eq!(refused.agents, json!({"agents":[]}));
+    assert!(!received.exists());
+    args["bounded_worker"]["max_input_bytes"] = json!(32_768);
     let accepted = run_worker(backend.clone(), args.clone(), dir.path(), Completion::Wait).await?;
     assert_eq!(std::fs::read_to_string(&received)?, at_limit);
     assert_eq!(
