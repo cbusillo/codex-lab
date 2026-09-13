@@ -1218,7 +1218,7 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
 pub async fn start_websocket_server_with_headers(
     connections: Vec<WebSocketConnectionConfig>,
 ) -> WebSocketTestServer {
-    start_websocket_server_with_headers_inner(connections, None).await
+    start_websocket_server_with_headers_inner(connections, /*accept_gate*/ None).await
 }
 
 /// Starts a WebSocket test server whose handshakes wait for `accept_gate`.
