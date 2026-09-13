@@ -1270,10 +1270,9 @@ async fn start_websocket_server_with_headers_inner(
             };
 
             if let Some(mut accept_gate) = accept_gate.clone() {
-                if !*accept_gate.borrow() {
-                    if accept_gate.wait_for(|ready| *ready).await.is_err() {
-                        return;
-                    }
+                let accept_ready = *accept_gate.borrow();
+                if !accept_ready && accept_gate.wait_for(|ready| *ready).await.is_err() {
+                    return;
                 }
             }
             if let Some(delay) = connection.accept_delay {
