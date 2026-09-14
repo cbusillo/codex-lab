@@ -22,6 +22,7 @@ enum SnapshotFailure {
 async fn snapshot_failure_omits_credentials_and_stops_descendants(
     failure: SnapshotFailure,
 ) -> Result<()> {
+    let credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let cancellation = match failure {
         SnapshotFailure::NetworkDenial | SnapshotFailure::CallerDropWithNetworkToken => {
             Some(CancellationToken::new())
@@ -72,7 +73,7 @@ async fn snapshot_failure_omits_credentials_and_stops_descendants(
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            format!("set -x; export GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789; {script}"),
+            format!("set -x; export GH_TOKEN={credential}; {script}"),
         ],
         &cwd,
         std::env::vars().collect(),
@@ -133,7 +134,8 @@ async fn snapshot_failure_omits_credentials_and_stops_descendants(
                 unreachable!("dropped captures have no result")
             }
         };
-        assert_eq!(format!("{error:?}"), expected);
+        assert_eq!(format!("{error:#}"), expected);
+        assert!(!format!("{error:?}").contains(credential));
     }
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     assert!(

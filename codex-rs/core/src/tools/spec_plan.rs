@@ -145,7 +145,7 @@ pub(crate) fn build_tool_router(
             Vec::new(),
             effective_tool_mode(turn_context, model_info),
             BTreeMap::new(),
-            None,
+            /*tool_namespaces_info*/ None,
             &[],
         ));
     }
