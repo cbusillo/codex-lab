@@ -56,7 +56,14 @@ use codex_sandboxing::windows_sandbox_uses_elevated_backend;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
-use codex_utils_pty::process_group::kill_child_process_group;
+#[cfg(not(target_os = "macos"))]
+use codex_utils_pty::process_group::kill_process_group;
+#[cfg(target_os = "macos")]
+use codex_utils_pty::process_group::kill_process_group_with_member_fallback as kill_process_group;
+#[cfg(not(target_os = "macos"))]
+use codex_utils_pty::process_group::terminate_process_group;
+#[cfg(target_os = "macos")]
+use codex_utils_pty::process_group::terminate_process_group_with_member_fallback as terminate_process_group;
 
 pub const DEFAULT_EXEC_COMMAND_TIMEOUT_MS: u64 = 10_000;
 
@@ -1000,7 +1007,7 @@ async fn consume_output(
             expiration_resolved = true;
             match outcome {
                 Some(ExecExpirationOutcome::TimedOut) => {
-                    kill_child_process_group(&mut child)?;
+                    process_group_id.map_or(Ok(()), kill_process_group)?;
                     child.start_kill()?;
                     (
                         synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE),
@@ -1010,9 +1017,8 @@ async fn consume_output(
                 Some(ExecExpirationOutcome::Cancelled) => {
                     // Let TERM-aware processes run cleanup briefly, then kill any
                     // remaining members of the original process group.
-                    let process_group_id = child.id();
                     let should_escalate = if let Some(process_group_id) = process_group_id {
-                        codex_utils_pty::process_group::terminate_process_group(process_group_id)?
+                        terminate_process_group(process_group_id)?
                     } else {
                         false
                     };
@@ -1027,13 +1033,11 @@ async fn consume_output(
                             if should_escalate
                                 && let Some(process_group_id) = process_group_id
                             {
-                                codex_utils_pty::process_group::kill_process_group(
-                                    process_group_id,
-                                )?;
+                                kill_process_group(process_group_id)?;
                             }
                         }
                         Err(_) => {
-                            kill_child_process_group(&mut child)?;
+                            process_group_id.map_or(Ok(()), kill_process_group)?;
                             child.start_kill()?;
                         }
                     }
@@ -1043,7 +1047,7 @@ async fn consume_output(
             }
         }
         _ = tokio::signal::ctrl_c() => {
-            kill_child_process_group(&mut child)?;
+            process_group_id.map_or(Ok(()), kill_process_group)?;
             child.start_kill()?;
             (synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + SIGKILL_CODE), false)
         }
@@ -1117,8 +1121,7 @@ async fn consume_output(
         match drained {
             Some(Ok(output)) => output,
             failure => {
-                let cleanup = process_group_id
-                    .map_or(Ok(()), codex_utils_pty::process_group::kill_process_group);
+                let cleanup = process_group_id.map_or(Ok(()), kill_process_group);
                 stdout_handle.abort();
                 stderr_handle.abort();
                 if !stdout_done {
