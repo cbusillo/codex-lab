@@ -784,7 +784,9 @@ impl McpConnectionSet {
                     outcome = Err(StartupOutcomeError::Cancelled);
                 }
 
-                if matches!(&outcome, Err(StartupOutcomeError::Failed { .. })) {
+                if startup_policy != McpStartupPolicy::OneShot
+                    && matches!(&outcome, Err(StartupOutcomeError::Failed { .. }))
+                {
                     async_managed_client.reconnect_failed_startup().await;
                 }
 

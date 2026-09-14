@@ -363,7 +363,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.use_local_resources && '[{"shard":1,"partition_count":1}]' || '[{"shard":1,"partition_count":4},{"shard":2,"partition_count":4},{"shard":3,"partition_count":4},{"shard":4,"partition_count":4}]') }}
+        # Local runners need the same partitioning to keep the full suite within
+        # the per-job deadline, including serial integration test groups.
+        include: ${{ fromJSON('[{"shard":1,"partition_count":4},{"shard":2,"partition_count":4},{"shard":3,"partition_count":4},{"shard":4,"partition_count":4}]') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

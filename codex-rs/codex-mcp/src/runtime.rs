@@ -60,11 +60,13 @@ use crate::server::EffectiveMcpServer;
 use crate::tool_catalog_cache::McpToolCatalogCache;
 use crate::tools::ToolInfo;
 
-/// Controls when one task starts its eligible MCP servers.
+/// Controls startup and startup-failure recovery for one task's MCP servers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpStartupPolicy {
     /// Start configured servers when their task's MCP runtime is published.
     Eager,
+    /// Start configured servers once, without background retries after startup failure.
+    OneShot,
     /// Start servers with cached tool definitions on first use.
     LazyWhenCached,
 }
