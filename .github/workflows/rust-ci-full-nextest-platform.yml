@@ -362,6 +362,8 @@ jobs:
       TEST_HELPERS_ARTIFACT: nextest-test-helpers-${{ inputs.artifact_id }}
     strategy:
       fail-fast: false
+      # Local shards share a process-lifetime lock; queue before the job timer starts.
+      max-parallel: ${{ inputs.use_local_resources && 1 || 4 }}
       matrix:
         # Local runners need the same partitioning to keep the full suite within
         # the per-job deadline, including serial integration test groups.

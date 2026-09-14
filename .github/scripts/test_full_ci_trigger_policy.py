@@ -370,6 +370,10 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
 
     def test_nextest_uses_all_four_partitions_for_every_runner(self) -> None:
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+        self.assertIn(
+            "max-parallel: ${{ inputs.use_local_resources && 1 || 4 }}",
+            platform_workflow.split("  shard:\n", 1)[1],
+        )
 
         matrix_match = re.search(
             r"include: \$\{\{ fromJSON\('([^']+)'\) \}\}",
