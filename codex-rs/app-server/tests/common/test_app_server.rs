@@ -2169,8 +2169,9 @@ impl TestAppServerBuilder {
                 (&program, &staged_program),
                 (&code_mode_host_program, &staged_host),
             ] {
-                std::fs::hard_link(source, destination)
-                    .or_else(|_| std::fs::copy(source, destination).map(|_| ()))
+                // Use independent inodes: removing an earlier staged hard link
+                // can invalidate macOS code-signature validation for a new child.
+                std::fs::copy(source, destination)
                     .with_context(|| format!("stage executable {}", source.display()))?;
             }
             program = staged_program;

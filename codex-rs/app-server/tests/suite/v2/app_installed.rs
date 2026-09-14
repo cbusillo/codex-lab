@@ -403,8 +403,8 @@ async fn installed_apps_failed_force_refresh_retains_previous_snapshot() -> Resu
     .await??;
     assert_eq!(error.error.code, -32603);
 
-    // A background reconnect is spawned, not awaited, so let any escaped task
-    // reach the fixture before asserting that none exists.
+    // Give any regressed background retry time to reach the fixture before
+    // checking that the failed refresh retained the snapshot without a retry.
     tokio::time::sleep(RECONNECT_SETTLE_TIMEOUT).await;
     let retained = send_installed_request(&mut app_server, /*force_refresh*/ false).await?;
     assert_eq!(retained, committed);

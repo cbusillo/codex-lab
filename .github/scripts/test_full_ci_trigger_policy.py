@@ -368,24 +368,22 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             platform_workflow,
         )
 
-    def test_nextest_local_mode_uses_one_complete_partition(self) -> None:
+    def test_nextest_uses_all_four_partitions_for_every_runner(self) -> None:
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
 
         matrix_match = re.search(
-            r"include: \$\{\{ fromJSON\(inputs\.use_local_resources && '([^']+)' \|\| '([^']+)'\) \}\}",
+            r"include: \$\{\{ fromJSON\('([^']+)'\) \}\}",
             platform_workflow,
         )
         self.assertIsNotNone(matrix_match)
         assert matrix_match is not None
-        local_matrix = json.loads(matrix_match.group(1))
-        hosted_matrix = json.loads(matrix_match.group(2))
-        self.assertEqual(local_matrix, [{"shard": 1, "partition_count": 1}])
+        matrix = json.loads(matrix_match.group(1))
         self.assertEqual(
-            hosted_matrix,
+            matrix,
             [{"shard": shard, "partition_count": 4} for shard in range(1, 5)],
         )
         self.assertEqual(
-            {entry["shard"] for entry in hosted_matrix},
+            {entry["shard"] for entry in matrix},
             set(range(1, 5)),
         )
         self.assertIn(
