@@ -351,12 +351,10 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
             'core.hooksPath=/dev/null merge --no-commit --no-ff "$EXPECTED_LOCAL"',
             candidate,
         )
-        self.assertIn(
-            'all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"',
-            candidate,
-        )
-        self.assertNotIn("$evidence_dir/all-conflict-paths.txt", candidate)
-        self.assertIn("sed -n '1,200p'", candidate)
+        self.assertIn('conflicts="$evidence_dir/conflict-paths.nul"', candidate)
+        self.assertIn("diff --name-only -z --diff-filter=U", candidate)
+        self.assertIn("count-conflict-paths --input", candidate)
+        self.assertNotIn("sed -n '1,200p'", candidate)
         self.assertIn('python3 "$trusted_helper" preflight', candidate)
         self.assertNotIn("python3 .github/scripts/", candidate)
         self.assertNotIn("GITHUB_WORKSPACE", candidate)
@@ -504,7 +502,7 @@ class UpstreamConvergenceWorkflowTest(unittest.TestCase):
         self.assertIn('trusted_guard"', checks)
         self.assertIn("TRUSTED_GUARD_SHA", packets)
         self.assertIn("build-packets", packets)
-        self.assertIn("conflict-paths.txt", packets)
+        self.assertIn("conflict-paths.nul", packets)
         self.assertIn("root-failure-outcome.json", packets)
         self.assertIn("always() && !cancelled()", packets)
         self.assertNotIn("stage3b_ready", packets)

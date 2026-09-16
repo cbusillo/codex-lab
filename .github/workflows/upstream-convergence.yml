@@ -312,10 +312,10 @@ jobs:
           trusted_gates="$RUNNER_TEMP/upstream-convergence-gates.json"
           trusted_extractor="$RUNNER_TEMP/extract_ci_root_failures.py"
           trusted_repair_ledger="$RUNNER_TEMP/upstream-convergence-repair-ledger.py"
-          conflicts="$evidence_dir/conflict-paths.txt"
-          all_conflicts="$RUNNER_TEMP/upstream-convergence-all-conflicts.txt"
+          conflicts="$evidence_dir/conflict-paths.nul"
           preflight="$evidence_dir/rusty-v8-preflight.json"
           mkdir -p "$evidence_dir"
+          : > "$conflicts"
           printf '%s\n' '{"schemaVersion":1,"classification":"infrastructure","reason":"candidate stage did not complete"}' > "$evidence_dir/candidate-bootstrap.json"
           classification=infrastructure
           reason="candidate preflight did not start"
@@ -403,13 +403,17 @@ jobs:
                 reason="trusted rusty_v8 preflight failed"
               fi
             else
-              git -C "$candidate_dir" diff --name-only --diff-filter=U > "$all_conflicts"
-              conflict_total=$(wc -l < "$all_conflicts" | tr -d ' ')
-              LC_ALL=C sort "$all_conflicts" | sed -n '1,200p' > "$conflicts"
-              if [[ -s "$conflicts" ]]; then
+              conflict_inventory_ready=false
+              if git -C "$candidate_dir" diff --name-only -z --diff-filter=U > "$conflicts" &&
+                conflict_total=$(python3 "$trusted_helper" count-conflict-paths --input "$conflicts"); then
+                conflict_inventory_ready=true
+              fi
+              if [[ "$conflict_inventory_ready" != true ]]; then
+                reason="unable to record the complete conflict-path inventory"
+              elif (( conflict_total > 0 )); then
                 classification=conflict
                 reason="upstream-first merge has conflicts; compilation is deferred to stage 3b"
-                echo "::warning title=Upstream convergence candidate conflict::Stage 3a recorded bounded conflict evidence; this is not an infrastructure failure."
+                echo "::warning title=Upstream convergence candidate conflict::Stage 3a recorded the complete bounded conflict inventory; this is not an infrastructure failure."
               else
                 reason="upstream-first merge failed without conflict paths"
               fi
@@ -735,7 +739,7 @@ jobs:
             --evidence "$evidence_dir/candidate-evidence.json" \
             --guard "$trusted_guard" \
             --gates "$trusted_gates" \
-            --conflicts "$evidence_dir/conflict-paths.txt" \
+            --conflicts "$evidence_dir/conflict-paths.nul" \
             --root-failures "$evidence_dir/root-failure-outcome.json" \
             --output-dir "$evidence_dir" \
             --cycle-id "$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" \
