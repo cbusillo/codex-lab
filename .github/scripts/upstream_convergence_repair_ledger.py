@@ -353,6 +353,8 @@ def validate_ledger(
                 not isinstance(receipt, dict)
                 or set(receipt) != {"candidate", "attemptId", "checkpoint", "sha256"}
                 or receipt["candidate"] != head
+                or not isinstance(receipt["attemptId"], str)
+                or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", receipt["attemptId"])
                 or receipt["attemptId"] != ledger.get("cycleId")
                 or not isinstance(receipt["checkpoint"], str)
                 or not Path(receipt["checkpoint"]).is_absolute()
@@ -535,6 +537,8 @@ def emit(args: argparse.Namespace) -> int:
             )
             if selected_ledger.exists():
                 ledger = read_object(selected_ledger, "repair ledger")
+                if ledger.get("cycleId", args.cycle_id) != args.cycle_id:
+                    raise LedgerError("repair ledger belongs to a different attempt")
                 provenance, cycles, totals = validate_ledger(
                     ledger, refs, set(units), args.require_live
                 )

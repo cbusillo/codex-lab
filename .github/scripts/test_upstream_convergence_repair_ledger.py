@@ -191,6 +191,9 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(
             self.checkpoint()["unresolvedUnits"], ["unrouted-conflicts:201"]
         )
+        self.assertEqual(self.checkpoint()["decision"], "continue")
+        self.write_ledger([self.cycle("unrouted-conflicts:201", "b" * 40, ["one"])])
+        self.assertNotEqual(self.execute().returncode, 0)
 
     def test_unavailable_packet_inventory_cannot_be_an_empty_checkpoint(self):
         self.write_inputs(0)
@@ -201,7 +204,7 @@ class RepairLedgerTest(unittest.TestCase):
 
     def test_checkpoint_receipt_is_preserved_and_bound_to_head_and_attempt(self):
         cycle = self.cycle("packet:0", "a" * 40, ["one"])
-        receipt = {
+        receipt: dict[str, str | None] = {
             "candidate": "a" * 40,
             "attemptId": "cycle-1",
             "checkpoint": str(self.root / "checkpoint.json"),
@@ -214,6 +217,13 @@ class RepairLedgerTest(unittest.TestCase):
         self.assertEqual(output["cycles"][0]["checkpointReceipt"], receipt)
         receipt["candidate"] = "c" * 40
         self.write_ledger([cycle], cycleId="cycle-1")
+        self.assertNotEqual(self.execute().returncode, 0)
+        receipt["candidate"] = "a" * 40
+        receipt["attemptId"] = None
+        self.write_ledger([cycle])
+        self.assertNotEqual(self.execute().returncode, 0)
+        receipt["attemptId"] = "wrong-attempt"
+        self.write_ledger([cycle], cycleId="wrong-attempt")
         self.assertNotEqual(self.execute().returncode, 0)
 
     def test_attempt_cap_and_precedence(self):

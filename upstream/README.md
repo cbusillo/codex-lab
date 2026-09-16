@@ -157,8 +157,8 @@ uv run --no-project python /trusted/tooling/.github/scripts/upstream_convergence
 ```
 
 Retain the returned `candidate`, `attemptId`, `checkpoint`, and `sha256` as
-`checkpointReceipt` in the corresponding repair ledger cycle (whose `cycleId`
-and `repairHead` must match), and record the receipt in the active GitHub issue.
+`checkpointReceipt` in the corresponding repair ledger cycle (the ledger `cycleId`
+and cycle `repairHead` must match), and record the receipt in the active GitHub issue.
 For a pre-repair checkpoint, retain it in that issue's attempt record. Resume
 with the same arguments, replacing `record` with `verify --sha256 <retained-digest>`.
 Do not derive this expected digest from the artifact being verified.

@@ -214,6 +214,33 @@ class CheckpointFixtureTest(unittest.TestCase):
         )
         self.assertNotEqual(self.execute("verify", receipt["sha256"]).returncode, 0)
 
+    def test_hidden_gitlink_is_refused_and_config_cannot_reorder_paths(self):
+        receipt = self.record()
+        order = self.root / "order"
+        order.write_text("changed\nadded-*\n")
+        git(self.repo, "config", "diff.orderFile", str(order))
+        self.assertEqual(self.execute("verify", receipt["sha256"]).returncode, 0)
+        (self.repo / ".gitmodules").write_text(
+            '[submodule "hidden"]\npath = hidden\nurl = https://example.com/sub.git\nignore = all\n'
+        )
+        git(self.repo, "add", ".gitmodules")
+        git(
+            self.repo,
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{self.base},hidden",
+        )
+        git(self.repo, "commit", "-m", "hidden gitlink")
+        self.head = git(self.repo, "rev-parse", "HEAD")
+        validation = json.loads(self.validation.read_bytes())
+        validation["candidate"] = self.head
+        self.validation.write_text(json.dumps(validation))
+        git(self.repo, "config", "diff.ignoreSubmodules", "all")
+        result = self.execute("record", checkpoint=self.root / "hidden-checkpoint.json")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported patch entry", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

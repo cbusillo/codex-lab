@@ -66,6 +66,9 @@ def patch_inventory(repo: Path, baseline: str, candidate: str) -> dict:
         "--no-ext-diff",
         "--no-textconv",
         "--no-renames",
+        "--ignore-submodules=none",
+        "-O",
+        os.devnull,
         "--abbrev=40",
         "-z",
         baseline,
@@ -223,12 +226,14 @@ def main(argv: list[str]) -> int:
     temporary = None
     recorded = None
     try:
+        args.repo = driver.repository_root(args.repo)
         checkpoint = args.checkpoint.resolve()
         for root in (args.repo.resolve(), SOURCE_ROOT):
-            if checkpoint.is_relative_to(root):
-                raise ValueError(
-                    "checkpoint must be outside candidate and tooling worktrees"
-                )
+            if any(
+                path.resolve().is_relative_to(root)
+                for path in (checkpoint, args.config, args.validation)
+            ):
+                raise ValueError("checkpoint and inputs must be outside both worktrees")
         if args.operation == "verify":
             if not SHA256.fullmatch(args.sha256 or ""):
                 raise ValueError(
@@ -261,7 +266,7 @@ def main(argv: list[str]) -> int:
             json.dumps(
                 {
                     "status": "recorded" if args.operation == "record" else "unchanged",
-                    "candidate": args.candidate,
+                    "candidate": expected["refs"]["candidate"],
                     "attemptId": expected["attemptId"],
                     "pathTotal": expected["patch"]["pathTotal"],
                     "checkpoint": str(checkpoint),
