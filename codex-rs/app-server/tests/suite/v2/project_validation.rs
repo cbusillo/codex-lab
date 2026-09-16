@@ -25,6 +25,7 @@ use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
+use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
@@ -565,6 +566,7 @@ async fn project_validation_revert_preserves_correction_history() -> Result<()> 
                 model: Some("mock-model".to_string()),
                 cwd: Some(workspace_path.to_string_lossy().into_owned()),
                 history_mode: Some(ThreadHistoryMode::Paginated),
+                sandbox: Some(SandboxMode::WorkspaceWrite),
                 ..Default::default()
             },
         })
