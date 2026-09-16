@@ -1023,6 +1023,8 @@ Build provenance:
             sqlite_home: Some(sqlite_home),
             log_dir: Some(log_dir),
             model_catalog_json: Some(model_catalog_json),
+            model_provider: None,
+            model_providers: None,
             check_for_update_on_startup: Some(false),
             allow_login_shell: Some(false),
             feedback: Some(FeedbackConfigToml {

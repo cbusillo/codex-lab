@@ -48,7 +48,6 @@ use codex_otel::SessionTelemetry;
 use codex_otel::TURN_E2E_DURATION_METRIC;
 use codex_otel::TURN_MEMORY_METRIC;
 use codex_otel::TURN_NETWORK_PROXY_METRIC;
-use codex_otel::TURN_TOKEN_USAGE_METRIC;
 use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_otel::TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC;
 use codex_protocol::models::ResponseItem;
@@ -333,12 +332,17 @@ impl Session {
         self.start_task(turn_context, input, task).await;
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "record the started turn atomically with its active reservation"
+    )]
     pub(crate) async fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
     ) {
+        self.activate_plugin_selection(&turn_context).await;
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let background_review_trigger_eligible = task.background_review_trigger_eligible();
@@ -360,12 +364,6 @@ impl Session {
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
 
-        self.services
-            .guardian_rejection_circuit_breaker
-            .lock()
-            .await
-            .clear_turn(&turn_context.sub_id);
-
         if background_review_trigger_eligible {
             self.record_background_auto_review_turn_start(turn_context.as_ref())
                 .await;
@@ -384,6 +382,7 @@ impl Session {
         }
         let turn_state = {
             let mut active = self.active_turn.lock().await;
+            self.record_started_turn(&turn_context.sub_id).await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
             debug_assert!(turn.task.is_none());
             Arc::clone(&turn.turn_state)
@@ -593,6 +592,9 @@ impl Session {
                 },
             )
             .await;
+        if let Some(trigger) = start_options.turn_trigger {
+            turn_context.turn_metadata_state.set_turn_trigger(trigger);
+        }
         if let Some(id) = start_options.parent_turn_id {
             if let Some(initiating_agent_path) = input.iter().find_map(|item| {
                 let TurnInput::InterAgentCommunication(communication) = item else {
@@ -725,13 +727,15 @@ impl Session {
             turn_tool_calls,
             token_usage_at_turn_start,
             completed_turn_diff,
+            token_usage_by_model,
         ) = {
-            let ts = turn_state.lock().await;
+            let mut ts = turn_state.lock().await;
             (
                 ts.has_memory_citation,
                 ts.tool_calls,
                 ts.token_usage_at_turn_start.clone(),
                 ts.completed_turn_diff.clone(),
+                std::mem::take(&mut ts.token_usage_by_model),
             )
         };
         run_hooks_and_record_inputs(
@@ -742,6 +746,7 @@ impl Session {
             PersistContext::Standard,
         )
         .await;
+        let turn_telemetry = &turn_context.session_telemetry;
         // Emit token usage metrics.
         {
             // TODO(jif): drop this
@@ -768,12 +773,8 @@ impl Session {
                 }
                 None => false,
             };
-            emit_turn_network_proxy_metric(
-                &self.services.session_telemetry,
-                network_proxy_active,
-                tmp_mem,
-            );
-            self.services.session_telemetry.histogram(
+            emit_turn_network_proxy_metric(turn_telemetry, network_proxy_active, tmp_mem);
+            turn_telemetry.histogram(
                 TURN_TOOL_CALL_METRIC,
                 i64::try_from(turn_tool_calls).unwrap_or(i64::MAX),
                 &[tmp_mem],
@@ -834,46 +835,17 @@ impl Session {
                 .track_turn_token_usage(TurnTokenUsageFact {
                     turn_id: turn_context.sub_id.clone(),
                     thread_id: self.thread_id.to_string(),
-                    token_usage: turn_token_usage.clone(),
+                    token_usage: turn_token_usage,
                 });
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.total_tokens,
-                &[("token_type", "total"), tmp_mem],
-            );
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.input_tokens,
-                &[("token_type", "input"), tmp_mem],
-            );
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.cached_input(),
-                &[("token_type", "cached_input"), tmp_mem],
-            );
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.cache_write_input_tokens,
-                &[("token_type", "cache_write_input"), tmp_mem],
-            );
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.output_tokens,
-                &[("token_type", "output"), tmp_mem],
-            );
-            self.services.session_telemetry.histogram(
-                TURN_TOKEN_USAGE_METRIC,
-                turn_token_usage.reasoning_output_tokens,
-                &[("token_type", "reasoning_output"), tmp_mem],
-            );
+            token_usage_by_model.emit(turn_telemetry, tmp_mem);
         }
         emit_turn_memory_metric(
-            &self.services.session_telemetry,
+            turn_telemetry,
             turn_context.config.features.enabled(Feature::MemoryTool),
             turn_context.config.memories.use_memories,
             turn_had_memory_citation,
         );
-        self.services.session_telemetry.counter(
+        turn_telemetry.counter(
             TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC,
             i64::try_from(self.list_background_terminals().await.len()).unwrap_or(i64::MAX),
             &[],
@@ -931,11 +903,6 @@ impl Session {
             })
         };
         self.send_event(turn_context.as_ref(), event).await;
-        self.services
-            .guardian_rejection_circuit_breaker
-            .lock()
-            .await
-            .clear_turn(&turn_context.sub_id);
 
         let cleared_active_turn = {
             let mut active = self.active_turn.lock().await;

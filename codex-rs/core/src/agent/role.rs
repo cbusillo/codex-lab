@@ -22,6 +22,7 @@ use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
+use codex_protocol::config_types::Personality;
 use codex_protocol::models::BaseInstructionsProvenance;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -145,7 +146,7 @@ async fn load_role_layer_toml(
     is_built_in: bool,
     role_name: &str,
 ) -> anyhow::Result<TomlValue> {
-    let (role_config_toml, role_config_base) = if is_built_in {
+    let (mut role_config_toml, role_config_base) = if is_built_in {
         let role_config_contents = built_in::config_file_contents(config_file)
             .map(str::to_owned)
             .ok_or(anyhow!("No corresponding config content"))?;
@@ -190,6 +191,12 @@ async fn load_role_layer_toml(
         (role_config_toml, role_config_base)
     };
 
+    if let Some(features) = role_config_toml
+        .get_mut("features")
+        .and_then(TomlValue::as_table_mut)
+    {
+        features.remove(Feature::Personality.key());
+    }
     deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
     Ok(resolve_relative_paths_in_config_toml(
         role_config_toml,
@@ -527,10 +534,9 @@ mod reload {
                 .clone_from(&config.model_reasoning_effort);
         }
         if preserve_current_base_instructions {
-            let personality_changed = config.personality != next_config.personality
-                || config.features.enabled(Feature::Personality)
-                    != next_config.features.enabled(Feature::Personality);
-            if personality_changed
+            let strips_baked_personality =
+                |config: &Config| config.personality == Some(Personality::None);
+            if strips_baked_personality(config) != strips_baked_personality(&next_config)
                 && matches!(
                     config.base_instructions_provenance,
                     Some(BaseInstructionsProvenance::Model { .. })

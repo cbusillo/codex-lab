@@ -90,12 +90,6 @@ pub(super) async fn finalize_aborted_turn(
         duration_ms,
     });
     session.send_event(task.turn_context.as_ref(), event).await;
-    session
-        .services
-        .guardian_rejection_circuit_breaker
-        .lock()
-        .await
-        .clear_turn(&task.turn_context.sub_id);
     if let Err(err) = session.flush_rollout().await {
         warn!("failed to flush rollout after emitting terminal turn event: {err}");
     }

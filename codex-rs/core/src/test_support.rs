@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_exec_server::EnvironmentManager;
-use codex_extension_api::LoadUserInstructionsFuture;
+use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
 use codex_extension_api::UserInstructionsProvider;
 use codex_http_client::HttpClientFactory;
@@ -71,7 +71,7 @@ pub async fn history_with_tool_call_metadata(
 pub struct EmptyUserInstructionsProvider;
 
 impl UserInstructionsProvider for EmptyUserInstructionsProvider {
-    fn load_user_instructions(&self) -> LoadUserInstructionsFuture<'_> {
+    fn load_user_instructions(&self) -> LoadInstructionsFuture<'_> {
         Box::pin(async { LoadedUserInstructions::default() })
     }
 }

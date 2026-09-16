@@ -4,11 +4,15 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction context
 ---
 Scenario: Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.
 
-## Local Compaction Request (Incoming User Excluded)
-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-02:message/developer:<multi_agent_mode>Any earlier instruction enabling proactive mul...
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:USER_ONE
-05:message/assistant:FIRST_REPLY
-06:message/user:<SUMMARIZATION_PROMPT>
+## Window 1
+-- request 1 (compaction; Local Compaction Request (Incoming User Excluded)) --
+00:message/developer:
+    <PERMISSIONS_INSTRUCTIONS>
+01:message/user:
+    <ENVIRONMENT_CONTEXT>
+02:message/user:
+    USER_ONE
+03:message/assistant:
+    FIRST_REPLY
+04:message/user:
+    <SUMMARIZATION_PROMPT>

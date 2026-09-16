@@ -12,6 +12,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
 
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
@@ -20,7 +21,6 @@ use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
-use codex_app_server_protocol::GetAccountTokenUsageResponse;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
@@ -63,11 +63,17 @@ use codex_config::types::ApprovalsReviewer;
 use codex_features::Feature;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
-use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
 
 use crate::history_cell::HistoryCell;
+
+/// Confirmed server lifecycle operations available from the agents dashboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentsOverviewAction {
+    Archive,
+    Delete,
+}
 
 /// Whether a managed checkout starts fresh or preserves the current conversation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +308,9 @@ pub(crate) struct AgentsOverviewThreadRefresh {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    OpenDaemonMenu,
+    ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
+    RunDaemonUpdate(crate::update_action::DaemonUpdateSource),
     ReviewMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     ContinueMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     CloseMisalignmentReview,
@@ -316,11 +325,15 @@ pub(crate) enum AppEvent {
     SelectAgentsOverviewThread {
         thread_id: ThreadId,
     },
-    /// Start a background task directly from the shared dashboard.
-    DispatchAgentsOverviewTask {
-        prompt: UserMessage,
+    /// Open an empty session in the selected checkout.
+    NewAgentsOverviewSession {
         cwd: Option<AbsolutePathBuf>,
     },
+    /// Create an empty session in a worktree from the selected project's default branch.
+    NewAgentsOverviewWorktree {
+        cwd: Option<AbsolutePathBuf>,
+    },
+    AgentsOverviewWorktreeCreated(Result<crate::app::PendingWorktree, String>),
     /// Rename a task directly from the shared dashboard.
     RenameAgentsOverviewThread {
         thread_id: ThreadId,
@@ -333,6 +346,7 @@ pub(crate) enum AppEvent {
     },
     /// Register a hidden title-generation thread started in the background.
     ThreadTitleStarted {
+        cancellation: CancellationToken,
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
@@ -341,6 +355,7 @@ pub(crate) enum AppEvent {
     },
     /// Route a hidden title request to its automatic rename or editable prompt.
     GeneratedThreadTitle {
+        cancellation: CancellationToken,
         thread_id: ThreadId,
         temporary_thread_id: ThreadId,
         destination: ThreadTitleDestination,
@@ -349,6 +364,20 @@ pub(crate) enum AppEvent {
     /// Interrupt a task directly from the shared dashboard.
     StopAgentsOverviewThread {
         thread_id: ThreadId,
+    },
+    /// Hide a dashboard row locally without stopping its task.
+    HideAgentsOverviewThread {
+        thread_id: ThreadId,
+    },
+    /// Confirm a server lifecycle action for the selected dashboard task.
+    ConfirmAgentsOverviewAction {
+        thread_id: ThreadId,
+        action: AgentsOverviewAction,
+    },
+    /// Execute a confirmed dashboard lifecycle action.
+    RunAgentsOverviewAction {
+        thread_id: ThreadId,
+        action: AgentsOverviewAction,
     },
     /// Start the shared app-server daemon without moving the current embedded session.
     #[cfg(any(unix, windows))]
@@ -585,10 +614,14 @@ pub(crate) enum AppEvent {
     },
 
     /// Branch before a selected prompt and reopen it in the new thread's composer.
-    ForkSessionForPromptEdit {
+    RevertSessionForPromptEdit {
         thread_id: ThreadId,
         nth_user_message: usize,
         prompt: UserMessage,
+    },
+    FinishPromptRevert {
+        thread_id: ThreadId,
+        nth_user_message: usize,
     },
 
     /// Request to exit the application.
@@ -648,6 +681,9 @@ pub(crate) enum AppEvent {
     /// Forward a command to the Agent. Using an `AppEvent` for this avoids
     /// bubbling channels through layers of widgets.
     CodexOp(AppCommand),
+
+    /// A blocking image-preparation worker has finished; payload stays with its widget.
+    ImagesPrepared(Uuid),
 
     /// Approve one retry of a recent auto-review denial selected in the TUI.
     ApproveRecentAutoReviewDenial {
@@ -721,8 +757,10 @@ pub(crate) enum AppEvent {
         result: Result<GetAccountRateLimitsResponse, String>,
     },
 
-    /// Open the default token-activity view selected from the `/usage` menu.
-    OpenTokenActivity,
+    /// Open the authenticated account analytics dashboard.
+    OpenAnalytics {
+        view: Option<crate::analytics::TokenActivityView>,
+    },
 
     /// Open the reset-credit flow selected from the `/usage` menu.
     OpenRateLimitResetCredits,
@@ -751,17 +789,6 @@ pub(crate) enum AppEvent {
         result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
     },
 
-    /// Fetch account-wide token activity for a `/usage` history card.
-    RefreshTokenActivity {
-        request_id: u64,
-    },
-
-    /// Result of fetching account-wide token activity.
-    TokenActivityLoaded {
-        request_id: u64,
-        result: Result<GetAccountTokenUsageResponse, String>,
-    },
-
     /// Fetch backend-estimated usage for the currently visible enterprise thread.
     RefreshThreadUsage {
         thread_id: ThreadId,
@@ -772,6 +799,13 @@ pub(crate) enum AppEvent {
     ThreadUsageLoaded {
         thread_id: ThreadId,
         request_id: u64,
+        result: Result<ThreadUsageOutcome, String>,
+    },
+
+    /// Result of fetching usage for the selected dashboard task.
+    AgentsOverviewUsageLoaded {
+        thread_id: ThreadId,
+        request_id: Uuid,
         result: Result<ThreadUsageOutcome, String>,
     },
 
@@ -1109,6 +1143,9 @@ pub(crate) enum AppEvent {
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
+    /// Move visible completed voice captions into history in one app event.
+    CommitRealtimeTranscriptHistory,
+
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
 
@@ -1154,9 +1191,6 @@ pub(crate) enum AppEvent {
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
 
-    /// Update the current personality in the running app and widget.
-    UpdatePersonality(Personality),
-
     /// Result of creating a TUI-owned WebRTC offer for an active thread.
     RealtimeWebrtcOfferCreated {
         thread_id: ThreadId,
@@ -1187,12 +1221,21 @@ pub(crate) enum AppEvent {
         effort: Option<ReasoningEffort>,
     },
 
+    /// Apply a model and effort only to the active session, preserving saved defaults.
+    SelectSessionModel {
+        model: String,
+        effort: Option<ReasoningEffort>,
+    },
+
     /// Show the cyber auto-review notice after the model selection confirmation.
     CyberModelAutoReviewNotice,
 
-    /// Persist the selected personality to the appropriate config.
-    PersistPersonalitySelection {
-        personality: Personality,
+    /// Read the owning server preference before showing the voice picker.
+    OpenRealtimeSettings,
+
+    /// Save the voice for subsequent conversations through the app server.
+    PersistRealtimeVoiceSelection {
+        voice: codex_protocol::protocol::RealtimeVoice,
     },
 
     /// Persist the selected service tier to the appropriate config.
@@ -1256,25 +1299,11 @@ pub(crate) enum AppEvent {
         selection: PermissionProfileSelection,
     },
 
-    /// Open the Windows world-writable directories warning.
-    /// If `preset` is `Some`, the confirmation will apply the provided
-    /// approval/sandbox configuration on Continue; if `None`, it performs no
-    /// policy change and only acknowledges/dismisses the warning.
+    /// Refresh server-owned Windows state after selecting a thread or project.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    OpenWorldWritableWarningConfirmation {
-        preset: Option<ApprovalPreset>,
-        profile_selection: Option<PermissionProfileSelection>,
-        /// Up to 3 sample world-writable directories to display in the warning.
-        sample_paths: Vec<String>,
-        /// If there are more than `sample_paths`, this carries the remaining count.
-        extra_count: usize,
-        /// True when the scan failed (e.g. ACL query error) and protections could not be verified.
-        failed_scan: bool,
+    RefreshWindowsSandbox {
+        thread_id: ThreadId,
     },
-
-    /// The startup world-writable scan finished and queued any protected warning it requires.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    StartupWorldWritableScanCompleted,
 
     /// Prompt to enable the Windows sandbox feature before using Agent mode.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -1359,19 +1388,11 @@ pub(crate) enum AppEvent {
     /// Clear all persisted local memory artifacts via the app-server.
     ResetMemories,
 
-    /// Update whether the world-writable directories warning has been acknowledged.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    UpdateWorldWritableWarningAcknowledged(bool),
-
     /// Update whether the rate limit switch prompt has been acknowledged for the session.
     UpdateRateLimitSwitchPromptHidden(bool),
 
     /// Update the Plan-mode-specific reasoning effort in memory.
     UpdatePlanModeReasoningEffort(Option<ReasoningEffort>),
-
-    /// Persist the acknowledgement flag for the world-writable directories warning.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    PersistWorldWritableWarningAcknowledged,
 
     /// Persist the acknowledgement flag for the rate limit switch prompt.
     PersistRateLimitSwitchPromptHidden,
@@ -1384,10 +1405,6 @@ pub(crate) enum AppEvent {
         from_model: String,
         to_model: String,
     },
-
-    /// Skip the next world-writable scan (one-shot) after a user-confirmed continue.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    SkipNextWorldWritableScan,
 
     /// Re-open the approval presets popup.
     OpenApprovalsPopup,

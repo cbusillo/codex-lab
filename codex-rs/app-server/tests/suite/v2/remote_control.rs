@@ -1137,6 +1137,7 @@ impl ConnectedRemoteControlBackend {
             _models_server: models_server,
             initialized_rx: Some(initialized_rx),
             server_task,
+            _models_server: models_server,
         })
     }
 

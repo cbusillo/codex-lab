@@ -2,6 +2,7 @@ use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseInputItem;
 use serde_json::Value as JsonValue;
 
@@ -219,9 +220,9 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue 
                     | codex_protocol::models::ContentItem::OutputText { text } => {
                         FunctionCallOutputContentItem::InputText { text }
                     }
-                    codex_protocol::models::ContentItem::InputImage { image_url, detail } => {
+                    codex_protocol::models::ContentItem::InputImage { image, detail } => {
                         FunctionCallOutputContentItem::InputImage {
-                            image_url,
+                            image,
                             detail: detail.or(Some(DEFAULT_IMAGE_DETAIL)),
                         }
                     }
@@ -254,11 +255,14 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
                 FunctionCallOutputContentItem::InputText { text } if !text.trim().is_empty() => {
                     Some(text.clone())
                 }
-                FunctionCallOutputContentItem::InputImage { image_url, .. }
-                    if !image_url.trim().is_empty() =>
-                {
-                    Some(image_url.clone())
-                }
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } if !image_url.trim().is_empty() => Some(image_url.clone()),
+                FunctionCallOutputContentItem::InputImage {
+                    image: ImageReference::File { file_id },
+                    ..
+                } if !file_id.trim().is_empty() => Some(file_id.clone()),
                 FunctionCallOutputContentItem::InputAudio { audio_url }
                     if !audio_url.trim().is_empty() =>
                 {
@@ -273,3 +277,7 @@ fn content_items_to_code_mode_result(items: &[FunctionCallOutputContentItem]) ->
             .join("\n"),
     )
 }
+
+#[cfg(test)]
+#[path = "tool_output_tests.rs"]
+mod tests;

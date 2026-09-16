@@ -20,8 +20,6 @@ use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::TurnStartedEvent;
 use codex_thread_store::PersistContext;
 use tracing::Instrument;
 use tracing::trace_span;
@@ -82,10 +80,16 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
-        let prewarmed_client_session = sess
-            .consume_startup_prewarm_for_regular_turn(&cancellation_token)
-            .instrument(trace_span!("regular_task.prepare_run_turn"))
-            .await;
+        // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
+        // not wait on startup prewarm resolution.
+        let prewarmed_client_session = async {
+            sess.emit_turn_started(&ctx).await;
+            sess.set_server_reasoning_included(/*included*/ false).await;
+            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
+                .await
+        }
+        .instrument(trace_span!("regular_task.prepare_run_turn"))
+        .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
                 self.initial_input_recorder
