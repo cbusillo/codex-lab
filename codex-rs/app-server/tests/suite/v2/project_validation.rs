@@ -651,6 +651,14 @@ async fn project_validation_revert_preserves_correction_history() -> Result<()> 
     assert_eq!(data.len(), 1);
     assert_eq!(data[0].id, first_turn.turn.id);
     assert!(data.iter().all(|turn| turn.id != follow_up.turn.id));
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("initial-change.txt"))?,
+        "initial\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("correction-change.txt"))?,
+        "correction\n"
+    );
 
     mcp.start_turn_and_wait_for_completion(TurnStartParams {
         thread_id: thread.id.clone(),
@@ -678,6 +686,18 @@ async fn project_validation_revert_preserves_correction_history() -> Result<()> 
         .expect("post-revert turn should contain current input");
     assert!(failure_index < consumed_index);
     assert!(consumed_index < new_input_index);
+    for marker in [
+        "<project_validation_failure>",
+        "<project_validation_correction_consumed>",
+    ] {
+        assert_eq!(
+            reverted_texts
+                .iter()
+                .filter(|text| text.starts_with(marker))
+                .count(),
+            1
+        );
+    }
     assert!(
         !reverted_texts
             .iter()

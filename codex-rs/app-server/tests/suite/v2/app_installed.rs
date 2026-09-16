@@ -232,13 +232,12 @@ async fn installed_apps_thread_id_uses_effective_thread_config() -> Result<()> {
     // A fresh user layer must take effect without losing the thread's override.
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
-    std::fs::write(
-        &config_path,
-        config.replace(
-            "default_tools_enabled = false",
-            "default_tools_enabled = true",
-        ),
-    )?;
+    let updated = config.replace(
+        "default_tools_enabled = false",
+        "default_tools_enabled = true",
+    );
+    assert_ne!(updated, config);
+    std::fs::write(&config_path, updated)?;
     expected
         .apps
         .iter_mut()

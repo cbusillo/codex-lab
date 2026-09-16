@@ -23,7 +23,6 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -69,33 +68,6 @@ fn normalize_line_endings_str(text: &str) -> String {
     } else {
         text.to_string()
     }
-}
-
-fn remove_multi_agent_usage_hint_world_state_section(rollout_path: &Path) -> Result<()> {
-    let rollout = std::fs::read_to_string(rollout_path)?;
-    let mut removed_section = false;
-    let retained = rollout
-        .lines()
-        .map(codex_rollout::parse_rollout_line)
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .into_iter()
-        .map(|mut line| {
-            if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
-                && state.remove("multi_agent_usage_hint").is_some()
-            {
-                removed_section = true;
-            }
-            serde_json::to_string(&line)
-        })
-        .collect::<std::result::Result<Vec<_>, _>>()?
-        .join("\n");
-    anyhow::ensure!(
-        removed_section,
-        "rollout did not contain a persisted multi-agent usage-hint section"
-    );
-    std::fs::write(rollout_path, format!("{retained}\n"))?;
-    Ok(())
 }
 
 fn response_message_contains_text(item: &ResponseItem, expected: &str) -> bool {
