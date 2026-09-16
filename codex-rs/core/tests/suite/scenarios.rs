@@ -155,13 +155,20 @@ fn plugin(name: &str) -> UserInput {
 }
 
 fn configure_scenario_catalog(config: &mut Config) {
-    // Keep the fixture independent of the checkout's project configuration.
+    // Keep checkout configuration and real `$HOME/.agents/skills` out of the fixture. A
+    // system layer discovers only this test home's skills, while retaining its plugin config.
     let stack = &config.config_layer_stack;
     config.config_layer_stack = ConfigLayerStack::new(
         stack
             .all_layers_low_to_high()
             .filter(|layer| !matches!(&layer.name, ConfigLayerSource::Project { .. }))
             .cloned()
+            .map(|mut layer| {
+                if let ConfigLayerSource::User { file, .. } = &layer.name {
+                    layer.name = ConfigLayerSource::System { file: file.clone() };
+                }
+                layer
+            })
             .collect(),
         stack.requirements().clone(),
         stack.requirements_toml().clone(),

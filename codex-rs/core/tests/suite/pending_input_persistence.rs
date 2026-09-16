@@ -36,6 +36,7 @@ use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 use test_case::test_case;
 use tokio::sync::mpsc;
@@ -52,6 +53,35 @@ enum CheckpointPolicy {
 enum InputKind {
     User,
     ToolOutput,
+}
+
+fn request_input_contains_exact_text(
+    raw_request: &[u8],
+    input_kind: InputKind,
+    expected: &str,
+) -> bool {
+    let body: Value = serde_json::from_slice(raw_request).expect("Responses request is JSON");
+    body["input"]
+        .as_array()
+        .expect("Responses request has input items")
+        .iter()
+        .any(|item| match input_kind {
+            InputKind::User => {
+                item["type"] == "message"
+                    && item["role"] == "user"
+                    && item["content"].as_array().is_some_and(|content| {
+                        content
+                            .iter()
+                            .any(|part| part["type"] == "input_text" && part["text"] == expected)
+                    })
+            }
+            InputKind::ToolOutput => {
+                item["type"] == "function_call_output"
+                    && item["name"] == "send_message_to_thread"
+                    && item["namespace"] == "codex_app"
+                    && item["output"] == expected
+            }
+        })
 }
 
 #[derive(Debug)]
@@ -192,14 +222,14 @@ async fn steered_input_checkpoint_controls_next_request(
             text: "steered input".to_string(),
             text_elements: Vec::new(),
         }]),
-        InputKind::ToolOutput => {
-            TurnInputRequest::new(TurnInput::ResponseItem(serde_json::from_value(json!({
+        InputKind::ToolOutput => TurnInputRequest::new(TurnInput::FunctionCallOutput(
+            serde_json::from_value(json!({
                 "type": "function_call_output",
                 "name": "send_message_to_thread",
                 "namespace": "codex_app",
                 "output": "steered input",
-            }))?))
-        }
+            }))?,
+        )),
     };
     assert_eq!(
         test.codex.start_or_steer_turn(input).await?,
@@ -237,8 +267,16 @@ async fn steered_input_checkpoint_controls_next_request(
     .await?;
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
-    assert!(!String::from_utf8_lossy(&requests[0]).contains("steered input"));
-    assert!(String::from_utf8_lossy(&requests[1]).contains("steered input"));
+    assert!(!request_input_contains_exact_text(
+        &requests[0],
+        input_kind,
+        "steered input"
+    ));
+    assert!(request_input_contains_exact_text(
+        &requests[1],
+        input_kind,
+        "steered input"
+    ));
     second_completed
         .send(())
         .expect("finish follow-up inference");
