@@ -131,6 +131,49 @@ class UpstreamConvergenceInventoryTest(unittest.TestCase):
                 self.assertEqual("intentionally_owned", classified["lane"])
                 self.assertIn("GOVERNANCE-1", classified["contracts"])
 
+    def test_policy_6_owns_exact_candidate_convergence_controls(self) -> None:
+        self.assertEqual(6, inventory.POLICY_VERSION)
+        self.assertEqual((1, 2, 3, 4, 5, 6), inventory.SUPPORTED_POLICY_VERSIONS)
+        self.assertEqual(
+            (
+                ".github/workflows/upstream-convergence.yml",
+                ".github/scripts/upstream_candidate_preflight.py",
+                ".github/scripts/test_upstream_candidate_preflight.py",
+                ".github/scripts/extract_ci_root_failures.py",
+                ".github/scripts/test_extract_ci_root_failures.py",
+            ),
+            inventory.CANDIDATE_CONTROL_PATHS,
+        )
+        for version, rules in (
+            (1, inventory.POLICY_V1_RULES),
+            (2, inventory.POLICY_V2_RULES),
+            (3, inventory.POLICY_V3_RULES),
+            (4, inventory.POLICY_V4_RULES),
+            (5, inventory.POLICY_V5_RULES),
+        ):
+            with self.subTest(version=version):
+                self.assertIs(rules, inventory.rules_for_policy(version))
+        for path in inventory.CANDIDATE_CONTROL_PATHS:
+            with self.subTest(path=path):
+                self.assertEqual(
+                    {
+                        "path": path,
+                        "lane": "intentionally_owned",
+                        "contracts": ["GOVERNANCE-1"],
+                        "reason": "trusted candidate convergence evidence and routing controls",
+                    },
+                    inventory.classify_path(path),
+                )
+                self.assertEqual(
+                    {
+                        "path": path,
+                        "lane": "green_bulk_adopt",
+                        "contracts": [],
+                        "reason": "upstream-owned surface with no named local contract",
+                    },
+                    inventory.classify_path(path, inventory.POLICY_V5_VERSION),
+                )
+
     def test_legacy_policy_preserves_historical_governance_classification(self) -> None:
         classified = inventory.classify_path(
             "upstream/convergence-guard.json",

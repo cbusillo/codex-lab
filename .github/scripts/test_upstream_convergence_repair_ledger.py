@@ -154,7 +154,7 @@ class RepairLedgerTest(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.checkpoint()["decision"], "handoff")
-        self.assertEqual(self.checkpoint()["handoffReason"], "unrelated_cycle_cap")
+        self.assertEqual(self.checkpoint()["handoffReason"], "repair_cycle_review")
         self.assertEqual(self.checkpoint()["unrelatedComponentTotal"], 2)
         self.assertEqual(self.checkpoint()["checkpointSha"], "b" * 40)
 
@@ -168,13 +168,69 @@ class RepairLedgerTest(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.checkpoint()["unrelatedComponentTotal"], 1)
+        self.assertEqual(self.checkpoint()["decision"], "handoff")
+
+    def test_second_failure_of_same_unit_requires_review(self):
+        self.write_ledger(
+            [
+                self.cycle("packet:0", "a" * 40, ["same"], status="failed"),
+                self.cycle("packet:0", "b" * 40, ["same"], status="failed"),
+            ]
+        )
+        self.assertEqual(self.execute().returncode, 0)
+        self.assertEqual(self.checkpoint()["handoffReason"], "repair_cycle_review")
+        self.assertEqual(self.checkpoint()["attemptTotal"], 2)
+
+    def test_unrouted_conflicts_remain_after_all_packets_are_repaired(self):
+        self.write_inputs(1)
+        packets = json.loads(self.packets.read_text())
+        packets["unresolvedPathTotal"] = 201
+        self.packets.write_text(json.dumps(packets))
+        self.write_ledger([self.cycle("packet:0", "a" * 40, ["one"])])
+        self.assertEqual(self.execute().returncode, 0)
+        self.assertEqual(
+            self.checkpoint()["unresolvedUnits"], ["unrouted-conflicts:201"]
+        )
         self.assertEqual(self.checkpoint()["decision"], "continue")
+        self.write_ledger([self.cycle("unrouted-conflicts:201", "b" * 40, ["one"])])
+        self.assertNotEqual(self.execute().returncode, 0)
+
+    def test_unavailable_packet_inventory_cannot_be_an_empty_checkpoint(self):
+        self.write_inputs(0)
+        packets = json.loads(self.packets.read_text())
+        packets["status"] = "unavailable"
+        self.packets.write_text(json.dumps(packets))
+        self.assertNotEqual(self.execute(ledger=False).returncode, 0)
+
+    def test_checkpoint_receipt_is_preserved_and_bound_to_head_and_attempt(self):
+        cycle = self.cycle("packet:0", "a" * 40, ["one"])
+        receipt: dict[str, str | None] = {
+            "candidate": "a" * 40,
+            "attemptId": "cycle-1",
+            "checkpoint": str(self.root / "checkpoint.json"),
+            "sha256": "b" * 64,
+        }
+        cycle["checkpointReceipt"] = receipt
+        self.write_ledger([cycle], cycleId="cycle-1")
+        self.assertEqual(self.execute().returncode, 0)
+        output = json.loads((self.output / "repair-ledger.json").read_text())
+        self.assertEqual(output["cycles"][0]["checkpointReceipt"], receipt)
+        receipt["candidate"] = "c" * 40
+        self.write_ledger([cycle], cycleId="cycle-1")
+        self.assertNotEqual(self.execute().returncode, 0)
+        receipt["candidate"] = "a" * 40
+        receipt["attemptId"] = None
+        self.write_ledger([cycle])
+        self.assertNotEqual(self.execute().returncode, 0)
+        receipt["attemptId"] = "wrong-attempt"
+        self.write_ledger([cycle], cycleId="wrong-attempt")
+        self.assertNotEqual(self.execute().returncode, 0)
 
     def test_attempt_cap_and_precedence(self):
         cycles = [self.cycle("packet:0", letter * 40, ["same"]) for letter in "abc"]
         self.write_ledger(cycles)
         self.assertEqual(self.execute().returncode, 0)
-        self.assertEqual(self.checkpoint()["handoffReason"], "attempt_cap")
+        self.assertEqual(self.checkpoint()["handoffReason"], "repair_cycle_review")
         self.assertEqual(self.checkpoint()["checkpointSha"], "c" * 40)
         cycles.append(
             self.cycle(
@@ -183,7 +239,7 @@ class RepairLedgerTest(unittest.TestCase):
         )
         self.write_ledger(cycles)
         self.assertEqual(self.execute().returncode, 0)
-        self.assertEqual(self.checkpoint()["handoffReason"], "unrelated_cycle_cap")
+        self.assertEqual(self.checkpoint()["handoffReason"], "repair_cycle_review")
 
     def test_unknown_refs_heads_and_accounting_fail(self):
         self.write_ledger([self.cycle("packet:unknown", "a" * 40, ["one"])])
@@ -237,14 +293,13 @@ class RepairLedgerTest(unittest.TestCase):
         self.write_ledger(
             [
                 self.cycle(
-                    "packet:0", "a" * 40, ["one"], prompt=19_999, completion=20_000
+                    "packet:0", "a" * 40, ["one"], prompt=20_000, completion=20_000
                 ),
-                self.cycle("packet:1", "b" * 40, ["one"], prompt=0, completion=1),
             ]
         )
         self.assertEqual(self.execute().returncode, 0)
         self.assertEqual(self.checkpoint()["handoffReason"], "token_budget_exhausted")
-        self.assertEqual(self.checkpoint()["checkpointSha"], "b" * 40)
+        self.assertEqual(self.checkpoint()["checkpointSha"], "a" * 40)
 
     def test_missing_packet_input_is_bounded_unavailable_green(self):
         self.packets.unlink()
@@ -291,7 +346,7 @@ class RepairLedgerTest(unittest.TestCase):
         self.write_ledger(cycles)
         result = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.checkpoint()["handoffReason"], "attempt_cap")
+        self.assertEqual(self.checkpoint()["handoffReason"], "repair_cycle_review")
 
     def test_deterministic_bounded_handoff_and_truncation(self):
         self.write_inputs(40)

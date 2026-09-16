@@ -100,13 +100,14 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertEqual(result["status"], "passed")
         self.assertEqual([asset["bytes"] for asset in result["assets"]], [7, 7])
 
-    def test_evidence_caps_conflict_paths_and_requires_exact_refs(self) -> None:
+    def test_evidence_preserves_more_than_200_exact_conflict_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            conflicts = root / "conflicts.txt"
-            conflicts.write_text(
-                "\n".join(f"path-{number}" for number in range(250)) + "\n",
-                encoding="utf-8",
+            conflicts = root / "conflicts.nul"
+            conflict_paths = [f"path-{number}" for number in range(250)]
+            conflict_paths.append("path-with\nnewline")
+            conflicts.write_bytes(
+                b"\0".join(path.encode("utf-8") for path in conflict_paths) + b"\0"
             )
             args = type(
                 "Args",
@@ -120,7 +121,7 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                     "gate_status": "ready",
                     "snapshot": "upstream/openai-codex/example",
                     "conflicts": conflicts,
-                    "conflict_total": 250,
+                    "conflict_total": 251,
                     "preflight": root / "missing.json",
                     "worktree_removed": "true",
                     "primary_checkout_clean": "true",
@@ -133,10 +134,55 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             preflight.write_evidence(args)
             result = json.loads((root / "evidence/candidate-evidence.json").read_text())
 
-        self.assertEqual(result["conflictPathTotal"], 250)
-        self.assertTrue(result["conflictPathsTruncated"])
+        self.assertEqual(result["conflictPathTotal"], 251)
+        self.assertFalse(result["conflictPathsTruncated"])
+        self.assertEqual(result["conflictPaths"], sorted(conflict_paths))
         self.assertTrue(result["temporaryWorktreeRemoved"])
         self.assertTrue(result["primaryCheckoutClean"])
+
+    def test_evidence_rejects_a_conflict_total_that_disagrees_with_inventory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            conflicts = root / "conflicts.nul"
+            conflicts.write_bytes(b"one\0two\0")
+            args = type(
+                "Args",
+                (),
+                {
+                    "classification": "conflict",
+                    "reason": "conflict",
+                    "base": "a" * 40,
+                    "upstream": "b" * 40,
+                    "local": "c" * 40,
+                    "gate_status": "ready",
+                    "snapshot": "upstream/openai-codex/example",
+                    "conflicts": conflicts,
+                    "conflict_total": 3,
+                    "preflight": root / "missing.json",
+                    "worktree_removed": "true",
+                    "primary_checkout_clean": "true",
+                    "output_dir": root / "evidence",
+                    "workflow_sha": "d" * 40,
+                    "run_id": "12345",
+                },
+            )()
+
+            with self.assertRaisesRegex(
+                preflight.CandidatePreflightError, "does not match"
+            ):
+                preflight.write_evidence(args)
+
+    def test_conflict_inventory_read_is_hard_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            conflicts = Path(temporary_directory) / "conflicts.nul"
+            conflicts.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+
+            with self.assertRaisesRegex(
+                preflight.CandidatePreflightError, "exceeds the bounded size"
+            ):
+                preflight.read_conflict_paths(conflicts)
 
     def test_selects_deterministic_exact_overlap_and_excludes_non_test_evidence(
         self,
@@ -312,6 +358,8 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
                 {
                     "schemaVersion": 1,
                     "classification": "conflict",
+                    "conflictPathTotal": len(conflicts),
+                    "conflictPathsTruncated": False,
                     "conflictPaths": conflicts,
                 }
             ),
@@ -362,8 +410,10 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             ),
             encoding="utf-8",
         )
-        conflict_file = root / "conflicts.txt"
-        conflict_file.write_text("\n".join(conflicts) + "\n", encoding="utf-8")
+        conflict_file = root / "conflicts.nul"
+        conflict_file.write_bytes(
+            b"\0".join(path.encode("utf-8") for path in conflicts) + b"\0"
+        )
         return evidence, guard, gates, conflict_file
 
     def test_build_packets_is_deterministic_red_manual_and_zero_token(self) -> None:
@@ -404,11 +454,149 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertEqual(result["packets"][0]["excludedAnchorTotal"], 2)
         self.assertEqual(result["counts"]["mechanicalOrUnattributedPathTotal"], 1)
         self.assertEqual(result["counts"]["attributedPathTotal"], 1)
+        self.assertEqual(result["outcome"], "conflicts-unresolved")
+        self.assertEqual(result["unresolvedPathTotal"], 1)
         self.assertEqual(telemetry["actualTotalTokens"], 0)
         self.assertEqual(telemetry["invocation"], "not-invoked")
         self.assertEqual(telemetry["accountingConfidence"], "explicit_zero")
         self.assertEqual(evidence["classification"], "conflict")
         self.assertEqual(evidence["modelPackets"]["plannedPacketTotal"], 1)
+
+    def test_build_packets_preserves_newlines_in_paths_and_anchor_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            conflict = "owned\npath.rs"
+            evidence, guard, gates, conflict_file = self.packet_inputs(root, [conflict])
+            gate_data = json.loads(gates.read_text(encoding="utf-8"))
+            gate_data["contracts"][0]["evidence"][0]["path"] = conflict
+            gates.write_text(json.dumps(gate_data), encoding="utf-8")
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-newline",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "1",
+                },
+            )()
+
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["packets"][0]["paths"][0]["path"], conflict)
+        self.assertEqual(result["packets"][0]["anchors"][0]["path"], conflict)
+
+    def test_build_packets_fails_closed_for_an_incomplete_supplied_universe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            evidence, guard, gates, conflict_file = self.packet_inputs(
+                root, ["one.rs", "two.rs"]
+            )
+            conflict_file.write_bytes(b"one.rs\0")
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-incomplete",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "1",
+                },
+            )()
+
+            self.assertEqual(preflight.build_model_packets(args), 1)
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(
+            any("do not match" in warning for warning in result["warnings"])
+        )
+
+    def test_build_packets_fails_closed_for_a_missing_supplied_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            evidence, guard, gates, conflict_file = self.packet_inputs(
+                root, ["owned.rs"]
+            )
+            conflict_file.unlink()
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-missing-inventory",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "1",
+                },
+            )()
+
+            self.assertEqual(preflight.build_model_packets(args), 1)
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertTrue(
+            any("input is unavailable" in warning for warning in result["warnings"])
+        )
+
+    def test_build_packets_routes_more_than_200_conflicts_as_unresolved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            conflicts = [f"unattributed-{index}.rs" for index in range(251)]
+            evidence, guard, gates, conflict_file = self.packet_inputs(root, conflicts)
+            args = type(
+                "Args",
+                (),
+                {
+                    "evidence": evidence,
+                    "guard": guard,
+                    "gates": gates,
+                    "conflicts": conflict_file,
+                    "root_failures": None,
+                    "output_dir": root / "packets",
+                    "cycle_id": "cycle-large-inventory",
+                    "started_at": "2026-08-28T00:00:00Z",
+                    "duration_ms": "1",
+                },
+            )()
+
+            self.assertEqual(preflight.build_model_packets(args), 0)
+            result = json.loads(
+                (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
+            )
+            unresolved = json.loads(
+                (args.output_dir / "unresolved-conflicts.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(result["counts"]["conflictPathTotal"], 251)
+        self.assertEqual(result["unresolvedPathTotal"], 250)
+        self.assertEqual(result["outcome"], "conflicts-unresolved")
+        self.assertEqual(len(unresolved["unresolvedPaths"]), 250)
 
     def test_build_packets_caps_and_defers_paths_and_aggregate_packets(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -448,6 +636,11 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
             result = json.loads(
                 (args.output_dir / "model-packets.json").read_text(encoding="utf-8")
             )
+            unresolved = json.loads(
+                (args.output_dir / "unresolved-conflicts.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
         self.assertLessEqual(result["plannedPacketTotal"], 12)
         self.assertLessEqual(result["aggregatePlannedPromptTokens"], 40_000)
@@ -466,6 +659,14 @@ checksum = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
         self.assertLessEqual(len(result["packets"][0]["paths"]), 25)
         self.assertGreater(result["packets"][0]["deferredPathTotal"], 0)
         self.assertGreater(result["deferredPacketTotal"], 0)
+        self.assertEqual(result["outcome"], "conflicts-unresolved")
+        self.assertGreater(result["unresolvedPathTotal"], 0)
+        self.assertEqual(
+            unresolved["unresolvedPathTotal"], result["unresolvedPathTotal"]
+        )
+        self.assertEqual(
+            unresolved["conflictPathTotal"], result["counts"]["conflictPathTotal"]
+        )
         self.assertTrue(
             any(
                 warning.startswith("packets_deferred:")
