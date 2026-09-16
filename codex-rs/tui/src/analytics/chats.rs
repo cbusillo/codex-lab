@@ -157,6 +157,7 @@ pub(super) fn list_params() -> ThreadListParams {
         search_term: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
+        descendant_of_thread_id: None,
     }
 }
 

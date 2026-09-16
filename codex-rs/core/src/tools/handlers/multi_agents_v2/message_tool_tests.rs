@@ -1,9 +1,8 @@
-use super::communication_from_tool_message;
+use super::agent_message_from_tool;
 use super::message_tool::message_content;
 use crate::session_prefix::bounded_completion_payload;
 use crate::tools::context::ToolPayload;
 use crate::tools::router::ToolCall;
-use codex_protocol::AgentPath;
 use codex_tools::ToolName;
 
 #[test]
@@ -26,17 +25,11 @@ fn omitted_encryption_metadata_keeps_internal_message_plaintext() {
         },
         encrypted_function_args: None,
     };
-    let author = AgentPath::root();
-    let recipient = author.join("worker").expect("valid agent path");
+    let message =
+        agent_message_from_tool("inspect this repository".to_string(), &call.direct_source());
 
-    let communication = communication_from_tool_message(
-        author,
-        recipient,
-        "inspect this repository".to_string(),
-        &call.direct_source(),
-        /*trigger_turn*/ true,
-    );
-
-    assert!(communication.content.contains("inspect this repository"));
-    assert_eq!(communication.encrypted_content, None);
+    assert!(matches!(
+        message,
+        super::AgentMessage::Plaintext(content) if content == "inspect this repository"
+    ));
 }

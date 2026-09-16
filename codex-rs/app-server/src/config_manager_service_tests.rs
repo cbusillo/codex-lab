@@ -2685,18 +2685,19 @@ async fn permission_config_reload_merges_session_layers() -> Result<()> {
     std::fs::create_dir_all(&wrapper_dir)?;
     let wrapper = wrapper_dir.join("codex-execve-wrapper");
     std::fs::write(&wrapper, "")?;
-    let service = ConfigManager::new(
-        tmp.path().to_path_buf(),
-        Vec::new(),
-        LoaderOverrides::without_managed_config_for_tests(),
-        /*strict_config*/ false,
-        CloudConfigBundleLoader::default(),
-        codex_arg0::Arg0DispatchPaths {
+    let service = ConfigManager::new(ConfigManagerArgs {
+        codex_home: tmp.path().to_path_buf(),
+        auth_home: tmp.path().to_path_buf(),
+        cli_overrides: Vec::new(),
+        loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
+        strict_config: false,
+        cloud_config_bundle: CloudConfigBundleLoader::default(),
+        arg0_paths: codex_arg0::Arg0DispatchPaths {
             main_execve_wrapper_exe: Some(wrapper),
             ..Default::default()
         },
-        std::sync::Arc::new(codex_config::NoopThreadConfigLoader),
-    );
+        thread_config_loader: std::sync::Arc::new(codex_config::NoopThreadConfigLoader),
+    });
 
     let mut config = service
         .load_with_overrides(

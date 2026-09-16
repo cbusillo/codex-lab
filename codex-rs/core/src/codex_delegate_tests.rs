@@ -269,6 +269,7 @@ async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
             SubAgentSource::Review,
             codex_extension_api::SessionIsolation::Inherit,
             /*initial_history*/ None,
+            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         )

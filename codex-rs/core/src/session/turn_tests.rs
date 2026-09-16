@@ -130,6 +130,7 @@ fn realtime_interactive_request_notices_exclude_request_payloads() {
                 proposed_execpolicy_amendment: None,
                 proposed_network_policy_amendments: None,
                 additional_permissions: None,
+                model_context: None,
                 available_decisions: None,
                 parsed_cmd: Vec::new(),
             }),

@@ -4,6 +4,7 @@
 //! configuration and app-server initialization remain responsive to safe local editing.
 
 use super::*;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use std::io::IsTerminal;
 
 #[derive(Debug, PartialEq)]

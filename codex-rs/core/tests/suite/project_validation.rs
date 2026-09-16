@@ -2169,7 +2169,6 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
                 ev_completed("resp-4"),
             ]),
             sse_completed("resp-5"),
-            sse_completed("resp-6"),
         ],
     )
     .await;
@@ -2235,33 +2234,8 @@ async fn project_validation_correction_preserves_the_aggregated_turn_diff() -> R
     assert!(failure_index < resolution_index);
     assert!(resolution_index < next_user_input_index);
 
-    test.codex
-        .submit(Op::ThreadRollback { num_turns: 1 })
-        .await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::ThreadRolledBack(_))
-    })
-    .await;
-    submit_user_input(&test.codex, &test, "continue after rollback").await?;
-    collect_events_until_terminal(&test.codex).await?;
-
-    let requests = response_mock.requests();
-    assert_eq!(requests.len(), 6);
-    let rollback_turn_user_texts = requests[5].message_input_texts("user");
-    let failure_index = rollback_turn_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_failure>"))
-        .expect("rollback should preserve historical validation failure context");
-    let resolution_index = rollback_turn_user_texts
-        .iter()
-        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
-        .expect("rollback should preserve the consumed correction marker");
-    let current_user_input_index = rollback_turn_user_texts
-        .iter()
-        .position(|text| text == "continue after rollback")
-        .expect("rollback turn should include the current user input");
-    assert!(failure_index < resolution_index);
-    assert!(resolution_index < current_user_input_index);
+    // Durable history replacement is covered by the app-server
+    // `project_validation_revert_preserves_correction_history` test.
     Ok(())
 }
 

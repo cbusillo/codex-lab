@@ -347,7 +347,10 @@ async fn client_setup_accepts_command_credential_refresh() {
                 refreshed_revision
             ),
         );
-        assert_ne!(setup.auth_owner_generation, client.auth_owner_generation());
+        assert_ne!(
+            setup.auth_owner_generation,
+            ModelClient::auth_owner_generation(&client.request_provider())
+        );
     }
 }
 

@@ -72,7 +72,7 @@ async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
     let home = tempdir()?;
     let mut manager = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
     let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
-    manager.thread_config_loader = Arc::new(UnavailableThreadConfig);
+    manager.thread_config_loader = Arc::new(RwLock::new(Arc::new(UnavailableThreadConfig)));
     assert!(
         manager
             .load_latest_config(/*fallback_cwd*/ None)

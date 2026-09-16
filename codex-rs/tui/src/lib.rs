@@ -1786,6 +1786,10 @@ async fn run_ratatui_app(
         if consent.directory_trust_persisted && !uses_remote_workspace {
             let previous_provider = config.model_provider_id.clone();
             config = load_config_or_exit_with_fallback_cwd(
+                ConfigHomes {
+                    codex_home: config.codex_home.to_path_buf(),
+                    auth_home: config.auth_home.to_path_buf(),
+                },
                 cli_kv_overrides.clone(),
                 overrides.clone(),
                 loader_overrides.clone(),
@@ -1834,6 +1838,10 @@ async fn run_ratatui_app(
             }
             if !uses_remote_workspace {
                 config = load_config_or_exit_with_fallback_cwd(
+                    ConfigHomes {
+                        codex_home: config.codex_home.to_path_buf(),
+                        auth_home: config.auth_home.to_path_buf(),
+                    },
                     cli_kv_overrides.clone(),
                     overrides.clone(),
                     loader_overrides.clone(),
@@ -2280,6 +2288,7 @@ pub(crate) mod tests {
             Arg0DispatchPaths::default(),
             LoaderOverrides::default(),
             /*explicit_remote_endpoint*/ None,
+            codex_version::ProductIdentity::Codex,
         );
         let size = std::mem::size_of_val(&future);
 

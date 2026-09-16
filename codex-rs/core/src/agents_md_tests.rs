@@ -1653,9 +1653,15 @@ async fn fallback_paths_are_rejected_before_filesystem_probes() {
             failure: InjectedFailure::MetadataNotFound,
             metadata_calls: Arc::clone(&metadata_calls),
         };
-        let paths = super::agents_md_paths(&cfg, &cwd, &filesystem, /*sandbox*/ None)
-            .await
-            .expect("discover paths");
+        let paths = super::agents_md_paths(
+            &cfg,
+            &cwd,
+            &filesystem,
+            /*sandbox*/ None,
+            codex_file_system::FindUpErrorPolicy::Ignore,
+        )
+        .await
+        .expect("discover paths");
 
         assert_eq!(paths, Vec::<PathUri>::new());
         assert_eq!(

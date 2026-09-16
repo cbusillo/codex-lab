@@ -243,7 +243,11 @@ async fn thread_attachment_operations_without_sqlite_return_method_not_found() -
     }
 
     client.shutdown().await?;
-    assert_no_local_persistence_artifacts(codex_home.path())?;
+    let expected_execution_account_lease_files = BTreeSet::new();
+    assert_no_local_persistence_artifacts(
+        codex_home.path(),
+        &expected_execution_account_lease_files,
+    )?;
     Ok(())
 }
 

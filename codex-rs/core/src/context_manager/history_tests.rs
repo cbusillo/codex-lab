@@ -3273,7 +3273,9 @@ fn text_only_items_count_decoded_content() {
 
 fn tool_image_item(base64: &str) -> FunctionCallOutputContentItem {
     FunctionCallOutputContentItem::InputImage {
-        image_url: format!("data:image/png;base64,{base64}"),
+        image: ImageReference::Inline {
+            image_url: format!("data:image/png;base64,{base64}"),
+        },
         detail: Some(DEFAULT_IMAGE_DETAIL),
     }
 }
