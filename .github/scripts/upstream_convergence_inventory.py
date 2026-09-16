@@ -25,12 +25,14 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
-POLICY_VERSION = 3
+POLICY_VERSION = 5
 LEGACY_POLICY_VERSION = 1
 PREVIOUS_POLICY_VERSION = 2
 SUPPORTED_POLICY_VERSIONS = (
     LEGACY_POLICY_VERSION,
     PREVIOUS_POLICY_VERSION,
+    3,
+    4,
     POLICY_VERSION,
 )
 
@@ -552,6 +554,39 @@ POLICY_V3_RULES = (
 )
 
 
+# Version 4 adds instruction-completeness ownership without changing any
+# classification used to reproduce the pinned v1-v3 upstream snapshots.
+POLICY_V4_RULES = (
+    Rule(
+        patterns=(
+            "codex-rs/core/src/agents_md.rs",
+            "codex-rs/core/src/agents_md_tests.rs",
+            "codex-rs/core/src/turn_diff_tracker.rs",
+            "codex-rs/core/src/turn_diff_tracker_tests.rs",
+            "codex-rs/core/src/state/turn.rs",
+            "codex-rs/core/src/tasks/mod.rs",
+            "codex-rs/core/src/tasks/background_review_instructions*",
+            "codex-rs/tui/src/history_cell/snapshots/*incomplete_instructions_explain_failed_background_review*",
+        ),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="exact instruction snapshot and changed-path proof for Background Review (#787)",
+    ),
+    *POLICY_V3_RULES,
+)
+
+
+POLICY_V5_RULES = (
+    Rule(
+        patterns=feature_paths("bounded_worker"),
+        lane="intentionally_owned",
+        contracts=("AGENT-1",),
+        reason="bounded external-worker product controls (#910), not convergence savings",
+    ),
+    *POLICY_V4_RULES,
+)
+
+
 def git_environment(**updates: str) -> dict[str, str]:
     env = {
         key: value
@@ -645,9 +680,7 @@ def run_process_bounded(
         reader.join()
     if process.poll() is None:
         try:
-            returncode = process.wait(
-                timeout=max(0.0, deadline - time.monotonic())
-            )
+            returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             if failure is None:
                 failure = RuntimeError(
@@ -696,15 +729,21 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
         return POLICY_V1_RULES
     if policy_version == PREVIOUS_POLICY_VERSION:
         return POLICY_V2_RULES
-    if policy_version == POLICY_VERSION:
+    if policy_version == 3:
         return POLICY_V3_RULES
+    if policy_version == 4:
+        return POLICY_V4_RULES
+    if policy_version == POLICY_VERSION:
+        return POLICY_V5_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"
     )
 
 
-def run_git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run_git(
+    repo: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[str]:
     result = run_git_process(repo, *args)
     if not isinstance(result.stdout, str) or not isinstance(result.stderr, str):
         raise RuntimeError(f"git {' '.join(args)} returned binary output")
@@ -773,9 +812,15 @@ def parse_conflict_message(line: str) -> tuple[str, str]:
 def merge_conflicts(
     repo: Path, upstream: str, local: str, policy_version: int = POLICY_VERSION
 ) -> tuple[dict[str, str], list[dict[str, object]]]:
-    raw_objects = Path(run_git(repo, "rev-parse", "--git-path", "objects").stdout.strip())
-    objects = raw_objects if raw_objects.is_absolute() else (repo / raw_objects).resolve()
-    with tempfile.TemporaryDirectory(prefix="upstream-convergence-objects-") as temporary:
+    raw_objects = Path(
+        run_git(repo, "rev-parse", "--git-path", "objects").stdout.strip()
+    )
+    objects = (
+        raw_objects if raw_objects.is_absolute() else (repo / raw_objects).resolve()
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="upstream-convergence-objects-"
+    ) as temporary:
         env = git_environment(
             GIT_OBJECT_DIRECTORY=temporary,
             GIT_ALTERNATE_OBJECT_DIRECTORIES=str(objects),
@@ -814,9 +859,7 @@ def merge_conflicts(
     return result_objects, classified
 
 
-def classify_path(
-    path: str, policy_version: int = POLICY_VERSION
-) -> dict[str, object]:
+def classify_path(path: str, policy_version: int = POLICY_VERSION) -> dict[str, object]:
     lane = "green_bulk_adopt"
     contracts: set[str] = set()
     reasons: list[str] = []
@@ -914,7 +957,9 @@ def build_inventory(
         "conflictTypeCounts": dict(
             sorted(Counter(entry["conflictType"] for entry in conflicts).items())
         ),
-        "laneCounts": dict(sorted(Counter(entry["lane"] for entry in conflicts).items())),
+        "laneCounts": dict(
+            sorted(Counter(entry["lane"] for entry in conflicts).items())
+        ),
         "residualLaneCounts": dict(
             sorted(Counter(entry["lane"] for entry in residuals).items())
         ),
@@ -926,7 +971,9 @@ def build_inventory(
 def render_records(header: dict[str, object], key: str, records: list[object]) -> str:
     lines = ["{"]
     for header_key, value in header.items():
-        lines.append(f"  {json.dumps(header_key)}: {json.dumps(value, sort_keys=True)},")
+        lines.append(
+            f"  {json.dumps(header_key)}: {json.dumps(value, sort_keys=True)},"
+        )
     lines.append(f"  {json.dumps(key)}: [")
     for index, record in enumerate(records):
         comma = "," if index + 1 < len(records) else ""
@@ -957,7 +1004,9 @@ def render_residuals(inventory: dict[str, object]) -> str:
                 "differs from upstream, so local content survives without review."
             ),
         },
-        "summary": {"residualLocalInfluence": inventory["summary"]["residualLocalInfluence"]},
+        "summary": {
+            "residualLocalInfluence": inventory["summary"]["residualLocalInfluence"]
+        },
         "residualLaneCounts": inventory["residualLaneCounts"],
     }
     return render_records(header, "residuals", inventory["residuals"])

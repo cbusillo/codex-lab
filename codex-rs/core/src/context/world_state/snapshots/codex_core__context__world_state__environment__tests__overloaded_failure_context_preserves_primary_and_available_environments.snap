@@ -1,0 +1,37 @@
+---
+source: core/src/context/world_state/environment_tests.rs
+expression: rendered
+---
+
+  <environments>
+    <environment id="aa-failed-0" primary="false">
+      <cwd>/failed-0</cwd>
+      <status>failed</status>
+      <error>界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界</error>
+    </environment>
+    <environment id="aa-failed-1" primary="false">
+      <cwd>/failed-1</cwd>
+      <status>failed</status>
+      <error>界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界</error>
+    </environment>
+    <environment id="aa-failed-2" primary="false">
+      <cwd>/failed-2</cwd>
+      <status>failed</status>
+    </environment>
+    <environment id="aa-failed-3" primary="false">
+      <cwd>/failed-3</cwd>
+      <status>failed</status>
+    </environment>
+    <environment id="zz-available-0" primary="false">
+      <cwd>/available-0</cwd>
+    </environment>
+    <environment id="zz-available-1" primary="false">
+      <cwd>/available-1</cwd>
+    </environment>
+    <environment id="zz-available-2" primary="false">
+      <cwd>/available-2</cwd>
+    </environment>
+    <environment id="zz-primary" primary="true">
+      <cwd>/primary</cwd>
+    </environment>
+  </environments>

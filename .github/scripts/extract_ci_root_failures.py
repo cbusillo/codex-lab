@@ -52,20 +52,26 @@ def _bounded_text(record: dict[str, Any], fields: tuple[str, ...], label: str) -
     raise InputError(f"missing {label}")
 
 
-def _identifier(record: dict[str, Any], fields: tuple[str, ...], label: str) -> str | int:
+def _identifier(
+    record: dict[str, Any], fields: tuple[str, ...], label: str
+) -> str | int:
     for field in fields:
         if field not in record or record[field] is None:
             continue
         value = record[field]
         if isinstance(value, bool) or not isinstance(value, (int, str)):
             raise InputError(f"{label} must be a string or integer")
-        if isinstance(value, str) and (not value.strip() or len(value) > MAX_TEXT_LENGTH):
+        if isinstance(value, str) and (
+            not value.strip() or len(value) > MAX_TEXT_LENGTH
+        ):
             raise InputError(f"{label} is empty or exceeds the bounded field size")
         return value
     raise InputError(f"missing {label}")
 
 
-def _is_aggregator(kind: str, identifier: str | int, name: str, record: dict[str, Any]) -> bool:
+def _is_aggregator(
+    kind: str, identifier: str | int, name: str, record: dict[str, Any]
+) -> bool:
     explicit = record.get("is_aggregator")
     if explicit is not None:
         if not isinstance(explicit, bool):
@@ -89,7 +95,9 @@ def _is_aggregator(kind: str, identifier: str | int, name: str, record: dict[str
     }
 
 
-def _conclusion(record: dict[str, Any], fields: tuple[str, ...], label: str) -> str | None:
+def _conclusion(
+    record: dict[str, Any], fields: tuple[str, ...], label: str
+) -> str | None:
     for field in fields:
         if field not in record or record[field] in (None, ""):
             continue
@@ -273,12 +281,17 @@ def extract_root_failures(
     actionable_ids = {id(source) for source in actionable}
     for source in eligible:
         if id(source) not in actionable_ids:
-            if source["conclusion"] and source["conclusion"].strip().casefold() != "success":
+            if (
+                source["conclusion"]
+                and source["conclusion"].strip().casefold() != "success"
+            ):
                 ignored_non_actionable += 1
             continue
         root_key = source["root_key"]
         groups.setdefault(root_key, []).append(source)
-        root_names[root_key] = min(root_names.get(root_key, source["root"]), source["root"])
+        root_names[root_key] = min(
+            root_names.get(root_key, source["root"]), source["root"]
+        )
 
     ordered_keys = sorted(groups)
     duplicate_count = sum(max(0, len(groups[key]) - 1) for key in ordered_keys)
@@ -342,10 +355,7 @@ def bounded_report(report: dict[str, Any], max_output_bytes: int) -> str:
         len(failure["sources"]) for failure in candidate["failures"]
     )
     rendered = _serialise(candidate)
-    while (
-        len(rendered.encode("utf-8")) > max_output_bytes
-        and candidate["failures"]
-    ):
+    while len(rendered.encode("utf-8")) > max_output_bytes and candidate["failures"]:
         candidate["failures"].pop()
         candidate["summary"]["reported_roots"] = len(candidate["failures"])
         candidate["summary"]["reported_sources"] = sum(
@@ -381,7 +391,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", default="-", help="JSON file, or '-' for stdin")
     parser.add_argument("--max-input-bytes", type=int, default=DEFAULT_MAX_INPUT_BYTES)
-    parser.add_argument("--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES)
+    parser.add_argument(
+        "--max-output-bytes", type=int, default=DEFAULT_MAX_OUTPUT_BYTES
+    )
     parser.add_argument("--max-roots", type=int, default=DEFAULT_MAX_ROOTS)
     parser.add_argument(
         "--max-sources-per-root",

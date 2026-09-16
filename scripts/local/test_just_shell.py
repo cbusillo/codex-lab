@@ -1,9 +1,15 @@
 import importlib.util
 import os
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+from local.target_lease import TARGET_LEASE_FD_ENV
 
 
 MODULE_PATH = Path(__file__).parents[1] / "just-shell.py"
@@ -55,6 +61,109 @@ class JustShellTest(unittest.TestCase):
 
         self.assertEqual(environment, {})
         run.assert_not_called()
+
+    def test_managed_recipe_forwards_engine_status(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {
+                "CODEX_REPO_ROOT": str(Path(__file__).parents[1].parent),
+                "CODEX_LAB_TARGET_RETENTION_CONFIG": str(config),
+            }
+            completed = mock.Mock(returncode=37)
+            with mock.patch("subprocess.run", return_value=completed) as run:
+                result = just_shell.run_managed_recipe("test", [], environment)
+        self.assertEqual(result, 37)
+        command = run.call_args.args[0]
+        self.assertEqual(command[-3:], ["--recipe", "test", "--"])
+
+    def test_plain_build_stays_unmanaged(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {"CODEX_LAB_TARGET_RETENTION_CONFIG": str(config)}
+            with mock.patch("subprocess.run") as run:
+                result = just_shell.run_managed_recipe("build", [], environment)
+        self.assertIsNone(result)
+        run.assert_not_called()
+
+    def test_managed_recipe_maps_signal_status_and_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            config = Path(temporary_directory) / "retention.json"
+            config.write_text("{}", encoding="utf-8")
+            environment = {"CODEX_LAB_TARGET_RETENTION_CONFIG": str(config)}
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=-2)):
+                self.assertEqual(
+                    just_shell.run_managed_recipe("test", [], environment), 130
+                )
+            with mock.patch("subprocess.run", side_effect=KeyboardInterrupt):
+                self.assertEqual(
+                    just_shell.run_managed_recipe("test", [], environment), 130
+                )
+
+    def test_managed_recipe_skips_explicit_target_override(self) -> None:
+        with mock.patch("subprocess.run") as run:
+            result = just_shell.run_managed_recipe(
+                "test", [], {"CARGO_TARGET_DIR": "/external/target"}
+            )
+        self.assertIsNone(result)
+        run.assert_not_called()
+
+    def test_absent_default_config_preserves_unmanaged_route(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            missing = Path(temporary_directory) / "missing.json"
+            with (
+                mock.patch.object(
+                    just_shell.managed_targets, "DEFAULT_CONFIG_PATH", missing
+                ),
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                self.assertIsNone(just_shell.run_managed_recipe("test", [], {}))
+
+    def test_leased_resolver_preserves_store_target(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(__file__).parents[2]
+            target = Path(temporary_directory) / "managed-target"
+            target.mkdir()
+            fd = os.open(
+                Path(temporary_directory) / "lease.lock", os.O_CREAT | os.O_RDWR, 0o600
+            )
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = just_shell.resolve_cargo_environment(
+                    "test",
+                    {
+                        "CODEX_REPO_ROOT": str(root),
+                        "CARGO_TARGET_DIR": str(target),
+                        "PATH": os.environ["PATH"],
+                        TARGET_LEASE_FD_ENV: str(fd),
+                    },
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertIn(result, ({}, {"CARGO_TARGET_DIR": str(target)}))
+
+    def test_managed_recipe_refuses_override_inside_managed_root(self) -> None:
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(temporary_directory)
+            config = root / "retention.json"
+            managed_root = root / "targets"
+            config.write_text(
+                '{"managed_root": "%s"}' % managed_root,
+                encoding="utf-8",
+            )
+            environment = {
+                "CODEX_LAB_TARGET_RETENTION_CONFIG": str(config),
+                "CARGO_TARGET_DIR": str(managed_root / "target"),
+            }
+            with self.assertRaisesRegex(RuntimeError, "inside"):
+                just_shell.run_managed_recipe("test", [], environment)
 
     def test_all_direct_cargo_recipes_resolve_target(self) -> None:
         expected = {
@@ -140,6 +249,71 @@ class JustShellTest(unittest.TestCase):
             env=environment,
         )
 
+    def test_codex_core_prerequisite_cargo_inherits_target_lease(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            lock_path = root / "lease.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            cargo = root / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env python3\n"
+                "import fcntl, os\n"
+                "from pathlib import Path\n"
+                f"fd = int(os.environ[{TARGET_LEASE_FD_ENV!r}])\n"
+                "assert os.get_inheritable(fd)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                f"Path({str(root / 'result')!r}).write_text('forwarded')\n",
+                encoding="utf-8",
+            )
+            cargo.chmod(cargo.stat().st_mode | stat.S_IXUSR)
+            environment = {
+                "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
+                "CARGO_TARGET_DIR": str(root / "target"),
+                TARGET_LEASE_FD_ENV: str(fd),
+            }
+            try:
+                just_shell.build_test_prerequisites(
+                    "test", ["-p", "codex-core"], environment
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual((root / "result").read_text(), "forwarded")
+
+    def test_invalid_target_lease_fails_before_prerequisite_spawn(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        environment = {
+            "CARGO_TARGET_DIR": "/tmp/target",
+            TARGET_LEASE_FD_ENV: "not-a-fd",
+        }
+        with mock.patch("subprocess.run") as run:
+            with self.assertRaisesRegex(ValueError, TARGET_LEASE_FD_ENV):
+                just_shell.build_test_prerequisites(
+                    "test", ["-p", "codex-core"], environment
+                )
+        run.assert_not_called()
+
+    def test_stripped_target_lease_refuses_before_cargo_spawn(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX target leases are not supported on Windows")
+        with tempfile.TemporaryFile() as lease, mock.patch("subprocess.run") as run:
+            os.set_inheritable(lease.fileno(), True)
+            with mock.patch.dict(
+                os.environ, {TARGET_LEASE_FD_ENV: str(lease.fileno())}
+            ):
+                with self.assertRaisesRegex(ValueError, "stripped"):
+                    just_shell.build_test_prerequisites(
+                        "test", ["-p", "codex-core"], {}
+                    )
+            run.assert_not_called()
+
     @staticmethod
     def test_codex_core_lib_tests_skip_runtime_binaries() -> None:
         with mock.patch("subprocess.run") as run:
@@ -172,6 +346,48 @@ class JustShellTest(unittest.TestCase):
             )
 
         run.assert_not_called()
+
+    def test_v8_resolver_inherits_target_lease(self) -> None:
+        if os.name == "nt":
+            self.skipTest("POSIX lease descriptors are unavailable on Windows")
+        import fcntl
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temporary_directory:
+            root = Path(temporary_directory)
+            helper = root / "scripts" / "local" / "rusty_v8_env.py"
+            helper.parent.mkdir(parents=True)
+            marker = root / "forwarded"
+            helper.write_text(
+                "import fcntl, os\n"
+                "from pathlib import Path\n"
+                f"fd = int(os.environ[{TARGET_LEASE_FD_ENV!r}])\n"
+                "assert os.get_inheritable(fd)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                f"Path({str(marker)!r}).write_text('forwarded')\n"
+                "print('RUSTY_V8_ARCHIVE=/cache/archive')\n"
+                "print('RUSTY_V8_SRC_BINDING_PATH=/cache/binding')\n",
+                encoding="utf-8",
+            )
+            lock_path = root / "lease.lock"
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.set_inheritable(fd, True)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = just_shell.resolve_rusty_v8_environment(
+                    "test",
+                    {"CODEX_REPO_ROOT": str(root), TARGET_LEASE_FD_ENV: str(fd)},
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual(
+                result,
+                {
+                    "RUSTY_V8_ARCHIVE": "/cache/archive",
+                    "RUSTY_V8_SRC_BINDING_PATH": "/cache/binding",
+                },
+            )
+            self.assertEqual(marker.read_text(), "forwarded")
 
 
 if __name__ == "__main__":

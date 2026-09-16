@@ -368,9 +368,7 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser("resolved-v8-crate-version")
 
-    write_release_checksums_parser = subparsers.add_parser(
-        "write-release-checksums"
-    )
+    write_release_checksums_parser = subparsers.add_parser("write-release-checksums")
     write_release_checksums_parser.add_argument("--version")
     write_release_checksums_parser.add_argument("--target", required=True)
     write_release_checksums_parser.add_argument("--output", type=Path, required=True)

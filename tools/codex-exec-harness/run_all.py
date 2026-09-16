@@ -201,7 +201,11 @@ def main(argv: list[str]) -> int:
         if isinstance(characterization, dict):
             skipped["characterization"] = characterization
         skipped_scenarios.append(skipped)
-        status = characterization.get("status") if isinstance(characterization, dict) else None
+        status = (
+            characterization.get("status")
+            if isinstance(characterization, dict)
+            else None
+        )
         detail = f" ({status})" if isinstance(status, str) else ""
         print(
             f"Skipping {scenario.relative_to(ROOT)}{detail}",

@@ -224,11 +224,12 @@ pub fn apply_world_writable_scan_and_denies_for_permissions(
     env_map: &std::collections::HashMap<String, String>,
     permissions: &ResolvedWindowsSandboxPermissions,
     logs_base_dir: Option<&Path>,
-) -> Result<()> {
+) -> Result<usize> {
     let flagged = audit_everyone_writable(cwd, env_map, logs_base_dir)?;
     if flagged.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
+    let flagged_count = flagged.len();
     let result = apply_capability_denies_for_world_writable_for_permissions(
         codex_home,
         &flagged,
@@ -243,7 +244,7 @@ pub fn apply_world_writable_scan_and_denies_for_permissions(
             logs_base_dir,
         );
     }
-    result
+    result.map(|()| flagged_count)
 }
 
 fn apply_capability_denies_for_world_writable_for_permissions(
@@ -261,7 +262,10 @@ fn apply_capability_denies_for_world_writable_for_permissions(
     let cap_path = cap_sid_file(codex_home);
     let caps = load_or_create_cap_sids(codex_home)?;
     std::fs::write(&cap_path, serde_json::to_string(&caps)?)?;
-    if !permissions.is_enforceable_by_windows_sandbox() {
+    if permissions
+        .validate_elevated_filesystem_policy(cwd)
+        .is_err()
+    {
         return Ok(());
     }
     let (active_sids, workspace_roots): (Vec<LocalSid>, Vec<PathBuf>) =

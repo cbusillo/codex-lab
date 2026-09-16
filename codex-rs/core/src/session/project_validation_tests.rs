@@ -171,8 +171,8 @@ fn cargo_validation_managed_profile_adds_only_cache_target_write_access() {
         panic!("expected managed permission profile");
     };
     let file_system = file_system.to_sandbox_policy();
-    assert!(file_system.can_write_path_with_cwd(cache_target.as_path(), workspace.as_path()));
-    assert!(!file_system.can_write_path_with_cwd(unrelated.as_path(), workspace.as_path()));
+    assert!(file_system.can_write_local_path_with_cwd(cache_target.as_path(), workspace.as_path()));
+    assert!(!file_system.can_write_local_path_with_cwd(unrelated.as_path(), workspace.as_path()));
 }
 
 #[test]

@@ -452,7 +452,9 @@ class TestUpstreamConvergenceReport(unittest.TestCase):
                 "error": "upstream provenance moved",
             },
         )
-        self.assertIn("candidate gate error: upstream provenance moved", compact["alerts"])
+        self.assertIn(
+            "candidate gate error: upstream provenance moved", compact["alerts"]
+        )
         self.assertIn("**Status**: `error`", markdown)
 
     def test_rejects_missing_refs(self) -> None:

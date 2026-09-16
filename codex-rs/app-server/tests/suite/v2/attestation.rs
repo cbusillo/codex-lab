@@ -56,7 +56,6 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
     .await;
 
     let codex_home = TempDir::new()?;
-    write_models_cache(codex_home.path())?;
     create_chatgpt_websocket_config(
         codex_home.path(),
         &websocket_server.uri().replacen("ws://", "http://", 1),
@@ -66,6 +65,7 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
         ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
         AuthCredentialsStoreMode::File,
     )?;
+    write_models_cache(codex_home.path()).await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -116,11 +116,7 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
         })
         .await?;
     let mut attestation_requests = 0;
-    let mut turn_response: Option<JSONRPCResponse> = None;
-    let mut turn_completed = false;
-
-    // The server may issue attestation/generate before it sends the turn/start
-    // response, so service inbound requests while waiting for both messages.
+    let mut turn_response = None;
     timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             match mcp.read_next_message().await? {
@@ -128,9 +124,6 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
                     if response.id == RequestId::Integer(turn_request_id) =>
                 {
                     turn_response = Some(response);
-                }
-                JSONRPCMessage::Error(error) if error.id == RequestId::Integer(turn_request_id) => {
-                    bail!("turn/start returned an error: {error:?}");
                 }
                 JSONRPCMessage::Request(request) => {
                     let request = ServerRequest::try_from(request)?;
@@ -149,18 +142,16 @@ async fn attestation_generate_round_trip_adds_header_to_responses_websocket_hand
                 JSONRPCMessage::Notification(notification)
                     if notification.method == "turn/completed" =>
                 {
-                    turn_completed = true;
+                    break Ok(());
                 }
                 _ => {}
-            }
-
-            if turn_response.is_some() && turn_completed {
-                break Ok(());
             }
         }
     })
     .await??;
-    let turn_response = turn_response.expect("turn/start response should be observed");
+    let Some(turn_response) = turn_response else {
+        bail!("turn/start response was not received before turn completion");
+    };
     let _: TurnStartResponse = to_response(turn_response)?;
     assert!(attestation_requests > 0);
 

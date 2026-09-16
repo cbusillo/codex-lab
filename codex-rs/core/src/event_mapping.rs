@@ -33,6 +33,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+use crate::context::ContextualUserFragment;
+use crate::context::ProjectValidationFailure;
 use crate::context::is_contextual_user_fragment;
 use crate::context::parse_visible_hook_prompt_message;
 use crate::web_search::web_search_action_detail;
@@ -42,6 +44,7 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX,
     "<model_switch>",
     "<managed_developer_instructions>",
+    "<persistent_mode>",
     APPS_INSTRUCTIONS_OPEN_TAG,
     COLLABORATION_MODE_OPEN_TAG,
     "<multi_agent_role>",
@@ -173,6 +176,7 @@ fn parse_agent_message(
         phase,
         memory_citation: None,
         delivery: None,
+        questions: None,
     }
 }
 
@@ -185,6 +189,13 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
             phase,
             ..
         } => match role.as_str() {
+            "user"
+                if content.iter().any(|item| {
+                    matches!(item, ContentItem::InputText { text } if ProjectValidationFailure::matches_text(text))
+                }) =>
+            {
+                None
+            }
             "user" => parse_visible_hook_prompt_message(id.as_deref(), content)
                 .map(TurnItem::HookPrompt)
                 .or_else(|| parse_user_message(content).map(TurnItem::UserMessage)),

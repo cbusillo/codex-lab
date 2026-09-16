@@ -1,3 +1,4 @@
+use codex_git_utils::SanitizedGitUrl;
 use codex_git_utils::collect_git_info;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::CODEX_API_KEY_ENV_VAR;
@@ -73,7 +74,12 @@ fn personal_access_token_exec_command(server: &MockServer, home: &TempDir) -> Co
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg(format!("openai_base_url=\"{}/api/codex\"", server.uri()))
+        .arg("model_provider=\"pat_mock\"")
+        .arg("-c")
+        .arg(format!(
+            "model_providers.pat_mock={{ name = \"pat_mock\", base_url = \"{}/api/codex\", wire_api = \"responses\", requires_openai_auth = true, supports_websockets = false }}",
+            server.uri()
+        ))
         .arg("-c")
         .arg(format!("chatgpt_base_url=\"{}/backend-api\"", server.uri()))
         .arg("-C")
@@ -486,12 +492,17 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
+        .arg("model_provider=\"mock\"")
+        .arg("-c")
+        .arg(format!(
+            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"OPENAI_API_KEY\", wire_api = \"responses\", supports_websockets = false }}",
+            server.uri()
+        ))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt);
     cmd.env("CODEX_LAB_HOME", home.path())
-        .env(CODEX_API_KEY_ENV_VAR, "dummy");
+        .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
     assert!(
@@ -602,7 +613,12 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
+        .arg("model_provider=\"mock\"")
+        .arg("-c")
+        .arg(format!(
+            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"OPENAI_API_KEY\", wire_api = \"responses\", supports_websockets = false }}",
+            server.uri()
+        ))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt2)
@@ -769,6 +785,7 @@ async fn integration_git_info_unit_test() {
         .unwrap()
         .trim()
         .to_string();
+    let expected_remote_url = SanitizedGitUrl::try_from(expected_remote_url.as_str()).unwrap();
     assert_eq!(
         repo_url, &expected_remote_url,
         "Repository URL should match git remote get-url output"
@@ -785,7 +802,13 @@ async fn integration_git_info_unit_test() {
 
     assert_eq!(git_info.commit_hash, deserialized.commit_hash);
     assert_eq!(git_info.branch, deserialized.branch);
-    assert_eq!(git_info.repository_url, deserialized.repository_url);
+    assert_eq!(
+        git_info
+            .repository_url
+            .as_ref()
+            .map(SanitizedGitUrl::as_str),
+        deserialized.repository_url.as_deref()
+    );
 
     println!("✅ Git info serialization test passed!");
 }

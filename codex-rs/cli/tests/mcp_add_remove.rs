@@ -12,9 +12,9 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-fn codex_command(codex_lab_home: &Path) -> Result<assert_cmd::Command> {
+fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_lab_home);
+    cmd.env("CODEX_LAB_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -122,31 +122,49 @@ async fn codex_lab_home_preserves_default_home_sentinel_when_legacy_homes_are_se
 }
 
 #[tokio::test]
-async fn codex_home_alone_does_not_redirect_lab_config() -> Result<()> {
-    let default_home = TempDir::new()?;
-    let default_lab_home = default_home.path().join(".codex-lab");
-    std::fs::create_dir(&default_lab_home)?;
+async fn npm_server_names_round_trip_through_cli() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let code_home = TempDir::new()?;
+    let name = "npm:@modelcontextprotocol/server-sequential.thinking";
 
-    let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("HOME", default_home.path());
-    cmd.env("CODEX_HOME", codex_home.path());
-    cmd.env("CODE_HOME", code_home.path());
-    cmd.env_remove("CODEX_LAB_HOME");
-    cmd.args(["mcp", "add", "docs", "--", "echo", "hello"])
+    codex_command(codex_home.path())?
+        .args(["mcp", "add", name, "--", "echo", "hello"])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+    assert!(config.contains(&format!("[mcp_servers.\"{name}\"]")));
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    assert_eq!(
+        servers.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec![name]
+    );
+
+    let output = codex_command(codex_home.path())?
+        .args(["mcp", "get", name, "--json"])
         .assert()
         .success()
-        .stdout(contains("Added global MCP server 'docs'."));
+        .get_output()
+        .stdout
+        .clone();
+    let server: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(server["name"], name);
 
-    assert!(
-        load_global_mcp_servers(&default_lab_home)
-            .await?
-            .contains_key("docs")
-    );
+    let output = codex_command(codex_home.path())?
+        .args(["mcp", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let listed: Vec<serde_json::Value> = serde_json::from_slice(&output)?;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["name"], name);
+
+    codex_command(codex_home.path())?
+        .args(["mcp", "remove", name])
+        .assert()
+        .success();
     assert!(load_global_mcp_servers(codex_home.path()).await?.is_empty());
-    assert!(load_global_mcp_servers(code_home.path()).await?.is_empty());
-
     Ok(())
 }
 
@@ -419,10 +437,13 @@ async fn add_streamable_http_with_custom_env_var() -> Result<()> {
 #[tokio::test]
 async fn add_streamable_http_with_oauth_options() -> Result<()> {
     let codex_home = TempDir::new()?;
+    let expected_callback = "http://127.0.0.1/callback/w9gKTtkB7gWy";
 
     let mut add_cmd = codex_command(codex_home.path())?;
     add_cmd
         .args([
+            "-c",
+            "mcp_oauth_callback_port=43123",
             "mcp",
             "add",
             "oauth-server",
@@ -434,7 +455,8 @@ async fn add_streamable_http_with_oauth_options() -> Result<()> {
             "https://resource.example.com",
         ])
         .assert()
-        .success();
+        .success()
+        .stdout(contains(format!("OAuth callback URL: {expected_callback}")));
 
     let servers = load_global_mcp_servers(codex_home.path()).await?;
     let oauth_server = servers
@@ -445,8 +467,72 @@ async fn add_streamable_http_with_oauth_options() -> Result<()> {
         Some("eci-prd-pub-codex-123")
     );
     assert_eq!(
+        oauth_server
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.callback_url.as_deref()),
+        Some(expected_callback)
+    );
+    assert_eq!(
         oauth_server.oauth_resource.as_deref(),
         Some("https://resource.example.com")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn add_persists_issuer_bound_callback_before_starting_oauth() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let oauth_server = MockServer::start().await;
+    let issuer = format!("{}/mcp", oauth_server.uri());
+    let metadata = serde_json::json!({
+        "issuer": issuer,
+        "authorization_endpoint": "not-a-valid-authorization-url",
+        "token_endpoint": format!("{}/token", oauth_server.uri()),
+        "authorization_response_iss_parameter_supported": true,
+    });
+    let concurrent_codex_home = codex_home.path().to_path_buf();
+    let concurrent_add = std::sync::Once::new();
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/mcp"))
+        .respond_with(move |_: &wiremock::Request| {
+            concurrent_add.call_once(|| {
+                codex_command(&concurrent_codex_home)
+                    .expect("create concurrent MCP add command")
+                    .args(["mcp", "add", "concurrent", "--", "echo", "concurrent"])
+                    .assert()
+                    .success();
+            });
+            ResponseTemplate::new(200).set_body_json(metadata.clone())
+        })
+        .mount(&oauth_server)
+        .await;
+
+    let mut add_cmd = codex_command(codex_home.path())?;
+    add_cmd.args([
+        "mcp",
+        "add",
+        "issuer-bound",
+        "--url",
+        &format!("{}/mcp", oauth_server.uri()),
+        "--oauth-client-id",
+        "registered-client",
+    ]);
+    let output = tokio::task::spawn_blocking(move || add_cmd.output()).await??;
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)?.contains("OAuth callback URL: http://127.0.0.1/callback")
+    );
+    let servers = load_global_mcp_servers(codex_home.path()).await?;
+    assert!(servers.contains_key("concurrent"));
+    assert_eq!(
+        servers["issuer-bound"]
+            .oauth
+            .as_ref()
+            .and_then(|oauth| oauth.callback_url.as_deref()),
+        Some("http://127.0.0.1/callback")
     );
 
     Ok(())

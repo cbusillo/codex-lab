@@ -29,9 +29,11 @@ fn resume_history(
 ) -> InitialHistory {
     let turn_id = "resume-warning-seed-turn".to_string();
     let turn_ctx = TurnContextItem {
-        turn_id: Some(turn_id.clone()),
-        cwd: config.cwd.clone(),
         environments: None,
+        turn_id: Some(turn_id.clone()),
+        root_turn_id: None,
+        disabled_plugin_ids: None,
+        cwd: config.cwd.clone(),
         workspace_roots: None,
         current_date: None,
         timezone: None,
@@ -49,6 +51,7 @@ fn resume_history(
         multi_agent_version: None,
         multi_agent_mode: None,
         realtime_active: None,
+        cyber_access_program: None,
         effort: config.model_reasoning_effort.clone(),
         summary: config
             .model_reasoning_summary

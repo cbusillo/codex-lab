@@ -1,0 +1,94 @@
+name: Setup voice SDK
+description: Restore or build the pinned native voice SDK for Cargo checks
+inputs:
+  target:
+    description: Cargo target; currently aarch64-apple-darwin only.
+    required: true
+  toolchain-key:
+    description: Rust toolchain identity used by the consuming compile check.
+    required: true
+  may-save:
+    description: Whether the trusted main workflow may save the verified SDK.
+    required: true
+outputs:
+  key:
+    description: Exact native SDK input identity for compiler-cache separation.
+    value: ${{ steps.identity.outputs.key }}
+runs:
+  using: composite
+  steps:
+    - id: identity
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        TOOLCHAIN_KEY: ${{ inputs.toolchain-key }}
+      run: |
+        set -euo pipefail
+        [[ "$TARGET" == "aarch64-apple-darwin" ]]
+        xcode_version="$(xcodebuild -version)"
+        os_build="$(sw_vers -buildVersion)"
+        native_toolchain="$xcode_version / $os_build"
+        key="$(python3 "$GITHUB_ACTION_PATH/../../scripts/voice_sdk_ci.py" identity --repository "$GITHUB_WORKSPACE" --target "$TARGET" --toolchain "$TOOLCHAIN_KEY / $native_toolchain")"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+    - id: restore
+      uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ runner.temp }}/voice-sdk
+        key: voice-sdk-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.identity.outputs.key }}
+    - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      with:
+        bazelisk-version: 1.28.1
+    - name: Build SDK on exact cache miss
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        bazel build --lockfile_mode=error //third_party/voice:native_sdk //third_party/voice:pkg_config
+        sdk="$(bazel cquery --lockfile_mode=error --output=files 'config(//third_party/voice:native_sdk, target)')"
+        [[ -n "$sdk" && "$sdk" != *$'\n'* && -d "$sdk" ]]
+        mkdir -p "$RUNNER_TEMP/voice-sdk"
+        cp -R "$sdk" "$RUNNER_TEMP/voice-sdk/sdk"
+    - name: Build declared pkg-config
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        bazel build --lockfile_mode=error //third_party/voice:pkg_config
+        pkg_config="$(bazel cquery --lockfile_mode=error --output=files 'config(//third_party/voice:pkg_config, target)')"
+        [[ -n "$pkg_config" && "$pkg_config" != *$'\n'* && -x "$pkg_config" ]]
+        python3 .github/scripts/voice_sdk_ci.py verify --sdk "$RUNNER_TEMP/voice-sdk/sdk" --target '${{ inputs.target }}' --pkg-config "$pkg_config" --sources third_party/voice/sources.json
+        echo "PKG_CONFIG=$GITHUB_WORKSPACE/$pkg_config" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_aarch64_apple_darwin=$GITHUB_WORKSPACE/$pkg_config" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_aarch64-apple-darwin=$GITHUB_WORKSPACE/$pkg_config" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_AARCH64_APPLE_DARWIN=$GITHUB_WORKSPACE/$pkg_config" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_LIBDIR=$RUNNER_TEMP/voice-sdk/sdk/lib/pkgconfig" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH=" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_LIBDIR_aarch64_apple_darwin=$RUNNER_TEMP/voice-sdk/sdk/lib/pkgconfig" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_LIBDIR_aarch64-apple-darwin=$RUNNER_TEMP/voice-sdk/sdk/lib/pkgconfig" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH_aarch64_apple_darwin=" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH_aarch64-apple-darwin=" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_SYSROOT_DIR=" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_SYSROOT_DIR_aarch64_apple_darwin=" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_SYSROOT_DIR_aarch64-apple-darwin=" >> "$GITHUB_ENV"
+        [[ -n "${CARGO_TARGET_DIR:-}" ]]
+        if [[ -n "${RUSTFLAGS:-}" || -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]]; then
+          echo "RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS would override the voice SDK target rpaths." >&2
+          exit 1
+        fi
+        if [[ -n "${CARGO_BUILD_TARGET:-}" && "$CARGO_BUILD_TARGET" != '${{ inputs.target }}' ]]; then
+          echo "Conflicting Cargo build target: $CARGO_BUILD_TARGET" >&2
+          exit 1
+        fi
+        echo "CARGO_BUILD_TARGET=${{ inputs.target }}" >> "$GITHUB_ENV"
+        runtime_dir="$CARGO_TARGET_DIR/${{ inputs.target }}/debug/lib"
+        python3 .github/scripts/voice_sdk_ci.py stage --sdk "$RUNNER_TEMP/voice-sdk/sdk" --target '${{ inputs.target }}' --output "$runtime_dir"
+        required_rustflags='-C link-arg=-Wl,-rpath,@executable_path/lib -C link-arg=-Wl,-rpath,@executable_path/../lib'
+        existing_rustflags="${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-}"
+        [[ "$existing_rustflags" != *$'\n'* ]]
+        echo "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS=${existing_rustflags:+$existing_rustflags }$required_rustflags" >> "$GITHUB_ENV"
+    - uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      if: steps.restore.outputs.cache-hit != 'true' && inputs.may-save == 'true'
+      with:
+        path: ${{ runner.temp }}/voice-sdk
+        key: voice-sdk-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.identity.outputs.key }}

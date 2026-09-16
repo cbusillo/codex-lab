@@ -33,7 +33,9 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
 
         self.assertEqual(report["summary"]["aggregators_suppressed"], 2)
         self.assertEqual(report["summary"]["failed_aggregators_suppressed"], 1)
-        self.assertEqual([failure["root"] for failure in report["failures"]], ["Rust unit tests"])
+        self.assertEqual(
+            [failure["root"] for failure in report["failures"]], ["Rust unit tests"]
+        )
 
     def test_failed_step_is_the_root_and_cascade_skips_are_ignored(self) -> None:
         report = extract_root_failures(
@@ -62,9 +64,7 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
                         "databaseId": 3,
                         "name": "rust-ci / CI results (required)",
                         "conclusion": "failure",
-                        "steps": [
-                            {"name": "Summarize", "conclusion": "failure"}
-                        ],
+                        "steps": [{"name": "Summarize", "conclusion": "failure"}],
                     },
                 ]
             }
@@ -100,9 +100,13 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual([failure["root"] for failure in report["failures"]], ["Run tests"])
+        self.assertEqual(
+            [failure["root"] for failure in report["failures"]], ["Run tests"]
+        )
 
-    def test_cancelled_jobs_are_fallback_after_failed_aggregator_is_suppressed(self) -> None:
+    def test_cancelled_jobs_are_fallback_after_failed_aggregator_is_suppressed(
+        self,
+    ) -> None:
         report = extract_root_failures(
             {
                 "jobs": [
@@ -112,7 +116,9 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual([failure["root"] for failure in report["failures"]], ["macOS tests"])
+        self.assertEqual(
+            [failure["root"] for failure in report["failures"]], ["macOS tests"]
+        )
 
     def test_upload_test_results_is_not_treated_as_aggregator(self) -> None:
         report = extract_root_failures(
@@ -148,7 +154,9 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual([failure["root"] for failure in report["failures"]], ["results"])
+        self.assertEqual(
+            [failure["root"] for failure in report["failures"]], ["results"]
+        )
         self.assertEqual(report["failures"][0]["sources"][0]["id"], 5)
 
     def test_job_and_check_duplicates_share_one_root_and_preserve_sources(self) -> None:
@@ -210,7 +218,9 @@ class ExtractCiRootFailuresTest(unittest.TestCase):
         second = extract_root_failures(reversed_payload)
 
         self.assertEqual(first, second)
-        self.assertEqual([failure["root"] for failure in first["failures"]], ["Alpha", "Zeta"])
+        self.assertEqual(
+            [failure["root"] for failure in first["failures"]], ["Alpha", "Zeta"]
+        )
         self.assertEqual(first["failures"][1]["sources"][0]["conclusion"], "timed_out")
 
     def test_malformed_input_fails_without_a_traceback(self) -> None:

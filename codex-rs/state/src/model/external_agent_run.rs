@@ -53,6 +53,9 @@ pub struct ExternalAgentRunStart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalAgentRunOutcome {
+    pub cli_version: Option<String>,
+    pub capability_source: Option<String>,
+    pub capability_freshness: Option<String>,
     pub completed_at_ms: i64,
     pub duration_ms: u64,
     pub terminal_state: String,

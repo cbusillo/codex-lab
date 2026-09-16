@@ -164,6 +164,63 @@ class UpstreamOwnedMutationGuardTest(unittest.TestCase):
 
         self.assert_single_violation("the @openai npm scope")
 
+    def test_pypi_publisher_requires_its_own_repository_guard(self) -> None:
+        for package in ("openai-codex", "openai-codex-cli-bin"):
+            for guarded in (False, True):
+                with self.subTest(package=package, guarded=guarded):
+                    condition = (
+                        "    if: github.repository == 'openai/codex'\n"
+                        if guarded
+                        else ""
+                    )
+                    self.write_workflow(
+                        "renamed-python-publisher.yml",
+                        "jobs:\n"
+                        "  resolve:\n"
+                        "    if: github.repository == 'openai/codex'\n"
+                        "    steps:\n"
+                        "      - run: echo resolve\n"
+                        "  renamed-publish:\n"
+                        "    needs: resolve\n"
+                        f"{condition}"
+                        "    steps:\n"
+                        "      - uses: pypa/gh-action-pypi-publish@abc\n"
+                        f"      - run: python verify_pypi_release.py {package} 1.0.0\n",
+                    )
+                    if guarded:
+                        self.assertEqual(
+                            publishing.find_violations(self.workflows_dir), []
+                        )
+                    else:
+                        self.assert_single_violation("the openai-codex PyPI packages")
+
+    def test_pypi_package_reads_do_not_require_a_publisher_guard(self) -> None:
+        self.write_workflow(
+            "python-read.yml",
+            "jobs:\n"
+            "  inspect:\n"
+            "    steps:\n"
+            "      - run: python verify_pypi_release.py openai-codex 1.0.0\n",
+        )
+        self.assertEqual(publishing.find_violations(self.workflows_dir), [])
+
+    def test_other_pypi_packages_are_not_classified_as_openai(self) -> None:
+        for package in (
+            "unrelated-package",
+            "openai-codex-extra",
+            "openai-codex-cli-bin-extra",
+        ):
+            with self.subTest(package=package):
+                self.write_workflow(
+                    "other-python-publisher.yml",
+                    "jobs:\n"
+                    "  publish:\n"
+                    "    steps:\n"
+                    "      - uses: pypa/gh-action-pypi-publish@abc\n"
+                    f"      - run: python verify_pypi_release.py {package} 1.0.0\n",
+                )
+                self.assertEqual(publishing.find_violations(self.workflows_dir), [])
+
     def test_rejects_unguarded_winget_publish(self) -> None:
         self.write_workflow(
             "rust-release.yml",

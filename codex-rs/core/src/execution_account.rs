@@ -939,3 +939,7 @@ fn auth_managers_share_model_catalog(left: &AuthManager, right: &AuthManager) ->
         .zip(cache_identity(right))
         .is_some_and(|(left, right)| left == right)
 }
+
+#[cfg(test)]
+#[path = "execution_account_tests.rs"]
+mod tests;

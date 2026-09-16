@@ -22,19 +22,10 @@ use pretty_assertions::assert_eq;
 use super::EventProcessorWithHumanOutput;
 use super::config_summary_entries;
 use super::final_message_from_turn_items;
-use super::product_banner;
 use super::reasoning_text;
 use super::should_print_final_message_to_stdout;
 use super::should_print_final_message_to_tty;
 use crate::event_processor::EventProcessor;
-
-#[test]
-fn codex_lab_banner_uses_release_identity() {
-    assert_eq!(
-        product_banner(codex_version::ProductIdentity::CodexLab),
-        format!("Codex Lab v{}", codex_version::CODEX_LAB_RELEASE_VERSION)
-    );
-}
 
 #[test]
 fn suppresses_final_stdout_message_when_both_streams_are_terminals() {
@@ -223,9 +214,9 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         thread_id: ThreadId::new(),
         forked_from_id: None,
         parent_thread_id: None,
+        history_mode: Default::default(),
         thread_source: None,
         thread_name: None,
-        history_mode: Default::default(),
         model: "gpt-5.4".to_string(),
         model_provider_id: config.model_provider_id.clone(),
         service_tier: None,
@@ -261,6 +252,7 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         },
         ThreadItem::Plan {
             id: "plan-1".to_string(),
@@ -272,6 +264,7 @@ fn final_message_from_turn_items_uses_latest_agent_message() {
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         },
     ]);
 
@@ -332,6 +325,7 @@ fn turn_completed_recovers_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -382,6 +376,7 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,

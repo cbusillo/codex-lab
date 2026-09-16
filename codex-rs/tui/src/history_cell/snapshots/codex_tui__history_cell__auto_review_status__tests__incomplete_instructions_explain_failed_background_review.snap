@@ -1,0 +1,5 @@
+---
+source: tui/src/history_cell/auto_review_status_tests.rs
+expression: "render_lines(&cell.display_lines(100)).join(\"\\n\")"
+---
+✗ Background Review failed for custom review · run-instructions · Background Review cannot verify complete AGENTS.md instructions: the complete instruction fragment exceeds its context limit. The review request was not sent.

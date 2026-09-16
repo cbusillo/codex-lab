@@ -271,6 +271,8 @@ impl ExternalAgentConfigRequestProcessor {
         });
         let pending_plugin_imports = import_outcome.pending_plugin_imports;
         tokio::spawn(async move {
+            let connector_names_by_source_path =
+                detected_session_connectors(&plugin_migration_service, &pending_session_imports).0;
             let session_progress_outgoing = Arc::clone(&outgoing);
             let session_import_id = import_id.clone();
             let session_imports = async move {
@@ -280,6 +282,7 @@ impl ExternalAgentConfigRequestProcessor {
                         pending_session_imports,
                         session_import_result,
                         session_metadata_mode,
+                        connector_names_by_source_path,
                     )
                     .await;
                 send_import_progress(&session_progress_outgoing, &session_import_id, &item_result)

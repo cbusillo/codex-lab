@@ -24,7 +24,8 @@ class BazelDataFixture(unittest.TestCase):
             'codex_rust_crate(compile_data = ["//codex-rs/producer:asset.txt"])\n',
         )
         self.write(
-            "codex-rs/consumer/src/lib.rs", 'const ASSET: &str = include_str!("../../producer/asset.txt");\n'
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/asset.txt");\n',
         )
         self.write("codex-rs/producer/BUILD.bazel", 'exports_files(["asset.txt"])\n')
         self.write("codex-rs/producer/asset.txt", "asset\n")
@@ -37,7 +38,8 @@ class BazelDataFixture(unittest.TestCase):
     def test_cross_package_edge_requires_consumer_label(self) -> None:
         self.write("codex-rs/consumer/BUILD.bazel", "codex_rust_crate()\n")
         self.write(
-            "codex-rs/consumer/src/lib.rs", 'const ASSET: &str = include_str!("../../producer/asset.txt");\n'
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/asset.txt");\n',
         )
         self.write("codex-rs/producer/BUILD.bazel", 'exports_files(["asset.txt"])\n')
         self.write("codex-rs/producer/asset.txt", "asset\n")
@@ -54,7 +56,8 @@ class BazelDataFixture(unittest.TestCase):
             'codex_rust_crate(compile_data = ["//codex-rs/producer:asset.txt"])\n',
         )
         self.write(
-            "codex-rs/consumer/src/lib.rs", 'const ASSET: &str = include_str!("../../producer/asset.txt");\n'
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/asset.txt");\n',
         )
         self.write("codex-rs/producer/BUILD.bazel", "exports_files([])\n")
         self.write("codex-rs/producer/asset.txt", "asset\n")
@@ -107,7 +110,8 @@ class BazelDataFixture(unittest.TestCase):
             '# compile_data = ["//codex-rs/producer:asset.txt"]\ncodex_rust_crate()\n',
         )
         self.write(
-            "codex-rs/consumer/src/lib.rs", 'const ASSET: &str = include_str!("../../producer/asset.txt");\n'
+            "codex-rs/consumer/src/lib.rs",
+            'const ASSET: &str = include_str!("../../producer/asset.txt");\n',
         )
         self.write("codex-rs/producer/BUILD.bazel", 'exports_files(["asset.txt"])\n')
         self.write("codex-rs/producer/asset.txt", "asset\n")
@@ -120,7 +124,7 @@ class BazelDataFixture(unittest.TestCase):
 
     def test_migration_directory_requires_compile_data_glob(self) -> None:
         self.write("codex-rs/state/BUILD.bazel", "codex_rust_crate()\n")
-        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write("codex-rs/state/Cargo.toml", '[package]\nname = "state"\n')
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -130,7 +134,10 @@ class BazelDataFixture(unittest.TestCase):
         report = bazel_data.verify(self.root)
 
         self.assertTrue(
-            any("does not cover migration directory" in error for error in report["errors"])
+            any(
+                "does not cover migration directory" in error
+                for error in report["errors"]
+            )
         )
 
     def test_migration_directory_accepts_compile_data_glob(self) -> None:
@@ -138,7 +145,7 @@ class BazelDataFixture(unittest.TestCase):
             "codex-rs/state/BUILD.bazel",
             'codex_rust_crate(compile_data = glob(["migrations/**"]))\n',
         )
-        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write("codex-rs/state/Cargo.toml", '[package]\nname = "state"\n')
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -154,7 +161,7 @@ class BazelDataFixture(unittest.TestCase):
             "codex-rs/state/BUILD.bazel",
             'codex_rust_crate(compile_data = glob(["**"], exclude = ["migrations/**"]))\n',
         )
-        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write("codex-rs/state/Cargo.toml", '[package]\nname = "state"\n')
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -164,7 +171,10 @@ class BazelDataFixture(unittest.TestCase):
         report = bazel_data.verify(self.root)
 
         self.assertTrue(
-            any("does not cover migration directory" in error for error in report["errors"])
+            any(
+                "does not cover migration directory" in error
+                for error in report["errors"]
+            )
         )
 
     def test_migration_uses_cargo_root_when_bazel_package_is_parent(self) -> None:
@@ -172,7 +182,7 @@ class BazelDataFixture(unittest.TestCase):
             "codex-rs/BUILD.bazel",
             'codex_rust_crate(compile_data = glob(["state/migrations/**"]))\n',
         )
-        self.write("codex-rs/state/Cargo.toml", "[package]\nname = \"state\"\n")
+        self.write("codex-rs/state/Cargo.toml", '[package]\nname = "state"\n')
         self.write(
             "codex-rs/state/src/migrations.rs",
             'static MIGRATOR: Migrator = sqlx::migrate!("./migrations");\n',
@@ -192,7 +202,9 @@ class BazelDataFixture(unittest.TestCase):
 
         report = bazel_data.verify(self.root)
 
-        self.assertTrue(any("unsupported non-literal" in error for error in report["errors"]))
+        self.assertTrue(
+            any("unsupported non-literal" in error for error in report["errors"])
+        )
 
     def test_allowlisted_dynamic_include_count_is_bounded(self) -> None:
         self.write("codex-rs/tui/BUILD.bazel", "codex_rust_crate()\n")
@@ -203,7 +215,9 @@ class BazelDataFixture(unittest.TestCase):
 
         report = bazel_data.verify(self.root)
 
-        self.assertTrue(any("expected 36, found 1" in error for error in report["errors"]))
+        self.assertTrue(
+            any("expected 36, found 1" in error for error in report["errors"])
+        )
 
     def test_comments_and_raw_strings_do_not_create_include_sites(self) -> None:
         self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")
@@ -233,7 +247,9 @@ class BazelDataFixture(unittest.TestCase):
 
         report = bazel_data.verify(self.root)
 
-        self.assertTrue(any("compile-time file is missing" in error for error in report["errors"]))
+        self.assertTrue(
+            any("compile-time file is missing" in error for error in report["errors"])
+        )
 
     def test_brace_delimited_include_is_verified(self) -> None:
         self.write("codex-rs/sample/BUILD.bazel", "codex_rust_crate()\n")

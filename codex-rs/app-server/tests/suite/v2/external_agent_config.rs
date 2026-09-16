@@ -608,6 +608,7 @@ source = {:?}
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -1973,6 +1974,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -2049,6 +2051,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
             phase: None,
             memory_citation: None,
             delivery: None,
+            questions: None,
         })
     );
 
@@ -2163,6 +2166,7 @@ required = true
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -2249,6 +2253,7 @@ async fn external_agent_config_import_accepts_detected_session_payload_after_res
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -2332,6 +2337,7 @@ async fn external_agent_config_import_skips_already_imported_session_versions() 
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -2461,6 +2467,7 @@ async fn external_agent_config_import_returns_before_background_session_import_f
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,
@@ -2578,6 +2585,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
 
     let request_id = mcp
         .send_thread_list_request(ThreadListParams {
+            originators: None,
             cursor: None,
             limit: None,
             sort_key: None,

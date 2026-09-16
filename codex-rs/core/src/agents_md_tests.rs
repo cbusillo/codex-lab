@@ -25,7 +25,7 @@ use codex_exec_server::RemoveOptions;
 use codex_exec_server::WalkOptions;
 use codex_exec_server::WalkOutcome;
 use codex_exec_server::WriteFileOptions;
-use codex_extension_api::UserInstructions;
+use codex_extension_api::Instructions;
 use codex_features::Feature;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
@@ -311,7 +311,7 @@ impl ExecutorFileSystem for FailingFileSystem {
 
 struct TestConfig {
     config: Config,
-    user_instructions: Option<UserInstructions>,
+    user_instructions: Option<Instructions>,
 }
 
 impl Deref for TestConfig {
@@ -339,7 +339,6 @@ async fn load_agents_md(config: &TestConfig) -> Option<LoadedAgentsMd> {
         &config.config,
         config.user_instructions.clone(),
         &environments,
-        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -351,6 +350,7 @@ async fn agents_md_paths(config: &TestConfig) -> std::io::Result<Vec<PathUri>> {
         &PathUri::from_abs_path(&config.cwd),
         LOCAL_FS.as_ref(),
         /*sandbox*/ None,
+        FindUpErrorPolicy::Ignore,
     )
     .await
 }
@@ -369,6 +369,10 @@ fn resolved_local_environments<const N: usize>(
                         workspace_roots: Vec::new(),
                         config: EnvironmentConfigState::Ready(EnvironmentConfig {
                             allow_login_shell: true,
+                            workspace_roots: Vec::new(),
+                            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                            windows_sandbox_private_desktop: true,
+                            use_legacy_landlock: false,
                             permission_profile: PermissionProfileSnapshot::legacy(
                                 PermissionProfile::read_only(),
                             ),
@@ -414,6 +418,7 @@ fn foreign_agents_md_uses_environment_native_paths() {
     };
     let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
     let loaded = LoadedAgentsMd {
+        incomplete: false,
         user_instructions: None,
         entries: vec![InstructionEntry {
             contents: "remote instructions".to_string(),
@@ -447,6 +452,7 @@ fn multi_environment_agents_md_renders_mixed_path_conventions() {
         .join("AGENTS.md")
         .expect("Windows AGENTS.md URI");
     let loaded = LoadedAgentsMd {
+        incomplete: false,
         user_instructions: None,
         entries: vec![
             InstructionEntry {
@@ -504,7 +510,7 @@ async fn make_config(root: &TempDir, limit: usize, instructions: Option<&str>) -
     config.cwd = root.abs();
     config.project_doc_max_bytes = limit;
 
-    let user_instructions = instructions.map(|text| UserInstructions {
+    let user_instructions = instructions.map(|text| Instructions {
         text: text.to_owned(),
         source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
     });
@@ -553,7 +559,7 @@ async fn make_config_with_project_root_markers(
 
     config.cwd = root.abs();
     config.project_doc_max_bytes = limit;
-    let user_instructions = instructions.map(|text| UserInstructions {
+    let user_instructions = instructions.map(|text| Instructions {
         text: text.to_owned(),
         source: config.codex_home.join(DEFAULT_AGENTS_MD_FILENAME),
     });
@@ -604,6 +610,7 @@ fn empty_loaded_instructions_are_empty() {
 #[test]
 fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
     let empty = LoadedAgentsMd {
+        incomplete: false,
         user_instructions: None,
         entries: vec![InstructionEntry {
             contents: String::new(),
@@ -611,6 +618,7 @@ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
         }],
     };
     let whitespace = LoadedAgentsMd {
+        incomplete: false,
         user_instructions: None,
         entries: vec![InstructionEntry {
             contents: " \n\t".to_string(),
@@ -682,6 +690,7 @@ async fn total_byte_limit_truncates_later_project_docs() {
 
     let loaded = load_agents_md(&config).await.expect("project instructions");
     let expected = LoadedAgentsMd {
+        incomplete: true,
         user_instructions: None,
         entries: vec![
             InstructionEntry {
@@ -811,7 +820,13 @@ async fn marker_search_does_not_wait_for_a_higher_ancestor() {
 
     let paths = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None),
+        super::agents_md_paths(
+            &config.config,
+            &cwd,
+            &fs,
+            /*sandbox*/ None,
+            FindUpErrorPolicy::Ignore,
+        ),
     )
     .await
     .expect("nearest marker should complete")
@@ -916,7 +931,13 @@ async fn project_root_marker_search_limits_concurrent_probes_and_preserves_order
         metadata_calls.release.add_permits(max_probe_count);
     };
     let (paths, ()) = tokio::join!(
-        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None),
+        super::agents_md_paths(
+            &config.config,
+            &cwd,
+            &fs,
+            /*sandbox*/ None,
+            FindUpErrorPolicy::Ignore
+        ),
         assertions
     );
     let paths = paths.expect("AGENTS.md discovery");
@@ -963,7 +984,14 @@ async fn agents_md_search_starts_all_directory_probes() {
         metadata_calls: Arc::clone(&metadata_calls),
     };
     let search = tokio::spawn(async move {
-        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None).await
+        super::agents_md_paths(
+            &config.config,
+            &cwd,
+            &fs,
+            /*sandbox*/ None,
+            FindUpErrorPolicy::Ignore,
+        )
+        .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -1038,9 +1066,15 @@ async fn empty_project_root_markers_only_probe_cwd_candidates() {
     };
     let cwd = PathUri::from_abs_path(&config.cwd);
 
-    let paths = super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None)
-        .await
-        .expect("AGENTS.md discovery");
+    let paths = super::agents_md_paths(
+        &config.config,
+        &cwd,
+        &fs,
+        /*sandbox*/ None,
+        FindUpErrorPolicy::Ignore,
+    )
+    .await
+    .expect("AGENTS.md discovery");
 
     let override_path = cwd.join(LOCAL_AGENTS_MD_FILENAME).expect("override path");
     let agents_path = cwd.join(DEFAULT_AGENTS_MD_FILENAME).expect("agents path");
@@ -1133,15 +1167,10 @@ async fn multiple_environment_docs_use_labeled_layout_and_preserve_source_order(
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(
-        &config.config,
-        user_instructions,
-        &environments,
-        WindowsSandboxLevel::Disabled,
-    )
-    .await
-    .expect("project instructions should load")
-    .expect("instructions expected");
+    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
+        .await
+        .expect("project instructions should load")
+        .expect("instructions expected");
     let inner = format!(
         r#"global instructions
 
@@ -1200,15 +1229,10 @@ async fn secondary_only_project_doc_uses_single_contributor_layout() {
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(
-        &config.config,
-        user_instructions,
-        &environments,
-        WindowsSandboxLevel::Disabled,
-    )
-    .await
-    .expect("project instructions should load")
-    .expect("instructions expected");
+    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
+        .await
+        .expect("project instructions should load")
+        .expect("instructions expected");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}secondary doc");
 
     assert_eq!(loaded.legacy_text(), inner);
@@ -1235,15 +1259,10 @@ async fn primary_only_project_doc_preserves_legacy_layout_with_multiple_bound_en
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(
-        &config.config,
-        user_instructions,
-        &environments,
-        WindowsSandboxLevel::Disabled,
-    )
-    .await
-    .expect("project instructions should load")
-    .expect("instructions expected");
+    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
+        .await
+        .expect("project instructions should load")
+        .expect("instructions expected");
     let inner = format!("global instructions{AGENTS_MD_SEPARATOR}primary doc");
 
     assert_eq!(loaded.legacy_text(), inner);
@@ -1271,15 +1290,10 @@ async fn project_doc_byte_limit_is_shared_across_environments() {
     ]);
     let user_instructions = config.user_instructions.clone();
 
-    let loaded = load_project_instructions(
-        &config.config,
-        user_instructions,
-        &environments,
-        WindowsSandboxLevel::Disabled,
-    )
-    .await
-    .expect("project instructions should load")
-    .expect("instructions expected");
+    let loaded = load_project_instructions(&config.config, user_instructions, &environments)
+        .await
+        .expect("project instructions should load")
+        .expect("instructions expected");
 
     assert_eq!(
         loaded.text(),
@@ -1310,7 +1324,6 @@ async fn full_primary_environment_budget_excludes_later_environment_docs() {
         &config.config,
         /*user_instructions*/ None,
         &environments,
-        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -1343,7 +1356,6 @@ async fn secondary_environment_invalid_utf8_does_not_suppress_other_docs() {
         &config.config,
         /*user_instructions*/ None,
         &environments,
-        WindowsSandboxLevel::Disabled,
     )
     .await
     .expect("project instructions should load")
@@ -1394,6 +1406,7 @@ async fn concatenates_root_and_cwd_docs() {
     let root_agents = repo.path().join("AGENTS.md").abs();
     let crate_agents = cfg.cwd.join("AGENTS.md");
     let expected = LoadedAgentsMd {
+        incomplete: false,
         user_instructions: None,
         entries: vec![
             InstructionEntry {
@@ -1530,7 +1543,8 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
     let project_agents = cfg.cwd.join("AGENTS.md");
 
     let expected = LoadedAgentsMd {
-        user_instructions: Some(UserInstructions {
+        incomplete: false,
+        user_instructions: Some(Instructions {
             text: "global doc".to_string(),
             source: global_agents.clone(),
         }),

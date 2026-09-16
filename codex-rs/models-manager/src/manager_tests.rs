@@ -27,6 +27,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 
+#[path = "cache_identity_tests.rs"]
+mod cache_identity_tests;
+
 #[path = "model_info_overrides_tests.rs"]
 mod model_info_overrides_tests;
 
@@ -87,6 +90,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 #[derive(Debug)]
 struct TestModelsEndpoint {
     has_configured_credentials: bool,
+    has_command_auth: bool,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
@@ -164,6 +168,8 @@ impl ModelsCache for TestModelsCache {
     fn refresh_ttl<'a>(
         &'a self,
         _client_version: &'a str,
+        _identity: &'a str,
+        _etag: &'a str,
     ) -> ModelsCacheFuture<'a, Result<(), ModelsCacheError>> {
         Box::pin(async move {
             let refreshed = {
@@ -186,6 +192,7 @@ impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_configured_credentials: false,
+            has_command_auth: false,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -196,6 +203,7 @@ impl TestModelsEndpoint {
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_configured_credentials: false,
+            has_command_auth: false,
             uses_codex_backend: false,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -214,7 +222,7 @@ impl TestModelsEndpoint {
             .expect("observed proxy policy lock should not be poisoned")
     }
 
-    async fn list_models(&self) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
+    async fn list_models(&self) -> CoreResult<ModelsEndpointResponse> {
         self.fetch_count.fetch_add(1, Ordering::SeqCst);
         let models = self
             .responses
@@ -222,7 +230,11 @@ impl TestModelsEndpoint {
             .expect("responses lock should not be poisoned")
             .pop_front()
             .unwrap_or_default();
-        Ok((models, None))
+        Ok(ModelsEndpointResponse {
+            models,
+            etag: None,
+            identity: self.identity().expect("test endpoint identity"),
+        })
     }
 }
 
@@ -263,6 +275,14 @@ impl ModelsEndpointClient for TestModelsEndpoint {
         self.has_configured_credentials
     }
 
+    fn identity(&self) -> Option<String> {
+        Some("test-provider".to_string())
+    }
+
+    fn has_command_auth(&self) -> bool {
+        self.has_command_auth
+    }
+
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(async { self.uses_codex_backend })
     }
@@ -271,7 +291,7 @@ impl ModelsEndpointClient for TestModelsEndpoint {
         &'a self,
         _client_version: &'a str,
         http_client_factory: HttpClientFactory,
-    ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
+    ) -> ModelsEndpointFuture<'a, CoreResult<ModelsEndpointResponse>> {
         Box::pin(async move {
             *self
                 .observed_proxy_policy
@@ -332,6 +352,7 @@ async fn file_cache_implements_models_cache_contract() {
     );
     let client_version = crate::client_version_to_whole();
     let entry = ModelsCacheEntry {
+        identity: Some("test-provider".to_string()),
         fetched_at: Utc::now(),
         etag: Some("file-etag".to_string()),
         client_version: Some(client_version.clone()),
@@ -363,6 +384,7 @@ async fn file_cache_refresh_ttl_renews_expired_entry_without_serving_it_stale() 
     let client_version = crate::client_version_to_whole();
     let expired_at = Utc::now() - chrono::Duration::hours(1);
     let entry = ModelsCacheEntry {
+        identity: Some("test-provider".to_string()),
         fetched_at: expired_at,
         etag: Some("expired-etag".to_string()),
         client_version: Some(client_version.clone()),
@@ -384,7 +406,11 @@ async fn file_cache_refresh_ttl_renews_expired_entry_without_serving_it_stale() 
     );
 
     cache
-        .refresh_ttl(&client_version)
+        .refresh_ttl(
+            &client_version,
+            entry.identity.as_deref().unwrap(),
+            entry.etag.as_deref().unwrap(),
+        )
         .await
         .expect("TTL refresh succeeds");
 
@@ -433,6 +459,7 @@ async fn manager_without_cache_fetches_on_every_refresh() {
 async fn injected_cache_hit_avoids_remote_fetch() {
     let cached_models = vec![remote_model("cached", "Cached", /*priority*/ 0)];
     let cache = TestModelsCache::with_entry(ModelsCacheEntry {
+        identity: Some("test-provider".to_string()),
         fetched_at: Utc::now(),
         etag: Some("cached-etag".to_string()),
         client_version: Some(crate::client_version_to_whole()),
@@ -486,6 +513,7 @@ async fn injected_cache_read_error_falls_back_and_persists_remote_models() {
     assert_eq!(
         stored_entries,
         vec![ModelsCacheEntry {
+            identity: Some("test-provider".to_string()),
             fetched_at: stored_entries[0].fetched_at,
             etag: None,
             client_version: Some(crate::client_version_to_whole()),
@@ -523,6 +551,7 @@ async fn injected_cache_ttl_refresh_preserves_cached_payload() {
     let cached_models = vec![remote_model("cached", "Cached", /*priority*/ 0)];
     let cached_at = Utc::now() - chrono::Duration::minutes(1);
     let cache = TestModelsCache::with_entry(ModelsCacheEntry {
+        identity: Some("test-provider".to_string()),
         fetched_at: cached_at,
         etag: Some("cached-etag".to_string()),
         client_version: Some(crate::client_version_to_whole()),
@@ -1003,7 +1032,7 @@ async fn refresh_available_models_merges_hidden_only_chatgpt_remote_with_bundled
 }
 
 #[tokio::test]
-async fn refresh_available_models_keeps_merging_for_api_auth() {
+async fn refresh_available_models_uses_configured_credentials_without_command_auth() {
     let remote_models = vec![remote_model(
         "api-auth-visible-remote",
         "API Auth Visible",
@@ -1012,6 +1041,7 @@ async fn refresh_available_models_keeps_merging_for_api_auth() {
     let codex_home = tempdir().expect("temp dir");
     let endpoint = Arc::new(TestModelsEndpoint {
         has_configured_credentials: true,
+        has_command_auth: false,
         uses_codex_backend: false,
         responses: Mutex::new(vec![remote_models.clone()].into()),
         fetch_count: AtomicUsize::new(0),
@@ -1268,7 +1298,7 @@ impl TestAuthAwareModelsEndpoint {
         }
     }
 
-    async fn list_models(&self) -> CoreResult<(Vec<ModelInfo>, Option<String>)> {
+    async fn list_models(&self) -> CoreResult<ModelsEndpointResponse> {
         self.fetch_count.fetch_add(1, Ordering::SeqCst);
         let models = self
             .responses
@@ -1276,12 +1306,28 @@ impl TestAuthAwareModelsEndpoint {
             .expect("responses lock should not be poisoned")
             .pop_front()
             .unwrap_or_default();
-        Ok((models, None))
+        Ok(ModelsEndpointResponse {
+            models,
+            etag: None,
+            identity: self.identity().expect("test endpoint identity"),
+        })
     }
 }
 
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
     fn has_configured_credentials(&self) -> bool {
+        // Account auth is independent of provider-configured credentials.
+        false
+    }
+
+    fn identity(&self) -> Option<String> {
+        self.auth_manager
+            .as_ref()
+            .and_then(|manager| manager.auth_mode())
+            .map(|mode| format!("{mode:?}"))
+    }
+
+    fn has_command_auth(&self) -> bool {
         false
     }
 
@@ -1293,7 +1339,7 @@ impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
         &'a self,
         _client_version: &'a str,
         _http_client_factory: HttpClientFactory,
-    ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
+    ) -> ModelsEndpointFuture<'a, CoreResult<ModelsEndpointResponse>> {
         Box::pin(TestAuthAwareModelsEndpoint::list_models(self))
     }
 }

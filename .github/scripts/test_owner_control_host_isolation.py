@@ -77,7 +77,9 @@ def dependency_package_names(
     for alias, dependency in dependencies.items():
         if isinstance(dependency, dict) and dependency.get("workspace") is True:
             names.add((workspace_dependencies or {}).get(alias, alias))
-        elif isinstance(dependency, dict) and isinstance(dependency.get("package"), str):
+        elif isinstance(dependency, dict) and isinstance(
+            dependency.get("package"), str
+        ):
             names.add(dependency["package"])
         else:
             names.add(alias)
@@ -89,9 +91,7 @@ def dependency_names(
     section: str,
     workspace_dependencies: dict[str, str] | None = None,
 ) -> set[str]:
-    names = dependency_package_names(
-        manifest.get(section, {}), workspace_dependencies
-    )
+    names = dependency_package_names(manifest.get(section, {}), workspace_dependencies)
     targets = manifest.get("target", {})
     if not isinstance(targets, dict):
         return names
@@ -181,8 +181,7 @@ def check_isolation() -> int:
     )
     if unexpected_dev:
         errors.append(
-            "host has unexpected dev dependencies: "
-            + ", ".join(sorted(unexpected_dev))
+            "host has unexpected dev dependencies: " + ", ".join(sorted(unexpected_dev))
         )
     host_source_root = CARGO_ROOT / "owner-control-host" / "src"
     host_source = "\n".join(
@@ -247,8 +246,7 @@ def check_isolation() -> int:
     )
     if unexpected_dev:
         errors.append(
-            "IPC has unexpected dev dependencies: "
-            + ", ".join(sorted(unexpected_dev))
+            "IPC has unexpected dev dependencies: " + ", ".join(sorted(unexpected_dev))
         )
     ipc_source_root = CARGO_ROOT / "owner-control-ipc" / "src"
     if (
@@ -268,8 +266,7 @@ def check_isolation() -> int:
     if not isinstance(ipc_library, dict) or ipc_library.get("path") != "src/lib.rs":
         errors.append("IPC library path must remain src/lib.rs")
     ipc_source = "\n".join(
-        path.read_text()
-        for path in sorted(ipc_source_root.rglob("*.rs"))
+        path.read_text() for path in sorted(ipc_source_root.rglob("*.rs"))
     )
     forbidden_symbols = sorted(
         symbol for symbol in DENIED_IPC_SOURCE_SYMBOLS if symbol in ipc_source
@@ -293,9 +290,7 @@ class OwnerControlHostIsolationTest(unittest.TestCase):
             "dependencies": {"alias": {"package": "direct-package"}},
             "target": {
                 "cfg(unix)": {
-                    "dependencies": {
-                        "target-alias": {"package": "target-package"}
-                    }
+                    "dependencies": {"target-alias": {"package": "target-package"}}
                 }
             },
         }

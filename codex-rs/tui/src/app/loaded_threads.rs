@@ -135,6 +135,9 @@ mod tests {
 
     fn test_thread(thread_id: ThreadId, source: SessionSource) -> Thread {
         Thread {
+            session_provenance: None,
+            originator: None,
+            environments: None,
             id: thread_id.to_string(),
             extra: None,
             session_id: thread_id.to_string(),
@@ -145,8 +148,11 @@ mod tests {
             section: None,
             section_entered_at: None,
             project_id: None,
+            daybreak_enabled: None,
             history_mode: Default::default(),
             model_provider: "openai".to_string(),
+            model: None,
+            reasoning_effort: None,
             created_at: 0,
             updated_at: 0,
             recency_at: Some(0),
@@ -157,7 +163,6 @@ mod tests {
             source,
             can_accept_direct_input: None,
             thread_source: None,
-            session_provenance: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

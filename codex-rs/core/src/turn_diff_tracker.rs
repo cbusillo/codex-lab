@@ -44,6 +44,13 @@ struct DiffCacheKey {
     right_revision: Option<u64>,
 }
 
+/// Exact diff and source paths captured together before background review scheduling.
+#[derive(Clone, Debug)]
+pub(crate) struct CompletedTurnDiff {
+    pub(crate) text: String,
+    pub(crate) paths: Vec<PathUri>,
+}
+
 /// Tracks the net text diff for the current turn from committed apply_patch
 /// mutations, without rereading the workspace filesystem.
 pub struct TurnDiffTracker {
@@ -113,6 +120,23 @@ impl TurnDiffTracker {
 
     pub fn get_unified_diff(&self) -> Option<String> {
         self.unified_diff.clone()
+    }
+
+    pub(crate) fn completed_diff(&self) -> Option<CompletedTurnDiff> {
+        let text = self.get_unified_diff()?;
+        let paths = self
+            .baseline_by_path
+            .keys()
+            .chain(self.current_by_path.keys())
+            .filter(|path| {
+                self.baseline_by_path.get(*path).map(|entry| &entry.content)
+                    != self.current_by_path.get(*path).map(|entry| &entry.content)
+            })
+            .map(|path| path.path.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        Some(CompletedTurnDiff { text, paths })
     }
 
     pub(crate) fn has_unified_diff(&self) -> bool {

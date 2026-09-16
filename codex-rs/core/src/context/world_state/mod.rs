@@ -11,6 +11,7 @@ mod model;
 mod multi_agent_mode;
 mod multi_agent_usage_hint;
 mod permissions;
+mod persistent_mode;
 mod personality;
 mod plugins_instructions;
 mod realtime;
@@ -58,6 +59,7 @@ pub(crate) use model::ModelInstructionsState;
 pub(crate) use multi_agent_mode::MultiAgentModeState;
 pub(crate) use multi_agent_usage_hint::MultiAgentUsageHintState;
 pub(crate) use permissions::PermissionsState;
+pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use personality::PersonalityState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
@@ -645,6 +647,10 @@ impl WorldStateSnapshot {
 
     pub(crate) fn into_value(self) -> Value {
         Value::Object(self.sections.into_iter().collect())
+    }
+
+    pub(crate) fn into_object(self) -> serde_json::Map<String, Value> {
+        self.sections.into_iter().collect()
     }
 
     /// Returns the RFC 7386 merge patch that advances `previous` to `self`.

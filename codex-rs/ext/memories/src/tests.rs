@@ -60,6 +60,7 @@ fn tools_are_not_contributed_when_disabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: false,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -77,6 +78,7 @@ fn tools_are_not_contributed_when_dedicated_tools_disabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: false,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -94,6 +96,7 @@ fn tools_are_contributed_when_enabled_with_dedicated_tools() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -123,6 +126,7 @@ fn install_registers_dedicated_tool_contributor() {
     let registry = builder.build();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: true,
         codex_home: test_path_buf("/tmp/codex-home").abs(),
@@ -183,6 +187,7 @@ async fn prompt_contribution_uses_memory_summary_when_enabled() {
     let extension = MemoriesExtension::default();
     let thread_store = ExtensionData::new("thread");
     thread_store.insert(MemoriesExtensionConfig {
+        version: codex_protocol::MemoryVersion::V1,
         enabled: true,
         dedicated_tools: false,
         codex_home: tempdir.path().abs(),
@@ -580,7 +585,10 @@ async fn search_tool_rejects_legacy_single_query() {
     assert!(err.to_string().contains("query"));
 }
 
-fn memory_tool(memory_root: &Path, tool_name: &str) -> Arc<dyn ToolExecutor<ToolCall>> {
+fn memory_tool(
+    memory_root: &Path,
+    tool_name: &str,
+) -> Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
     let expected_tool_name = memory_tool_name(tool_name);
     crate::tools::memory_tools(
         LocalMemoriesBackend::from_memory_root(memory_root),

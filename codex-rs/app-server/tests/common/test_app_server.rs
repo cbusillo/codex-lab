@@ -205,7 +205,15 @@ impl TestAppServer {
     /// Closes stdio and waits for app-server's graceful thread teardown to finish.
     pub async fn shutdown_gracefully(&mut self) -> std::io::Result<ExitStatus> {
         drop(self.stdin.take());
-        self.process.wait().await
+        // Drain final notifications so a full stdout pipe cannot block runtime shutdown.
+        let mut sink = tokio::io::sink();
+        tokio::select! {
+            status = self.process.wait() => status,
+            drained = tokio::io::copy(&mut self.stdout, &mut sink) => {
+                drained?;
+                self.process.wait().await
+            }
+        }
     }
 
     /// Returns the automatically selected test environment retained by this server.
@@ -283,7 +291,7 @@ impl TestAppServer {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::ExecutableFileBusy)
                 || retries == 2
             {
-                break process.context("codex-mcp-server proc should start")?;
+                break process.context("codex app-server proc should start")?;
             }
             retries += 1;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1596,7 +1604,7 @@ impl TestAppServer {
         tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
@@ -2141,8 +2149,8 @@ impl TestAppServerBuilder {
         {
             // Test runners can keep binary targets in separate directories.
             // Recreate the installed sibling layout without a path override.
-            // Prefer Bazel's TEST_TMPDIR so staging can share a filesystem with
-            // the binaries and avoid expensive cross-filesystem copies.
+            // Prefer Bazel's TEST_TMPDIR to keep staging on the test runner's
+            // filesystem.
             let install_dir = match std::env::var_os("TEST_TMPDIR") {
                 Some(test_tmpdir) => TempDir::new_in(test_tmpdir)?,
                 None => TempDir::new()?,
@@ -2161,8 +2169,9 @@ impl TestAppServerBuilder {
                 (&program, &staged_program),
                 (&code_mode_host_program, &staged_host),
             ] {
-                std::fs::hard_link(source, destination)
-                    .or_else(|_| std::fs::copy(source, destination).map(|_| ()))
+                // Use independent copies to avoid macOS code signature
+                // interactions between staged installations.
+                std::fs::copy(source, destination)
                     .with_context(|| format!("stage executable {}", source.display()))?;
             }
             program = staged_program;

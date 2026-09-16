@@ -167,7 +167,9 @@ async fn run_review_task(
     for item in input {
         match item {
             TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
-            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
+            TurnInput::ResponseItem(_)
+            | TurnInput::FunctionCallOutput(_)
+            | TurnInput::InterAgentCommunication(_) => {}
         }
     }
 
@@ -190,6 +192,9 @@ async fn run_review_task(
         .and_then(ReviewPersistenceContext::background_budget)
         .cloned();
     let budget_gate = budget.clone().map(BackgroundReviewBudgetGate::new);
+    let instructions_gate = ctx
+        .extension_data
+        .get::<super::BackgroundReviewInstructionsGate>();
     let codex_home = session.codex_home().await;
 
     // Start sub-codex conversation and get the receiver for events.
@@ -225,7 +230,7 @@ async fn run_review_task(
             Ok(start_conversation.await)
         };
     let mut start_error_summary = None;
-    let execution = match start_result {
+    let mut execution = match start_result {
         Err(execution) => execution,
         Ok(Ok(review_conversation)) => {
             Box::pin(execute_review_conversation(
@@ -257,6 +262,11 @@ async fn run_review_task(
             }
         }
     };
+    if let Some(reason) = instructions_gate.as_ref().and_then(|gate| gate.failure()) {
+        // A denied follow-up must never accept any earlier child output as a complete review.
+        execution.output = None;
+        start_error_summary = Some(reason);
+    }
     let cancelled = cancellation_token.is_cancelled();
     let should_exit_review_mode = persistence
         .as_ref()
@@ -442,16 +452,22 @@ async fn start_review_conversation(
     let model = config
         .review_model
         .clone()
-        .unwrap_or_else(|| ctx.model_info.slug.clone());
+        .unwrap_or_else(|| ctx.model_info().slug.clone());
     sub_agent_config.model = Some(model);
     let mut thread_extension_init = codex_extension_api::ExtensionDataInit::new();
     if let Some(budget_gate) = budget_gate.clone() {
         thread_extension_init.insert(budget_gate);
+        let instructions_gate = ctx
+            .extension_data
+            .get::<super::BackgroundReviewInstructionsGate>()
+            .map(|gate| gate.as_ref().clone())
+            .unwrap_or_default();
+        thread_extension_init.insert(instructions_gate);
     }
     run_codex_thread_one_shot(
         sub_agent_config,
         Arc::clone(&session.services.auth_manager),
-        Arc::clone(&session.services.models_manager),
+        Arc::clone(&session.services.control_models_manager),
         input,
         Arc::clone(&session),
         ctx.clone(),
@@ -885,6 +901,7 @@ pub(crate) async fn exit_review_mode(
     session
         .record_conversation_items(
             &ctx,
+            ctx.model_info(),
             &[ResponseItem::Message {
                 id: Some(ResponseItemId::new("msg")),
                 role: "user".to_string(),
@@ -904,6 +921,7 @@ pub(crate) async fn exit_review_mode(
     session
         .record_response_item_and_emit_turn_item(
             ctx.as_ref(),
+            ctx.model_info(),
             ResponseItem::Message {
                 id: Some(ResponseItemId::new("msg")),
                 role: "assistant".to_string(),

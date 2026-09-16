@@ -19,9 +19,7 @@ PERSISTENT_RUNNER_LABEL = re.compile(
     r"\b(?:codex-lab-app|codex-lab-signing|codex-lab-linux|macos-codex-lab)\b"
 )
 MACOS_LARGE_RUNNER = re.compile(r"\bmacos-[0-9]+-(?:large|xlarge)\b")
-RUNNER_SELECTOR = re.compile(
-    r"^\s*(?:-\s*)?(?:runs-on|runner|os|group|labels)\s*:"
-)
+RUNNER_SELECTOR = re.compile(r"^\s*(?:-\s*)?(?:runs-on|runner|os|group|labels)\s*:")
 UNSUPPORTED_PLATFORM_ALIAS = re.compile(
     r"\b(?:windows-(?:x64|arm64)|linux-(?:x64|arm64)(?:-xl)?)\b"
 )
@@ -48,7 +46,11 @@ def find_selector_violations(
     for line_number, line in enumerate(contents.splitlines(), start=1):
         stripped = line.lstrip()
         indent = len(line) - len(stripped)
-        if runner_block_indent is not None and stripped and indent <= runner_block_indent:
+        if (
+            runner_block_indent is not None
+            and stripped
+            and indent <= runner_block_indent
+        ):
             runner_block_indent = None
         if RUNNER_BLOCK.match(stripped):
             runner_block_indent = indent

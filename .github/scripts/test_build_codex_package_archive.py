@@ -128,7 +128,9 @@ class BuildCodexPackageArchiveContractTests(unittest.TestCase):
 
             repo_root = Path(__file__).parents[2]
             archive_dir.mkdir()
-            gzip_archive = archive_dir / "codex-package-x86_64-unknown-linux-musl.tar.gz"
+            gzip_archive = (
+                archive_dir / "codex-package-x86_64-unknown-linux-musl.tar.gz"
+            )
             gzip_archive.write_bytes(b"archive-sentinel")
             environment = os.environ.copy()
             environment.update(
@@ -185,6 +187,7 @@ class BuildCodexPackageArchiveContractTests(unittest.TestCase):
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("target-already-claimed", second.stderr)
             self.assertEqual(sentinel.read_bytes(), original)
+
 
 if __name__ == "__main__":
     unittest.main()

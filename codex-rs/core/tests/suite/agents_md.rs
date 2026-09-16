@@ -8,7 +8,6 @@ use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::models::PermissionProfile;
@@ -105,7 +104,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
     let mut removed_section = false;
     let retained = rollout
         .lines()
-        .map(serde_json::from_str::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line)
         .collect::<std::result::Result<Vec<_>, _>>()?
         .into_iter()
         .map(|mut line| {
@@ -695,12 +694,15 @@ async fn symlinked_writable_root_reports_sandbox_failure_instead_of_session_corr
 -> Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
+    let home_path = home.path().display().to_string();
+    let canonical_home_path = home.path().canonicalize()?.display().to_string();
     let visualization_target = home.path().join("visualization-target");
     std::fs::create_dir(&visualization_target)?;
     let visualization_root = home.path().join("visualizations");
     create_directory_symlink(&visualization_target, &visualization_root);
 
     let mut builder = test_codex().with_home(home).with_config(move |config| {
+        config.project_doc_max_bytes = 1;
         let mut file_system_policy = FileSystemSandboxPolicy::read_only();
         file_system_policy.entries.push(FileSystemSandboxEntry::new(
             config.cwd.join("private.txt").into(),
@@ -736,6 +738,13 @@ async fn symlinked_writable_root_reports_sandbox_failure_instead_of_session_corr
         !error.contains("Session data under"),
         "sandbox preparation failure should not be diagnosed as session corruption: {error}"
     );
+    let error = error
+        .replace(&canonical_home_path, "$CODEX_HOME")
+        .replace(&home_path, "$CODEX_HOME");
+    insta::assert_snapshot!(error, @"
+    Fatal error: Failed to initialize session: failed to load AGENTS.md instructions for environment `local`: failed to prepare fs sandbox: failed to prepare Seatbelt sandbox: writable root $CODEX_HOME/visualizations contains symlink component $CODEX_HOME/visualizations; symlinked writable roots are not supported.
+    If this writable root is at or beneath CODEX_HOME and you trust its symlink targets, set `allow_symlinked_codex_home = true` at the top level of `$CODEX_HOME/config.toml` (normally `~/.codex/config.toml`) on the execution host, then restart Codex or its executor. This opt-out trusts targets outside CODEX_HOME and targets changed between commands. It does not apply to other writable roots.
+    ");
 
     Ok(())
 }
@@ -1391,10 +1400,8 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
         .thread_manager
         .fork_thread(
             ForkSnapshot::Interrupted,
-            fork_config,
+            codex_core::StartThreadOptions::new(fork_config),
             rollout_path,
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
         )
         .await?;
 
@@ -1491,14 +1498,26 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         },
         responses::sse(vec![
             responses::ev_response_created("child-response"),
-            responses::ev_assistant_message("child-message", "done"),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "role": "assistant",
+                    "id": "child-message",
+                    "content": [{"type": "output_text", "text": "done"}],
+                    "phase": "final_answer"
+                }
+            }),
             responses::ev_completed("child-response"),
         ]),
     )
     .await;
     responses::mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
+        |request: &wiremock::Request| {
+            request_body_contains(request, SPAWN_CALL_ID)
+                && !request.headers.contains_key("x-openai-subagent")
+        },
         responses::sse(vec![
             responses::ev_response_created("spawn-follow-up-response"),
             responses::ev_assistant_message("spawn-follow-up-message", "child started"),

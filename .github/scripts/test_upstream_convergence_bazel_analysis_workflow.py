@@ -12,7 +12,9 @@ class BazelAnalysisWorkflowTest(unittest.TestCase):
     def test_blocking_ci_routes_analysis_through_required_fan_in(self) -> None:
         contents = BLOCKING.read_text(encoding="utf-8")
 
-        self.assertIn("uses: ./.github/workflows/codex-lab-bazel-analysis.yml", contents)
+        self.assertIn(
+            "uses: ./.github/workflows/codex-lab-bazel-analysis.yml", contents
+        )
         self.assertIn("- bazel-analysis", contents)
 
     def test_analysis_is_hosted_path_aware_and_nobuild(self) -> None:
@@ -26,7 +28,7 @@ class BazelAnalysisWorkflowTest(unittest.TestCase):
         self.assertIn("codex-rs/*", contents)
         self.assertIn("bazel/*", contents)
         self.assertIn("*.bzl", contents)
-        self.assertIn("files=(\"__no_changes__\")", contents)
+        self.assertIn('files=("__no_changes__")', contents)
         self.assertIn('changed_files="$(git diff', contents)
         self.assertIn("Unable to diff pull request base", contents)
         self.assertIn("timeout-minutes: 5", contents)

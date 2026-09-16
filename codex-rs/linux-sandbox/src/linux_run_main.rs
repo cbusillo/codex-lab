@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
+use crate::bwrap::WSL_INTEROP_DIR;
 use crate::bwrap::create_bwrap_command_args;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
@@ -179,14 +180,16 @@ pub fn run_main() -> ! {
     ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
     let EffectivePermissions {
         permission_profile,
-        mut file_system_sandbox_policy,
+        file_system_sandbox_policy,
         network_sandbox_policy,
     } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
     ensure_legacy_landlock_mode_supports_policy(
         use_legacy_landlock,
         &file_system_sandbox_policy,
         network_sandbox_policy,
+        allow_network_for_proxy,
         &sandbox_policy_cwd,
+        Path::new(WSL_INTEROP_DIR),
     );
 
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
@@ -291,16 +294,12 @@ pub fn run_main() -> ! {
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
-        let proxy_route_spec = if allow_network_for_proxy {
-            let (proxy_route_spec, socket_dir) = prepare_host_proxy_route_spec()
+        let (proxy_route_spec, proxy_controls) = if allow_network_for_proxy {
+            let (proxy_route_spec, controls) = prepare_host_proxy_route_spec()
                 .unwrap_or_else(|err| panic!("failed to prepare host proxy routing bridge: {err}"));
-            file_system_sandbox_policy = file_system_sandbox_policy.with_additional_readable_roots(
-                &sandbox_policy_cwd,
-                std::slice::from_ref(&socket_dir),
-            );
-            Some(proxy_route_spec)
+            (Some(proxy_route_spec), controls)
         } else {
-            None
+            (None, Vec::new())
         };
         let inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
             sandbox_policy_cwd: &sandbox_policy_cwd,
@@ -314,10 +313,10 @@ pub fn run_main() -> ! {
             &sandbox_policy_cwd,
             command_cwd.as_deref(),
             &file_system_sandbox_policy,
-            network_sandbox_policy,
+            bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy),
             inner,
+            proxy_controls,
             !no_proc,
-            allow_network_for_proxy,
         );
     }
 
@@ -382,7 +381,9 @@ fn ensure_legacy_landlock_mode_supports_policy(
     use_legacy_landlock: bool,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     network_sandbox_policy: NetworkSandboxPolicy,
+    allow_network_for_proxy: bool,
     sandbox_policy_cwd: &Path,
+    wsl_interop_dir: &Path,
 ) {
     if use_legacy_landlock
         && file_system_sandbox_policy
@@ -392,18 +393,29 @@ fn ensure_legacy_landlock_mode_supports_policy(
             "permission profiles requiring direct runtime enforcement are incompatible with --use-legacy-landlock"
         );
     }
+    if use_legacy_landlock
+        && network_sandbox_policy.is_enabled()
+        && !allow_network_for_proxy
+        && !file_system_sandbox_policy.has_full_disk_write_access()
+        // Interop can use another binfmt handler or a newly created socket.
+        // An active endpoint probe would race with sandboxed command startup.
+        && wsl_interop_dir.is_dir()
+    {
+        panic!(
+            "legacy Landlock cannot isolate WSL Windows interop with network access enabled; use bubblewrap or restrict network access"
+        );
+    }
 }
 
 fn run_bwrap_with_proc_fallback(
     sandbox_policy_cwd: &Path,
     command_cwd: Option<&Path>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
-    network_sandbox_policy: NetworkSandboxPolicy,
+    network_mode: BwrapNetworkMode,
     inner: Vec<String>,
+    proxy_controls: Vec<File>,
     mount_proc: bool,
-    allow_network_for_proxy: bool,
 ) -> ! {
-    let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
 
@@ -419,6 +431,8 @@ fn run_bwrap_with_proc_fallback(
     let options = BwrapOptions {
         mount_proc,
         network_mode,
+        mask_wsl_interop: !file_system_sandbox_policy.has_full_disk_write_access()
+            && Path::new(WSL_INTEROP_DIR).is_dir(),
         ..Default::default()
     };
     let mut bwrap_args = build_bwrap_argv(
@@ -429,6 +443,7 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    bwrap_args.preserved_files.extend(proxy_controls);
     apply_inner_command_argv0(&mut bwrap_args.args);
     run_or_exec_bwrap(bwrap_args);
 }
@@ -597,6 +612,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         exec_bwrap(args, preserved_files);
     }
 
+    drop(preserved_files);
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);

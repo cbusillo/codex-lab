@@ -287,6 +287,31 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assert_owned(path, "AGENT-1")
 
+    def test_instruction_safety_ownership_does_not_reclassify_frozen_snapshots(
+        self,
+    ) -> None:
+        for path in (
+            "codex-rs/core/src/tasks/background_review_instructions.rs",
+            "codex-rs/core/src/tasks/background_review_instructions_tests.rs",
+            "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__auto_review_status__tests__incomplete_instructions_explain_failed_background_review.snap",
+            "codex-rs/core/src/agents_md.rs",
+            "codex-rs/core/src/state/turn.rs",
+            "codex-rs/core/src/turn_diff_tracker.rs",
+            "codex-rs/core/src/tasks/mod.rs",
+        ):
+            with self.subTest(path=path):
+                self.assert_owned(path, "AGENT-1")
+                self.assertNotEqual(
+                    inventory.classify_path(path, 3)["lane"], "intentionally_owned"
+                )
+
+    def test_bounded_worker_context_preserves_legacy_classification(self) -> None:
+        path = "codex-rs/core/src/context/bounded_worker_instructions.rs"
+        self.assert_owned(path, "AGENT-1")
+        self.assertNotEqual(
+            inventory.classify_path(path, 4)["lane"], "intentionally_owned"
+        )
+
     def test_background_review_engine_and_session_state_are_owned(self) -> None:
         # The engine that runs a background review and the durable per-session
         # state it reads back. Upstream owns both filenames, so only these exact
@@ -380,7 +405,10 @@ class OwnedFeatureCoverageTest(unittest.TestCase):
                 "codex-rs/app-server/tests/suite/v2/background_review_control.rs",
                 "AGENT-1",
             ),
-            ("codex-rs/app-server/tests/suite/v2/project_validation.rs", "VALIDATION-1"),
+            (
+                "codex-rs/app-server/tests/suite/v2/project_validation.rs",
+                "VALIDATION-1",
+            ),
         ):
             with self.subTest(path=path):
                 self.assert_owned(path, contract)
@@ -569,7 +597,9 @@ class CheckedInSnapshotTest(unittest.TestCase):
                     len(residuals["residuals"]),
                 )
                 residual_lane_counts = dict(
-                    sorted(Counter(item["lane"] for item in residuals["residuals"]).items())
+                    sorted(
+                        Counter(item["lane"] for item in residuals["residuals"]).items()
+                    )
                 )
                 self.assertEqual(
                     residual_lane_counts,

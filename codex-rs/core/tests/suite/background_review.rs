@@ -1899,3 +1899,6 @@ fn seed_background_review(
     store.save_output(SEEDED_RUN_ID, &output)?;
     Ok(output)
 }
+
+#[path = "background_review_instruction_tests.rs"]
+mod instruction_tests;

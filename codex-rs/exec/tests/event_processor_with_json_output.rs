@@ -14,8 +14,6 @@ use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus as ApiMcpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus as ApiPatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind as ApiPatchChangeKind;
-use codex_app_server_protocol::ProjectValidationCompletedNotification;
-use codex_app_server_protocol::ProjectValidationStatus as ApiProjectValidationStatus;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
@@ -65,8 +63,6 @@ use codex_exec::McpToolCallItemResult;
 use codex_exec::McpToolCallStatus;
 use codex_exec::PatchApplyStatus;
 use codex_exec::PatchChangeKind;
-use codex_exec::ProjectValidationCompletedEvent;
-use codex_exec::ProjectValidationStatus;
 use codex_exec::ReasoningItem;
 use codex_exec::ThreadErrorEvent;
 use codex_exec::ThreadEvent;
@@ -117,9 +113,9 @@ fn session_configured_produces_thread_started_event() {
         thread_id,
         forked_from_id: None,
         parent_thread_id: None,
+        history_mode: Default::default(),
         thread_source: None,
         thread_name: None,
-        history_mode: Default::default(),
         model: "codex-mini-latest".to_string(),
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
@@ -165,52 +161,6 @@ fn turn_started_emits_turn_started_event() {
         collected,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnStarted(TurnStartedEvent {})],
-            status: CodexStatus::Running,
-        }
-    );
-}
-
-#[test]
-fn project_validation_completed_emits_validation_event() {
-    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
-
-    let collected = processor.collect_thread_events(
-        ServerNotification::ProjectValidationCompleted(ProjectValidationCompletedNotification {
-            thread_id: "thread-1".to_string(),
-            turn_id: "turn-1".to_string(),
-            item_id: Some("validation-1".to_string()),
-            command: vec!["just".to_string(), "test".to_string()],
-            command_truncated: false,
-            cwd: Some(test_path_buf("/tmp/project").abs()),
-            status: ApiProjectValidationStatus::Passed,
-            skip_reason: None,
-            changed_file_count: Some(2),
-            exit_code: Some(0),
-            output: "ok".to_string(),
-            output_truncated: false,
-            duration_ms: 12,
-        }),
-    );
-
-    assert_eq!(
-        collected,
-        CollectedThreadEvents {
-            events: vec![ThreadEvent::ProjectValidationCompleted(
-                ProjectValidationCompletedEvent {
-                    turn_id: "turn-1".to_string(),
-                    item_id: Some("validation-1".to_string()),
-                    command: vec!["just".to_string(), "test".to_string()],
-                    command_truncated: false,
-                    cwd: Some(test_path_buf("/tmp/project").abs()),
-                    status: ProjectValidationStatus::Passed,
-                    skip_reason: None,
-                    changed_file_count: Some(2),
-                    exit_code: Some(0),
-                    output: "ok".to_string(),
-                    output_truncated: false,
-                    duration_ms: 12,
-                }
-            )],
             status: CodexStatus::Running,
         }
     );
@@ -357,6 +307,7 @@ fn unsupported_items_do_not_consume_synthetic_ids() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -979,6 +930,7 @@ fn agent_message_item_updates_final_message() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1015,6 +967,7 @@ fn agent_message_item_started_is_ignored() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1366,6 +1319,7 @@ fn turn_completion_recovers_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -1494,6 +1448,7 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1513,6 +1468,7 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -1546,6 +1502,7 @@ fn turn_completion_preserves_streamed_final_message_when_turn_items_are_empty() 
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1593,6 +1550,7 @@ fn failed_turn_clears_stale_final_message() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1612,6 +1570,7 @@ fn failed_turn_clears_stale_final_message() {
                 items: Vec::new(),
                 status: TurnStatus::Failed,
                 error: Some(TurnError {
+                    misalignment: None,
                     message: "turn failed".to_string(),
                     additional_details: None,
                     codex_error_info: None,
@@ -1668,6 +1627,7 @@ fn turn_failure_prefers_structured_error_message() {
 
     let error = processor.collect_thread_events(ServerNotification::Error(ErrorNotification {
         error: TurnError {
+            misalignment: None,
             message: "backend failed".to_string(),
             codex_error_info: None,
             additional_details: Some("request id abc".to_string()),

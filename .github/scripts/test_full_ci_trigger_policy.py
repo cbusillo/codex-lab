@@ -368,27 +368,26 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             platform_workflow,
         )
 
-    def test_nextest_local_mode_uses_one_complete_partition(self) -> None:
+    def test_nextest_uses_all_four_partitions_for_every_runner(self) -> None:
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+        self.assertIn(
+            "max-parallel: ${{ inputs.use_local_resources && 1 || 4 }}",
+            platform_workflow.split("  shard:\n", 1)[1],
+        )
 
         matrix_match = re.search(
-            r"include: \$\{\{ fromJSON\(inputs\.use_local_resources && '([^']+)' \|\| '([^']+)'\) \}\}",
+            r"include: \$\{\{ fromJSON\('([^']+)'\) \}\}",
             platform_workflow,
         )
         self.assertIsNotNone(matrix_match)
         assert matrix_match is not None
-        local_matrix = json.loads(matrix_match.group(1))
-        hosted_matrix = json.loads(matrix_match.group(2))
-        self.assertEqual(local_matrix, [{"shard": 1, "partition_count": 1}])
+        matrix = json.loads(matrix_match.group(1))
         self.assertEqual(
-            hosted_matrix,
-            [
-                {"shard": shard, "partition_count": 4}
-                for shard in range(1, 5)
-            ],
+            matrix,
+            [{"shard": shard, "partition_count": 4} for shard in range(1, 5)],
         )
         self.assertEqual(
-            {entry["shard"] for entry in hosted_matrix},
+            {entry["shard"] for entry in matrix},
             set(range(1, 5)),
         )
         self.assertIn(
@@ -453,10 +452,21 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         action = SETUP_RUSTY_V8_ACTION.read_text()
         release_workflow = CODEX_LAB_RELEASE_WORKFLOW.read_text()
 
-        self.assertIn("write-release-checksums", action)
-        self.assertNotIn(
-            'curl -fsSL "${base_url}/${checksums_name}"',
-            action,
+        self.assertIn("release_manifests.sha256", action)
+        self.assertIn(
+            "hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest()", action
+        )
+        self.assertLess(
+            action.index(
+                'if [[ "${actual_manifest_checksum}" != "${expected_manifest_checksum}" ]]'
+            ),
+            action.index('curl -fsSL "${base_url}/${archive_name}"'),
+        )
+        self.assertLess(
+            action.index(
+                'if [[ "${actual_manifest_checksum}" != "${expected_manifest_checksum}" ]]'
+            ),
+            action.index('curl -fsSL "${base_url}/${binding_name}"'),
         )
         self.assertIn("uses: ./.github/actions/setup-rusty-v8", release_workflow)
 

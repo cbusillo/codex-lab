@@ -148,6 +148,23 @@ impl ProviderRoutingFailure {
 }
 
 impl ProviderRoutingDecision {
+    /// Preserve an explicit choice while its registered worker performs cancellable preflight.
+    pub(crate) fn deferred_external(agent_type: &str) -> Self {
+        Self {
+            agent_type: agent_type.to_string(),
+            role_name: Some(agent_type.to_string()),
+            is_external: true,
+            provider: None,
+            summary: ProviderRoutingSummary {
+                kind: ProviderRoutingKind::Explicit,
+                requested: Some(agent_type.to_string()),
+                effective: agent_type.to_string(),
+                reason: "Explicit bounded worker; preflight runs after registration. Provider model, service tier, spending and internal request counts are unobserved.".to_string(),
+                skipped_candidates: Vec::new(),
+            },
+        }
+    }
+
     pub(crate) fn agent_type(&self) -> &str {
         &self.agent_type
     }

@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::compiler_fence;
 
@@ -23,6 +25,8 @@ use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
 use tracing::debug;
 use tracing::warn;
 
@@ -47,6 +51,14 @@ const LOCAL_SECRETS_FILENAME: &str = "local.age";
 const CODEX_AUTH_SECRETS_FILENAME: &str = "codex_auth.age";
 const LOGIN_AGGREGATE_SECRETS_FILENAME: &str = "login_aggregate.age";
 const MCP_OAUTH_SECRETS_FILENAME: &str = "mcp_oauth.age";
+static MCP_OAUTH_CACHE: Mutex<Option<CachedMcpSecrets>> = Mutex::new(None);
+
+#[cfg(test)]
+static MCP_OAUTH_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+#[path = "local/cache_tests.rs"]
+mod cache_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LocalSecretsNamespace {
@@ -78,6 +90,13 @@ struct SecretsFile {
 enum LockMode {
     Shared,
     Exclusive,
+}
+
+struct CachedMcpSecrets {
+    path: PathBuf,
+    ciphertext_hash: [u8; 32],
+    passphrase_hash: [u8; 32],
+    file: Arc<SecretsFile>,
 }
 
 impl SecretsFile {
@@ -291,6 +310,23 @@ impl LocalSecretsBackend {
                 logical_path.display()
             )
         })?;
+        let cache = (self.namespace == LocalSecretsNamespace::McpOAuth).then(|| {
+            let ciphertext_hash: [u8; 32] = Sha256::digest(&ciphertext).into();
+            let passphrase_hash: [u8; 32] =
+                Sha256::digest(passphrase.expose_secret().as_bytes()).into();
+            let cache = MCP_OAUTH_CACHE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (cache, ciphertext_hash, passphrase_hash)
+        });
+        if let Some((cache, ciphertext_hash, passphrase_hash)) = cache.as_ref()
+            && let Some(cached) = cache.as_ref()
+            && cached.path == logical_path
+            && cached.ciphertext_hash == *ciphertext_hash
+            && cached.passphrase_hash == *passphrase_hash
+        {
+            return Ok(cached.file.as_ref().clone());
+        }
         let plaintext = decrypt_with_passphrase(&ciphertext, &passphrase)?;
         let mut parsed: SecretsFile = serde_json::from_slice(&plaintext).with_context(|| {
             format!(
@@ -307,6 +343,14 @@ impl LocalSecretsBackend {
             parsed.version,
             SECRETS_VERSION
         );
+        if let Some((mut cache, ciphertext_hash, passphrase_hash)) = cache {
+            *cache = Some(CachedMcpSecrets {
+                path: logical_path,
+                ciphertext_hash,
+                passphrase_hash,
+                file: Arc::new(parsed.clone()),
+            });
+        }
         Ok(parsed)
     }
 
@@ -320,6 +364,15 @@ impl LocalSecretsBackend {
         let ciphertext = encrypt_with_passphrase(&plaintext, &passphrase)?;
         let path = self.secrets_path();
         atomic_file::write_file_atomically(&path, &ciphertext)?;
+        if self.namespace == LocalSecretsNamespace::McpOAuth {
+            let mut cache = MCP_OAUTH_CACHE
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if cache.as_ref().is_some_and(|cached| cached.path == path) {
+                *cache = None;
+            }
+        }
+
         Ok(())
     }
 
@@ -781,6 +834,9 @@ mod tests {
 
     #[test]
     fn local_namespaces_use_separate_files_and_keyring_accounts() -> Result<()> {
+        let _cache_lock = MCP_OAUTH_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let codex_home = tempfile::tempdir().expect("tempdir");
         let keyring = Arc::new(MockKeyringStore::default());
         let managed_backend = LocalSecretsBackend::new_with_namespace(

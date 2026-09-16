@@ -11,7 +11,7 @@ impl ChatWidget {
         request: ServerRequest,
         replay_kind: Option<ReplayKind>,
     ) {
-        if self.misalignment_policy_violation {
+        if self.has_misalignment_policy_violation() {
             return;
         }
 
@@ -172,6 +172,7 @@ impl ChatWidget {
         };
 
         self.on_guardian_assessment(GuardianAssessmentEvent {
+            review_reason: None,
             id,
             target_item_id: None,
             plugin_id: None,

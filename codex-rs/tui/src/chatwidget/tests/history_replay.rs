@@ -2,6 +2,7 @@ use super::*;
 use crate::app_event::HistoryLookupResponse;
 use codex_app_server_protocol::NetworkAccess;
 use codex_app_server_protocol::SandboxPolicy;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -9,45 +10,6 @@ use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use pretty_assertions::assert_eq;
-
-#[tokio::test]
-async fn session_flow_uses_codex_lab_release_identity() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    chat.product_identity = codex_version::ProductIdentity::CodexLab;
-    chat.handle_thread_session(crate::session_state::ThreadSessionState {
-        thread_id: ThreadId::new(),
-        forked_from_id: None,
-        fork_parent_title: None,
-        thread_name: None,
-        model: "test-model".to_string(),
-        model_provider_id: "test-provider".to_string(),
-        service_tier: None,
-        approval_policy: AskForApproval::Never,
-        approvals_reviewer: ApprovalsReviewer::User,
-        permission_profile: PermissionProfile::read_only(),
-        active_permission_profile: None,
-        cwd: test_path_buf("/home/user/project").abs(),
-        runtime_workspace_roots: Vec::new(),
-        instruction_source_paths: Vec::new(),
-        reasoning_effort: Some(ReasoningEffortConfig::default()),
-        collaboration_mode: None,
-        personality: None,
-        message_history: None,
-        network_proxy: None,
-        rollout_path: None,
-    });
-
-    let identity_line = drain_insert_history(&mut rx)
-        .into_iter()
-        .flatten()
-        .map(|line| lines_to_single_string(&[line]))
-        .find(|line| line.contains("Codex Lab"))
-        .expect("session header should contain Codex Lab identity");
-    insta::assert_snapshot!(
-        "session_flow_uses_codex_lab_release_identity",
-        identity_line
-    );
-}
 
 #[tokio::test]
 async fn resumed_initial_messages_render_history() {
@@ -134,6 +96,7 @@ async fn replayed_failed_turns_preserve_overload_warnings_between_retries() {
             /*duration_ms*/ None,
             /*error*/
             Some(AppServerTurnError {
+                misalignment: None,
                 message: error_message.to_string(),
                 codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
                 additional_details: None,
@@ -314,6 +277,49 @@ async fn replayed_review_prompt_does_not_seed_composer_history() {
 }
 
 #[tokio::test]
+async fn replayed_delegated_tool_output_is_attributed_without_seeding_composer_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let item = AppServerThreadItem::FunctionCallOutput {
+        id: "delegation-1".to_string(),
+        name: "send_message_to_thread".to_string(),
+        namespace: Some("codex_tui".to_string()),
+        output: FunctionCallOutputBody::Text(
+            "<codex_delegation>\n  <source_thread_id>source-task</source_thread_id>\n  <input>Follow &lt;up&gt; &amp; report</input>\n</codex_delegation>".to_string(),
+        ),
+    };
+    chat.replay_thread_item(
+        item.clone(),
+        "turn-1".to_string(),
+        ReplayKind::ResumeInitialMessages,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    assert_chatwidget_snapshot!(
+        "replayed_delegated_tool_output",
+        lines_to_single_string(&cells[0])
+    );
+    let projected = crate::thread_transcript::thread_items_to_transcript_cells(
+        /*thread_id*/ None,
+        &chat.config.cwd,
+        [item],
+        crate::thread_transcript::RawReasoningVisibility::Hidden,
+        /*config*/ None,
+    );
+    assert_eq!(
+        projected
+            .iter()
+            .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            .collect::<Vec<_>>(),
+        vec![lines_to_single_string(&cells[0])]
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+}
+
+#[tokio::test]
 async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let review_hint = "current changes";
@@ -372,6 +378,7 @@ async fn replayed_nested_review_prompts_do_not_render_or_seed_composer_history()
                         phase: Some(MessagePhase::FinalAnswer),
                         memory_citation: None,
                         delivery: None,
+                        questions: None,
                     },
                 ],
                 ..app_server_turn(
@@ -1063,6 +1070,7 @@ async fn replayed_retryable_app_server_error_keeps_turn_running() {
     chat.handle_server_notification(
         ServerNotification::Error(ErrorNotification {
             error: AppServerTurnError {
+                misalignment: None,
                 message: "Reconnecting... 1/5".to_string(),
                 codex_error_info: None,
                 additional_details: Some("Idle timeout waiting for SSE".to_string()),
@@ -1263,10 +1271,15 @@ async fn failed_repl_mcp_tool_call_preserves_status_and_result() {
             /*replay_kind*/ None,
         );
 
+        chat.flush_active_cell();
         let cells = drain_insert_history(&mut rx);
         let [lines] = cells.as_slice() else {
             panic!("expected one completed MCP tool call for {server}");
         };
+        if server == "cua_repl" {
+            insta::assert_snapshot!("failed_computer_activity", lines_to_single_string(lines));
+            continue;
+        }
         insta::allow_duplicates! {
             insta::assert_snapshot!(lines_to_single_string(lines), @r#"
             • Called Inspect workspace
@@ -1373,6 +1386,8 @@ async fn live_reasoning_summary_is_not_rendered_twice_when_item_completes() {
     );
     let _ = drain_insert_history(&mut rx);
 
+    handle_agent_reasoning_started(&mut chat, "reasoning-1");
+
     chat.handle_server_notification(
         ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
             thread_id: "thread-1".to_string(),
@@ -1429,6 +1444,8 @@ async fn live_reasoning_summary_drops_empty_parts_without_losing_content() {
         /*replay_kind*/ None,
     );
     let _ = drain_insert_history(&mut rx);
+
+    handle_agent_reasoning_started(&mut chat, "reasoning-1");
 
     for (summary_index, delta) in [
         (0, "**Plan**\n\ndone"),
@@ -1500,29 +1517,51 @@ async fn thread_snapshot_replayed_turn_started_marks_task_running() {
 
 #[tokio::test]
 async fn replayed_in_progress_turn_marks_task_running() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-
-    chat.replay_thread_turns(
-        vec![AppServerTurn {
-            id: "turn-1".to_string(),
-            items_view: codex_app_server_protocol::TurnItemsView::Full,
-            items: Vec::new(),
-            status: AppServerTurnStatus::InProgress,
-            error: None,
-            started_at: None,
-            completed_at: None,
-            duration_ms: None,
-        }],
+    for replay_kind in [
         ReplayKind::ResumeInitialMessages,
-    );
+        ReplayKind::ThreadSnapshot,
+    ] {
+        for items_view in [
+            codex_app_server_protocol::TurnItemsView::Full,
+            codex_app_server_protocol::TurnItemsView::NotLoaded,
+        ] {
+            let (mut chat, mut rx, mut op_rx) =
+                make_chatwidget_manual(/*model_override*/ None).await;
+            chat.thread_id = Some(ThreadId::new());
+            chat.replay_thread_turns(
+                vec![AppServerTurn {
+                    items_view,
+                    ..app_server_turn(
+                        "turn-1",
+                        AppServerTurnStatus::InProgress,
+                        /*duration_ms*/ None,
+                        /*error*/ None,
+                    )
+                }],
+                replay_kind,
+            );
 
-    assert!(drain_insert_history(&mut rx).is_empty());
-    assert!(chat.bottom_pane.is_task_running());
-    let status = chat
-        .bottom_pane
-        .status_widget()
-        .expect("status indicator should be visible");
-    assert_eq!(status.header(), "Working");
+            assert!(drain_insert_history(&mut rx).is_empty());
+            assert_eq!(
+                (
+                    chat.bottom_pane.is_task_running(),
+                    chat.turn_lifecycle.last_turn_id.as_deref(),
+                ),
+                (true, Some("turn-1")),
+            );
+            assert_chatwidget_snapshot!(
+                "replayed_in_progress_turn",
+                normalize_snapshot_paths(render_bottom_popup(&chat, /*width*/ 80)),
+            );
+
+            chat.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert_matches!(op_rx.try_recv(), Ok(Op::Interrupt));
+            assert!(
+                std::iter::from_fn(|| rx.try_recv().ok())
+                    .all(|event| !matches!(event, AppEvent::Exit(_)))
+            );
+        }
+    }
 }
 
 #[tokio::test]

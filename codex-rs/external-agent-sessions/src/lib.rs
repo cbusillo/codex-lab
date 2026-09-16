@@ -1,14 +1,19 @@
 //! Stable session-history boundary for external-agent migration.
 
 pub use codex_external_agent_migration::sessions::CompletedExternalAgentSessionImport;
+pub use codex_external_agent_migration::sessions::ExistingSessionAppend;
 pub use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
 pub use codex_external_agent_migration::sessions::ImportedConnectorCandidate;
 pub use codex_external_agent_migration::sessions::ImportedExternalAgentSession;
 pub use codex_external_agent_migration::sessions::ImportedSessionConnectorAttribution;
 pub use codex_external_agent_migration::sessions::PendingSessionImport;
+pub use codex_external_agent_migration::sessions::SessionImportTarget;
 pub use codex_external_agent_migration::sessions::SessionMetadataMode;
 pub use codex_external_agent_migration::sessions::SessionSummary;
+pub use codex_external_agent_migration::sessions::append_existing_session;
+pub use codex_external_agent_migration::sessions::append_imported_session_connector_names;
 pub use codex_external_agent_migration::sessions::detect_imported_cla_session_connectors;
+pub use codex_external_agent_migration::sessions::detect_imported_cla_session_connectors_by_source_path;
 pub use codex_external_agent_migration::sessions::detect_recent_cla_sessions;
 pub use codex_external_agent_migration::sessions::detect_recent_cur_sessions;
 pub use codex_external_agent_migration::sessions::has_current_session_been_imported;
