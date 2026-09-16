@@ -3301,7 +3301,9 @@ fn custom_tool_call_output_item(content: Vec<FunctionCallOutputContentItem>) -> 
 
 fn user_image_item(base64: &str) -> ContentItem {
     ContentItem::InputImage {
-        image_url: format!("data:image/png;base64,{base64}"),
+        image: ImageReference::Inline {
+            image_url: format!("data:image/png;base64,{base64}"),
+        },
         detail: Some(DEFAULT_IMAGE_DETAIL),
     }
 }
