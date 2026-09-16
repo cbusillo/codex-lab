@@ -137,6 +137,14 @@ impl ConfigManager {
         }
     }
 
+    pub(crate) fn clear_cloud_config_bundle_loader(&self) {
+        if let Ok(mut guard) = self.cloud_config_bundle.write() {
+            *guard = CloudConfigBundleLoader::default();
+        } else {
+            warn!("failed to clear cloud config bundle loader");
+        }
+    }
+
     fn current_thread_config_loader(&self) -> Arc<dyn ThreadConfigLoader> {
         self.thread_config_loader
             .read()

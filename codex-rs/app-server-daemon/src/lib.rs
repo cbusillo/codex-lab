@@ -272,11 +272,12 @@ pub async fn run_pid_update_loop(
     restore_release: Option<String>,
 ) -> Result<()> {
     ensure_supported_platform()?;
-    run_pid_update_loop_for_build(http_client_factory, is_lab_build()).await
+    run_pid_update_loop_for_build(http_client_factory, restore_release, is_lab_build()).await
 }
 
 async fn run_pid_update_loop_for_build(
     http_client_factory: codex_http_client::HttpClientFactory,
+    restore_release: Option<String>,
     is_lab_build: bool,
 ) -> Result<()> {
     if is_lab_build {
@@ -1194,17 +1195,20 @@ mod tests {
 
     #[tokio::test]
     async fn codex_lab_rejects_pid_update_loop_before_network_access() {
-        let error = run_pid_update_loop_for_build(
-            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-            /*is_lab_build*/ true,
-        )
-        .await
-        .expect_err("Lab update loop should be rejected");
+        for restore_release in [None, Some("test-restore-release".to_string())] {
+            let error = run_pid_update_loop_for_build(
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                restore_release,
+                /*is_lab_build*/ true,
+            )
+            .await
+            .expect_err("Lab update loop should be rejected");
 
-        assert_eq!(
-            error.to_string(),
-            "Codex Lab disables the upstream app-server update loop; use the supported Codex Lab release installer with --check or --status"
-        );
+            assert_eq!(
+                error.to_string(),
+                "Codex Lab disables the upstream app-server update loop; use the supported Codex Lab release installer with --check or --status"
+            );
+        }
     }
 
     #[tokio::test]
