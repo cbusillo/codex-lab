@@ -341,6 +341,7 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    model_provider_override: Option<ModelProviderInfo>,
 }
 
 impl TestCodexBuilder {
@@ -354,6 +355,13 @@ impl TestCodexBuilder {
 
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    /// Replace the test model provider with a custom one. The mock server
+    /// `base_url` and the SSE-only transport assumption still apply.
+    pub fn with_model_provider(mut self, model_provider: ModelProviderInfo) -> Self {
+        self.model_provider_override = Some(model_provider);
         self
     }
 
@@ -836,12 +844,21 @@ impl TestCodexBuilder {
         home: &TempDir,
         cwd_override: AbsolutePathBuf,
     ) -> anyhow::Result<(Config, Arc<TempDir>)> {
-        let model_provider = ModelProviderInfo {
-            base_url: Some(base_url),
-            // Most core tests use SSE-only mock servers, so keep websocket transport off unless
-            // a test explicitly opts into websocket coverage.
-            supports_websockets: false,
-            ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
+        let model_provider = match self.model_provider_override.take() {
+            Some(model_provider) => ModelProviderInfo {
+                base_url: Some(base_url),
+                // Most core tests use SSE-only mock servers, so keep websocket transport off
+                // unless a test explicitly opts into websocket coverage.
+                supports_websockets: false,
+                ..model_provider
+            },
+            None => ModelProviderInfo {
+                base_url: Some(base_url),
+                // Most core tests use SSE-only mock servers, so keep websocket transport off
+                // unless a test explicitly opts into websocket coverage.
+                supports_websockets: false,
+                ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
+            },
         };
         let cwd = Arc::new(TempDir::new()?);
         for hook in self.pre_build_hooks.drain(..) {
@@ -1387,6 +1404,7 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        model_provider_override: None,
     }
 }
 

@@ -58,6 +58,7 @@ pub enum RemoteCompactionSupport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub namespace_tools: bool,
+    pub custom_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
     pub external_web_access: bool,
@@ -68,6 +69,7 @@ impl Default for ProviderCapabilities {
     fn default() -> Self {
         Self {
             namespace_tools: true,
+            custom_tools: true,
             image_generation: true,
             web_search: true,
             external_web_access: true,
@@ -359,7 +361,11 @@ impl ModelProvider for ConfiguredModelProvider {
             RemoteCompactionSupport::Unsupported
         };
 
+        let declared = self.info.capabilities;
         ProviderCapabilities {
+            namespace_tools: declared.namespace_tools,
+            custom_tools: declared.custom_tools,
+            web_search: declared.web_search,
             remote_compaction,
             ..ProviderCapabilities::default()
         }
@@ -590,7 +596,41 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         }
+    }
+
+    #[test]
+    fn configured_provider_maps_declared_capabilities() {
+        let mut info = provider_for("https://mock.test/v1".to_string());
+        info.capabilities = codex_model_provider_info::ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: true,
+        };
+
+        let provider = create_model_provider(info, /*auth_manager*/ None);
+        let capabilities = provider.capabilities();
+
+        assert!(!capabilities.namespace_tools);
+        assert!(!capabilities.custom_tools);
+        assert!(capabilities.web_search);
+        // Undeclared capabilities keep their defaults.
+        assert!(capabilities.image_generation);
+        assert!(capabilities.external_web_access);
+    }
+
+    #[test]
+    fn configured_provider_defaults_capabilities_to_full_surface() {
+        let provider = create_model_provider(
+            provider_for("https://mock.test/v1".to_string()),
+            /*auth_manager*/ None,
+        );
+        let capabilities = provider.capabilities();
+
+        assert!(capabilities.namespace_tools);
+        assert!(capabilities.custom_tools);
+        assert!(capabilities.web_search);
     }
 
     fn remote_model(slug: &str) -> ModelInfo {

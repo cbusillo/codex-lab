@@ -104,6 +104,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::btree_map::Entry;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tracing::instrument;
 
 const MAX_AGENT_TYPE_DESCRIPTION_BYTES: usize = 4 * 1024;
@@ -124,6 +126,29 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
+    dropped_tool_warnings: &'a DroppedToolSurfaceWarnings,
+}
+
+/// Session-scoped latch so tool-surface drop warnings are emitted once per
+/// session instead of once per rebuilt tool plan.
+#[derive(Debug, Default)]
+pub(crate) struct DroppedToolSurfaceWarnings {
+    namespaces: AtomicBool,
+    custom_tools: AtomicBool,
+}
+
+impl DroppedToolSurfaceWarnings {
+    fn claim_namespace_warning(&self) -> bool {
+        self.namespaces
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn claim_custom_tool_warning(&self) -> bool {
+        self.custom_tools
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -155,6 +180,10 @@ pub(crate) fn build_tool_router(
         .services
         .thread_extension_data
         .get::<crate::WaitForEnvironmentToolConfig>();
+    let dropped_tool_warnings = session
+        .services
+        .thread_extension_data
+        .get_or_init(DroppedToolSurfaceWarnings::default);
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
@@ -165,6 +194,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        dropped_tool_warnings: &dropped_tool_warnings,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -207,6 +237,7 @@ pub(crate) fn build_tool_router(
         registry,
         hosted_specs,
         &session.services.tool_search_handler_cache,
+        &dropped_tool_warnings,
     )
 }
 
@@ -299,6 +330,7 @@ pub(crate) fn build_core_tool_registry(
     }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
+    let dropped_tool_warnings = DroppedToolSurfaceWarnings::default();
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
@@ -309,6 +341,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        dropped_tool_warnings: &dropped_tool_warnings,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -377,6 +410,7 @@ pub(crate) fn finalize_tool_router(
     mut registry: ToolRegistry,
     hosted_specs: Vec<ToolSpec>,
     tool_search_handler_cache: &ToolSearchHandlerCache,
+    dropped_tool_warnings: &DroppedToolSurfaceWarnings,
 ) -> CodexResult<ToolRouter> {
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
@@ -498,6 +532,7 @@ pub(crate) fn finalize_tool_router(
         &registry,
         &code_mode_tool_names,
         hosted_specs,
+        dropped_tool_warnings,
     );
     let tool_namespaces_info = include_tool_namespaces_info
         .then(|| {
@@ -556,6 +591,7 @@ fn build_model_visible_specs(
     registry: &ToolRegistry,
     code_mode_tool_names: &BTreeMap<String, ToolName>,
     hosted_specs: Vec<ToolSpec>,
+    dropped_tool_warnings: &DroppedToolSurfaceWarnings,
 ) -> Vec<ToolSpec> {
     let mut specs = Vec::new();
     for tool in registry.entries() {
@@ -581,12 +617,30 @@ fn build_model_visible_specs(
     }
     specs.extend(hosted_specs);
 
-    merge_into_namespaces(specs)
+    let mut dropped_namespace_names = Vec::new();
+    let specs = merge_into_namespaces(specs)
         .into_iter()
         .filter(|spec| {
-            namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
+            if namespace_tools_enabled(turn_context) {
+                true
+            } else if let ToolSpec::Namespace(namespace) = spec {
+                dropped_namespace_names.push(namespace.name.clone());
+                false
+            } else {
+                true
+            }
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    if !dropped_namespace_names.is_empty() && dropped_tool_warnings.claim_namespace_warning() {
+        tracing::warn!(
+            provider = %turn_context.provider.info().name,
+            "provider does not support the Responses `namespace` tool type, so these tool groups were not sent to the model: {}. Sub-agent management, MCP, and other namespaced tools are unavailable for this model.",
+            dropped_namespace_names.join(", ")
+        );
+    }
+
+    specs
 }
 
 fn spec_for_model_request(
@@ -1348,8 +1402,16 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     }
 
     if environment_mode.has_environment() && context.model_info.apply_patch_tool_type.is_some() {
-        let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-        registry.add(ApplyPatchHandler::new(include_environment_id));
+        if context.turn_context.provider.capabilities().custom_tools {
+            let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+            registry.add(ApplyPatchHandler::new(include_environment_id));
+        } else if context.dropped_tool_warnings.claim_custom_tool_warning() {
+            tracing::warn!(
+                provider = %context.turn_context.provider.info().name,
+                "provider does not support freeform `custom` tools, so apply_patch is not available for model {}. The model will need to edit files through the shell instead.",
+                context.model_info.slug
+            );
+        }
     }
 
     if context

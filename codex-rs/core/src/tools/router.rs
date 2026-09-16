@@ -102,12 +102,14 @@ impl ToolRouter {
         hosted_specs: Vec<ToolSpec>,
         tool_search_handler_cache: &ToolSearchHandlerCache,
     ) -> Self {
+        let dropped_tool_warnings = crate::tools::spec_plan::DroppedToolSurfaceWarnings::default();
         finalize_tool_router(
             turn_context,
             model_info,
             registry,
             hosted_specs,
             tool_search_handler_cache,
+            &dropped_tool_warnings,
         )
         .expect("test tool registry should not contain duplicate tools")
     }

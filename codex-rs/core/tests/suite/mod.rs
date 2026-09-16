@@ -166,6 +166,7 @@ mod invalid_image_recovery;
 mod items;
 mod json_result;
 mod live_cli;
+mod local_provider_tool_surface;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 mod mcp_optional_startup_grace;

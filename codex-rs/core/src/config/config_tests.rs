@@ -13000,3 +13000,69 @@ fn sqlite_home_env_conflict_reports_an_override() -> std::io::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn load_config_applies_model_provider_capabilities_table() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "local-flat"
+
+[model_providers.local-flat]
+name = "Local Flat"
+base_url = "http://127.0.0.1:8080/v1"
+requires_openai_auth = false
+
+[model_providers.local-flat.capabilities]
+namespace_tools = false
+custom_tools = false
+web_search = false
+"#,
+    )
+    .expect("provider with a capabilities table should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(config.model_provider_id, "local-flat");
+    assert_eq!(
+        config.model_provider.capabilities,
+        codex_model_provider_info::ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn load_config_keeps_full_capabilities_when_table_is_omitted() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "custom-openai"
+
+[model_providers.custom-openai]
+name = "OpenAI"
+base_url = "https://openai.example.test/v1"
+requires_openai_auth = false
+"#,
+    )
+    .expect("provider without a capabilities table should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(
+        config.model_provider.capabilities,
+        codex_model_provider_info::ModelProviderCapabilities::default()
+    );
+}

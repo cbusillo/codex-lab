@@ -155,6 +155,42 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
+    /// Tool-surface capabilities the provider's API accepts.
+    #[serde(default)]
+    pub capabilities: ModelProviderCapabilities,
+}
+
+/// Tool-surface capabilities a provider declares for the models it serves.
+///
+/// Every field defaults to `true`, so providers that omit the `capabilities`
+/// table keep the current tool surface. Local OpenAI-compatible servers that
+/// only accept top-level `function` tools should set the unsupported
+/// capabilities to `false`; Codex then emits a flat tool surface for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ModelProviderCapabilities {
+    /// Whether the provider accepts the Responses API `namespace` tool type.
+    #[serde(default = "default_true")]
+    pub namespace_tools: bool,
+    /// Whether the provider accepts freeform `custom` tools such as `apply_patch`.
+    #[serde(default = "default_true")]
+    pub custom_tools: bool,
+    /// Whether the provider accepts the hosted `web_search` tool.
+    #[serde(default = "default_true")]
+    pub web_search: bool,
+}
+
+impl Default for ModelProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            namespace_tools: true,
+            custom_tools: true,
+            web_search: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One-way identity for canonical provider configuration and credential fields.
@@ -528,6 +564,7 @@ impl ModelProviderInfo {
             requires_openai_auth: true,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -564,6 +601,7 @@ impl ModelProviderInfo {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -788,6 +826,15 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        // Local OpenAI-compatible servers do not accept the OpenAI-specific
+        // `namespace` or freeform `custom` tool types or the hosted
+        // `web_search` tool, so the bundled local providers default to the
+        // flat function-tool surface.
+        capabilities: ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: false,
+        },
     }
 }
 
