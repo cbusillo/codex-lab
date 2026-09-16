@@ -20,6 +20,7 @@ MAX_CANDIDATE = 256
 MAX_UNIT_ID = 640
 MAX_HANDOFF_UNIT_ID = 160
 TOKEN_BUDGET = 40_000
+REPAIR_REVIEW_CYCLES = 2
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 REPAIR_STATUSES = {"failed", "repaired"}
 REPAIR_AGENTS = {"human", "model", "script"}
@@ -129,6 +130,11 @@ def stage3c_units(
     telemetry = read_object(telemetry_path, "model telemetry", MAX_INPUT_BYTES)
     if packets.get("schemaVersion") != 1 or packets.get("stage") != "3c":
         raise LedgerError("model packets are not stage 3c schema 1")
+    if (
+        packets.get("status") == "unavailable"
+        or packets.get("outcome") == "unavailable"
+    ):
+        raise LedgerError("model packet inventory is unavailable")
     if telemetry.get("schemaVersion") != 1 or telemetry.get("stage") != "3c":
         raise LedgerError("model telemetry is not stage 3c schema 1")
     if (
@@ -172,6 +178,17 @@ def stage3c_units(
     warnings = packets.get("warnings", [])
     if not isinstance(warnings, list):
         raise LedgerError("model packet warnings are invalid")
+    unresolved_paths = packets.get("unresolvedPathTotal", 0)
+    if (
+        not isinstance(unresolved_paths, int)
+        or isinstance(unresolved_paths, bool)
+        or unresolved_paths < 0
+    ):
+        raise LedgerError("model packet unresolved count is invalid")
+    if unresolved_paths:
+        # Not an executable repair unit: rebuild complete routing before these
+        # paths can disappear from the handoff, even if every packet is repaired.
+        projected.append(f"unrouted-conflicts:{unresolved_paths}")
     return units, projected, [flat(warning, 256) for warning in warnings[:16]]
 
 
@@ -330,6 +347,21 @@ def validate_ledger(
         ):
             raise LedgerError("real repair cycles require a changed exact repair head")
         seen_heads.add(head)
+        receipt = cycle.get("checkpointReceipt")
+        if receipt is not None:
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt) != {"candidate", "attemptId", "checkpoint", "sha256"}
+                or receipt["candidate"] != head
+                or receipt["attemptId"] != ledger.get("cycleId")
+                or not isinstance(receipt["checkpoint"], str)
+                or not Path(receipt["checkpoint"]).is_absolute()
+                or not isinstance(receipt["sha256"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
+            ):
+                raise LedgerError(
+                    "checkpoint receipt must identify this repair head and attempt"
+                )
         if repair_agent == "model":
             if (
                 model_tier == "none"
@@ -361,6 +393,7 @@ def validate_ledger(
                 "finishedAt": flat(finished_at, 128),
                 "durationMs": duration_ms,
                 "accounting": cycle_accounting,
+                **({"checkpointReceipt": receipt} if receipt is not None else {}),
             }
         )
     declared = accounting(ledger.get("accounting"), "ledger")
@@ -541,19 +574,11 @@ def emit(args: argparse.Namespace) -> int:
             )
             decision, handoff_reason, kind = "no-cycles", "none", "pre-repair"
             checkpoint_sha = refs["local"] if refs_available else None
-        elif component_total >= 2:
+        elif attempt_total >= REPAIR_REVIEW_CYCLES:
             decision, handoff_reason, reason, kind = (
                 "handoff",
-                "unrelated_cycle_cap",
-                "two unrelated repair components reached",
-                "post-repair",
-            )
-            checkpoint_sha = cycles[-1]["repairHead"]
-        elif max_attempts >= 3:
-            decision, handoff_reason, reason, kind = (
-                "handoff",
-                "attempt_cap",
-                "three repair attempts reached for one unit",
+                "repair_cycle_review",
+                "two repair cycles reached; inspect root cause before continuing",
                 "post-repair",
             )
             checkpoint_sha = cycles[-1]["repairHead"]
@@ -610,8 +635,7 @@ def emit(args: argparse.Namespace) -> int:
             "attemptTotal": attempt_total,
             "maxAttemptsPerUnit": max_attempts,
             "caps": {
-                "unrelatedComponents": 2,
-                "attemptsPerUnit": 3,
+                "repairCyclesBeforeReview": REPAIR_REVIEW_CYCLES,
                 "tokens": TOKEN_BUDGET,
             },
             "accounting": {**totals, "accountingConfidence": aggregate_confidence},
