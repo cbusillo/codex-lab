@@ -1383,6 +1383,7 @@ impl Session {
                 turn_context.config.as_ref(),
                 self.services.plugins_manager.as_ref(),
                 turn_context.environments.single_local_environment(),
+                &turn_context.disabled_plugin_ids,
             )
             .await;
             let refreshed = Arc::new(turn_context.with_refreshed_execution_account(

@@ -61,7 +61,11 @@ impl BackgroundReviewInstructionsGate {
         if self.paths.is_empty() {
             return Err("the exact changed paths are unavailable");
         }
-        let names = candidate_filenames(&step.turn.config);
+        let environment = step
+            .environments
+            .primary()
+            .ok_or("the review environment is unavailable")?;
+        let names = candidate_filenames(&step.turn.config, environment.cwd());
         if self.paths.iter().any(|path| {
             path.to_path_buf()
                 .file_name()
@@ -70,10 +74,6 @@ impl BackgroundReviewInstructionsGate {
         }) {
             return Err("the turn changes instruction files whose baseline scope is not available");
         }
-        let environment = step
-            .environments
-            .primary()
-            .ok_or("the review environment is unavailable")?;
         let filesystem = environment.environment.get_filesystem();
         let sandbox = (!environment
             .permission_profile()

@@ -12,6 +12,7 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 
@@ -63,7 +64,9 @@ impl ToolExecutor<ToolInvocation> for BrowserHandler {
                 && let Some(image) = result.image
             {
                 items.push(FunctionCallOutputContentItem::InputImage {
-                    image_url: image.data_url(),
+                    image: ImageReference::Inline {
+                        image_url: image.data_url(),
+                    },
                     detail: Some(ImageDetail::High),
                 });
             }

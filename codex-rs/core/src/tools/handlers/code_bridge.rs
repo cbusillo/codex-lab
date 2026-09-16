@@ -36,6 +36,7 @@ use codex_code_bridge_protocol::ScreenshotResponseMessage;
 use codex_code_bridge_protocol::SourceKind;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::ImageReference;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use serde::Deserialize;
@@ -172,7 +173,9 @@ async fn handle_invocation(
         let mut items = vec![FunctionCallOutputContentItem::InputText { text: content }];
         if success && let Some(image) = result.image {
             items.push(FunctionCallOutputContentItem::InputImage {
-                image_url: image.data_url(),
+                image: ImageReference::Inline {
+                    image_url: image.data_url(),
+                },
                 detail: Some(ImageDetail::High),
             });
         }

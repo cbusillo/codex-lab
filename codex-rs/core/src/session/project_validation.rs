@@ -48,7 +48,7 @@ use super::validation_provider::resolve_automatic_validation_provider;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
-use crate::exec::process_exec_tool_call;
+use crate::exec::build_exec_request;
 use crate::exec_env::create_env;
 
 const PROJECT_VALIDATION_OUTPUT_MAX_BYTES: usize = 8 * 1024;
@@ -565,10 +565,11 @@ pub(crate) async fn run_project_validation(
     };
 
     let mut workspace_roots = turn_context.config.effective_workspace_roots();
-    if let Some(cache) = cargo_cache.as_ref()
-        && !workspace_roots.contains(cache.target_dir())
-    {
-        workspace_roots.push(cache.target_dir().clone());
+    if let Some(cache) = cargo_cache.as_ref() {
+        let cache_root = codex_utils_path_uri::PathUri::from_abs_path(cache.target_dir());
+        if !workspace_roots.contains(&cache_root) {
+            workspace_roots.push(cache_root);
+        }
     }
     let validation_permission_profile = cargo_validation_permission_profile(
         &turn_context.permission_profile(),
@@ -600,16 +601,18 @@ pub(crate) async fn run_project_validation(
         justification: None,
         arg0: None,
     };
-    let result = process_exec_tool_call(
+    let result = match build_exec_request(
         params,
         &validation_permission_profile,
         &plan.cwd,
         &workspace_roots,
         &turn_context.config.codex_linux_sandbox_exe,
+        &turn_context.config.codex_self_exe,
         turn_context.config.features.use_legacy_landlock(),
-        /*stdout_stream*/ None,
-    )
-    .await;
+    ) {
+        Ok(request) => crate::sandboxing::execute_env(request, /*stdout_stream*/ None).await,
+        Err(error) => Err(error),
+    };
 
     if let Some(cache) = cargo_cache {
         cache.finish();

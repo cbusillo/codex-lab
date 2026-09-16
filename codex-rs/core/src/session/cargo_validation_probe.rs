@@ -11,7 +11,7 @@ use super::turn_context::TurnContext;
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::exec::ExecParams;
-use crate::exec::process_exec_tool_call;
+use crate::exec::build_exec_request;
 
 const CARGO_TOOLCHAIN_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -50,17 +50,19 @@ pub(crate) async fn resolve_cargo_toolchain_identity(
         justification: None,
         arg0: None,
     };
-    let output = process_exec_tool_call(
+    let request = build_exec_request(
         params,
         &turn_context.permission_profile(),
         sandbox_cwd,
         &turn_context.config.effective_workspace_roots(),
         &turn_context.config.codex_linux_sandbox_exe,
+        &turn_context.config.codex_self_exe,
         turn_context.config.features.use_legacy_landlock(),
-        /*stdout_stream*/ None,
     )
-    .await
     .map_err(io::Error::other)?;
+    let output = crate::sandboxing::execute_env(request, /*stdout_stream*/ None)
+        .await
+        .map_err(io::Error::other)?;
     if output.exit_code != 0 {
         return Err(io::Error::other(format!(
             "cargo toolchain probe exited with status {}",

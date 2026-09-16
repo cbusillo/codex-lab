@@ -20,6 +20,7 @@ use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
+use codex_protocol::protocol::EventMsg;
 use codex_thread_store::PersistContext;
 use tracing::Instrument;
 use tracing::trace_span;
@@ -61,14 +62,7 @@ impl SessionTask for RegularTask {
     }
 
     async fn start(&self, sess: Arc<Session>, ctx: Arc<TurnContext>) {
-        let event = EventMsg::TurnStarted(TurnStartedEvent {
-            turn_id: ctx.sub_id.clone(),
-            trace_id: ctx.trace_id.clone(),
-            started_at: ctx.turn_timing_state.started_at_unix_secs().await,
-            model_context_window: ctx.model_context_window(),
-            collaboration_mode_kind: ctx.mode(),
-        });
-        sess.send_event(ctx.as_ref(), event).await;
+        sess.emit_turn_started(&ctx).await;
         sess.set_server_reasoning_included(/*included*/ false).await;
     }
 
@@ -80,16 +74,12 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
-        // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
-        // not wait on startup prewarm resolution.
-        let prewarmed_client_session = async {
-            sess.emit_turn_started(&ctx).await;
-            sess.set_server_reasoning_included(/*included*/ false).await;
-            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
-                .await
-        }
-        .instrument(trace_span!("regular_task.prepare_run_turn"))
-        .await;
+        // TaskStart emits TurnStarted exactly once before prewarm, including
+        // when abort cleanup wins the race to start a parked task.
+        let prewarmed_client_session = sess
+            .consume_startup_prewarm_for_regular_turn(&cancellation_token)
+            .instrument(trace_span!("regular_task.prepare_run_turn"))
+            .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
                 self.initial_input_recorder

@@ -179,7 +179,7 @@ impl BoundedWorkerRequest {
                     .into_iter()
                     .flat_map(crate::agents_md::LoadedAgentsMd::sources)
                     .collect::<HashSet<_>>();
-                let names = crate::agents_md::candidate_filenames(config);
+                let names = crate::agents_md::candidate_filenames(config, environment.cwd());
                 for path in paths {
                     let path = Path::new(path);
                     if path

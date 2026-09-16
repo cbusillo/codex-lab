@@ -60,7 +60,7 @@ pub fn create_code_bridge_tool() -> ToolSpec {
             Some(vec!["action".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(code_bridge_output_schema()),
+        output_schema: Some(code_bridge_output_schema().into()),
     })
 }
 
