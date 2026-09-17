@@ -315,9 +315,11 @@ fn pack_parts(
     let mut current = String::new();
     for block in source_blocks {
         let maximum_contents = REVIEW_PART_BODY_BYTES
-            .saturating_sub(block.header.len())
-            .saturating_sub(64)
-            .max(1);
+            .checked_sub(block.header.len().saturating_add(64))
+            .filter(|maximum| *maximum >= 4)
+            .ok_or_else(|| {
+                "an instruction source header exceeds the Background Review part budget".to_string()
+            })?;
         let pieces = split_utf8(&block.contents, maximum_contents);
         let part_count = pieces.len();
         for (continuation, piece) in pieces.into_iter().enumerate() {
@@ -399,8 +401,13 @@ fn split_utf8(text: &str, max_bytes: usize) -> Vec<String> {
 }
 
 fn source_block(rank: usize, scope: &str, source: &str, contents: &str) -> ReviewSourceBlock {
+    let applicability = if scope == "global" {
+        "applies to all review targets".to_string()
+    } else {
+        format!("applies to files under `{scope}`")
+    };
     ReviewSourceBlock {
-        header: format!("source rank {rank}; applies to files under `{scope}`; source `{source}`"),
+        header: format!("source rank {rank}; {applicability}; source `{source}`"),
         contents: contents.to_string(),
     }
 }
@@ -442,9 +449,6 @@ fn omission_reason(category: &str, path: Option<&PathUri>, count: usize) -> Stri
 }
 
 fn validate_review_parts(parts: &[ReviewAgentsMdSnapshot], prompt: &Prompt) -> Result<(), String> {
-    if parts.is_empty() {
-        return Ok(());
-    }
     let expected = parts
         .iter()
         .map(|part| (part.ordinal, ReviewAgentsMdFragment(part.clone()).render()))
@@ -478,11 +482,7 @@ fn validate_review_parts(parts: &[ReviewAgentsMdSnapshot], prompt: &Prompt) -> R
             let Some((ordinal, _)) = expected.iter().find(|(_, expected)| *expected == text) else {
                 return Err("a review instruction part is missing, truncated, or conflicts with the prepared set".to_string());
             };
-            if let Some(previous) = found.insert(*ordinal, text)
-                && previous != text
-            {
-                return Err("a review instruction part conflicts with the prepared set".to_string());
-            }
+            found.insert(*ordinal, text);
         }
     }
     if found.len() != expected.len() || !expected.keys().all(|ordinal| found.contains_key(ordinal))

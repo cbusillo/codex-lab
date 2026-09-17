@@ -11,7 +11,7 @@ use serde::Serialize;
 pub(crate) const REVIEW_AGENTS_MD_PARTS: usize = 8;
 pub(crate) const REVIEW_AGENTS_MD_KIND: &str = "background_review.agents_md_part";
 pub(crate) const REVIEW_AGENTS_MD_TOTAL_BYTES: usize = 40 * 1024;
-const REVIEW_AGENTS_MD_PART_IDS: [&str; REVIEW_AGENTS_MD_PARTS] = [
+pub(super) const REVIEW_AGENTS_MD_PART_IDS: [&str; REVIEW_AGENTS_MD_PARTS] = [
     "background_review_agents_md_part_0",
     "background_review_agents_md_part_1",
     "background_review_agents_md_part_2",
@@ -93,13 +93,17 @@ impl ContextualUserFragment for ReviewAgentsMdFragment {
         "user"
     }
 
+    fn requires_separate_message(&self) -> bool {
+        true
+    }
+
     fn markers(&self) -> (&'static str, &'static str) {
         Self::type_markers()
     }
 
     fn body(&self) -> String {
         format!(
-            " part {}/{} digest={}\n<INSTRUCTIONS>\n{}\n",
+            " part {}/{} digest={}\nHigher-ranked sources override lower-ranked sources only within their stated scope.\n{}\n",
             self.0.ordinal + 1,
             self.0.total,
             self.0.digest,

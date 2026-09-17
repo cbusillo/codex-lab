@@ -831,6 +831,30 @@ fn has_retained_fragment(
     state: &Value,
     section: &dyn ErasedWorldStateSection,
 ) -> bool {
+    // Complete review parts never carry the bounded-truncation envelope. Match
+    // their immutable render and trusted kind together; another part or copied
+    // user text must not suppress reinjection of a missing instruction part.
+    if review_agents_md_part::REVIEW_AGENTS_MD_PART_IDS.contains(&section_id) {
+        let Some(fragment) = section.render_diff(PreviousSectionState::Absent) else {
+            return false;
+        };
+        let expected = fragment.render();
+        let kind = fragment.content_kind();
+        return items.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Message {
+                    role,
+                    content,
+                    internal_chat_message_metadata_passthrough: Some(metadata),
+                    ..
+                } if role == fragment.role() && content.iter().enumerate().any(|(index, item)| {
+                    metadata.content_item_kinds.as_ref().and_then(|kinds| kinds.get(index)) == Some(&kind)
+                        && matches!(item, ContentItem::InputText { text } if text == &expected)
+                })
+            )
+        });
+    }
     items.iter().any(|item| {
         matches!(
             item,
