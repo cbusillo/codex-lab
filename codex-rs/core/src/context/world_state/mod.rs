@@ -14,6 +14,7 @@ mod permissions;
 mod persistent_mode;
 mod plugins_instructions;
 mod realtime;
+mod review_agents_md_part;
 #[cfg(test)]
 mod test_support;
 mod tools;
@@ -61,6 +62,12 @@ pub(crate) use permissions::PermissionsState;
 pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_KIND;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_PARTS;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_TOTAL_BYTES;
+pub(crate) use review_agents_md_part::ReviewAgentsMdFragment;
+pub(crate) use review_agents_md_part::ReviewAgentsMdPart;
+pub(crate) use review_agents_md_part::ReviewAgentsMdSnapshot;
 pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {
@@ -73,6 +80,10 @@ trait ErasedWorldStateSection: Send + Sync {
     fn has_retained_fragment_matcher(&self) -> bool;
 
     fn matches_retained_fragment(&self, role: &str, text: &str) -> bool;
+
+    fn requires_complete_retained_fragment(&self) -> bool {
+        false
+    }
 
     fn render_diff(
         &self,
@@ -121,6 +132,10 @@ impl<S: WorldStateSection> ErasedWorldStateSection for S {
 
     fn matches_retained_fragment(&self, role: &str, text: &str) -> bool {
         S::matches_retained_fragment(role, text)
+    }
+
+    fn requires_complete_retained_fragment(&self) -> bool {
+        review_agents_md_part::REVIEW_AGENTS_MD_PART_IDS.contains(&S::ID)
     }
 
     fn render_diff(
@@ -824,6 +839,30 @@ fn has_retained_fragment(
     state: &Value,
     section: &dyn ErasedWorldStateSection,
 ) -> bool {
+    // Complete review parts never carry the bounded-truncation envelope. Match
+    // their immutable render and trusted kind together; another part or copied
+    // user text must not suppress reinjection of a missing instruction part.
+    if section.requires_complete_retained_fragment() {
+        let Some(fragment) = section.render_diff(PreviousSectionState::Absent) else {
+            return false;
+        };
+        let expected = fragment.render();
+        let kind = fragment.content_kind();
+        return items.iter().any(|item| {
+            matches!(
+                item,
+                ResponseItem::Message {
+                    role,
+                    content,
+                    internal_chat_message_metadata_passthrough: Some(metadata),
+                    ..
+                } if role == fragment.role() && content.iter().enumerate().any(|(index, item)| {
+                    metadata.content_item_kinds.as_ref().and_then(|kinds| kinds.get(index)) == Some(&kind)
+                        && matches!(item, ContentItem::InputText { text } if text == &expected)
+                })
+            )
+        });
+    }
     items.iter().any(|item| {
         matches!(
             item,

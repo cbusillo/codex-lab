@@ -38,6 +38,7 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::review_format::render_review_output_text;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::PathBufExt;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
@@ -868,6 +869,54 @@ async fn review_omits_retained_tier_when_fast_mode_disabled() -> anyhow::Result<
         request_log.single_request().body_json().get("service_tier"),
         None
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_review_keeps_ordinary_agents_instructions_out_of_background_review_parts()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let repo = TempDir::new()?;
+    std::fs::write(repo.path().join("AGENTS.md"), "MANUAL_REVIEW_AGENTS_RULE")?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let (server, request_log) =
+        start_responses_server_with_sse(completed_sse(), /*expected_requests*/ 1).await;
+    let config_cwd = cwd.clone();
+    let test = test_codex()
+        .with_config(move |config| config.cwd = config_cwd)
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.codex
+        .submit(Op::Review {
+            persistence: None,
+            review_request: ReviewRequest {
+                target: ReviewTarget::Custom {
+                    instructions: "review manual instructions".to_string(),
+                },
+                user_facing_hint: None,
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let body = request_log.single_request().body_json();
+    let kinds = body["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|message| {
+            message["internal_chat_message_metadata_passthrough"]["content_item_kinds"].as_array()
+        })
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"agents_md.instructions"));
+    assert!(!kinds.contains(&"background_review.agents_md_part"));
+    assert!(body.to_string().contains("MANUAL_REVIEW_AGENTS_RULE"));
     Ok(())
 }
 

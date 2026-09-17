@@ -460,8 +460,11 @@ async fn start_review_conversation(
         let instructions_gate = ctx
             .extension_data
             .get::<super::BackgroundReviewInstructionsGate>()
-            .map(|gate| gate.as_ref().clone())
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                "Background Review cannot verify complete AGENTS.md instructions: review instruction state is unavailable. The review request was not sent.".to_string()
+            })?
+            .as_ref()
+            .clone();
         thread_extension_init.insert(instructions_gate);
     }
     run_codex_thread_one_shot(

@@ -199,30 +199,7 @@ pub(crate) async fn agents_md_paths(
     marker_error_policy: FindUpErrorPolicy,
 ) -> io::Result<Vec<PathUri>> {
     let dir = cwd.clone();
-
-    let mut merged = TomlValue::Table(toml::map::Map::new());
-    for layer in config.config_layer_stack.layers_low_to_high() {
-        if matches!(layer.name, ConfigLayerSource::Project { .. }) {
-            continue;
-        }
-        merge_toml_values(&mut merged, &layer.config);
-    }
-    let project_root_markers = match project_root_markers_from_config(&merged) {
-        Ok(Some(markers)) => markers,
-        Ok(None) => default_project_root_markers(),
-        Err(err) => {
-            tracing::warn!("invalid project_root_markers: {err}");
-            default_project_root_markers()
-        }
-    };
-    let project_root = find_nearest_ancestor_with_markers(
-        fs,
-        &dir,
-        project_root_markers,
-        marker_error_policy,
-        sandbox,
-    )
-    .await?;
+    let project_root = project_root_for(config, &dir, fs, sandbox, marker_error_policy).await?;
     let search_dirs = if let Some(root) = project_root {
         let mut dirs = Vec::new();
         let mut cursor = dir.clone();
@@ -270,6 +247,33 @@ pub(crate) async fn agents_md_paths(
         }
     }
     Ok(found)
+}
+
+/// Finds the configured project root used for AGENTS.md discovery.
+pub(crate) async fn project_root_for(
+    config: &Config,
+    cwd: &PathUri,
+    fs: &dyn ExecutorFileSystem,
+    sandbox: Option<&FileSystemSandboxContext>,
+    marker_error_policy: FindUpErrorPolicy,
+) -> io::Result<Option<PathUri>> {
+    let mut merged = TomlValue::Table(toml::map::Map::new());
+    for layer in config.config_layer_stack.layers_low_to_high() {
+        if matches!(layer.name, ConfigLayerSource::Project { .. }) {
+            continue;
+        }
+        merge_toml_values(&mut merged, &layer.config);
+    }
+    let project_root_markers = match project_root_markers_from_config(&merged) {
+        Ok(Some(markers)) => markers,
+        Ok(None) => default_project_root_markers(),
+        Err(err) => {
+            tracing::warn!("invalid project_root_markers: {err}");
+            default_project_root_markers()
+        }
+    };
+    find_nearest_ancestor_with_markers(fs, cwd, project_root_markers, marker_error_policy, sandbox)
+        .await
 }
 
 pub(crate) fn candidate_filenames<'a>(config: &'a Config, cwd: &PathUri) -> Vec<&'a str> {
@@ -392,6 +396,24 @@ impl LoadedAgentsMd {
         } else {
             self.legacy_text()
         }
+    }
+
+    /// Returns host and internal instructions without project-scoped files.
+    pub(crate) fn non_project_text(&self) -> String {
+        self.user_instructions
+            .iter()
+            .chain(self.thread_instructions.iter())
+            .map(|instructions| instructions.text.as_str())
+            .chain(
+                self.entries
+                    .iter()
+                    .filter_map(|entry| match &entry.provenance {
+                        InstructionProvenance::Internal => Some(entry.contents.as_str()),
+                        InstructionProvenance::Project { .. } => None,
+                    }),
+            )
+            .collect::<Vec<_>>()
+            .join("\n\n")
     }
 
     fn legacy_text(&self) -> String {

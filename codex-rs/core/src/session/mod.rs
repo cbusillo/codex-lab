@@ -4294,6 +4294,7 @@ impl Session {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
+        let mut contextual_user_groups = Vec::<Vec<RenderedFragment>>::new();
         let mut separate_developer_sections = Vec::<RenderedFragment>::new();
         let mut context_window_hints = Vec::new();
         let (session_source, auto_compact_window_ids) = {
@@ -4458,6 +4459,12 @@ impl Session {
                     separate_developer_sections.push(fragment.render_fragment());
                 }
                 "developer" => developer_sections.push(fragment.render_fragment()),
+                "user" if fragment.requires_separate_message() => {
+                    if !contextual_user_sections.is_empty() {
+                        contextual_user_groups.push(std::mem::take(&mut contextual_user_sections));
+                    }
+                    contextual_user_groups.push(vec![fragment.render_fragment()]);
+                }
                 "user" => contextual_user_sections.push(fragment.render_fragment()),
                 _ => {}
             }
@@ -4483,10 +4490,15 @@ impl Session {
         {
             items.push(message);
         }
-        if let Some(contextual_user_message) =
-            crate::context_manager::updates::build_rendered_message(contextual_user_sections)
-        {
-            items.push(contextual_user_message);
+        if !contextual_user_sections.is_empty() {
+            contextual_user_groups.push(contextual_user_sections);
+        }
+        for group in contextual_user_groups {
+            if let Some(contextual_user_message) =
+                crate::context_manager::updates::build_rendered_message(group)
+            {
+                items.push(contextual_user_message);
+            }
         }
         // Emit the guardian policy prompt as a separate developer item so the guardian
         // subagent sees a distinct, easy-to-audit instruction block.
