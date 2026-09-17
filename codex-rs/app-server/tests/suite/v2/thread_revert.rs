@@ -12,11 +12,13 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
+use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -392,6 +394,16 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
     assert_eq!(reverted.thread_id, thread.id);
 
     assert_eq!(reverted_thread.id, thread.id);
+    let reverted_thread_json = serde_json::to_value(&reverted_thread)?;
+    assert_eq!(reverted_thread.name, None);
+    assert_eq!(reverted_thread.session_id, thread.session_id);
+    assert_eq!(reverted_thread_json.get("name"), Some(&Value::Null));
+    assert_eq!(
+        reverted_thread_json
+            .get("sessionId")
+            .and_then(Value::as_str),
+        Some(thread.session_id.as_str())
+    );
     assert!(reverted_thread.turns.is_empty());
     assert!(items_backwards_cursor.is_some());
     assert_eq!(
@@ -425,6 +437,13 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
             .iter()
             .all(|item| item.turn_id == turn_ids[0])
     );
+    assert!(reverted_items.iter().any(|item| matches!(
+        &item.item,
+        ThreadItem::ProjectValidation {
+            status: ProjectValidationStatus::Skipped,
+            ..
+        }
+    )));
 
     mcp.shutdown_gracefully().await?;
     let mut mcp = TestAppServer::builder()

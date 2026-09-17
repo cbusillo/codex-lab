@@ -49,6 +49,7 @@ const NAMESPACE: &str = "agents";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
+const CAPABILITY_ROLE_INSTRUCTIONS: &str = "capability restriction role instructions";
 const PARENT_HISTORY_PROMPT: &str = "remember this parent-only conversation turn";
 const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 
@@ -63,6 +64,7 @@ const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 #[test_case("blank override"; "blank override")]
 #[test_case("parent has no instructions"; "parent has no instructions")]
 #[test_case("explicit configured role"; "explicit configured role")]
+#[test_case("role cannot re-enable parent shell"; "role cannot re-enable parent shell")]
 #[test_case("full history configured role"; "full history configured role")]
 #[test_case("full history explicit default role"; "full history explicit default role")]
 #[test_case("implicit configured default"; "implicit configured default")]
@@ -79,6 +81,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         "no history"
         | "no history configured role without instructions"
         | "explicit configured role"
+        | "role cannot re-enable parent shell"
         | "implicit configured default" => Some("none"),
         _ => None,
     };
@@ -87,6 +90,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         | "no history configured role without instructions"
         | "bounded history configured role without instructions"
         | "explicit configured role"
+        | "role cannot re-enable parent shell"
         | "full history configured role" => Some("custom"),
         "full history explicit default role" => Some("default"),
         _ => None,
@@ -114,6 +118,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             | "no history configured role without instructions"
             | "bounded history configured role without instructions"
             | "explicit configured role"
+            | "role cannot re-enable parent shell"
             | "full history configured role"
             | "full history explicit default role"
             | "implicit configured default"
@@ -123,6 +128,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let role_has_instructions = matches!(
         case,
         "explicit configured role"
+            | "role cannot re-enable parent shell"
             | "full history configured role"
             | "full history explicit default role"
             | "implicit configured default"
@@ -135,6 +141,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         | "no history configured role without instructions"
         | "bounded history configured role without instructions" => Some(PARENT_INSTRUCTIONS),
         "blank override" => None,
+        "role cannot re-enable parent shell" => Some(CAPABILITY_ROLE_INSTRUCTIONS),
         "explicit configured role"
         | "full history configured role"
         | "full history explicit default role"
@@ -241,6 +248,21 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     config
         .with_extra_config(&feature_config)
         .write(codex_home.path())?;
+    let parent_config = if case == "role cannot re-enable parent shell" {
+        let role_path = codex_home.path().join("capabilities-role.toml");
+        std::fs::write(
+            &role_path,
+            format!(
+                "developer_instructions = {CAPABILITY_ROLE_INSTRUCTIONS:?}\nfeatures.shell_tool = true\n"
+            ),
+        )?;
+        Some(HashMap::from([
+            ("features.shell_tool".to_string(), json!(false)),
+            ("agents.custom.config_file".to_string(), json!(role_path)),
+        ]))
+    } else {
+        None
+    };
     write_models_cache(codex_home.path()).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -250,6 +272,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         .start_thread(ThreadStartParams {
             model: Some("gpt-5.4".to_string()),
             developer_instructions: parent.map(str::to_string),
+            config: parent_config,
             ..Default::default()
         })
         .await?;
@@ -290,6 +313,34 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let child_request = child_request.single_request();
 
     let parent_spawn_request = parent_request.single_request();
+    if matches!(
+        case,
+        "role cannot re-enable parent shell" | "explicit configured role"
+    ) {
+        for (phase, request) in [("parent", &parent_spawn_request), ("child", &child_request)] {
+            let body = request.body_json();
+            let tools = body["tools"].as_array().expect("model-visible tools");
+            let shell_tools = ["exec_command", "shell_command"]
+                .into_iter()
+                .filter(|name| {
+                    tools.iter().any(|tool| tool["name"] == *name)
+                        || responses::namespace_child_tool(&body, "functions", name).is_some()
+                })
+                .collect::<Vec<_>>();
+            if case == "role cannot re-enable parent shell" {
+                assert_eq!(
+                    shell_tools,
+                    Vec::<&str>::new(),
+                    "{phase}: a role must not re-enable the parent's disabled shell tools"
+                );
+            } else {
+                assert!(
+                    !shell_tools.is_empty(),
+                    "{phase}: the control must expose the shell tools checked by the restricted case"
+                );
+            }
+        }
+    }
     let parent_texts = parent_spawn_request.message_input_texts("developer");
     if let Some(parent) = parent {
         assert!(
@@ -382,7 +433,10 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         .filter(|text| {
             matches!(
                 *text,
-                PARENT_INSTRUCTIONS | CHILD_INSTRUCTIONS | ROLE_INSTRUCTIONS
+                PARENT_INSTRUCTIONS
+                    | CHILD_INSTRUCTIONS
+                    | ROLE_INSTRUCTIONS
+                    | CAPABILITY_ROLE_INSTRUCTIONS
             )
         })
         .collect::<Vec<_>>();

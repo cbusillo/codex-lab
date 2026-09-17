@@ -10,6 +10,7 @@ use anyhow::Context;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::create_apply_patch_sse_response;
 use app_test_support::create_exec_command_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
@@ -24,10 +25,17 @@ use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::ProjectValidationSkipReason;
 use codex_app_server_protocol::ProjectValidationStatus;
+use codex_app_server_protocol::SandboxMode;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadRevertParams;
+use codex_app_server_protocol::ThreadRevertResponse;
+use codex_app_server_protocol::ThreadRevertedNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadTurnsListParams;
+use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -35,6 +43,7 @@ use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::WriteStatus;
 use codex_core::config::set_project_trust_level;
 use codex_protocol::config_types::TrustLevel;
+use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
@@ -511,5 +520,190 @@ async fn automatic_validation_config_write_respects_thread_override() -> Result<
         Some(ProjectValidationSkipReason::ValidationDisabled)
     );
 
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn project_validation_revert_preserves_correction_history() -> Result<()> {
+    let initial_patch =
+        "*** Begin Patch\n*** Add File: initial-change.txt\n+initial\n*** End Patch\n";
+    let correction_patch =
+        "*** Begin Patch\n*** Add File: correction-change.txt\n+correction\n*** End Patch\n";
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            create_apply_patch_sse_response(initial_patch, "initial-patch")?,
+            create_final_assistant_message_sse_response("initial work complete")?,
+            create_apply_patch_sse_response(correction_patch, "correction-patch")?,
+            create_final_assistant_message_sse_response("correction complete")?,
+            create_final_assistant_message_sse_response("next task complete")?,
+            create_final_assistant_message_sse_response("reverted task complete")?,
+        ],
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_extra_config(
+            "[validation.project_command]\ncommand = [\"/bin/sh\", \"-c\", \"if [ -f .validation-ran ]; then printf validation-pass; exit 0; fi; touch .validation-ran; printf validation-fail >&2; exit 7\"]\ntimeout_ms = 5000\n",
+        )
+        .write(codex_home.path())?;
+    let workspace = TempDir::new()?;
+    let workspace_path = std::fs::canonicalize(workspace.path())?;
+    init_git_repo(&workspace_path)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadStart {
+            request_id,
+            params: ThreadStartParams {
+                model: Some("mock-model".to_string()),
+                cwd: Some(workspace_path.to_string_lossy().into_owned()),
+                history_mode: Some(ThreadHistoryMode::Paginated),
+                sandbox: Some(SandboxMode::WorkspaceWrite),
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    let first_turn = mcp
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "finish the work".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("initial-change.txt"))?,
+        "initial\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("correction-change.txt"))?,
+        "correction\n"
+    );
+
+    let follow_up = mcp
+        .start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "continue with the next task".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 5);
+    let follow_up_texts = requests[4].message_input_texts("user");
+    let failure_index = follow_up_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("follow-up should preserve validation failure");
+    let consumed_index = follow_up_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("follow-up should contain consumed correction marker");
+    let next_input_index = follow_up_texts
+        .iter()
+        .position(|text| text == "continue with the next task")
+        .expect("follow-up should contain its user input");
+    assert!(failure_index < consumed_index);
+    assert!(consumed_index < next_input_index);
+
+    let ThreadRevertResponse { .. } = mcp
+        .request(|request_id| ClientRequest::ThreadRevert {
+            request_id,
+            params: ThreadRevertParams {
+                thread_id: thread.id.clone(),
+                before_turn_id: follow_up.turn.id.clone(),
+            },
+        })
+        .await?;
+    let reverted: ThreadRevertedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/reverted"),
+    )
+    .await??;
+    assert_eq!(reverted.thread_id, thread.id);
+    assert_eq!(response_mock.requests().len(), 5);
+
+    let ThreadTurnsListResponse { data, .. } = mcp
+        .request(|request_id| ClientRequest::ThreadTurnsList {
+            request_id,
+            params: ThreadTurnsListParams {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                limit: None,
+                sort_direction: None,
+                items_view: None,
+            },
+        })
+        .await?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].id, first_turn.turn.id);
+    assert!(data.iter().all(|turn| turn.id != follow_up.turn.id));
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("initial-change.txt"))?,
+        "initial\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace_path.join("correction-change.txt"))?,
+        "correction\n"
+    );
+
+    mcp.start_turn_and_wait_for_completion(TurnStartParams {
+        thread_id: thread.id.clone(),
+        input: vec![UserInput::Text {
+            text: "continue after revert".to_string(),
+            text_elements: Vec::new(),
+        }],
+        ..Default::default()
+    })
+    .await?;
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 6);
+    let reverted_texts = requests[5].message_input_texts("user");
+    let failure_index = reverted_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_failure>"))
+        .expect("post-revert turn should preserve validation failure");
+    let consumed_index = reverted_texts
+        .iter()
+        .position(|text| text.starts_with("<project_validation_correction_consumed>"))
+        .expect("post-revert turn should preserve consumed marker");
+    let new_input_index = reverted_texts
+        .iter()
+        .position(|text| text == "continue after revert")
+        .expect("post-revert turn should contain current input");
+    assert!(failure_index < consumed_index);
+    assert!(consumed_index < new_input_index);
+    for marker in [
+        "<project_validation_failure>",
+        "<project_validation_correction_consumed>",
+    ] {
+        assert_eq!(
+            reverted_texts
+                .iter()
+                .filter(|text| text.starts_with(marker))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        !reverted_texts
+            .iter()
+            .any(|text| text == "continue with the next task")
+    );
     Ok(())
 }

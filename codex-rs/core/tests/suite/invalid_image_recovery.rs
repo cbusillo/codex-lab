@@ -9,6 +9,7 @@ use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_history::CompactedItem;
 use codex_history::RolloutItem;
+use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
@@ -39,7 +40,9 @@ const INVALID_IMAGE_SANITIZED_MESSAGE: &str = concat!(
 fn user_image_turn(text: &str) -> TurnInputRequest {
     TurnInputRequest::user_input(vec![
         UserInput::Image {
-            image_url: TINY_PNG.to_string(),
+            image: ImageReference::Inline {
+                image_url: TINY_PNG.to_string(),
+            },
             detail: None,
         },
         UserInput::Text {

@@ -29,6 +29,7 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ProfileWorkspaceRoot;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
@@ -92,7 +93,7 @@ pub struct ThreadConfigSnapshot {
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub environments: TurnEnvironmentSelections,
     pub workspace_roots: Vec<AbsolutePathBuf>,
-    pub profile_workspace_roots: Vec<AbsolutePathBuf>,
+    pub profile_workspace_roots: Vec<ProfileWorkspaceRoot>,
     pub ephemeral: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
@@ -106,6 +107,7 @@ pub struct ThreadConfigSnapshot {
     pub parent_thread_id: Option<ThreadId>,
     pub thread_source: Option<ThreadSource>,
     pub originator: String,
+    pub disabled_plugin_ids: Vec<String>,
 }
 
 impl ThreadConfigSnapshot {
@@ -142,7 +144,7 @@ impl ThreadConfigSnapshot {
 pub struct CodexThreadSettingsOverrides {
     pub environments: Option<TurnEnvironmentSelections>,
     pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
-    pub profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
     pub approval_policy: Option<AskForApproval>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub sandbox_policy: Option<SandboxPolicy>,
@@ -233,6 +235,11 @@ impl CodexThread {
     /// Returns the session telemetry handle for thread-scoped production instrumentation.
     pub fn session_telemetry(&self) -> SessionTelemetry {
         self.session.services.session_telemetry.clone()
+    }
+
+    /// Whether analytics is enabled for this thread after configuration and host overrides.
+    pub fn analytics_enabled(&self) -> bool {
+        self.session.services.analytics_events_client.is_enabled()
     }
 
     /// Returns extension-owned data attached to this thread runtime.
@@ -352,6 +359,23 @@ impl CodexThread {
                 unreachable!("start-if-idle submission cannot steer")
             }
         }
+    }
+
+    /// Starts a new internal continuation turn when idle, including in Plan mode.
+    /// Rejects if a newer task has started, even if it has already finished.
+    /// The input must be a response item; it is never treated as user authorization.
+    pub async fn continue_turn_if_idle(
+        &self,
+        request: TurnInputRequest,
+        expected_previous_turn_id: String,
+    ) -> CodexResult<TurnInputSubmission> {
+        self.submit_turn_input_with_mode(
+            request,
+            TurnInputMode::ContinueIfIdle {
+                expected_previous_turn_id,
+            },
+        )
+        .await
     }
 
     /// Resumes an interrupted regular turn only when the thread is idle.
@@ -493,6 +517,13 @@ impl CodexThread {
         items: Vec<ResponseItem>,
     ) -> Result<(), Vec<ResponseItem>> {
         self.session.inject_if_running(items).await
+    }
+
+    /// Captures a regular turn only after its input is recorded. The caller must flush the rollout.
+    pub async fn interrupted_turn(
+        &self,
+    ) -> Option<(String, TurnStartOptions, TurnEnvironmentSelection)> {
+        self.session.interrupted_turn().await
     }
 
     /// Returns the trusted root when the expected turn is currently active.
@@ -690,7 +721,7 @@ impl CodexThread {
 
     pub async fn guardian_trunk_rollout_path(&self) -> Option<PathBuf> {
         self.session
-            .guardian_review_session()
+            .guardian_review_session()?
             .trunk()
             .await?
             .rollout_path()

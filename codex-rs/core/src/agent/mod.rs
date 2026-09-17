@@ -1,6 +1,7 @@
 pub(crate) mod agent_resolver;
 mod antigravity_models;
 pub(crate) mod bounded_worker;
+pub(crate) mod child_config;
 pub(crate) mod claude_stream;
 pub(crate) mod control;
 pub(crate) mod external_capabilities;

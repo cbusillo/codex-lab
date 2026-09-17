@@ -9,6 +9,7 @@ use crate::SectionInput;
 use crate::SectionScope;
 use codex_context_fragments::ContextualUserFragment;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ImageReference;
 use codex_protocol::user_input::UserInput;
 use codex_protocol::user_input::UserInput::Image;
 use codex_protocol::user_input::UserInput::Text;
@@ -85,10 +86,15 @@ impl NodeReplContext<'_> {
     pub fn render_inputs(&self) -> Vec<UserInput> {
         if self.mode != NodeReplReviewEvidenceMode::Multimodal
             || !self.responses.iter().any(|response| {
-                response
-                    .items
-                    .iter()
-                    .any(|item| matches!(item, Image { .. }))
+                response.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        Image {
+                            image: ImageReference::Inline { .. },
+                            ..
+                        }
+                    )
+                })
             })
         {
             return vec![text_input(self.render())];
@@ -133,7 +139,10 @@ impl NodeReplContext<'_> {
         let mut omitted_images = 0_usize;
         for (response, _) in &selected {
             for item in response.items.iter().rev() {
-                if let Image { image_url, .. } = item
+                if let Image {
+                    image: ImageReference::Inline { image_url },
+                    ..
+                } = item
                     && seen_images.insert(image_url.as_str())
                 {
                     if retained_images.len() < MAX_RENDERED_IMAGES {
@@ -156,9 +165,11 @@ impl NodeReplContext<'_> {
             for item in response.items {
                 match item {
                     Text { text, .. } => inputs.push(text_input(format!("{text}\n"))),
-                    Image { image_url, .. }
-                        if retained_images.contains(image_url.as_str())
-                            && rendered_images.insert(image_url.as_str()) =>
+                    Image {
+                        image: ImageReference::Inline { image_url },
+                        ..
+                    } if retained_images.contains(image_url.as_str())
+                        && rendered_images.insert(image_url.as_str()) =>
                     {
                         inputs.push(item.clone());
                     }

@@ -80,7 +80,7 @@ pub struct ModelProvider {
     #[prost(message, optional, tag = "19")]
     pub capabilities: ::core::option::Option<ModelProviderCapabilities>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ModelProviderCapabilities {
     #[prost(bool, optional, tag = "1")]
     pub namespace_tools: ::core::option::Option<bool>,

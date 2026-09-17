@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::bounded_worker::BoundedWorkerLimits;
 use crate::agent::bounded_worker::BoundedWorkerRequest;
+use crate::agent::control::MessageDeliveryMode;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
@@ -288,12 +289,10 @@ async fn handle_spawn_agent(
         .session_source
         .get_agent_path()
         .unwrap_or_else(AgentPath::root);
-    let communication = communication_from_tool_message(
+    let communication = agent_message_from_tool(message, &source).into_communication(
         author,
         new_agent_path.clone(),
-        message,
-        &source,
-        /*trigger_turn*/ true,
+        MessageDeliveryMode::TriggerTurn,
     );
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
     let multi_agent_v2_usage_hints =
@@ -340,6 +339,7 @@ async fn handle_spawn_agent(
                     parent_thread_id: Some(session.thread_id),
                     parent_turn_id: Some(turn.sub_id.clone()),
                     root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                    turn_trigger: turn.turn_metadata_state.current_turn_trigger(),
                     environments: Some(step_context.environments.to_selections()),
                     external_agent_provider: routing.provider().cloned(),
                     external_agent_routing: Some(routing.summary()),

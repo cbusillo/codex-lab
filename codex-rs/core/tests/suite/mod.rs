@@ -130,6 +130,7 @@ mod cyber_access_program;
 mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
+mod direct_tool_metadata;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -140,12 +141,16 @@ mod external_auth;
 mod fork_thread;
 mod git_enrichment;
 mod guardian_authorization;
+#[path = "guardian_checkpoint_migration_tests.rs"]
+mod guardian_checkpoint_migration;
 // Uses the same command-approval harness as guardian_review below.
+mod canonical_plugin_connectors;
 #[cfg(not(target_os = "windows"))]
 mod guardian_context_budget;
 mod guardian_history;
 mod guardian_mcp_elicitation;
 mod guardian_retained_context;
+mod guardian_retry;
 #[cfg(not(target_os = "windows"))]
 mod guardian_review;
 #[cfg(not(target_os = "windows"))]
@@ -167,8 +172,12 @@ mod items;
 mod json_result;
 mod live_cli;
 mod local_provider_tool_surface;
+#[path = "managed_threads_tests.rs"]
+mod managed_threads;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
+mod mcp_ema_config;
+mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
@@ -178,6 +187,8 @@ mod mcp_tool_exposure;
 mod mcp_turn_metadata;
 mod mcp_user_verification;
 mod model_overrides;
+#[path = "model_provider_requirements_tests.rs"]
+mod model_provider_requirements;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
@@ -193,6 +204,7 @@ mod openai_file_mcp;
 mod otel;
 mod override_updates;
 mod pending_input;
+mod pending_input_persistence;
 mod permissions_messages;
 mod personality;
 mod plugins;
@@ -230,6 +242,7 @@ mod rollout_compression;
 mod rollout_list_find;
 mod safety_buffering;
 mod safety_check_downgrade;
+mod scenarios;
 mod search_tool;
 mod session_provenance;
 mod settings_commits;

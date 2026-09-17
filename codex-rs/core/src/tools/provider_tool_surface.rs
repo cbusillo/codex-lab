@@ -42,16 +42,15 @@ impl DroppedToolSurfaceWarnings {
             .entries_mut()
             .filter(|tool| tool.exposure.is_deferred())
         {
-            let contains_custom_tool =
-                tool.runtime
-                    .search_info()
-                    .is_some_and(|info| match info.entry.output {
-                        LoadableToolSpec::Namespace(namespace) => namespace
-                            .tools
-                            .iter()
-                            .any(|tool| matches!(tool, ResponsesApiNamespaceTool::Custom(_))),
-                        LoadableToolSpec::Function(_) => false,
-                    });
+            let contains_custom_tool = tool.runtime.search_info().is_some_and(|info| {
+                match info.entry.to_loadable_spec() {
+                    LoadableToolSpec::Namespace(namespace) => namespace
+                        .tools
+                        .iter()
+                        .any(|tool| matches!(tool, ResponsesApiNamespaceTool::Custom(_))),
+                    LoadableToolSpec::Function(_) => false,
+                }
+            });
             if contains_custom_tool {
                 tool.exposure = ToolExposure::Hidden;
                 self.custom_tool_dropped();

@@ -901,6 +901,7 @@ impl App {
                 let name = name.to_string();
                 app_server.thread_set_name(thread_id, name.clone()).await?;
                 self.chat_widget.expect_manual_thread_name(thread_id, name);
+                self.cancel_thread_title_generation(thread_id);
                 Ok(true)
             }
             AppCommand::Review { target } => {
@@ -931,11 +932,14 @@ impl App {
                     .config_ref()
                     .experimental_realtime_ws_model
                     .clone();
+                let voices = self.realtime_voices(app_server).await;
+                let voice = self.effective_realtime_voice(app_server, &voices).await?;
                 app_server
                     .thread_realtime_start(
                         *realtime_thread_id,
                         String::from(offer_sdp.clone()),
                         model,
+                        voice,
                     )
                     .await?;
                 Ok(true)
@@ -1012,9 +1016,7 @@ impl App {
             runtime_permission_profile_override.map(|profile| {
                 profile
                     .clone()
-                    .materialize_project_roots_with_workspace_roots(
-                        &config.effective_workspace_roots(),
-                    )
+                    .materialize_project_roots_with_path_uris(&config.effective_workspace_roots())
             });
         if runtime_permission_profile_override
             .as_ref()
@@ -1159,7 +1161,9 @@ impl App {
         }
         if matches!(
             notification,
-            ServerNotification::ThreadSettingsUpdated(_) | ServerNotification::ThreadArchived(_)
+            ServerNotification::ThreadSettingsUpdated(_)
+                | ServerNotification::ThreadArchived(_)
+                | ServerNotification::ThreadAttachmentUpdated(_)
         ) && self.primary_thread_id.is_some()
             && self.primary_thread_id != Some(thread_id)
             && !self.thread_event_channels.contains_key(&thread_id)
@@ -1353,6 +1357,9 @@ impl App {
     ) -> Option<ThreadSessionState> {
         let mut session = self.primary_session_configured.clone()?;
         session.thread_id = thread_id;
+        session.windows_sandbox_host = crate::windows_sandbox::host_from_environments(
+            notification.thread.environments.as_deref(),
+        );
         session.thread_name = notification.thread.name.clone();
         session.model_provider_id = notification.thread.model_provider.clone();
         session
@@ -1514,6 +1521,7 @@ impl App {
             self.recap.reset_for_new_thread(Instant::now());
         }
         self.primary_thread_id = Some(thread_id);
+        self.agents_overview.hidden_threads.remove(&thread_id);
         self.agents_overview.threads.entry(thread_id).or_default();
         self.primary_session_configured = Some(session.clone());
         self.upsert_agent_picker_thread(
@@ -1535,13 +1543,12 @@ impl App {
             ThreadAttachPresentation::SessionLineage => {
                 self.chat_widget.handle_thread_session(session);
             }
-            ThreadAttachPresentation::PromptEdit => {
-                self.chat_widget.handle_prompt_edit_thread_session(session);
-            }
         }
         let should_buffer_initial_replay = !turns.is_empty();
         let replayed_final_items = realtime_delivery::completed_agent_items_from_turns(&turns);
         let replayed_voice_texts = realtime_delivery::replayed_voice_texts_from_turns(&turns);
+        let retained_assistant_captions =
+            self.prepare_realtime_transcript_replay(replayed_voice_texts);
         if should_buffer_initial_replay {
             self.app_event_tx
                 .send(AppEvent::BeginInitialHistoryReplayBuffer);
@@ -1559,11 +1566,8 @@ impl App {
         }
         self.restore_realtime_replay_state_after_replay(
             &replayed_final_items,
-            replayed_voice_texts,
+            retained_assistant_captions,
         );
-        if matches!(presentation, ThreadAttachPresentation::PromptEdit) {
-            self.chat_widget.emit_prompt_edit_thread_event();
-        }
         let pending = std::mem::take(&mut self.pending_primary_events);
         for pending_event in pending {
             match pending_event {
@@ -1873,6 +1877,10 @@ impl App {
             replay_filter::snapshot_has_pending_interactive_request(&snapshot);
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ true);
+        let has_resumed_collaboration_mode = snapshot
+            .session
+            .as_ref()
+            .is_some_and(|session| session.collaboration_mode.is_some());
         if let Some(session) = snapshot.session {
             if session.reasoning_effort != Some(ReasoningEffortConfig::Ultra) {
                 self.chat_widget
@@ -1886,6 +1894,8 @@ impl App {
                 self.chat_widget.handle_thread_session(session);
             }
         }
+        let retained_assistant_captions =
+            self.prepare_realtime_transcript_replay(replayed_voice_texts);
         for turn_id in &snapshot.delegated_turns {
             self.chat_widget
                 .remember_realtime_delegated_reasoning_turn(turn_id);
@@ -1936,11 +1946,16 @@ impl App {
                 .send(AppEvent::EndInitialHistoryReplayBuffer);
         }
         if recovered_input.is_some() {
+            let mode = has_resumed_collaboration_mode
+                .then(|| self.chat_widget.effective_collaboration_mode());
             self.chat_widget.restore_reconnected_input(recovered_input);
+            if let Some(mode) = mode {
+                self.chat_widget.set_effective_collaboration_mode(mode);
+            }
         }
         self.restore_realtime_replay_state_after_replay(
             &replayed_final_items,
-            replayed_voice_texts,
+            retained_assistant_captions,
         );
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ false);

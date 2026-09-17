@@ -34,7 +34,6 @@ ignored-paths = [
     "tests/suite/v2/otel.rs",
     "tests/suite/v2/rollout_migration.rs",
     "tests/suite/v2/server_diagnostics.rs",
-    "tests/suite/v2/thread_sections.rs",
     "tests/suite/v2/view_image.rs",
 ]
 
@@ -96,6 +95,7 @@ codex-memories-write = { workspace = true }
 codex-mcp = { workspace = true }
 codex-mcp-extension = { workspace = true }
 codex-model-provider = { workspace = true }
+codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
 codex-protocol = { workspace = true }
 codex-queue-extension = { workspace = true }
@@ -171,6 +171,7 @@ rmcp = { workspace = true, default-features = false, features = [
 ] }
 serial_test = { workspace = true }
 shlex = { workspace = true }
+sqlx = { workspace = true }
 tar = { workspace = true }
 test-case = "3.3.1"
 tokio-tungstenite = { workspace = true }

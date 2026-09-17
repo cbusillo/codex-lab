@@ -229,6 +229,22 @@ async fn installed_apps_thread_id_uses_effective_thread_config() -> Result<()> {
     alpha.enabled = false;
     alpha.callable = false;
 
+    // A fresh user layer must take effect without losing the thread's override.
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    let updated = config.replace(
+        "default_tools_enabled = false",
+        "default_tools_enabled = true",
+    );
+    assert_ne!(updated, config);
+    std::fs::write(&config_path, updated)?;
+    expected
+        .apps
+        .iter_mut()
+        .find(|app| app.id == "blocked")
+        .expect("blocked app should be installed")
+        .callable = true;
+
     for force_refresh in [false, true] {
         let request_id = app_server
             .send_apps_installed_request(AppsInstalledParams {

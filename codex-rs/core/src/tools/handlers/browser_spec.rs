@@ -164,7 +164,7 @@ pub fn create_browser_tool(full_cdp_access: bool) -> ToolSpec {
             },
             "required": ["status"],
             "additionalProperties": true
-        })),
+        }).into()),
     })
 }
 

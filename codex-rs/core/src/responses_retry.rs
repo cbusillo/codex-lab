@@ -45,6 +45,13 @@ impl ResponsesStreamRetryState {
     }
 }
 
+/// Server retry advice retained after stream retries are exhausted. The turn ID
+/// prevents a reused Guardian session from applying advice from an earlier review.
+pub(crate) struct ExhaustedResponseRetry {
+    pub(crate) turn_id: String,
+    pub(crate) retry_at: Option<tokio::time::Instant>,
+}
+
 /// Handles a retryable stream error and returns `Ok(())` when the caller should
 /// retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(
@@ -131,6 +138,14 @@ pub(crate) async fn handle_retryable_response_stream_error(
         return Ok(());
     }
 
+    sess.services
+        .thread_extension_data
+        .insert(ExhaustedResponseRetry {
+            turn_id: turn_context.sub_id.clone(),
+            retry_at: err
+                .retry_delay()
+                .and_then(|delay| tokio::time::Instant::now().checked_add(delay)),
+        });
     Err(err)
 }
 

@@ -1288,7 +1288,7 @@ url = "ws://127.0.0.1:8765"
             permission_profile: PermissionProfileSnapshot::active_with_profile_workspace_roots(
                 PermissionProfile::read_only(),
                 ActivePermissionProfile::read_only(),
-                vec![cwd.join("profile-root")],
+                vec![cwd.join("profile-root").into()],
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,
@@ -1447,6 +1447,10 @@ url = "ws://127.0.0.1:8765"
             .with_span_events(FmtSpan::NEW)
             .with_writer(MockWriter::new(buffer))
             .finish();
+        // Avoid tracing-core's single-dispatch path caching no interest when another
+        // test first reaches these shared callsites without a subscriber.
+        let _interest_cache_guard =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _subscriber_guard = tracing::subscriber::set_default(subscriber);
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -1478,6 +1482,13 @@ url = "ws://127.0.0.1:8765"
         ));
         environments
             .update_selections(std::slice::from_ref(&selection), &test_environment_config());
+        // Exercise first-use callsite registration from a thread without a subscriber.
+        std::thread::spawn({
+            let environments = Arc::clone(&environments);
+            move || assert!(environments.snapshot().now_or_never().is_none())
+        })
+        .join()
+        .expect("unsubscribed snapshot");
         let snapshot_task = tokio::spawn({
             let environments = Arc::clone(&environments);
             async move { environments.snapshot().await }
@@ -1542,7 +1553,7 @@ url = "ws://127.0.0.1:8765"
             permission_profile: PermissionProfileSnapshot::active_with_profile_workspace_roots(
                 PermissionProfile::read_only(),
                 ActivePermissionProfile::read_only(),
-                vec![cwd.join("profile-root")],
+                vec![cwd.join("profile-root").into()],
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,
@@ -1924,7 +1935,7 @@ url = "ws://127.0.0.1:8765"
             permission_profile: PermissionProfileSnapshot::active_with_profile_workspace_roots(
                 PermissionProfile::read_only(),
                 ActivePermissionProfile::read_only(),
-                vec![cwd.join("child-profile-root")],
+                vec![cwd.join("child-profile-root").into()],
             ),
             shell_environment_policy: Default::default(),
             exec_policy: None,

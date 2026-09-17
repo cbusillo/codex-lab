@@ -1,3 +1,4 @@
+use codex_protocol::models::ImageReference;
 use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 
@@ -9,7 +10,7 @@ use super::NodeReplReviewEvidenceMode;
 
 fn image(image_url: String) -> UserInput {
     UserInput::Image {
-        image_url,
+        image: ImageReference::Inline { image_url },
         detail: None,
     }
 }
@@ -54,7 +55,10 @@ fn multimodal_evidence_caps_distinct_images_at_the_newest_four() {
     let rendered_images = inputs
         .iter()
         .filter_map(|item| match item {
-            UserInput::Image { image_url, .. } => Some(image_url.clone()),
+            UserInput::Image {
+                image: ImageReference::Inline { image_url },
+                ..
+            } => Some(image_url.clone()),
             UserInput::Text { .. } => None,
             _ => panic!("unexpected evidence input: {item:?}"),
         })

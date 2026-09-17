@@ -197,6 +197,8 @@ async fn prompt_tools_are_consistent_across_requests(
     .await;
 
     let TestCodex {
+        // Keep the file-backed instructions alive across request-boundary refreshes.
+        home: _home,
         codex,
         config,
         thread_manager,
@@ -356,7 +358,9 @@ async fn gpt_5_tools_without_apply_patch_append_apply_patch_instructions() -> an
     )
     .await;
 
-    let TestCodex { codex, .. } = test_codex()
+    let TestCodex {
+        home: _home, codex, ..
+    } = test_codex()
         .with_pre_build_hook(write_global_instructions)
         .with_config(|config| {
             config
@@ -423,7 +427,12 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
     )
     .await;
 
-    let TestCodex { codex, config, .. } = test_codex()
+    let TestCodex {
+        home: _home,
+        codex,
+        config,
+        ..
+    } = test_codex()
         .with_pre_build_hook(write_global_instructions)
         .with_config(|config| {
             config
@@ -506,7 +515,12 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
     )
     .await;
 
-    let TestCodex { codex, config, .. } = test_codex()
+    let TestCodex {
+        home: _home,
+        codex,
+        config,
+        ..
+    } = test_codex()
         .with_pre_build_hook(write_global_instructions)
         .with_config(|config| {
             config
@@ -774,7 +788,9 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() -> anyhow::Res
     )
     .await;
 
-    let TestCodex { codex, .. } = test_codex()
+    let TestCodex {
+        home: _home, codex, ..
+    } = test_codex()
         .with_pre_build_hook(write_global_instructions)
         .with_config(|config| {
             config
@@ -902,6 +918,7 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
     .await;
 
     let TestCodex {
+        home: _home,
         codex,
         config,
         session_configured,
@@ -1024,6 +1041,7 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     )
     .await;
     let TestCodex {
+        home: _home,
         codex,
         config,
         session_configured,

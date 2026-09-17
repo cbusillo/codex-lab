@@ -37,6 +37,9 @@ use tempfile::NamedTempFile;
 use tokio::process::Command;
 use url::Url;
 
+#[path = "managed_proxy_unix_sockets_tests.rs"]
+mod unix_sockets;
+
 const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable: no system bwrap was found";
 const NETWORK_TIMEOUT_MS: u64 = 4_000;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 8);
@@ -150,6 +153,20 @@ async fn run_linux_sandbox_direct(
     env: HashMap<String, String>,
     timeout_ms: u64,
 ) -> Output {
+    let mut command =
+        linux_sandbox_command(command, permission_profile, allow_network_for_proxy, env);
+    tokio::time::timeout(Duration::from_millis(timeout_ms), command.output())
+        .await
+        .expect("sandbox command should not time out")
+        .expect("sandbox command should execute")
+}
+
+fn linux_sandbox_command(
+    command: &[&str],
+    permission_profile: &PermissionProfile,
+    allow_network_for_proxy: bool,
+    env: HashMap<String, String>,
+) -> Command {
     let cwd = std::env::current_dir().expect("current directory should exist");
     let permission_profile_json =
         serde_json::to_string(permission_profile).expect("permission profile should serialize");
@@ -161,7 +178,8 @@ async fn run_linux_sandbox_direct(
         permission_profile_json,
     ];
     if allow_network_for_proxy {
-        args.push("--allow-network-for-proxy".to_string());
+        args.push("--managed-network".to_string());
+        args.push("{}".to_string());
     }
     args.push("--".to_string());
     args.extend(command.iter().map(|entry| (*entry).to_string()));
@@ -174,10 +192,344 @@ async fn run_linux_sandbox_direct(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    tokio::time::timeout(Duration::from_millis(timeout_ms), cmd.output())
+    cmd
+}
+
+#[tokio::test]
+async fn sandboxed_commands_have_a_seccomp_filtered_namespace_reaper() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bubblewrap is unavailable");
+        return;
+    }
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+
+    assert_seccomp_filtered_namespace_reaper(
+        &PermissionProfile::read_only(),
+        /*allow_network_for_proxy*/ false,
+        env,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn managed_proxy_commands_have_a_seccomp_filtered_namespace_reaper() {
+    if let Some(skip_reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {skip_reason}");
+        return;
+    }
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string());
+
+    for permission_profile in [PermissionProfile::read_only(), PermissionProfile::Disabled] {
+        assert_seccomp_filtered_namespace_reaper(
+            &permission_profile,
+            /*allow_network_for_proxy*/ true,
+            env.clone(),
+        )
+        .await;
+    }
+}
+
+async fn assert_seccomp_filtered_namespace_reaper(
+    permission_profile: &PermissionProfile,
+    allow_network_for_proxy: bool,
+    env: HashMap<String, String>,
+) {
+    let inherited_seccomp_filters = std::fs::read_to_string("/proc/self/status")
+        .expect("test process status should be readable")
+        .lines()
+        .find_map(|line| line.strip_prefix("Seccomp_filters:"))
+        .and_then(|count| count.trim().parse::<usize>().ok())
+        .expect("test process status should expose its seccomp filter count");
+
+    let output = run_linux_sandbox_direct(
+        &[
+            "bash",
+            "-c",
+            "if [ ! -r /proc/self/status ] || [ ! -r /proc/1/status ] || [ \"$(readlink /proc/1/ns/pid 2>/dev/null)\" != \"$(readlink /proc/self/ns/pid 2>/dev/null)\" ]; then printf 'namespace proc unavailable\\n'; exit 0; fi; printf '%s\\n' \"$PPID\"; awk '$1 == \"Seccomp:\" && FNR == NR { print $2 } $1 == \"Seccomp_filters:\" { print $2 }' /proc/1/status /proc/self/status",
+        ],
+        permission_profile,
+        allow_network_for_proxy,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+
+    assert_eq!(
+        output.status.success(),
+        true,
+        "sandboxed command should execute; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.stdout == b"namespace proc unavailable\n" {
+        eprintln!("skipping namespace reaper check: a namespaced proc mount is unavailable");
+        return;
+    }
+    let expected_filter_count = inherited_seccomp_filters + 1;
+    assert_eq!(
+        output.stdout,
+        format!("1\n2\n{expected_filter_count}\n{expected_filter_count}\n").as_bytes()
+    );
+}
+
+#[tokio::test]
+async fn namespace_reaper_collects_orphaned_descendants() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bubblewrap is unavailable");
+        return;
+    }
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+
+    let output = run_linux_sandbox_direct(
+        &[
+            "bash",
+            "-c",
+            "if [ ! -r /proc/self/status ] || [ ! -r /proc/1/status ] || [ \"$(readlink /proc/1/ns/pid 2>/dev/null)\" != \"$(readlink /proc/self/ns/pid 2>/dev/null)\" ]; then printf 'namespace proc unavailable\\n'; exit 0; fi; orphan=$(bash -c 'sleep 0.05 </dev/null >/dev/null 2>&1 & printf \"%s\\n\" \"$!\"'); for _ in $(seq 1 100); do if [ ! -e \"/proc/$orphan\" ]; then printf 'orphan reaped\\n'; exit 0; fi; sleep 0.01; done; exit 1",
+        ],
+        &PermissionProfile::read_only(),
+        /*allow_network_for_proxy*/ false,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+
+    assert_eq!(
+        output.status.success(),
+        true,
+        "namespace init should reap orphaned descendants; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.stdout == b"namespace proc unavailable\n" {
+        eprintln!("skipping orphan reaping check: a namespaced proc mount is unavailable");
+        return;
+    }
+    assert_eq!(output.stdout, b"orphan reaped\n");
+}
+
+#[tokio::test]
+async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
+    if option_env!("CODEX_BWRAP_SHA256")
+        .is_some_and(|digest| digest.chars().any(|character| character != '0'))
+    {
+        eprintln!("skipping system bwrap fallback test: bundled binaries require a release digest");
+        return;
+    }
+
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bubblewrap is unavailable");
+        return;
+    }
+
+    let Some(system_bwrap) = codex_sandboxing::find_system_bwrap_in_path() else {
+        eprintln!("skipping system bwrap fallback test: no system bubblewrap is available");
+        return;
+    };
+
+    let tempdir = tempfile::tempdir().expect("create isolated sandbox installation");
+    let sandbox_executable = tempdir.path().join("codex-linux-sandbox");
+    let original_executable = codex_linux_sandbox_exe();
+    if std::fs::hard_link(original_executable, &sandbox_executable).is_err() {
+        std::fs::copy(original_executable, &sandbox_executable).expect("copy sandbox executable");
+    }
+
+    let resources_dir = tempdir.path().join("codex-resources");
+    std::fs::create_dir(&resources_dir).expect("create bundled resource directory");
+    std::os::unix::fs::symlink(&system_bwrap, resources_dir.join("bwrap"))
+        .expect("install bundled bubblewrap");
+
+    let system_dir = tempdir.path().join("system");
+    std::fs::create_dir(&system_dir).expect("create fake system binary directory");
+    let unsupported_bwrap = system_dir.join("bwrap");
+    std::fs::write(
+        &unsupported_bwrap,
+        "#!/bin/sh\nif [ \"$1\" = \"--help\" ]; then printf '%s\\n' '--perms'; exit 0; fi\nexit 91\n",
+    )
+    .expect("write unsupported system bubblewrap");
+    std::fs::set_permissions(&unsupported_bwrap, std::fs::Permissions::from_mode(0o755))
+        .expect("make unsupported system bubblewrap executable");
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    let original_path = env.get("PATH").cloned().unwrap_or_default();
+    env.insert(
+        "PATH".to_string(),
+        format!("{}:{original_path}", system_dir.display()),
+    );
+
+    let cwd = std::env::current_dir().expect("current directory should exist");
+    let permission_profile =
+        serde_json::to_string(&PermissionProfile::read_only()).expect("serialize profile");
+    let output = tokio::time::timeout(
+        Duration::from_millis(NETWORK_TIMEOUT_MS),
+        Command::new(&sandbox_executable)
+            .args([
+                "--sandbox-policy-cwd",
+                cwd.to_str().expect("UTF-8 current directory"),
+                "--permission-profile",
+                &permission_profile,
+                "--",
+                "bash",
+                "-c",
+                "printf 'bundled fallback\\n'",
+            ])
+            .current_dir(&cwd)
+            .env_clear()
+            .envs(env)
+            .output(),
+    )
+    .await
+    .expect("bundled bubblewrap should not time out")
+    .expect("sandbox command should execute");
+
+    assert_eq!(
+        output.status.success(),
+        true,
+        "unsupported system bubblewrap should fall back to bundled bubblewrap; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"bundled fallback\n");
+}
+
+#[tokio::test]
+async fn managed_proxy_full_filesystem_uses_minimal_dev_nodes() {
+    if let Some(skip_reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {skip_reason}");
+        return;
+    }
+
+    let host_dev = std::fs::metadata("/dev").expect("host /dev should exist");
+    let host_dev_id = format!("{}:{}", host_dev.dev(), host_dev.ino());
+    let shared_memory_file = match NamedTempFile::new_in("/dev/shm") {
+        Ok(file) => {
+            std::fs::write(file.path(), "host-before").expect("seed /dev/shm file");
+            Some(file)
+        }
+        Err(err) => {
+            eprintln!("skipping /dev/shm interoperability check: {err}");
+            None
+        }
+    };
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string());
+    if let Some(file) = &shared_memory_file {
+        env.insert(
+            "CODEX_TEST_SHM_PATH".to_string(),
+            file.path().to_string_lossy().into_owned(),
+        );
+    }
+
+    let output = run_linux_sandbox_direct(
+        &[
+            "bash",
+            "-c",
+            concat!(
+                "set -e; ",
+                "for node in null zero urandom; do test -c \"/dev/$node\"; done; ",
+                "printf test >/dev/null; ",
+                "head -c 1 /dev/zero >/dev/null; ",
+                "head -c 1 /dev/urandom >/dev/null; ",
+                "if command -v python3 >/dev/null 2>&1; then ",
+                "python3 -c 'import os; assert len(os.urandom(16)) == 16'; ",
+                "fi; ",
+                "if [ -n \"${CODEX_TEST_SHM_PATH:-}\" ]; then ",
+                "test \"$(cat \"$CODEX_TEST_SHM_PATH\")\" = host-before; ",
+                "printf sandbox-after >\"$CODEX_TEST_SHM_PATH\"; ",
+                "fi; ",
+                "stat -c '%d:%i' /dev",
+            ),
+        ],
+        &PermissionProfile::Disabled,
+        /*allow_network_for_proxy*/ true,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+
+    assert!(
+        output.status.success(),
+        "standard devices should be usable; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_ne!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        host_dev_id,
+        "/dev should be synthetic rather than inherited from the host"
+    );
+    if let Some(file) = shared_memory_file {
+        assert_eq!(
+            std::fs::read_to_string(file.path()).expect("read /dev/shm file"),
+            "sandbox-after"
+        );
+    }
+}
+
+#[tokio::test]
+async fn managed_proxy_bridges_release_command_output_after_exit() {
+    if let Some(skip_reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {skip_reason}");
+        return;
+    }
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string());
+
+    let output = run_linux_sandbox_direct(
+        &["bash", "-c", "printf 'bridge output closed\\n'"],
+        &PermissionProfile::Disabled,
+        /*allow_network_for_proxy*/ true,
+        env,
+        NETWORK_TIMEOUT_MS,
+    )
+    .await;
+
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"bridge output closed\n");
+}
+
+#[tokio::test]
+async fn managed_proxy_readiness_survives_closed_standard_descriptors() {
+    if let Some(skip_reason) = managed_proxy_skip_reason().await {
+        eprintln!("skipping managed proxy test: {skip_reason}");
+        return;
+    }
+
+    let mut env = create_env_from_core_vars();
+    strip_proxy_env(&mut env);
+    env.insert("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string());
+
+    let mut command = linux_sandbox_command(
+        &["bash", "-c", "true"],
+        &PermissionProfile::Disabled,
+        /*allow_network_for_proxy*/ true,
+        env,
+    );
+    unsafe {
+        command.pre_exec(|| {
+            libc::close(libc::STDIN_FILENO);
+            libc::close(libc::STDOUT_FILENO);
+            Ok(())
+        });
+    }
+
+    let output = tokio::time::timeout(Duration::from_millis(NETWORK_TIMEOUT_MS), command.output())
         .await
         .expect("sandbox command should not time out")
-        .expect("sandbox command should execute")
+        .expect("sandbox command should execute");
+
+    assert!(
+        output.status.success(),
+        "managed proxy readiness should survive closed standard descriptors; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -368,18 +720,25 @@ fn handoff_client() {
         return;
     };
     assert!(std::env::var_os(PROXY_ATTRIBUTION_TOKEN_ENV_KEY).is_none());
-    let inherited_sockets = std::fs::read_dir("/proc/self/fd")
-        .expect("enumerate inherited descriptors")
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let target = std::fs::read_link(entry.path()).ok()?;
-            target
-                .to_string_lossy()
-                .starts_with("socket:")
-                .then(|| (entry.file_name(), target))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(inherited_sockets, Vec::new(), "privileged socket leaked");
+    match std::fs::read_dir("/proc/self/fd") {
+        Ok(entries) => {
+            let inherited_sockets = entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let target = std::fs::read_link(entry.path()).ok()?;
+                    target
+                        .to_string_lossy()
+                        .starts_with("socket:")
+                        .then(|| (entry.file_name(), target))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(inherited_sockets, Vec::new(), "privileged socket leaked");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping descriptor enumeration: sandbox proc is unavailable");
+        }
+        Err(error) => panic!("enumerate inherited descriptors: {error}"),
+    }
 
     let shared = std::env::var("CODEX_TEST_HANDOFF_SHARED").expect("shared directory");
     let shared = Path::new(&shared);

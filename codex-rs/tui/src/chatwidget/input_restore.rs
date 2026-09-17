@@ -3,11 +3,20 @@
 use std::collections::HashSet;
 
 use crate::bottom_pane::ComposerDraftSnapshot;
+use crate::bottom_pane::KillBufferSnapshot;
 
 use super::user_messages::remap_colliding_paste_placeholders;
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn take_kill_buffer_snapshot(&mut self) -> KillBufferSnapshot {
+        self.bottom_pane.take_kill_buffer_snapshot()
+    }
+
+    pub(crate) fn restore_kill_buffer_snapshot(&mut self, snapshot: KillBufferSnapshot) {
+        self.bottom_pane.restore_kill_buffer_snapshot(snapshot);
+    }
+
     /// Restore the exact draft entered before the fully initialized composer became available.
     pub(crate) fn restore_startup_draft(&mut self, draft: ComposerDraftSnapshot) {
         let existing_draft = self.bottom_pane.composer_draft_snapshot();
@@ -109,7 +118,11 @@ impl ChatWidget {
             return;
         }
         #[cfg(any(target_os = "windows", test))]
-        if self.elevated_windows_sandbox_setup_required() {
+        if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Local
+            && (self.windows_sandbox_local_server
+                && self.windows_sandbox_config.requirements.is_none()
+                || self.elevated_windows_sandbox_setup_required())
+        {
             return;
         }
         if let Some(draft) = pending_draft.take() {
@@ -127,7 +140,27 @@ impl ChatWidget {
             return;
         }
         #[cfg(any(target_os = "windows", test))]
-        if self.elevated_windows_sandbox_setup_required() {
+        if self.windows_sandbox_local_server
+            && self.windows_sandbox_host != crate::app::WindowsSandboxHost::Remote
+            && self.windows_sandbox_config.requirements.is_none()
+        {
+            return;
+        }
+        #[cfg(any(target_os = "windows", test))]
+        if self.windows_sandbox_host == crate::app::WindowsSandboxHost::Local
+            && self.elevated_windows_sandbox_setup_required()
+        {
+            return;
+        }
+        #[cfg(any(target_os = "windows", test))]
+        if matches!(
+            self.windows_sandbox_host,
+            crate::app::WindowsSandboxHost::Mixed | crate::app::WindowsSandboxHost::Unknown
+        ) && self.elevated_windows_sandbox_setup_required()
+        {
+            if let Some(user_message) = self.initial_user_message.take() {
+                self.restore_user_message_to_composer(user_message);
+            }
             return;
         }
         if self.blocks_direct_input {
@@ -262,6 +295,7 @@ impl ChatWidget {
     /// When there are queued user messages, restore them into the composer
     /// separated by newlines rather than auto-submitting the next one.
     pub(super) fn on_interrupted_turn(&mut self, reason: TurnAbortReason) {
+        self.requeue_image_submission();
         // Finalize, log a gentle prompt, and clear running state.
         self.finalize_turn();
         let send_pending_steers_immediately =
@@ -480,6 +514,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn capture_thread_input_state(&mut self) -> Option<ThreadInputState> {
+        self.cancel_image_submission();
         let draft = self.bottom_pane.composer_draft_snapshot();
         let composer = ThreadComposerState {
             text: draft.text,
@@ -514,6 +549,7 @@ impl ChatWidget {
                 .submit_pending_steers_after_interrupt,
             current_collaboration_mode: self.current_collaboration_mode.clone(),
             active_collaboration_mask: self.active_collaboration_mask.clone(),
+            plan_mode_reasoning_effort: self.config.plan_mode_reasoning_effort.clone(),
             task_running: self.bottom_pane.is_task_running(),
             agent_turn_running: self.turn_lifecycle.agent_turn_running,
         })
@@ -532,6 +568,7 @@ impl ChatWidget {
             self.input_queue.recovered_queue = input_state.recovered_queue;
             self.current_collaboration_mode = input_state.current_collaboration_mode;
             self.active_collaboration_mask = input_state.active_collaboration_mask;
+            self.config.plan_mode_reasoning_effort = input_state.plan_mode_reasoning_effort;
             self.safety_buffering_prompt = input_state.safety_buffering_prompt;
             self.safety_buffering_source = input_state.safety_buffering_source;
             self.turn_lifecycle.restore_running(

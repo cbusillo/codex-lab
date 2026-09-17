@@ -125,6 +125,7 @@ pub(crate) async fn run_stateless_model_request(
             .enabled(Feature::ConcurrentReasoningSummaries),
         attestation_provider,
         config.http_client_factory(),
+        config.workspace_routing_context(),
     );
     model_client.set_execution_account_lease(execution_account);
     let session_telemetry = SessionTelemetry::new(

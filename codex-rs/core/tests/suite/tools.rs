@@ -20,10 +20,18 @@ use codex_code_bridge_protocol::ScreenshotMediaType;
 use codex_code_bridge_protocol::ScreenshotPayload;
 use codex_code_bridge_protocol::SourceKind;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::StartThreadOptions;
+use codex_core::TurnInputRequest;
 use codex_features::Feature;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
+use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_custom_tool_call;
@@ -38,14 +46,19 @@ use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use test_case::test_case;
 
 /// A real, decodable 1x1 PNG. It must be a genuinely valid image (correct chunk CRCs included):
 /// the model-visible image pipeline replaces payloads it cannot decode with a text placeholder,
 /// which would silently hide the metadata/image separation this test proves.
 const SCREENSHOT_FIXTURE_BASE64: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+use super::direct_tool_metadata::tool_call_metadata;
 
 fn tool_names(body: &Value) -> Vec<String> {
     body.get("tools")
@@ -62,6 +75,126 @@ fn tool_names(body: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[test_case(false, false; "normal sampling")]
+#[test_case(true, false; "pre sampling compaction")]
+#[test_case(false, true; "namespace collision")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn strict_tool_collisions_fail_the_turn_before_sampling(
+    pre_compact: bool,
+    namespace_collision: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(move |config| {
+        config.tool_registry.error_on_tool_collisions = true;
+        config.update_plan_enabled = true;
+        if pre_compact {
+            config.model_auto_compact_token_limit = Some(0);
+        }
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let dynamic_tools = if namespace_collision {
+        [
+            ("first", "First namespace description."),
+            ("second", "Second namespace description."),
+        ]
+        .into_iter()
+        .map(|(name, description)| {
+            DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
+                name: "shared".to_string(),
+                description: description.to_string(),
+                tools: vec![DynamicToolNamespaceTool::Function(
+                    DynamicToolFunctionSpec {
+                        name: name.to_string(),
+                        description: format!("The {name} tool."),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false,
+                        }),
+                        defer_loading: false,
+                    },
+                )],
+            })
+        })
+        .collect()
+    } else {
+        vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+            name: "update_plan".to_string(),
+            description: "Collides with the built-in planning tool.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+            defer_loading: false,
+        })]
+    };
+    let codex_core::NewThread { thread, .. } = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            dynamic_tools,
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+
+    thread
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "use the planning tool".to_string(),
+                text_elements: Vec::new(),
+            }])
+            .on_start(codex_core::TurnStartOptions {
+                root_turn_id: Some("root-turn".into()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    let EventMsg::Error(error) =
+        wait_for_event(&thread, |event| matches!(event, EventMsg::Error(_))).await
+    else {
+        unreachable!("event predicate guarantees an error");
+    };
+    let expected_collision = if namespace_collision {
+        "duplicate tool: shared"
+    } else {
+        "duplicate tool: functions.update_plan"
+    };
+    assert_eq!(error.message, expected_collision);
+
+    let EventMsg::TurnComplete(completed) =
+        wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await
+    else {
+        unreachable!("event predicate guarantees turn completion");
+    };
+    assert_eq!(completed.error, Some(error));
+    thread.flush_rollout().await?;
+    let history = thread.load_history(/*include_archived*/ false).await?;
+    let attribution = history.items.iter().find_map(|item| match item {
+        codex_history::RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+            if event.turn_id == completed.turn_id =>
+        {
+            event.root_turn_id.as_deref()
+        }
+        _ => None,
+    });
+    assert_eq!(attribution, Some("root-turn"));
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .context("mock server should expose received requests")?
+            .iter()
+            .all(|request| request.url.path() != "/v1/responses"),
+        "a colliding turn should fail before making a model request"
+    );
+
+    Ok(())
 }
 
 /// Spawns a Code Bridge service rooted at the test's `CODEX_LAB_HOME` so the `code_bridge` tool
@@ -625,6 +758,7 @@ async fn namespaced_custom_tool_call_preserves_namespace_through_dispatch_and_re
                         "name": format!("{namespace}__{tool_name}"),
                         "arguments": input,
                     }],
+                    "tool_calls_complete": true,
                 },
             }),
         )
@@ -659,20 +793,29 @@ async fn namespaced_custom_tool_call_preserves_namespace_through_dispatch_and_re
         PermissionProfile::Disabled,
     )
     .await?;
+    let escaped_request = escaped_mock.single_request();
     assert_eq!(
-        escaped_mock
-            .single_request()
-            .custom_tool_call_output(escaped_call_id)["internal_chat_message_metadata_passthrough"]
-            ["executed_tool_calls"],
-        json!([{
-            "name": format!("{namespace}__{tool_name}"),
-            "arguments": {
-                "_codex_executed_tool_call_truncated": {
-                    "original_bytes": serde_json::to_vec(&escaped_input)?.len(),
-                    "max_bytes": 8 * 1024,
-                },
+        tool_call_metadata(escaped_request.custom_tool_call_output(call_id)),
+        json!({
+            "executed_tool_calls": [{
+                "name": format!("{namespace}__{tool_name}"),
+                "arguments": input,
+            }],
+            "tool_calls_complete": true,
+        }),
+    );
+    let expected_escaped_calls = json!([{
+        "name": format!("{namespace}__{tool_name}"),
+        "arguments": {
+            "_codex_executed_tool_call_truncated": {
+                "original_bytes": serde_json::to_vec(&escaped_input)?.len(),
+                "max_bytes": 8 * 1024,
             },
-        }]),
+        },
+    }]);
+    assert_eq!(
+        tool_call_metadata(escaped_request.custom_tool_call_output(escaped_call_id)),
+        json!({"executed_tool_calls": expected_escaped_calls}),
     );
 
     let direct_exec_call_id = "custom-direct-exec";
@@ -705,19 +848,29 @@ async fn namespaced_custom_tool_call_preserves_namespace_through_dispatch_and_re
     )
     .await?;
 
-    let direct_exec_output = direct_exec_mock
-        .single_request()
-        .custom_tool_call_output(direct_exec_call_id);
+    let direct_exec_request = direct_exec_mock.single_request();
+    assert_eq!(
+        tool_call_metadata(direct_exec_request.custom_tool_call_output(call_id)),
+        tool_call_metadata(escaped_request.custom_tool_call_output(call_id)),
+    );
+    assert_eq!(
+        tool_call_metadata(direct_exec_request.custom_tool_call_output(escaped_call_id)),
+        tool_call_metadata(escaped_request.custom_tool_call_output(escaped_call_id)),
+    );
+    let direct_exec_output = direct_exec_request.custom_tool_call_output(direct_exec_call_id);
     assert_eq!(
         direct_exec_output["output"],
         json!("unsupported custom tool call: exec"),
     );
     assert_eq!(
-        direct_exec_output["internal_chat_message_metadata_passthrough"]["executed_tool_calls"],
-        json!([{
-            "name": codex_code_mode::PUBLIC_TOOL_NAME,
-            "arguments": input,
-        }]),
+        tool_call_metadata(direct_exec_output),
+        json!({
+            "executed_tool_calls": [{
+                "name": codex_code_mode::PUBLIC_TOOL_NAME,
+                "arguments": input,
+            }],
+            "tool_calls_complete": true,
+        }),
     );
 
     Ok(())

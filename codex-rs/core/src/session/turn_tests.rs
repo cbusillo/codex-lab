@@ -130,6 +130,10 @@ fn realtime_interactive_request_notices_exclude_request_payloads() {
                 proposed_execpolicy_amendment: None,
                 proposed_network_policy_amendments: None,
                 additional_permissions: None,
+                model_context: Some(codex_protocol::items::ModelInvocationContext {
+                    model_slug: PRIVATE.to_string(),
+                    reasoning_effort: Some(PRIVATE.to_string()),
+                }),
                 available_decisions: None,
                 parsed_cmd: Vec::new(),
             }),

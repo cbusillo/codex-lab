@@ -15,11 +15,19 @@ mod collaboration_mode_list;
 #[cfg(unix)]
 mod command_exec;
 mod compaction;
+#[path = "config_model_provider_requirements_tests.rs"]
+mod config_model_provider_requirements;
 mod config_requirements_application;
 #[path = "config_requirements_browser_use_tests.rs"]
 mod config_requirements_browser_use;
+#[path = "config_requirements_exec_tests.rs"]
+mod config_requirements_exec;
 mod config_requirements_in_app_browser;
+mod config_requirements_login;
 mod config_rpc;
+#[cfg(unix)]
+#[path = "connection_handling_stdio_tests.rs"]
+mod connection_handling_stdio;
 mod connection_handling_websocket;
 #[cfg(unix)]
 mod connection_handling_websocket_unix;
@@ -66,6 +74,8 @@ mod memory_reset;
 mod misalignment_policy;
 mod model_list;
 mod model_provider_capabilities_read;
+#[path = "model_provider_enforcement_tests.rs"]
+mod model_provider_enforcement;
 mod multi_agent_v2_developer_instructions;
 mod output_schema;
 mod permission_profile_list;
@@ -83,6 +93,8 @@ mod project_validation;
 mod projects;
 mod rate_limit_reset_credits;
 mod rate_limits;
+#[path = "rate_limits_identity_tests.rs"]
+mod rate_limits_identity;
 mod realtime_conversation;
 mod recommended_plugins;
 mod remote_control;
@@ -102,6 +114,7 @@ mod session_end;
 mod skills_list;
 mod sleep;
 mod thread_archive;
+mod thread_attachments;
 mod thread_delete;
 mod thread_environments;
 mod thread_fork;
@@ -118,7 +131,7 @@ mod thread_queue;
 mod thread_read;
 mod thread_resume;
 mod thread_revert;
-mod thread_rollback;
+mod thread_sections;
 mod thread_settings_update;
 mod thread_shell_command;
 mod thread_start;
@@ -134,6 +147,7 @@ mod turn_start_zsh_fork;
 mod turn_steer;
 mod web_search;
 mod windows_sandbox_setup;
+mod workspace_routing;
 
 mod user_verification;
 mod user_verification_mcp;

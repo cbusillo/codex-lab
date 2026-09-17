@@ -1,4 +1,3 @@
-use crate::agent::role::apply_role_to_config;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
@@ -189,14 +188,6 @@ pub(crate) fn build_agent_spawn_config(
     Ok(config)
 }
 
-pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn)?;
-    // For resume, keep base instructions sourced from rollout/session metadata.
-    config.base_instructions = None;
-    config.base_instructions_provenance = None;
-    Ok(config)
-}
-
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
@@ -223,17 +214,6 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     Ok(config)
-}
-
-pub(crate) fn reject_full_fork_agent_type_override(
-    agent_type: Option<&str>,
-) -> Result<(), FunctionCallError> {
-    if agent_type.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
@@ -362,54 +342,16 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     Ok(())
 }
 
-pub(crate) async fn apply_spawn_agent_role(
-    session: &Session,
-    config: &mut Config,
-    role_name: Option<&str>,
-) -> Result<(), FunctionCallError> {
-    apply_spawn_agent_role_with_application(
-        session,
-        config,
-        role_name,
-        SpawnAgentRoleApplication::Default,
-    )
-    .await
-}
-
 pub(crate) async fn apply_spawn_agent_role_for_multi_agent_v2(
     session: &Session,
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), FunctionCallError> {
-    apply_spawn_agent_role_with_application(
-        session,
-        config,
-        role_name,
-        SpawnAgentRoleApplication::MultiAgentV2,
-    )
-    .await
-}
-
-enum SpawnAgentRoleApplication {
-    Default,
-    MultiAgentV2,
-}
-
-async fn apply_spawn_agent_role_with_application(
-    session: &Session,
-    config: &mut Config,
-    role_name: Option<&str>,
-    application: SpawnAgentRoleApplication,
-) -> Result<(), FunctionCallError> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    match application {
-        SpawnAgentRoleApplication::Default => apply_role_to_config(config, role_name).await,
-        SpawnAgentRoleApplication::MultiAgentV2 => {
-            apply_role_to_config_for_multi_agent_v2(config, role_name).await
-        }
-    }
-    .map_err(FunctionCallError::RespondToModel)?;
+    apply_role_to_config_for_multi_agent_v2(config, role_name)
+        .await
+        .map_err(FunctionCallError::RespondToModel)?;
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {
         return Ok(());
