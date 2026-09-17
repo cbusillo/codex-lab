@@ -3562,12 +3562,3 @@ async fn flat_local_provider_drops_apply_patch_without_custom_tools() {
     .await;
     flat.assert_visible_lacks(&["apply_patch"]);
 }
-
-#[test]
-fn dropped_tool_surface_warnings_claim_once_per_session() {
-    let warnings = super::DroppedToolSurfaceWarnings::default();
-    assert!(warnings.claim_namespace_warning());
-    assert!(!warnings.claim_namespace_warning());
-    assert!(warnings.claim_custom_tool_warning());
-    assert!(!warnings.claim_custom_tool_warning());
-}

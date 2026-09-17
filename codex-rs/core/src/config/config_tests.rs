@@ -11729,7 +11729,10 @@ max_concurrent_threads_per_session = 17
         let mut config = config.clone();
         config.wait_agent_enabled = wait_agent_enabled;
         let usage_hints = resolve_usage_hints(
-            &config, /*catalog*/ None, /*omit_update_plan_instructions*/ false,
+            &config,
+            /*catalog*/ None,
+            config.tool_namespace.as_deref(),
+            /*omit_update_plan_instructions*/ false,
         );
         for hint in [usage_hints.root, usage_hints.subagent] {
             let hint = hint.expect("default usage hints should be present").body();
@@ -11747,6 +11750,7 @@ max_concurrent_threads_per_session = 17
             root: Some(String::new()),
             subagent: Some(String::new()),
         }),
+        config.tool_namespace.as_deref(),
         /*omit_update_plan_instructions*/ false,
     );
     assert!(usage_hints.root.is_none() && usage_hints.subagent.is_none());
@@ -11780,6 +11784,7 @@ expose_spawn_agent_model_overrides = true
             root: Some("Catalog root base.".to_string()),
             subagent: Some("Catalog subagent base.".to_string()),
         }),
+        config.tool_namespace.as_deref(),
         /*omit_update_plan_instructions*/ true,
     );
     assert_eq!(
@@ -11802,11 +11807,17 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
     let mut config = resolve_multi_agent_v2_config(&config_toml);
     assert!(config.expose_spawn_agent_model_overrides);
     let usage_hints = resolve_usage_hints(
-        &config, /*catalog*/ None, /*omit_update_plan_instructions*/ false,
+        &config,
+        /*catalog*/ None,
+        config.tool_namespace.as_deref(),
+        /*omit_update_plan_instructions*/ false,
     );
     config.expose_spawn_agent_model_overrides = false;
     let usage_hints_without_model_overrides = resolve_usage_hints(
-        &config, /*catalog*/ None, /*omit_update_plan_instructions*/ false,
+        &config,
+        /*catalog*/ None,
+        config.tool_namespace.as_deref(),
+        /*omit_update_plan_instructions*/ false,
     );
 
     for (hint, hint_without_model_overrides) in [
@@ -11922,6 +11933,7 @@ subagent_usage_hint_text = ""
             root: Some("catalog root".to_string()),
             subagent: Some("catalog subagent".to_string()),
         }),
+        config.multi_agent_v2.tool_namespace.as_deref(),
         /*omit_update_plan_instructions*/ false,
     );
     assert_eq!(

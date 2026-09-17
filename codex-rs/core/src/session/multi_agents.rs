@@ -1,6 +1,8 @@
+use crate::config::Config;
 use crate::config::MultiAgentV2Config;
 use crate::context::MultiAgentRoleInstructions;
 use crate::session::step_context::StepContext;
+use codex_model_provider::create_model_provider;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -56,6 +58,14 @@ pub(crate) struct ResolvedMultiAgentV2UsageHints {
     pub(crate) subagent: Option<MultiAgentRoleInstructions>,
 }
 
+pub(crate) fn configured_tool_namespace(config: &Config) -> Option<&str> {
+    create_model_provider(config.model_provider.clone(), /*auth_manager*/ None)
+        .capabilities()
+        .namespace_tools
+        .then_some(config.multi_agent_v2.tool_namespace.as_deref())
+        .flatten()
+}
+
 pub(super) fn usage_hint_text(
     step_context: &StepContext,
     session_source: &SessionSource,
@@ -75,6 +85,12 @@ pub(super) fn usage_hint_text(
     let snapshot = resolve_usage_hints(
         &turn_context.config.multi_agent_v2,
         catalog,
+        turn_context
+            .provider
+            .capabilities()
+            .namespace_tools
+            .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
+            .flatten(),
         !turn_context.config.update_plan_enabled && turn_context.config.model_catalog.is_none(),
     );
     match session_source {
@@ -92,9 +108,10 @@ pub(super) fn usage_hint_text(
 pub(crate) fn resolve_usage_hints(
     config: &MultiAgentV2Config,
     catalog: Option<&MultiAgentRoleMessages>,
+    tool_namespace: Option<&str>,
     omit_update_plan_instructions: bool,
 ) -> ResolvedMultiAgentV2UsageHints {
-    let spawn_agent_recipient = config.tool_namespace.as_deref().map_or_else(
+    let spawn_agent_recipient = tool_namespace.map_or_else(
         || "to=functions.spawn_agent".to_string(),
         |namespace| format!("to=functions.{namespace}.spawn_agent"),
     );

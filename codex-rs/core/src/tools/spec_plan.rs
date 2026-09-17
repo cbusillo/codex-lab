@@ -57,6 +57,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_web_search_tool;
+use crate::tools::provider_tool_surface::DroppedToolSurfaceWarnings;
 use crate::tools::registry::CoreToolRuntime;
 #[cfg(test)]
 use crate::tools::registry::RegisteredTool;
@@ -104,8 +105,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::btree_map::Entry;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use tracing::instrument;
 
 const MAX_AGENT_TYPE_DESCRIPTION_BYTES: usize = 4 * 1024;
@@ -127,28 +126,6 @@ struct CoreToolPlanContext<'a> {
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
     dropped_tool_warnings: &'a DroppedToolSurfaceWarnings,
-}
-
-/// Session-scoped latch so tool-surface drop warnings are emitted once per
-/// session instead of once per rebuilt tool plan.
-#[derive(Debug, Default)]
-pub(crate) struct DroppedToolSurfaceWarnings {
-    namespaces: AtomicBool,
-    custom_tools: AtomicBool,
-}
-
-impl DroppedToolSurfaceWarnings {
-    fn claim_namespace_warning(&self) -> bool {
-        self.namespaces
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    fn claim_custom_tool_warning(&self) -> bool {
-        self.custom_tools
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -413,6 +390,7 @@ pub(crate) fn finalize_tool_router(
     dropped_tool_warnings: &DroppedToolSurfaceWarnings,
 ) -> CodexResult<ToolRouter> {
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+    dropped_tool_warnings.filter_search_sources(turn_context, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
     if code_mode_enabled {
@@ -617,30 +595,7 @@ fn build_model_visible_specs(
     }
     specs.extend(hosted_specs);
 
-    let mut dropped_namespace_names = Vec::new();
-    let specs = merge_into_namespaces(specs)
-        .into_iter()
-        .filter(|spec| {
-            if namespace_tools_enabled(turn_context) {
-                true
-            } else if let ToolSpec::Namespace(namespace) = spec {
-                dropped_namespace_names.push(namespace.name.clone());
-                false
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if !dropped_namespace_names.is_empty() && dropped_tool_warnings.claim_namespace_warning() {
-        tracing::warn!(
-            provider = %turn_context.provider.info().name,
-            "provider does not support the Responses `namespace` tool type, so these tool groups were not sent to the model: {}. Sub-agent management, MCP, and other namespaced tools are unavailable for this model.",
-            dropped_namespace_names.join(", ")
-        );
-    }
-
-    specs
+    dropped_tool_warnings.filter_specs(turn_context, merge_into_namespaces(specs))
 }
 
 fn spec_for_model_request(
@@ -1405,12 +1360,8 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         if context.turn_context.provider.capabilities().custom_tools {
             let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
             registry.add(ApplyPatchHandler::new(include_environment_id));
-        } else if context.dropped_tool_warnings.claim_custom_tool_warning() {
-            tracing::warn!(
-                provider = %context.turn_context.provider.info().name,
-                "provider does not support freeform `custom` tools, so apply_patch is not available for model {}. The model will need to edit files through the shell instead.",
-                context.model_info.slug
-            );
+        } else {
+            context.dropped_tool_warnings.custom_tool_dropped();
         }
     }
 

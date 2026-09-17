@@ -102,7 +102,8 @@ impl ToolRouter {
         hosted_specs: Vec<ToolSpec>,
         tool_search_handler_cache: &ToolSearchHandlerCache,
     ) -> Self {
-        let dropped_tool_warnings = crate::tools::spec_plan::DroppedToolSurfaceWarnings::default();
+        let dropped_tool_warnings =
+            crate::tools::provider_tool_surface::DroppedToolSurfaceWarnings::default();
         finalize_tool_router(
             turn_context,
             model_info,
