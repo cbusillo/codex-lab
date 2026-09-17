@@ -1,7 +1,9 @@
 //! Requirements reads report the authentication policy enforced by the running server.
 
 use anyhow::Result;
+use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::TestAppServer;
+use app_test_support::encode_id_token;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountResponse;
@@ -79,7 +81,42 @@ async fn config_requirements_read_exposes_effective_login_methods(
             server.read_stream_until_error_message(RequestId::Integer(id)),
         )
         .await??;
-        assert!(error.error.message.contains("disabled"), "{error:?}");
+        assert_eq!(
+            error.error.message,
+            "ChatGPT login is disabled. Use API key login instead."
+        );
+
+        let id = server
+            .send_login_account_chatgpt_device_code_request()
+            .await?;
+        let error = timeout(
+            READ_TIMEOUT,
+            server.read_stream_until_error_message(RequestId::Integer(id)),
+        )
+        .await??;
+        assert_eq!(
+            error.error.message,
+            "ChatGPT login is disabled. Use API key login instead."
+        );
+
+        let access_token =
+            encode_id_token(&ChatGptIdTokenClaims::new().chatgpt_account_id("managed"))?;
+        let id = server
+            .send_chatgpt_auth_tokens_login_request(
+                access_token,
+                "managed".to_string(),
+                /*chatgpt_plan_type*/ None,
+            )
+            .await?;
+        let error = timeout(
+            READ_TIMEOUT,
+            server.read_stream_until_error_message(RequestId::Integer(id)),
+        )
+        .await??;
+        assert_eq!(
+            error.error.message,
+            "External ChatGPT auth is disabled. Use API key login instead."
+        );
     }
     if !expected.contains(&ForcedLoginMethod::Api) {
         let id = server.send_login_account_api_key_request("sk-test").await?;
@@ -88,7 +125,10 @@ async fn config_requirements_read_exposes_effective_login_methods(
             server.read_stream_until_error_message(RequestId::Integer(id)),
         )
         .await??;
-        assert!(error.error.message.contains("disabled"), "{error:?}");
+        assert_eq!(
+            error.error.message,
+            "API key login is disabled. Use ChatGPT login instead."
+        );
     }
     Ok(())
 }

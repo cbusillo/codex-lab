@@ -4764,17 +4764,16 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
         &file_system_sandbox_policy,
         network_sandbox_policy,
     );
-    let mut config = (*turn.config).clone();
-    config
+    turn.environments.environments.clear();
+    Arc::make_mut(&mut turn.config)
         .permissions
         .set_permission_profile(permission_profile)
         .expect("permission profile set");
-    config
+    Arc::make_mut(&mut turn.config)
         .permissions
         .approval_policy
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
-    turn.config = Arc::new(config);
 
     let parent_config = Arc::make_mut(&mut turn.config);
     parent_config
@@ -4796,41 +4795,22 @@ async fn build_agent_spawn_config_uses_turn_context_values(parent_enabled: bool)
         .guidance_message = Some("Parent model's resolved guidance.".to_string());
 
     let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+    expected.base_instructions_provenance = base_instructions.provenance.clone();
     expected.base_instructions = Some(base_instructions.text);
-    expected.base_instructions_provenance = base_instructions.provenance;
     expected.model = Some(turn.model_info().slug.clone());
     expected.model_provider = turn.provider.info().clone();
     expected.model_reasoning_effort = turn.reasoning_effort().cloned();
     expected.model_reasoning_summary = Some(turn.reasoning_summary());
     expected.developer_instructions = turn.developer_instructions.clone();
-    expected
-        .permissions
-        .approval_policy
-        .set(turn.approval_policy())
-        .expect("approval policy set");
-    expected.approvals_reviewer = turn.config.approvals_reviewer;
     #[allow(deprecated)]
     {
         expected.cwd = turn.cwd.clone();
     }
-    let permission_profile = turn
-        .config
-        .permissions
-        .active_permission_profile()
-        .map_or_else(
-            || PermissionProfileSnapshot::legacy(turn.permission_profile()),
-            |active_permission_profile| {
-                PermissionProfileSnapshot::active_with_profile_workspace_roots(
-                    turn.permission_profile(),
-                    active_permission_profile,
-                    turn.config.permissions.profile_workspace_roots().to_vec(),
-                )
-            },
-        );
     expected
         .permissions
-        .set_permission_profile_from_session_snapshot(permission_profile)
-        .expect("permission profile set");
+        .approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("approval policy set");
     assert_eq!(config, expected);
 }
 

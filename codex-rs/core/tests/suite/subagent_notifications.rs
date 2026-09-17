@@ -2323,7 +2323,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
             tool_call_metadata(parent_request.function_call_output(SPAWN_CALL_ID)),
             json!({
                 "executed_tool_calls": [{
-                    "name": "collaboration__spawn_agent",
+                    "name": format!("{MULTI_AGENT_V2_NAMESPACE}__spawn_agent"),
                     "arguments": serde_json::from_str::<Value>(&spawn_args)?,
                 }],
                 "tool_calls_complete": true,

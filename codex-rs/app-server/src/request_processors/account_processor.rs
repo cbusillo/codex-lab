@@ -499,6 +499,15 @@ impl AccountRequestProcessor {
             return Err(self.external_auth_active_error());
         }
 
+        if !self
+            .auth_manager
+            .is_login_method_allowed(ForcedLoginMethod::Api)
+        {
+            return Err(invalid_request(
+                "API key login is disabled. Use ChatGPT login instead.",
+            ));
+        }
+
         if matches!(
             self.config.forced_login_method,
             Some(ForcedLoginMethod::Chatgpt)
@@ -663,6 +672,15 @@ impl AccountRequestProcessor {
 
         if self.auth_manager.is_external_chatgpt_auth_active() {
             return Err(self.external_auth_active_error());
+        }
+
+        if !self
+            .auth_manager
+            .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+        {
+            return Err(invalid_request(
+                "ChatGPT login is disabled. Use API key login instead.",
+            ));
         }
 
         if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
@@ -1159,6 +1177,15 @@ impl AccountRequestProcessor {
         chatgpt_account_id: String,
         chatgpt_plan_type: Option<String>,
     ) -> Result<LoginAccountResponse, JSONRPCErrorError> {
+        if !self
+            .auth_manager
+            .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
+        {
+            return Err(invalid_request(
+                "External ChatGPT auth is disabled. Use API key login instead.",
+            ));
+        }
+
         if matches!(
             self.config.forced_login_method,
             Some(ForcedLoginMethod::Api)

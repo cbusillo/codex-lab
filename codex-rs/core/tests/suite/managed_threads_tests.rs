@@ -317,18 +317,25 @@ async fn startup_allowlist_controls_advertising_and_execution(
     .await;
     let requests = response.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].body_json()["tools"]
-            .as_array()
-            .expect("request tools array")
-            .iter()
-            .map(|tool| tool["name"].as_str().expect("plain tool name"))
-            .collect::<Vec<_>>(),
-        tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>(),
-    );
+    if tools.is_empty() {
+        assert!(
+            requests[0].body_json().get("tools").is_none(),
+            "no-tools startup must not advertise a tools field"
+        );
+    } else {
+        assert_eq!(
+            requests[0].body_json()["tools"]
+                .as_array()
+                .expect("request tools array")
+                .iter()
+                .map(|tool| tool["name"].as_str().expect("plain tool name"))
+                .collect::<Vec<_>>(),
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+        );
+    }
     assert_eq!(
         requests[1].function_call_output("excluded")["output"],
         "unsupported call: exec_command"

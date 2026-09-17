@@ -3646,6 +3646,7 @@ async fn chatgpt_auth_tokens_login_refreshes_auth_for_loaded_thread() -> Result<
     )?;
 
     let mut mcp = TestAppServer::builder()
+        .with_mock_chatgpt_backend()
         .with_codex_home(codex_home.path())
         .with_env_overrides(&[("OPENAI_API_KEY", None)])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)

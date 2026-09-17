@@ -9,6 +9,7 @@ use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_extension_api::Instructions;
 use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
+use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
 use codex_extension_api::ThreadInstructionsProvider;
 use codex_extension_api::UserInstructionsProvider;
 use codex_features::Feature;
@@ -1375,9 +1376,6 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
     // The full thread budget is independent of global instructions and wrapping.
     // Changing environments must also remove the previously selected repository docs.
     let host_text = "x".repeat(approx_bytes_for_tokens(/*tokens*/ 10_000));
-    let expected = expected_provider_only_instruction_fragment(&format!(
-        "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n{GLOBAL_INSTRUCTIONS}\n\n{host_text}"
-    ));
     fixture.provider.set_instructions(Some(Instructions {
         text: host_text,
         source: None,
@@ -1404,7 +1402,19 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
     .await;
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(instruction_fragments(&requests[1]).last(), Some(&expected));
+    let fragments = instruction_fragments(&requests[1]);
+    let rendered = fragments
+        .last()
+        .expect("the refreshed provider fragment should be present");
+    assert!(rendered.starts_with("# AGENTS.md instructions<bounded_world_state_section "));
+    assert!(rendered.contains(&format!(
+        "<INSTRUCTIONS>\nThese AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n{GLOBAL_INSTRUCTIONS}\n"
+    )));
+    assert!(rendered.contains("world-state content truncated"));
+    assert!(rendered.ends_with("</INSTRUCTIONS>"));
+    assert!(rendered.len() <= MAX_WORLD_STATE_SECTION_BYTES);
+    assert!(rendered.contains(&"x".repeat(128)));
+    assert!(!rendered.contains(PROJECT_INSTRUCTIONS));
     Ok(())
 }
 
