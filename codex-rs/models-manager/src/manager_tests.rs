@@ -1100,8 +1100,8 @@ async fn refresh_available_models_keeps_merging_for_custom_api_auth() {
     )];
     let codex_home = tempdir().expect("temp dir");
     let endpoint = Arc::new(TestModelsEndpoint {
-        has_configured_credentials: true,
-        supports_api_key_models: false,
+        has_configured_credentials: false,
+        supports_api_key_models: true,
         has_command_auth: true,
         uses_codex_backend: false,
         responses: Mutex::new(vec![remote_models.clone()].into()),

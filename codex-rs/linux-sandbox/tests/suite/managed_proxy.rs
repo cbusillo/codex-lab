@@ -453,9 +453,8 @@ async fn managed_proxy_full_filesystem_uses_minimal_dev_nodes() {
     )
     .await;
 
-    assert_eq!(
+    assert!(
         output.status.success(),
-        true,
         "standard devices should be usable; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -492,7 +491,7 @@ async fn managed_proxy_bridges_release_command_output_after_exit() {
     )
     .await;
 
-    assert_eq!(output.status.success(), true);
+    assert!(output.status.success());
     assert_eq!(output.stdout, b"bridge output closed\n");
 }
 
@@ -526,9 +525,8 @@ async fn managed_proxy_readiness_survives_closed_standard_descriptors() {
         .expect("sandbox command should not time out")
         .expect("sandbox command should execute");
 
-    assert_eq!(
+    assert!(
         output.status.success(),
-        true,
         "managed proxy readiness should survive closed standard descriptors; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
