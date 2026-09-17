@@ -8,7 +8,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RolloutItem;
+use codex_rollout::RolloutItem;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::read_session_meta_line;
 use core_test_support::responses;
