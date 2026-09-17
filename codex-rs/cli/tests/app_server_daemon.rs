@@ -196,6 +196,8 @@ fn managed_identity_survives_locale_and_timezone_changes() -> Result<()> {
                 .args(["app-server", "daemon", "version"])
                 .env("LC_ALL", locale)
                 .env("TZ", timezone)
+                .env("RUST_BACKTRACE", "0")
+                .env("RUST_LIB_BACKTRACE", "0")
                 .output();
             let preserved = std::fs::read(&pid_file);
             // Restore the native identity before assertions so Drop can stop the daemon.
