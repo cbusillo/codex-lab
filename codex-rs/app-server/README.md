@@ -283,7 +283,7 @@ Example with notification opt-out:
 - `fs/unwatch` — stop sending notifications for a prior `fs/watch`; returns `{}`.
 - `fs/changed` — notification emitted when watched paths change, including the `watchId` and `changedPaths`.
 - `model/list` — list available models (set `includeHidden: true` to include entries with `hidden: true`), with model-advertised string reasoning effort options in the catalog's intended progression order, `additionalSpeedTiers`, `serviceTiers`, optional `defaultServiceTier`, optional legacy `upgrade` model ids, optional `upgradeInfo` metadata (`model`, `upgradeCopy`, `modelLink`, `migrationMarkdown`), and optional `availabilityNux` metadata. Clients should preserve the `supportedReasoningEfforts` array order rather than deriving order from the effort names.
-- `modelProvider/capabilities/read` — read provider-level capabilities for the currently configured model provider.
+- `modelProvider/capabilities/read` — read provider-level capabilities for the currently configured model provider, including `namespaceTools`, `customTools`, and `webSearch`. These describe the tool types the provider accepts. Providers configured with `namespace_tools = false` receive flat collaboration functions; unsupported namespaced groups are omitted. With `custom_tools = false`, freeform tools such as `apply_patch` are omitted and Code Mode falls back to direct function tools. The server emits a `warning` notification once per session for each affected tool category. Built-in LM Studio and Ollama providers disable all three capabilities; other provider definitions default them to `true` when omitted.
 - `experimentalFeature/list` — list feature flags with stage metadata (`beta`, `underDevelopment`, `stable`, etc.), enabled/default-enabled state, and cursor pagination. Pass `threadId` when showing feature state for an existing loaded thread so `enabled` is computed from that thread's refreshed config, including project-local config for the thread's cwd; if omitted, the server uses its default config resolution context. For non-beta flags, `displayName`/`description`/`announcement` are `null`.
 - `permissionProfile/list` — beta; list available permission profile ids with optional display `description` text and an `allowed` flag reflecting effective requirements, using cursor pagination. Pass `cwd` when the caller needs project-local `[permissions.<id>]` entries to be included in the current catalog view.
 - `experimentalFeature/enablement/set` — patch the in-memory process-wide runtime feature enablement for currently supported feature keys. For each feature, precedence is: cloud requirements > --enable <feature_name> > config.toml > experimentalFeature/enablement/set (new) > code default. Invalid keys will be ignored.
@@ -721,12 +721,16 @@ Paginated threads support the same views. Their `full` view is materialized from
 `thread/items/list` pages full persisted items across a thread, optionally filtered to one turn:
 
 ```json
-{ "method": "thread/items/list", "id": 25, "params": {
+{
+  "method": "thread/items/list",
+  "id": 25,
+  "params": {
     "threadId": "thr_123",
     "turnId": "turn_456",
     "limit": 100,
     "sortDirection": "asc"
-} }
+  }
+}
 ```
 
 Each returned entry includes the containing `turnId` and its full `item`, so clients can group
@@ -1788,6 +1792,7 @@ The app-server streams JSON-RPC notifications while a turn is running. Each turn
   items; their existing `subAgentActivity` notifications are unchanged, and `list_agents` emits no
   activity item. Calls cancelled during handler execution are recorded privately with status
   `interrupted`, distinct from tool failures.
+
 - `webSearch` — `{id, query, action?, results?}` for a web search request issued by the agent; `action` mirrors the Responses API web_search action payload (`search`, `open_page`, `find_in_page`) and may be omitted until completion. For standalone web search, `results` contains the out-of-band structured result DTOs returned by `/v1/alpha/search`; clients should ignore result types and fields they do not understand.
 - `imageView` — `{id, path}` emitted when the agent invokes the image viewer tool.
 - `sleep` — `{id, durationMs}` emitted while the agent waits for a duration or new input.
@@ -2193,29 +2198,33 @@ For unmanaged hooks, `currentHash` and `trustStatus` describe whether the curren
 {
   "id": 28,
   "result": {
-    "data": [{
-      "cwd": "/Users/me/project",
-      "hooks": [{
-        "key": "/Users/me/.codex/config.toml:pre_tool_use:0:0",
-        "eventName": "pre_tool_use",
-        "handlerType": "command",
-        "isManaged": false,
-        "matcher": "Bash",
-        "command": "python3 /Users/me/hook.py",
-        "timeoutSec": 5,
-        "statusMessage": "running hook",
-        "additionalContextLimit": null,
-        "sourcePath": "/Users/me/.codex/config.toml",
-        "source": "user",
-        "pluginId": null,
-        "displayOrder": 0,
-        "enabled": true,
-        "currentHash": "sha256:...",
-        "trustStatus": "untrusted"
-      }],
-      "warnings": [],
-      "errors": []
-    }]
+    "data": [
+      {
+        "cwd": "/Users/me/project",
+        "hooks": [
+          {
+            "key": "/Users/me/.codex/config.toml:pre_tool_use:0:0",
+            "eventName": "pre_tool_use",
+            "handlerType": "command",
+            "isManaged": false,
+            "matcher": "Bash",
+            "command": "python3 /Users/me/hook.py",
+            "timeoutSec": 5,
+            "statusMessage": "running hook",
+            "additionalContextLimit": null,
+            "sourcePath": "/Users/me/.codex/config.toml",
+            "source": "user",
+            "pluginId": null,
+            "displayOrder": 0,
+            "enabled": true,
+            "currentHash": "sha256:...",
+            "trustStatus": "untrusted"
+          }
+        ],
+        "warnings": [],
+        "errors": []
+      }
+    ]
   }
 }
 ```
@@ -2227,21 +2236,24 @@ To disable a non-managed hook, upsert a state entry at `hooks.state` with `confi
   "method": "config/batchWrite",
   "id": 29,
   "params": {
-    "edits": [{
-      "keyPath": "hooks.state",
-      "value": {
-        "/Users/me/.codex/config.toml:pre_tool_use:0:0": {
-          "enabled": false
-        }
-      },
-      "mergeStrategy": "upsert"
-    }],
+    "edits": [
+      {
+        "keyPath": "hooks.state",
+        "value": {
+          "/Users/me/.codex/config.toml:pre_tool_use:0:0": {
+            "enabled": false
+          }
+        },
+        "mergeStrategy": "upsert"
+      }
+    ],
     "reloadUserConfig": true
   }
 }
 ```
 
 To re-enable it, upsert the same hook key with `"enabled": true`.
+
 ## Apps
 
 Use `app/installed` to read installed apps and whether each app is currently enabled and callable.

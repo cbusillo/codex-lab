@@ -49,6 +49,13 @@ message ModelProvider {
   bool requires_openai_auth = 16;
   bool supports_websockets = 17;
   bool supports_standalone_web_search = 18;
+  optional ModelProviderCapabilities capabilities = 19;
+}
+
+message ModelProviderCapabilities {
+  optional bool namespace_tools = 1;
+  optional bool custom_tools = 2;
+  optional bool web_search = 3;
 }
 
 message StringMap {

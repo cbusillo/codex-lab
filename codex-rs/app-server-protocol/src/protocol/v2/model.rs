@@ -43,6 +43,7 @@ pub struct ModelProviderCapabilitiesReadParams {}
 #[ts(export_to = "v2/")]
 pub struct ModelProviderCapabilitiesReadResponse {
     pub namespace_tools: bool,
+    pub custom_tools: bool,
     pub image_generation: bool,
     pub web_search: bool,
 }

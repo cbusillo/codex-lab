@@ -203,6 +203,7 @@ impl ConfigRequestProcessor {
         let capabilities = provider.capabilities();
         Ok(ModelProviderCapabilitiesReadResponse {
             namespace_tools: capabilities.namespace_tools,
+            custom_tools: capabilities.custom_tools,
             image_generation: capabilities.image_generation,
             web_search: capabilities.web_search,
         })

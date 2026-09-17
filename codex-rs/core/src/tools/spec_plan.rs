@@ -57,6 +57,7 @@ use crate::tools::handlers::tool_search_spec::ToolSearchSourceListing;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::hosted_spec::WebSearchToolOptions;
 use crate::tools::hosted_spec::create_web_search_tool;
+use crate::tools::provider_tool_surface::DroppedToolSurfaceWarnings;
 use crate::tools::registry::CoreToolRuntime;
 #[cfg(test)]
 use crate::tools::registry::RegisteredTool;
@@ -124,6 +125,7 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
+    dropped_tool_warnings: &'a DroppedToolSurfaceWarnings,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -155,6 +157,10 @@ pub(crate) fn build_tool_router(
         .services
         .thread_extension_data
         .get::<crate::WaitForEnvironmentToolConfig>();
+    let dropped_tool_warnings = session
+        .services
+        .thread_extension_data
+        .get_or_init(DroppedToolSurfaceWarnings::default);
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
@@ -165,6 +171,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        dropped_tool_warnings: &dropped_tool_warnings,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -207,6 +214,7 @@ pub(crate) fn build_tool_router(
         registry,
         hosted_specs,
         &session.services.tool_search_handler_cache,
+        &dropped_tool_warnings,
     )
 }
 
@@ -299,6 +307,7 @@ pub(crate) fn build_core_tool_registry(
     }
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
+    let dropped_tool_warnings = DroppedToolSurfaceWarnings::default();
     let context = CoreToolPlanContext {
         turn_context,
         model_info,
@@ -309,6 +318,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        dropped_tool_warnings: &dropped_tool_warnings,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -377,8 +387,10 @@ pub(crate) fn finalize_tool_router(
     mut registry: ToolRegistry,
     hosted_specs: Vec<ToolSpec>,
     tool_search_handler_cache: &ToolSearchHandlerCache,
+    dropped_tool_warnings: &DroppedToolSurfaceWarnings,
 ) -> CodexResult<ToolRouter> {
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+    dropped_tool_warnings.filter_search_sources(turn_context, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
     if code_mode_enabled {
@@ -498,6 +510,7 @@ pub(crate) fn finalize_tool_router(
         &registry,
         &code_mode_tool_names,
         hosted_specs,
+        dropped_tool_warnings,
     );
     let tool_namespaces_info = include_tool_namespaces_info
         .then(|| {
@@ -556,6 +569,7 @@ fn build_model_visible_specs(
     registry: &ToolRegistry,
     code_mode_tool_names: &BTreeMap<String, ToolName>,
     hosted_specs: Vec<ToolSpec>,
+    dropped_tool_warnings: &DroppedToolSurfaceWarnings,
 ) -> Vec<ToolSpec> {
     let mut specs = Vec::new();
     for tool in registry.entries() {
@@ -581,12 +595,7 @@ fn build_model_visible_specs(
     }
     specs.extend(hosted_specs);
 
-    merge_into_namespaces(specs)
-        .into_iter()
-        .filter(|spec| {
-            namespace_tools_enabled(turn_context) || !matches!(spec, ToolSpec::Namespace(_))
-        })
-        .collect()
+    dropped_tool_warnings.filter_specs(turn_context, merge_into_namespaces(specs))
 }
 
 fn spec_for_model_request(
@@ -1348,8 +1357,12 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     }
 
     if environment_mode.has_environment() && context.model_info.apply_patch_tool_type.is_some() {
-        let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
-        registry.add(ApplyPatchHandler::new(include_environment_id));
+        if context.turn_context.provider.capabilities().custom_tools {
+            let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+            registry.add(ApplyPatchHandler::new(include_environment_id));
+        } else {
+            context.dropped_tool_warnings.custom_tool_dropped();
+        }
     }
 
     if context
