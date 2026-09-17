@@ -303,7 +303,7 @@ async fn near_context_budget_instructions_arrive_complete_in_bounded_parts() -> 
     background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Completed).await;
     let parts = review_instruction_parts(&mock.requests()[2]);
     let total = parts.iter().map(String::len).sum::<usize>();
-    assert!(total >= 38 * 1024 && total <= 40 * 1024);
+    assert!((38 * 1024..=40 * 1024).contains(&total));
     assert!(parts.iter().all(|part| part.len() <= 9 * 1024));
     assert!(
         parts

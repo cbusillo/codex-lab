@@ -267,7 +267,7 @@ fn world_state_pressure_does_not_silently_shorten_review_parts() {
     let prompt = Prompt {
         input: rendered
             .into_iter()
-            .map(|fragment| fragment.into_boxed_response_item())
+            .map(codex_context_fragments::ContextualUserFragment::into_boxed_response_item)
             .collect(),
         ..Prompt::default()
     };
