@@ -1281,6 +1281,24 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
         Some(compacted_previous_window_id)
     );
     assert_eq!(reconstructed.window_id, Some(compacted_window_id));
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history: Arc::new(rollout_items),
+            rollout_path: None,
+        }))
+        .await;
+
+    assert_eq!(
+        session.state.lock().await.auto_compact_window_ids(),
+        AutoCompactWindowIds {
+            first_window_id: compacted_first_window_id,
+            previous_window_id: Some(compacted_previous_window_id),
+            window_id: compacted_window_id,
+        }
+    );
+    assert!(session.current_window_id().await.ends_with(":2"));
 }
 
 #[tokio::test]
