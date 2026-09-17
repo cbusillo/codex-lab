@@ -49,6 +49,7 @@ const NAMESPACE: &str = "agents";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
+const CAPABILITY_ROLE_INSTRUCTIONS: &str = "capability restriction role instructions";
 const PARENT_HISTORY_PROMPT: &str = "remember this parent-only conversation turn";
 const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 
@@ -140,8 +141,8 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         | "no history configured role without instructions"
         | "bounded history configured role without instructions" => Some(PARENT_INSTRUCTIONS),
         "blank override" => None,
+        "role cannot reenable parent shell" => Some(CAPABILITY_ROLE_INSTRUCTIONS),
         "explicit configured role"
-        | "role cannot reenable parent shell"
         | "full history configured role"
         | "full history explicit default role"
         | "implicit configured default"
@@ -251,7 +252,9 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         let role_path = codex_home.path().join("capabilities-role.toml");
         std::fs::write(
             &role_path,
-            format!("developer_instructions = {ROLE_INSTRUCTIONS:?}\nfeatures.shell_tool = true\n"),
+            format!(
+                "developer_instructions = {CAPABILITY_ROLE_INSTRUCTIONS:?}\nfeatures.shell_tool = true\n"
+            ),
         )?;
         Some(HashMap::from([
             ("features.shell_tool".to_string(), json!(false)),
@@ -310,7 +313,10 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let child_request = child_request.single_request();
 
     let parent_spawn_request = parent_request.single_request();
-    if case == "role cannot reenable parent shell" {
+    if matches!(
+        case,
+        "role cannot reenable parent shell" | "explicit configured role"
+    ) {
         for (phase, request) in [("parent", &parent_spawn_request), ("child", &child_request)] {
             let body = request.body_json();
             let tools = body["tools"].as_array().expect("model-visible tools");
@@ -321,11 +327,18 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
                         || responses::namespace_child_tool(&body, "functions", name).is_some()
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(
-                shell_tools,
-                Vec::<&str>::new(),
-                "{phase}: a role must not reenable the parent's disabled shell tools"
-            );
+            if case == "role cannot reenable parent shell" {
+                assert_eq!(
+                    shell_tools,
+                    Vec::<&str>::new(),
+                    "{phase}: a role must not reenable the parent's disabled shell tools"
+                );
+            } else {
+                assert!(
+                    !shell_tools.is_empty(),
+                    "{phase}: the control must expose the shell tools checked by the restricted case"
+                );
+            }
         }
     }
     let parent_texts = parent_spawn_request.message_input_texts("developer");
@@ -420,7 +433,10 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         .filter(|text| {
             matches!(
                 *text,
-                PARENT_INSTRUCTIONS | CHILD_INSTRUCTIONS | ROLE_INSTRUCTIONS
+                PARENT_INSTRUCTIONS
+                    | CHILD_INSTRUCTIONS
+                    | ROLE_INSTRUCTIONS
+                    | CAPABILITY_ROLE_INSTRUCTIONS
             )
         })
         .collect::<Vec<_>>();
