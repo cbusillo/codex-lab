@@ -618,7 +618,11 @@ text(`MCP: ${ping.structuredContent?.echo ?? "missing"}`);"#,
     )?;
     assert_eq!(
         agents,
-        json!({"agents": [{"agent_name": "/root", "agent_status": "running"}]})
+        json!({"agents": [{
+            "agent_name": "/root",
+            "agent_status": "running",
+            "supports_followup_messages": true,
+        }]})
     );
     insta::assert_snapshot!(
         "astra_settings_release_check_tool_shapes",

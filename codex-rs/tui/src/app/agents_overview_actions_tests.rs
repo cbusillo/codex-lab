@@ -6,6 +6,11 @@ use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RolloutItem;
+use codex_rollout::append_rollout_item_to_path;
+use codex_rollout::read_session_meta_line;
 use core_test_support::responses;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
@@ -402,18 +407,40 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         };
         let (mut app, mut rx, _op_rx) =
             Box::pin(crate::app::tests::make_test_app_with_channels()).await;
-        let (release, gate) = tokio::sync::oneshot::channel();
-        let (server, _completions) = start_streaming_sse_server(vec![vec![
-            StreamingSseChunk {
+        let mut streams = Vec::new();
+        if attach_child {
+            streams.push(vec![StreamingSseChunk {
                 gate: None,
-                body: responses::sse(vec![responses::ev_response_created("running")]),
-            },
-            StreamingSseChunk {
-                gate: Some(gate),
-                body: responses::sse(vec![responses::ev_completed("running")]),
-            },
-        ]])
-        .await;
+                body: responses::sse(vec![
+                    responses::ev_response_created("parent-followup"),
+                    responses::ev_function_call_with_namespace(
+                        "followup-worker",
+                        "agents",
+                        "followup_task",
+                        r#"{"target":"worker","message":"Keep working"}"#,
+                    ),
+                    responses::ev_completed("parent-followup"),
+                ]),
+            }]);
+        }
+        let mut releases = Vec::new();
+        // Parent and child requests may arrive in either order; keep both active.
+        for _ in 0..if attach_child { 2 } else { 1 } {
+            let (release, gate) = tokio::sync::oneshot::channel();
+            releases.push(release);
+            streams.push(vec![
+                StreamingSseChunk {
+                    gate: None,
+                    body: responses::sse(vec![responses::ev_response_created("running")]),
+                },
+                StreamingSseChunk {
+                    gate: Some(gate),
+                    body: responses::sse(vec![responses::ev_completed("running")]),
+                },
+            ]);
+        }
+        let request_count = streams.len();
+        let (server, _completions) = start_streaming_sse_server(streams).await;
         app.config.model = Some("gpt-5.2".into());
         app.config.model_provider_id = "lifecycle-test".into();
         app.config.model_provider = ModelProviderInfo {
@@ -454,7 +481,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                         SubAgentSource::ThreadSpawn {
                             parent_thread_id: id,
                             depth: 1,
-                            agent_path: None,
+                            agent_path: Some(AgentPath::root().join("worker").unwrap()),
                             agent_nickname: None,
                             agent_role: None,
                         },
@@ -464,6 +491,18 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                 )
                 .expect("materialize child session"),
             )?;
+            for (thread_id, timestamp) in
+                [(id, "2025-01-05T12-00-00"), (child, "2025-01-05T12-01-00")]
+            {
+                let path = app_test_support::rollout_path(
+                    &app.config.codex_home,
+                    timestamp,
+                    &thread_id.to_string(),
+                );
+                let mut meta = read_session_meta_line(&path).await?;
+                meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
+                append_rollout_item_to_path(&path, &RolloutItem::SessionMeta(meta)).await?;
+            }
             let state_db = codex_state::StateRuntime::init(
                 codex_state::SqliteConfig::new_for_testing(app.config.codex_home.clone()),
                 app.config.model_provider_id.clone(),
@@ -635,12 +674,28 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             render_bottom_popup(&app.chat_widget, /*width*/ 80)
         );
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
+        if attach_child {
+            Box::pin(app_server.resume_thread(
+                &app.local_settings,
+                app.config.clone(),
+                id,
+                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+            ))
+            .await?;
+            assert_eq!(
+                app_server
+                    .thread_read(primary, /*include_turns*/ false)
+                    .await?
+                    .can_accept_direct_input,
+                Some(false)
+            );
+        }
         app_server
             .request_handle()
             .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
                 request_id: RequestId::String(Uuid::new_v4().to_string()),
                 params: TurnStartParams {
-                    thread_id: primary.to_string(),
+                    thread_id: id.to_string(),
                     input: vec![codex_app_server_protocol::UserInput::Text {
                         text: "Keep working".into(),
                         text_elements: Vec::new(),
@@ -651,7 +706,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             .await?;
         tokio::time::timeout(
             std::time::Duration::from_secs(/*secs*/ 5),
-            server.wait_for_request_count(/*count*/ 1),
+            server.wait_for_request_count(request_count),
         )
         .await?;
         assert!(matches!(
@@ -728,7 +783,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             }
         }
         app_server.shutdown().await?;
-        drop(release);
+        drop(releases);
         server.shutdown().await;
     }
     Ok(())
