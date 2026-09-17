@@ -24,7 +24,7 @@ async fn unsupported_custom_tools_cannot_be_loaded_through_search() {
     let warnings = DroppedToolSurfaceWarnings::default();
     let mut registry = ToolRegistry::default();
     registry.add_with_exposure(
-        ApplyPatchHandler::new(/*include_environment_id*/ false),
+        ApplyPatchHandler::new(/*multi_environment*/ false),
         ToolExposure::Deferred,
     );
     registry.add_with_exposure(CurrentTimeHandler, ToolExposure::Deferred);
