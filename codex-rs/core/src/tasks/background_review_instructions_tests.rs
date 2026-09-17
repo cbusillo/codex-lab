@@ -11,7 +11,12 @@ use serde_json::json;
 
 fn packed_parts(text: &str) -> Vec<ReviewAgentsMdSnapshot> {
     pack_parts(
-        vec![source_block(1, "/repo", "file:///repo/AGENTS.md", text)],
+        vec![source_block(
+            /*rank*/ 1,
+            "/repo",
+            "file:///repo/AGENTS.md",
+            text,
+        )],
         &[],
     )
     .expect("test instructions fit the fixed part capacity")
@@ -79,7 +84,7 @@ fn packer_preserves_utf8_and_marks_every_part_with_one_digest() {
     }];
     let parts = pack_parts(
         vec![source_block(
-            1,
+            /*rank*/ 1,
             "/repo/nested",
             "file:///repo/nested/AGENTS.md",
             &"é".repeat(10_000),
@@ -128,7 +133,7 @@ fn oversized_source_headers_refuse_without_stalling_utf8_splitting() {
 fn packer_refuses_more_than_the_fixed_core_part_capacity() {
     let error = pack_parts(
         vec![source_block(
-            1,
+            /*rank*/ 1,
             "/repo",
             "file:///repo/AGENTS.md",
             &"x".repeat(REVIEW_PART_BODY_BYTES * (REVIEW_AGENTS_MD_PARTS + 1)),
@@ -141,7 +146,12 @@ fn packer_refuses_more_than_the_fixed_core_part_capacity() {
 
 #[test]
 fn source_blocks_keep_scope_and_rank_visible() {
-    let block = source_block(2, "/repo/a", "file:///repo/a/AGENTS.md", "RULE");
+    let block = source_block(
+        /*rank*/ 2,
+        "/repo/a",
+        "file:///repo/a/AGENTS.md",
+        "RULE",
+    );
     assert_eq!(
         block.header,
         "source rank 2; applies to files under `/repo/a`; source `file:///repo/a/AGENTS.md`"
@@ -322,7 +332,7 @@ fn history_reinjects_only_missing_review_part_and_accepts_out_of_order_history()
 fn omission_reason_keeps_utf8_boundaries() {
     let path =
         codex_utils_path_uri::PathUri::parse(&format!("file:///{}", "界".repeat(300))).unwrap();
-    let reason = omission_reason("too many sources", Some(&path), 1);
+    let reason = omission_reason("too many sources", Some(&path), /*count*/ 1);
     assert!(reason.len() <= 512);
     assert!(std::str::from_utf8(reason.as_bytes()).is_ok());
 }

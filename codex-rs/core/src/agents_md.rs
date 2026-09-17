@@ -404,10 +404,14 @@ impl LoadedAgentsMd {
             .iter()
             .chain(self.thread_instructions.iter())
             .map(|instructions| instructions.text.as_str())
-            .chain(self.entries.iter().filter_map(|entry| {
-                matches!(entry.provenance, InstructionProvenance::Internal)
-                    .then_some(entry.contents.as_str())
-            }))
+            .chain(
+                self.entries
+                    .iter()
+                    .filter_map(|entry| match &entry.provenance {
+                        InstructionProvenance::Internal => Some(entry.contents.as_str()),
+                        InstructionProvenance::Project { .. } => None,
+                    }),
+            )
             .collect::<Vec<_>>()
             .join("\n\n")
     }

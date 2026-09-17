@@ -81,6 +81,10 @@ trait ErasedWorldStateSection: Send + Sync {
 
     fn matches_retained_fragment(&self, role: &str, text: &str) -> bool;
 
+    fn requires_complete_retained_fragment(&self) -> bool {
+        false
+    }
+
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Value>,
@@ -128,6 +132,10 @@ impl<S: WorldStateSection> ErasedWorldStateSection for S {
 
     fn matches_retained_fragment(&self, role: &str, text: &str) -> bool {
         S::matches_retained_fragment(role, text)
+    }
+
+    fn requires_complete_retained_fragment(&self) -> bool {
+        review_agents_md_part::REVIEW_AGENTS_MD_PART_IDS.contains(&S::ID)
     }
 
     fn render_diff(
@@ -834,7 +842,7 @@ fn has_retained_fragment(
     // Complete review parts never carry the bounded-truncation envelope. Match
     // their immutable render and trusted kind together; another part or copied
     // user text must not suppress reinjection of a missing instruction part.
-    if review_agents_md_part::REVIEW_AGENTS_MD_PART_IDS.contains(&section_id) {
+    if section.requires_complete_retained_fragment() {
         let Some(fragment) = section.render_diff(PreviousSectionState::Absent) else {
             return false;
         };

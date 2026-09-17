@@ -198,7 +198,7 @@ async fn sibling_changed_targets_receive_only_their_scoped_rules_in_root_first_o
         repo.path().join("untouched/AGENTS.md"),
         "UNTOUCHED_REVIEW_RULE",
     )?;
-    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().join("a"))?;
     let server = responses::start_mock_server().await;
     let patch = ADD_FEATURE_PATCH
         .replace("feature.rs", "a/feature.rs")
@@ -242,6 +242,109 @@ async fn background_review_completes_when_no_agents_files_apply() -> Result<()> 
     submit_turn(&test.codex, &cwd, "add the feature").await?;
     background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Completed).await;
     assert!(review_instruction_parts(&mock.requests()[2]).is_empty());
+    shutdown_thread(&test.codex).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_project_instruction_loading_omits_project_agents_from_background_review()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let repo = create_git_repo()?;
+    std::fs::write(repo.path().join("AGENTS.md"), "DISABLED_PROJECT_RULE")?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mut bodies = code_changing_turn_responses("project-docs-disabled");
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("review"),
+        responses::ev_assistant_message("review-message", &review_output_json(/*findings*/ 0)),
+        responses::ev_completed("review"),
+    ]));
+    let mock = responses::mount_sse_sequence(&server, bodies).await;
+    let config_cwd = cwd.clone();
+    let test = test_codex()
+        .with_config(move |config| {
+            config.cwd = config_cwd;
+            config.project_doc_max_bytes = 0;
+        })
+        .build(&server)
+        .await?;
+    submit_turn(&test.codex, &cwd, "add the feature").await?;
+    background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Completed).await;
+    let review = mock.requests()[2].body_json().to_string();
+    assert!(!review.contains("DISABLED_PROJECT_RULE"));
+    assert!(review_instruction_parts(&mock.requests()[2]).is_empty());
+    shutdown_thread(&test.codex).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn near_context_budget_instructions_arrive_complete_in_bounded_parts() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let repo = create_git_repo()?;
+    let contents = format!("{}\nLATE_NEAR_BUDGET_RULE", "x".repeat(37_500));
+    std::fs::write(repo.path().join("AGENTS.md"), contents)?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mut bodies = code_changing_turn_responses("near-context-budget");
+    bodies.push(responses::sse(vec![
+        responses::ev_response_created("review"),
+        responses::ev_assistant_message("review-message", &review_output_json(/*findings*/ 0)),
+        responses::ev_completed("review"),
+    ]));
+    let mock = responses::mount_sse_sequence(&server, bodies).await;
+    let config_cwd = cwd.clone();
+    let test = test_codex()
+        .with_config(move |config| {
+            config.cwd = config_cwd;
+            config.project_doc_max_bytes = 64 * 1024;
+        })
+        .build(&server)
+        .await?;
+    submit_turn(&test.codex, &cwd, "add the feature").await?;
+    background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Completed).await;
+    let parts = review_instruction_parts(&mock.requests()[2]);
+    let total = parts.iter().map(String::len).sum::<usize>();
+    assert!(total >= 38 * 1024 && total <= 40 * 1024);
+    assert!(parts.iter().all(|part| part.len() <= 9 * 1024));
+    assert!(
+        parts
+            .iter()
+            .any(|part| part.contains("LATE_NEAR_BUDGET_RULE"))
+    );
+    shutdown_thread(&test.codex).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instructions_over_background_context_budget_fail_without_a_review_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let repo = create_git_repo()?;
+    std::fs::write(repo.path().join("AGENTS.md"), "x".repeat(44 * 1024))?;
+    let cwd = AbsolutePathBuf::try_from(repo.path().to_path_buf())?;
+    let server = responses::start_mock_server().await;
+    let mock =
+        responses::mount_sse_sequence(&server, code_changing_turn_responses("over-context-budget"))
+            .await;
+    let config_cwd = cwd.clone();
+    let test = test_codex()
+        .with_config(move |config| {
+            config.cwd = config_cwd;
+            config.project_doc_max_bytes = 64 * 1024;
+        })
+        .build(&server)
+        .await?;
+    submit_turn(&test.codex, &cwd, "add the feature").await?;
+    background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Failed).await;
+    let run = single_run(&AutoReviewStore::for_scope(
+        test.codex_home_path(),
+        repo.path(),
+    ));
+    assert_eq!(run.status, AutoReviewRunStatus::Failed);
+    assert_eq!(
+        run.error_summary.as_deref(),
+        Some(
+            "Background Review cannot verify complete AGENTS.md instructions: complete instructions exceed the Background Review context budget. The review request was not sent."
+        )
+    );
+    assert_eq!(mock.requests().len(), 2);
     shutdown_thread(&test.codex).await
 }
 

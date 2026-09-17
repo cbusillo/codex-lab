@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use codex_exec_server::ReadFileOptions;
+use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
@@ -101,7 +102,10 @@ impl BackgroundReviewInstructionsGate {
             .collect(step)
             .await
             .map_err(|reason| self.deny(reason))?;
-        if observed.fingerprint != prepared.fingerprint || observed.sources != prepared.sources {
+        if observed.fingerprint != prepared.fingerprint
+            || observed.sources != prepared.sources
+            || observed.parts != prepared.parts
+        {
             return Err(
                 self.deny("applicable instruction sources changed after review preparation")
             );
@@ -163,13 +167,17 @@ impl BackgroundReviewInstructionsGate {
             .file_system_sandbox_policy()
             .has_full_disk_read_access())
         .then(|| environment.sandbox_context(/*additional_permissions*/ None));
+        let project_instructions_enabled = !step.turn.config.active_project.is_untrusted()
+            && step.turn.config.project_doc_max_bytes > 0;
         let names = candidate_filenames(&step.turn.config, environment.cwd());
-        if self.paths.iter().any(|path| {
-            path.to_path_buf()
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| names.contains(&name))
-        }) {
+        if project_instructions_enabled
+            && self.paths.iter().any(|path| {
+                path.to_path_buf()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| names.contains(&name))
+            })
+        {
             return Err(
                 "the turn changes instruction files whose baseline scope is not available"
                     .to_string(),
@@ -191,7 +199,7 @@ impl BackgroundReviewInstructionsGate {
         if directories.len() > MAX_REVIEW_TARGET_DIRECTORIES {
             return Err(omission_reason(
                 "too many changed target directories",
-                directories.first(),
+                directories.get(MAX_REVIEW_TARGET_DIRECTORIES),
                 directories.len() - MAX_REVIEW_TARGET_DIRECTORIES,
             ));
         }
@@ -202,40 +210,44 @@ impl BackgroundReviewInstructionsGate {
             return Err("a changed path is outside the local review environment".to_string());
         }
 
-        let expected_root = project_root_for(
-            &step.turn.config,
-            environment.cwd(),
-            filesystem.as_ref(),
-            sandbox.as_ref(),
-            codex_file_system::FindUpErrorPolicy::Propagate,
-        )
-        .await
-        .map_err(|_| "applicable instruction files could not be discovered".to_string())?;
         let mut paths = HashSet::new();
-        for directory in &directories {
-            let root = project_root_for(
+        if project_instructions_enabled {
+            let expected_root = project_root_for(
                 &step.turn.config,
-                directory,
+                environment.cwd(),
                 filesystem.as_ref(),
                 sandbox.as_ref(),
                 codex_file_system::FindUpErrorPolicy::Propagate,
             )
             .await
             .map_err(|_| "applicable instruction files could not be discovered".to_string())?;
-            if root != expected_root {
-                return Err("a changed target belongs to an unsupported project root".to_string());
-            }
-            for path in agents_md_paths(
-                &step.turn.config,
-                directory,
-                filesystem.as_ref(),
-                sandbox.as_ref(),
-                codex_file_system::FindUpErrorPolicy::Propagate,
-            )
-            .await
-            .map_err(|_| "applicable instruction files could not be discovered".to_string())?
-            {
-                paths.insert(path);
+            for directory in &directories {
+                let root = project_root_for(
+                    &step.turn.config,
+                    directory,
+                    filesystem.as_ref(),
+                    sandbox.as_ref(),
+                    codex_file_system::FindUpErrorPolicy::Propagate,
+                )
+                .await
+                .map_err(|_| "applicable instruction files could not be discovered".to_string())?;
+                if root != expected_root {
+                    return Err(
+                        "a changed target belongs to an unsupported project root".to_string()
+                    );
+                }
+                for path in agents_md_paths(
+                    &step.turn.config,
+                    directory,
+                    filesystem.as_ref(),
+                    sandbox.as_ref(),
+                    codex_file_system::FindUpErrorPolicy::Propagate,
+                )
+                .await
+                .map_err(|_| "applicable instruction files could not be discovered".to_string())?
+                {
+                    paths.insert(path);
+                }
             }
         }
         let mut paths = paths.into_iter().collect::<Vec<_>>();
@@ -257,7 +269,7 @@ impl BackgroundReviewInstructionsGate {
         if let Some(loaded) = loaded {
             let global = loaded.non_project_text();
             if !global.trim().is_empty() {
-                source_blocks.push(source_block(0, "global", "host", &global));
+                source_blocks.push(source_block(/*rank*/ 0, "global", "host", &global));
                 sources.push(PreparedSource {
                     path: "<global>".to_string(),
                     digest: digest(&global),
@@ -273,7 +285,7 @@ impl BackgroundReviewInstructionsGate {
                     omission_reason(
                         "applicable instruction source could not be read",
                         Some(path),
-                        1,
+                        /*count*/ 1,
                     )
                 })?;
             raw_bytes = raw_bytes.saturating_add(bytes.len());
@@ -281,11 +293,15 @@ impl BackgroundReviewInstructionsGate {
                 return Err(omission_reason(
                     "instruction loading was truncated or failed",
                     Some(path),
-                    1,
+                    /*count*/ 1,
                 ));
             }
             let contents = std::str::from_utf8(&bytes).map_err(|_| {
-                omission_reason("instruction loading was truncated or failed", Some(path), 1)
+                omission_reason(
+                    "instruction loading was truncated or failed",
+                    Some(path),
+                    /*count*/ 1,
+                )
             })?;
             let scope = path
                 .parent()
@@ -348,7 +364,7 @@ fn pack_parts(
     if chunks.len() > REVIEW_AGENTS_MD_PARTS {
         return Err(omission_reason(
             "complete instructions exceed the Background Review part capacity",
-            None,
+            /*path*/ None,
             chunks.len() - REVIEW_AGENTS_MD_PARTS,
         ));
     }
@@ -369,9 +385,9 @@ fn pack_parts(
         .map(|part| ReviewAgentsMdFragment(part.clone()).render().len())
         .sum::<usize>();
     if rendered_bytes > REVIEW_AGENTS_MD_TOTAL_BYTES
-        || parts
-            .iter()
-            .any(|part| ReviewAgentsMdFragment(part.clone()).render().len() > 9 * 1024)
+        || parts.iter().any(|part| {
+            ReviewAgentsMdFragment(part.clone()).render().len() > MAX_WORLD_STATE_SECTION_BYTES
+        })
     {
         return Err(
             "complete instructions exceed the Background Review context budget".to_string(),

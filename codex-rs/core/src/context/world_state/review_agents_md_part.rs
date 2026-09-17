@@ -58,16 +58,9 @@ impl<const N: usize> WorldStateSection for ReviewAgentsMdPart<N> {
     }
 
     fn has_retained_fragment_matcher() -> bool {
+        // The core world-state adapter requires the exact render and trusted
+        // content kind for these parts, including untruncated fragments.
         true
-    }
-
-    fn matches_retained_fragment(role: &str, text: &str) -> bool {
-        // The generic retained matcher authenticates the full rendered text using
-        // this section's persisted snapshot hash. Do not accept a marker-only
-        // fallback: another part, a truncation envelope, or copied user text
-        // must cause this exact part to be emitted again.
-        let _ = (role, text);
-        false
     }
 
     fn render_diff(
@@ -103,7 +96,7 @@ impl ContextualUserFragment for ReviewAgentsMdFragment {
 
     fn body(&self) -> String {
         format!(
-            " part {}/{} digest={}\nHigher-ranked sources override lower-ranked sources only within their stated scope.\n{}\n",
+            " part {}/{} digest={}\nSources use increasing precedence: larger rank numbers override smaller rank numbers only within their stated scope.\n{}\n",
             self.0.ordinal + 1,
             self.0.total,
             self.0.digest,
