@@ -38,7 +38,7 @@ fn callback_line_is_bounded_and_does_not_expose_input_in_errors() {
     );
     assert_eq!(
         format!(
-            "{:?}",
+            "{:#}",
             read_callback_line(Cursor::new(b"sensitive\xff")).unwrap_err()
         ),
         "OAuth callback URL must be valid UTF-8"
