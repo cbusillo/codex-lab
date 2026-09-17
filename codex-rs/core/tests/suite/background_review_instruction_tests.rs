@@ -200,12 +200,10 @@ async fn sibling_changed_targets_receive_only_their_scoped_rules_in_root_first_o
     )?;
     let cwd = AbsolutePathBuf::try_from(repo.path().join("a"))?;
     let server = responses::start_mock_server().await;
-    let patch = ADD_FEATURE_PATCH
-        .replace("feature.rs", "a/feature.rs")
-        .replace(
-            "*** End Patch",
-            "*** Add File: b/feature.rs\n+pub fn b() {}\n*** End Patch",
-        );
+    let patch = ADD_FEATURE_PATCH.replace(
+        "*** End Patch",
+        "*** Add File: ../b/feature.rs\n+pub fn b() {}\n*** End Patch",
+    );
     let mut bodies = code_changing_turn_responses_with_patch("siblings", &patch);
     bodies.push(responses::sse(vec![
         responses::ev_response_created("review"),
@@ -216,6 +214,8 @@ async fn sibling_changed_targets_receive_only_their_scoped_rules_in_root_first_o
     let test = build_codex_in_repo(&server, cwd.clone(), /*budget*/ None).await?;
     submit_turn(&test.codex, &cwd, "add both scoped features").await?;
     background_review_statuses_until(&test.codex, BackgroundAutoReviewStatus::Completed).await;
+    assert!(repo.path().join("a/feature.rs").is_file());
+    assert!(repo.path().join("b/feature.rs").is_file());
     let parts = review_instruction_parts(&mock.requests()[2]).join("\n");
     let root = parts.find("ROOT_REVIEW_RULE").unwrap();
     let a = parts.find("A_REVIEW_RULE").unwrap();
