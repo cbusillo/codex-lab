@@ -492,6 +492,7 @@ async fn astra_kickoff_with_skills_plugins_and_remote_compaction() -> Result<()>
         paths.sort();
         assert_eq!(paths, expected_paths);
     }
+    drop(observed_paths);
 
     let requests = mock.requests();
     insta::assert_snapshot!(
@@ -556,7 +557,7 @@ async fn astra_settings_release_check_with_direct_and_code_mode_tools() -> Resul
         vec![
             sse(vec![
                 ev_response_created("agents-response"),
-                ev_function_call_with_namespace("agents-call", "collaboration", "list_agents", "{}"),
+                ev_function_call_with_namespace("agents-call", "agents", "list_agents", "{}"),
                 ev_completed("agents-response"),
             ]),
             sse(vec![
@@ -608,11 +609,22 @@ text(`MCP: ${ping.structuredContent?.echo ?? "missing"}`);"#,
     .await;
 
     test.submit_turn("Check the Settings release. Read release/diagnostics.log, inspect release/settings.png, confirm the local MCP integration responds, and update release/status.md with the result. Tell me whether another agent is working on this task.").await?;
+    let requests = mock.requests();
+    let agents_output = requests[1].function_call_output("agents-call");
+    let agents: serde_json::Value = serde_json::from_str(
+        agents_output["output"]
+            .as_str()
+            .expect("agent list is JSON text"),
+    )?;
+    assert_eq!(
+        agents,
+        json!({"agents": [{"agent_name": "/root", "agent_status": "running"}]})
+    );
     insta::assert_snapshot!(
         "astra_settings_release_check_tool_shapes",
         context_snapshot::format_request_history_snapshot(
             "Astra checks a Settings release using direct collaboration and Code Mode tools.",
-            &mock.requests(),
+            &requests,
             &ContextSnapshotOptions::default().include_request_settings(),
         )
     );

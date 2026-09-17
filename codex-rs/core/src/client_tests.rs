@@ -262,25 +262,27 @@ impl ModelProvider for SetupRefreshProvider {
         &self,
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<codex_api::Provider>> {
         Box::pin(async move {
-            self.setup_calls.fetch_add(1, Ordering::SeqCst);
+            let first_setup = self.setup_calls.fetch_add(1, Ordering::SeqCst) == 0;
             let manager = self.inner.auth_manager().expect("auth manager");
-            match &self.refresh {
-                SetupRefresh::Command(token_path) => {
-                    std::fs::write(token_path, "refreshed-token")?;
-                    manager
-                        .refresh_token_from_authority()
-                        .await
-                        .expect("refresh command token");
-                }
-                SetupRefresh::ChatGpt {
-                    home,
-                    token,
-                    workspace,
-                } => {
-                    codex_login::auth::login_with_chatgpt_auth_tokens(
-                        home, token, workspace, /*chatgpt_plan_type*/ None,
-                    )?;
-                    manager.reload().await;
+            if first_setup {
+                match &self.refresh {
+                    SetupRefresh::Command(token_path) => {
+                        std::fs::write(token_path, "refreshed-token")?;
+                        manager
+                            .refresh_token_from_authority()
+                            .await
+                            .expect("refresh command token");
+                    }
+                    SetupRefresh::ChatGpt {
+                        home,
+                        token,
+                        workspace,
+                    } => {
+                        codex_login::auth::login_with_chatgpt_auth_tokens(
+                            home, token, workspace, /*chatgpt_plan_type*/ None,
+                        )?;
+                        manager.reload().await;
+                    }
                 }
             }
             self.inner.api_provider().await
