@@ -2,12 +2,11 @@
 
 import itertools
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import textwrap
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -87,6 +86,122 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             "name: Configure job-scoped Rust tool state",
         )
 
+    def nextest_tests_script(self, *, local: bool, remote: bool = False) -> str:
+        workflow = (
+            ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml"
+        ).read_text()
+        script = shell_block(workflow, "      - name: tests\n")
+        replacements = {
+            "${{ inputs.use_local_resources }}": "true" if local else "false",
+            "${{ inputs.target }}": "aarch64-apple-darwin",
+            "${{ inputs.profile }}": "ci-test",
+            "${{ inputs.test_threads }}": "4",
+            "${{ inputs.remote_env }}": "true" if remote else "false",
+            "${{ inputs.remote_test_filter }}": "",
+            "${{ github.run_id }}": "test-run",
+            "${{ matrix.shard }}": "1",
+            "${{ matrix.partition_count }}": "4",
+        }
+        for source, replacement in replacements.items():
+            script = script.replace(source, replacement)
+        return script.replace(
+            "python3 ../.github/scripts/local_build_resources.py exec --",
+            '"${LOCAL_BUILD_WRAPPER}" --',
+        )
+
+    def nextest_version_guard_script(self) -> str:
+        workflow = (
+            ROOT / ".github/workflows/rust-ci-full-nextest-platform.yml"
+        ).read_text()
+        guard = workflow.split(
+            '          nextest_bin="$(command -v cargo-nextest || true)"', 1
+        )[1]
+        guard = guard.split("          archive_dir=", 1)[0]
+        return textwrap.dedent(
+            'nextest_bin="$(command -v cargo-nextest || true)"' + guard
+        )
+
+    def run_nextest_behavior(
+        self, *, local: bool, version: str = "0.9.111", run_status: int = 0
+    ) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            codex_rs = workspace / "codex-rs"
+            (workspace / ".github/scripts").mkdir(parents=True)
+            codex_rs.mkdir()
+            (workspace / ".github/scripts/local_build_resources.py").symlink_to(
+                ROOT / ".github/scripts/local_build_resources.py"
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            target_dir = root / "cargo-target"
+            target_dir.mkdir()
+            helper_dir = root / "helpers"
+            helper_dir.mkdir()
+            for name in ("codex-code-mode-host", "codex-execve-wrapper"):
+                (helper_dir / name).write_text("helper\n")
+            mock = bin_dir / "cargo-nextest"
+            mock.write_text(
+                textwrap.dedent(
+                    f"""\
+                    #!/bin/bash
+                    set -euo pipefail
+                    if [[ "${{1:-}}" == "nextest" && "${{2:-}}" == "--version" ]]; then
+                      echo "cargo-nextest {version} (mock)"
+                      exit 0
+                    fi
+                    printf '%s\\n' "$*" >> "${{MOCK_LOG}}"
+                    profile=default
+                    for arg in "$@"; do
+                      if [[ "${{previous:-}}" == "--profile" ]]; then profile="$arg"; fi
+                      previous="$arg"
+                    done
+                    mkdir -p "$(pwd)/target/nextest/$profile"
+                    printf '<testsuite tests="1"/>\\n' > "$(pwd)/target/nextest/$profile/junit.xml"
+                    exit {run_status}
+                    """
+                )
+            )
+            mock.chmod(0o755)
+            wrapper = root / "wrapper"
+            wrapper.write_text('#!/bin/bash\nshift\nexec "$@"\n')
+            wrapper.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "RUNNER_TEMP": str(root),
+                "CARGO_TARGET_DIR": str(target_dir),
+                "TEST_HELPERS_ARTIFACT": "helpers",
+                "NEXTEST_ARCHIVE_FILE": "archive.tar.zst",
+                "LOCAL_BUILD_WRAPPER": str(wrapper),
+                "MOCK_LOG": str(root / "mock.log"),
+                "RUNNER_OS": "macOS",
+                "REMOTE_TEST_FILTER": "",
+            }
+            (root / "nextest-archive").mkdir()
+            (root / "nextest-archive" / "archive.tar.zst").write_text("archive\n")
+            result = subprocess.run(
+                ["bash", "-c", self.nextest_tests_script(local=local)],
+                cwd=codex_rs,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            log = (
+                (root / "mock.log").read_text() if (root / "mock.log").exists() else ""
+            )
+            junit = codex_rs / "target/nextest/default/junit.xml"
+            local_junit = codex_rs / "target/nextest/local/junit.xml"
+            artifact = root / "nextest-junit/native.xml"
+            contents = artifact.read_text() if artifact.exists() else ""
+            for path in (junit, local_junit):
+                if path.exists():
+                    path.unlink()
+            return result.returncode, log, contents
+
     def test_local_setup_exports_private_cargo_home_and_marker(self) -> None:
         code, output, environment, path, error = self.run_shell(self.setup_script())
         self.assertEqual(
@@ -99,6 +214,58 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             ),
             error,
         )
+
+    def test_nextest_selects_profile_and_junit_store_for_local_mode(self) -> None:
+        for local in (False, True):
+            with self.subTest(local=local):
+                code, log, junit = self.run_nextest_behavior(local=local)
+                expected = "local" if local else "default"
+                self.assertEqual((code, junit), (0, '<testsuite tests="1"/>\n'))
+                self.assertIn(f"--profile {expected}", log)
+
+    def test_nextest_aborts_before_run_on_version_mismatch(self) -> None:
+        code, log, junit = self.run_nextest_behavior(local=False, version="0.9.1110")
+        self.assertNotEqual(code, 0)
+        self.assertEqual((log, junit), ("", ""))
+
+    def test_nextest_windows_guard_preserves_spaces_when_converting_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            nextest = bin_dir / "cargo-nextest"
+            nextest.write_text(
+                "#!/bin/bash\nprintf 'cargo-nextest 0.9.111 (mock)\\n'\n"
+            )
+            nextest.chmod(0o755)
+            cygpath = bin_dir / "cygpath"
+            cygpath.write_text(
+                "#!/bin/bash\nprintf 'C:/runner/nextest path/cargo-nextest.exe\\n'\n"
+            )
+            cygpath.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", self.nextest_version_guard_script()],
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "RUNNER_OS": "Windows",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "using cargo-nextest 0.9.111 at C:/runner/nextest path/cargo-nextest.exe",
+                result.stdout,
+            )
+
+    def test_nextest_preserves_native_failure_after_junit_copy(self) -> None:
+        code, log, junit = self.run_nextest_behavior(local=False, run_status=7)
+        self.assertEqual(code, 7)
+        self.assertIn("--profile default", log)
+        self.assertEqual(junit, '<testsuite tests="1"/>\n')
 
     def test_hosted_setup_preserves_cargo_home_without_local_mutation(self) -> None:
         code, output, environment, path, error = self.run_shell(

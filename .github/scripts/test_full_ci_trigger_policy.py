@@ -356,7 +356,7 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             1,
         )
         self.assertIn(
-            'junit_source="${workspace_root}/target/nextest/default/junit.xml"',
+            'junit_source="${workspace_root}/target/nextest/${nextest_profile}/junit.xml"',
             platform_workflow,
         )
         junit_upload = platform_workflow.split(

@@ -190,8 +190,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.111
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -215,10 +214,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          nextest_bin="$(command -v cargo-nextest || true)"
+          if [[ -z "${nextest_bin}" ]]; then
+            echo "::error::cargo-nextest 0.9.111 was not found after installation"
+            exit 1
+          fi
+          nextest_version="$("${nextest_bin}" nextest --version | awk 'NR == 1 { print $2 }')"
+          if [[ "${nextest_version}" != "0.9.111" ]]; then
+            echo "::error::expected cargo-nextest 0.9.111 at ${nextest_bin}, found ${nextest_version:-unknown}"
+            exit 1
+          fi
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            nextest_bin="$(cygpath -w "${nextest_bin}")"
+          fi
+          echo "::notice::using cargo-nextest ${nextest_version} at ${nextest_bin}"
           archive_dir="${RUNNER_TEMP}/nextest-archive"
           mkdir -p "${archive_dir}"
           python3 ../.github/scripts/local_build_resources.py exec -- \
-            cargo nextest archive \
+            "${nextest_bin}" nextest archive \
             --target ${{ inputs.target }} \
             --cargo-profile ${{ inputs.profile }} \
             --timings \
@@ -417,8 +430,7 @@ jobs:
 
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
+          tool: nextest@0.9.111
 
       - name: Enable unprivileged user namespaces (Linux)
         if: runner.os == 'Linux'
@@ -458,10 +470,29 @@ jobs:
           archive_file="${RUNNER_TEMP}/nextest-archive/${NEXTEST_ARCHIVE_FILE}"
           workspace_root="$(pwd)"
           junit_dir="${RUNNER_TEMP}/nextest-junit"
+          nextest_profile=default
+          if [[ "${{ inputs.use_local_resources }}" == "true" ]]; then
+            nextest_profile=local
+          fi
           # Nextest resolves its configured store directory from the remapped
           # workspace root, independently of Cargo's target directory.
-          junit_source="${workspace_root}/target/nextest/default/junit.xml"
+          junit_source="${workspace_root}/target/nextest/${nextest_profile}/junit.xml"
           mkdir -p "${junit_dir}"
+
+          nextest_bin="$(command -v cargo-nextest || true)"
+          if [[ -z "${nextest_bin}" ]]; then
+            echo "::error::cargo-nextest 0.9.111 was not found after installation"
+            exit 1
+          fi
+          nextest_version="$("${nextest_bin}" nextest --version | awk 'NR == 1 { print $2 }')"
+          if [[ "${nextest_version}" != "0.9.111" ]]; then
+            echo "::error::expected cargo-nextest 0.9.111 at ${nextest_bin}, found ${nextest_version:-unknown}"
+            exit 1
+          fi
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            nextest_bin="$(cygpath -w "${nextest_bin}")"
+          fi
+          echo "::notice::using cargo-nextest ${nextest_version} at ${nextest_bin}"
 
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             original_home="${HOME}"
@@ -518,6 +549,7 @@ jobs:
 
           nextest_args=(
             run
+            --profile "${nextest_profile}"
             --archive-file "${archive_file}"
             --workspace-remap "${workspace_root}"
             --partition "hash:${{ matrix.shard }}/${{ matrix.partition_count }}"
@@ -537,7 +569,7 @@ jobs:
                 "CARGO_BIN_EXE_codex_execve_wrapper=${execve_wrapper}" \
                 "CARGO_BIN_EXE_codex-linux-sandbox=${sandbox_helper}" \
                 "CARGO_BIN_EXE_codex_linux_sandbox=${sandbox_helper}" \
-                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- "${nextest_bin}" nextest "$@"
             elif [[ "${RUNNER_OS}" == "Windows" ]]; then
               local setup_helper
               local command_runner
@@ -550,14 +582,14 @@ jobs:
                 "CARGO_BIN_EXE_codex_code_mode_host=${code_mode_host_win}" \
                 "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
                 "CARGO_BIN_EXE_codex_command_runner=${command_runner}" \
-                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- "${nextest_bin}" nextest "$@"
             else
               env \
                 "CARGO_BIN_EXE_codex-code-mode-host=${code_mode_host}" \
                 "CARGO_BIN_EXE_codex_code_mode_host=${code_mode_host}" \
                 "CARGO_BIN_EXE_codex-execve-wrapper=${execve_wrapper}" \
                 "CARGO_BIN_EXE_codex_execve_wrapper=${execve_wrapper}" \
-                python3 ../.github/scripts/local_build_resources.py exec -- cargo nextest "$@"
+                python3 ../.github/scripts/local_build_resources.py exec -- "${nextest_bin}" nextest "$@"
             fi
           }
 
