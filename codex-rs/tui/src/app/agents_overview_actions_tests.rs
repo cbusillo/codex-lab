@@ -530,15 +530,20 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         } else {
             id
         };
-        let resumed = Box::pin(app_server.resume_thread(
-            &app.local_settings,
-            app.config.clone(),
-            primary,
-            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-        ))
-        .await?;
-        app.enqueue_primary_thread_session(resumed.session, resumed.turns)
+        // Restore the owner before attaching its persisted V2 child.
+        for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
+            let resumed = Box::pin(app_server.resume_thread(
+                &app.local_settings,
+                app.config.clone(),
+                thread_id,
+                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+            ))
             .await?;
+            if thread_id == primary {
+                app.enqueue_primary_thread_session(resumed.session, resumed.turns)
+                    .await?;
+            }
+        }
         app.agents_overview.threads.insert(
             id,
             Some(overview_thread(
@@ -591,15 +596,19 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                     .is_some()
             );
             std::fs::remove_dir(&blocked_archive)?;
-            let resumed = Box::pin(app_server.resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                primary,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            ))
-            .await?;
-            app.enqueue_primary_thread_session(resumed.session, resumed.turns)
+            for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
+                let resumed = Box::pin(app_server.resume_thread(
+                    &app.local_settings,
+                    app.config.clone(),
+                    thread_id,
+                    crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+                ))
                 .await?;
+                if thread_id == primary {
+                    app.enqueue_primary_thread_session(resumed.session, resumed.turns)
+                        .await?;
+                }
+            }
             app.open_agents_overview(&app_server);
         }
         let background = ThreadId::from_string(
@@ -675,13 +684,6 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         );
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
         if attach_child {
-            Box::pin(app_server.resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                id,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            ))
-            .await?;
             assert_eq!(
                 app_server
                     .thread_read(primary, /*include_turns*/ false)
@@ -709,13 +711,15 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             server.wait_for_request_count(request_count),
         )
         .await?;
-        assert!(matches!(
-            app_server
-                .thread_read(primary, /*include_turns*/ false)
-                .await?
-                .status,
-            ThreadStatus::Active { .. }
-        ));
+        for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
+            assert!(matches!(
+                app_server
+                    .thread_read(thread_id, /*include_turns*/ false)
+                    .await?
+                    .status,
+                ThreadStatus::Active { .. }
+            ));
+        }
         app.chat_widget.handle_key_event(key);
         let confirmation = std::iter::from_fn(|| rx.try_recv().ok())
             .find(|event| matches!(event, AppEvent::ConfirmAgentsOverviewAction { .. }))

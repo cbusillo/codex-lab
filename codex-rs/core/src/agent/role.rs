@@ -1,10 +1,8 @@
-//! Applies agent-role configuration layers on top of an existing session config.
+//! Applies bounded agent-role overrides on top of an existing session config.
 //!
-//! Roles are selected at spawn time and are loaded with the same config machinery as
-//! `config.toml`. This module resolves built-in and user-defined role files, inserts the role as a
-//! high-precedence layer, and preserves the caller's current model, reasoning effort, provider,
-//! and service tier unless the role layer sets them. It does not decide when to spawn a sub-agent
-//! or which role to use; the multi-agent tool handler owns that orchestration.
+//! Roles can customize model settings and instructions or disable selected tools and skills.
+//! A projected configuration layer preserves the parent's authority and caller-owned runtime
+//! settings. The multi-agent tool handler decides when to spawn a sub-agent and which role to use.
 
 use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
@@ -18,12 +16,18 @@ use codex_agent_roles::parse_agent_role_file_contents;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
+use codex_config::SkillsConfig;
 use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
+use codex_features::feature_for_key;
 use codex_protocol::config_types::Personality;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Verbosity;
 use codex_protocol::models::BaseInstructionsProvenance;
+use codex_protocol::openai_models::ReasoningEffort;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -34,12 +38,26 @@ use toml::Value as TomlValue;
 pub const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
+#[derive(Default, Serialize)]
+struct AgentRoleOverrides {
+    developer_instructions: Option<String>,
+    model: Option<String>,
+    model_reasoning_effort: Option<ReasoningEffort>,
+    model_reasoning_summary: Option<ReasoningSummary>,
+    model_verbosity: Option<Verbosity>,
+    personality: Option<Personality>,
+    service_tier: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    features: BTreeMap<String, bool>,
+    skills: Option<SkillsConfig>,
+}
+
 /// Applies a named role layer to `config` while preserving caller-owned provider settings.
 ///
 /// The role layer is inserted at session-flag precedence so it can override persisted config, but
-/// the caller's current `model_provider` and `service_tier` remain sticky runtime choices unless
-/// the role explicitly sets the corresponding top-level config key. Rebuilding the config without
-/// those overrides would make a spawned agent silently fall back to default settings.
+/// the caller's current `model_provider` remains a sticky runtime choice. The service tier also
+/// stays unchanged unless the role explicitly sets it. Rebuilding the config without those
+/// overrides would make a spawned agent silently fall back to default settings.
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
@@ -103,6 +121,47 @@ async fn apply_role_to_config_inner(
         return Ok(());
     };
     let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
+    let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
+    let mut role_overrides = AgentRoleOverrides {
+        developer_instructions: role_config.developer_instructions,
+        model: role_config.model,
+        model_reasoning_effort: role_config.model_reasoning_effort,
+        model_reasoning_summary: role_config.model_reasoning_summary,
+        model_verbosity: role_config.model_verbosity,
+        personality: role_config.personality,
+        service_tier: role_config.service_tier,
+        ..Default::default()
+    };
+    if let Some(features) = role_config.features {
+        for (key, enabled) in features.entries() {
+            if !enabled
+                && let Some(
+                    feature @ (Feature::ShellTool
+                    | Feature::Apps
+                    | Feature::Plugins
+                    | Feature::MemoryTool
+                    | Feature::RequestPermissionsTool),
+                ) = feature_for_key(&key)
+            {
+                role_overrides
+                    .features
+                    .insert(feature.key().to_string(), false);
+            }
+        }
+    }
+    if let Some(mut skills) = role_config.skills {
+        skills.config.retain(|skill| !skill.enabled);
+        skills.bundled = skills.bundled.filter(|bundled| !bundled.enabled);
+        skills.include_instructions = skills.include_instructions.filter(|enabled| !enabled);
+        skills.max_context_tokens = None;
+        if !skills.config.is_empty()
+            || skills.bundled.is_some()
+            || skills.include_instructions.is_some()
+        {
+            role_overrides.skills = Some(skills);
+        }
+    }
+    let role_layer_toml = TomlValue::try_from(&role_overrides)?;
     if role_layer_toml
         .as_table()
         .is_some_and(toml::map::Map::is_empty)
@@ -127,6 +186,13 @@ async fn apply_role_to_config_inner(
         preserve_current_service_tier,
     )
     .await?;
+    if role_overrides
+        .skills
+        .as_ref()
+        .is_some_and(|skills| skills.include_instructions == Some(false))
+    {
+        next_config.include_skill_instructions = false;
+    }
     next_config.permissions = permissions;
     next_config.approvals_reviewer = approvals_reviewer;
     next_config.mcp_servers = mcp_servers;
@@ -183,9 +249,6 @@ async fn load_role_layer_toml(
                 "chatgpt_base_url",
             ] {
                 table.remove(key);
-            }
-            if let Some(features) = table.get_mut("features").and_then(TomlValue::as_table_mut) {
-                features.remove("apps");
             }
         }
         (role_config_toml, role_config_base)
