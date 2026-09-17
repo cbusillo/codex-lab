@@ -44,6 +44,7 @@ GOVERNANCE_PATHS = (
     ".github/scripts/test_convergence_guard_workflows.py",
     ".github/workflows/blocking-ci.yml",
     ".github/workflows/repo-checks.yml",
+    *inventory.CANDIDATE_CONTROL_PATHS,
 )
 
 

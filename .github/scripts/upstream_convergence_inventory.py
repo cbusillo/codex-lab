@@ -25,14 +25,16 @@ LANE_PRIORITY = {
 
 SCHEMA_VERSION = 2
 GUARD_SCHEMA_VERSION = 1
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 LEGACY_POLICY_VERSION = 1
 PREVIOUS_POLICY_VERSION = 2
+POLICY_V5_VERSION = 5
 SUPPORTED_POLICY_VERSIONS = (
     LEGACY_POLICY_VERSION,
     PREVIOUS_POLICY_VERSION,
     3,
     4,
+    POLICY_V5_VERSION,
     POLICY_VERSION,
 )
 
@@ -587,6 +589,26 @@ POLICY_V5_RULES = (
 )
 
 
+CANDIDATE_CONTROL_PATHS = (
+    ".github/workflows/upstream-convergence.yml",
+    ".github/scripts/upstream_candidate_preflight.py",
+    ".github/scripts/test_upstream_candidate_preflight.py",
+    ".github/scripts/extract_ci_root_failures.py",
+    ".github/scripts/test_extract_ci_root_failures.py",
+)
+
+
+POLICY_V6_RULES = (
+    Rule(
+        patterns=CANDIDATE_CONTROL_PATHS,
+        lane="intentionally_owned",
+        contracts=("GOVERNANCE-1",),
+        reason="trusted candidate convergence evidence and routing controls",
+    ),
+    *POLICY_V5_RULES,
+)
+
+
 def git_environment(**updates: str) -> dict[str, str]:
     env = {
         key: value
@@ -733,8 +755,10 @@ def rules_for_policy(policy_version: int) -> tuple[Rule, ...]:
         return POLICY_V3_RULES
     if policy_version == 4:
         return POLICY_V4_RULES
-    if policy_version == POLICY_VERSION:
+    if policy_version == POLICY_V5_VERSION:
         return POLICY_V5_RULES
+    if policy_version == POLICY_VERSION:
+        return POLICY_V6_RULES
     raise ValueError(
         f"unsupported policy version {policy_version}; "
         f"expected one of {SUPPORTED_POLICY_VERSIONS}"

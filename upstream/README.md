@@ -53,7 +53,7 @@ and the upstream blob, drawn from two sources:
 - `ownership_baseline`: the path already differed from upstream at the pinned
   pre-anchor local baseline.
 - `current_tree`: the path is owned in the candidate itself. Owned work created
-  or restored *after* the baseline is invisible to the baseline source, so
+  or restored _after_ the baseline is invisible to the baseline source, so
   without this the manifest had to be hand-edited to protect new proofs, and a
   hand-edited generated artifact drifts silently. Adding a path can only
   increase protection, so this source cannot launder an anchor loss.
@@ -128,6 +128,58 @@ exist, declared symbol text remains present, suite proofs stay registered, and
 non-executable release claims name a deciding issue. The recorded CI tiers are
 an inventory; they do not imply that nightly or release proof runs on every pull
 request. Bootstrap history remains available in the completed issue #428.
+
+## Committed repair checkpoints
+
+Before resuming a committed candidate or delegating its patch to a model, use
+`.github/scripts/upstream_convergence_checkpoint.py` from the pinned, clean
+tooling checkout. This is a provenance check; it neither runs validation nor
+proves that a recorded test outcome is correct. It supports clean task branches
+in linked worktrees, with both pinned local and upstream commits in candidate
+ancestry. An unresolved or dirty merge must remain in its worktree until its
+owner resolves and commits it; it cannot pass this committed-state verifier.
+
+Keep configuration, validation evidence, and checkpoint artifacts outside both
+worktrees. The configuration is a JSON object with `schemaVersion: 1`, a stable
+`attemptId`, timezone-qualified original `startedAt`, and a `settings` object.
+Validation evidence has `schemaVersion: 1`, the same `attemptId`, the exact
+`candidate` commit, and `checks`, a list of objects with `name`, `outcome`
+(`passed`, `failed`, or `not-run`), and `artifactSha256` (digest or null).
+Put relevant build/toolchain/environment settings in the configuration and
+retain the referenced logs. Digests preserve claims; they do not establish them.
+
+```sh
+uv run --no-project python /trusted/tooling/.github/scripts/upstream_convergence_checkpoint.py record \
+  --repo /isolated/candidate --base <merge-base-sha> --local <local-sha> \
+  --upstream <upstream-sha> --candidate <candidate-sha> --source <tooling-sha> \
+  --config /artifacts/config.json --validation /artifacts/validation.json \
+  --checkpoint /artifacts/checkpoint.json
+```
+
+Retain the returned `candidate`, `attemptId`, `checkpoint`, and `sha256` as
+`checkpointReceipt` in the corresponding repair ledger cycle (the ledger `cycleId`
+and cycle `repairHead` must match), and record the receipt in the active GitHub issue.
+For a pre-repair checkpoint, retain it in that issue's attempt record. Resume
+with the same arguments, replacing `record` with `verify --sha256 <retained-digest>`.
+Do not derive this expected digest from the artifact being verified.
+
+The verifier compares complete ordered upstream-to-candidate blob/mode/path
+rows and a local-to-candidate inventory digest. Full inventories stay in the
+artifact; only bounded summaries and selected packets enter model context.
+Missing or reversed rows, stale validation, changed configuration, or changed
+tooling fail before delegation. Hand off the verified commit, never a floating
+worktree; any later change requires a new verification or an appended checkpoint.
+Existing checkpoints cannot be overwritten. Tooling changes intentionally
+require a new checkpoint with the previous evidence retained.
+
+This detects drift, not an actor rewriting both receipt and artifact. Ignored
+build files, local Git configuration, filters, hooks, and the live environment
+are not attested; configuration and validation evidence must describe relevant
+inputs. The helper carries the original timer start without pausing or restarting
+elapsed time. Disposable fixture runs are preparation, not timed convergence.
+After the second recorded repair cycle of any kind, including a repeated cause,
+the repair ledger requests root-cause review before a third cycle. Preserve the
+candidate and all accounting; continue only with a bounded path or park the attempt.
 
 ## Supported command
 
