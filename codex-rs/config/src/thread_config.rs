@@ -286,6 +286,11 @@ mod tests {
                     supports_websockets = true
                     supports_standalone_web_search = true
 
+                    [model_providers.local.capabilities]
+                    namespace_tools = true
+                    custom_tools = true
+                    web_search = true
+
                     [features]
                     plugins = false
                 }
@@ -314,6 +319,7 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         }
     }
 }

@@ -612,6 +612,7 @@ mod thread_processor_behavior_tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: false,
+            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         };
         let config_manager = ConfigManager::new(ConfigManagerArgs {
             auth_home: temp_dir.path().to_path_buf(),

@@ -5,6 +5,9 @@
 //!   2. User-defined entries inside `~/.codex/config.toml` under the `model_providers`
 //!      key. These override or extend the defaults at runtime.
 
+mod capabilities;
+pub use capabilities::ModelProviderCapabilities;
+
 use codex_api::Provider as ApiProvider;
 use codex_api::RetryConfig as ApiRetryConfig;
 use codex_protocol::auth::AuthMode;
@@ -155,6 +158,9 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
+    /// Tool-surface capabilities the provider's API accepts.
+    #[serde(default)]
+    pub capabilities: ModelProviderCapabilities,
 }
 
 /// One-way identity for canonical provider configuration and credential fields.
@@ -548,6 +554,7 @@ other non-default provider fields are not supported"
             requires_openai_auth: true,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -584,6 +591,7 @@ other non-default provider fields are not supported"
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -802,6 +810,15 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        // Local OpenAI-compatible servers do not accept the OpenAI-specific
+        // `namespace` or freeform `custom` tool types or the hosted
+        // `web_search` tool, so the bundled local providers default to the
+        // flat function-tool surface.
+        capabilities: ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: false,
+        },
     }
 }
 

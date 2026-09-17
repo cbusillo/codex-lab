@@ -171,6 +171,7 @@ mod invalid_image_recovery;
 mod items;
 mod json_result;
 mod live_cli;
+mod local_provider_tool_surface;
 #[path = "managed_threads_tests.rs"]
 mod managed_threads;
 mod mcp_auth_elicitation;

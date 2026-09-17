@@ -16,6 +16,7 @@ use crate::context::MultiAgentRoleInstructions;
 use crate::context::world_state::PersistentModeState;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::TurnEnvironmentState;
+use crate::session::multi_agents::configured_tool_namespace;
 use crate::session::multi_agents::resolve_usage_hints;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
@@ -1011,6 +1012,7 @@ impl AgentControl {
                 let parent_usage_hints = resolve_usage_hints(
                     &parent_config.multi_agent_v2,
                     /*catalog*/ None,
+                    configured_tool_namespace(&parent_config),
                     !parent_config.update_plan_enabled,
                 );
                 [parent_usage_hints.root, parent_usage_hints.subagent]
@@ -1230,6 +1232,7 @@ impl AgentControl {
                     resolve_usage_hints(
                         &config.multi_agent_v2,
                         /*catalog*/ None,
+                        configured_tool_namespace(&config),
                         !config.update_plan_enabled,
                     )
                     .subagent

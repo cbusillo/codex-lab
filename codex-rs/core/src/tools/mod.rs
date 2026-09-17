@@ -12,6 +12,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod network_approval;
 pub(crate) mod orchestrator;
 pub(crate) mod parallel;
+pub(crate) mod provider_tool_surface;
 pub(crate) mod registry;
 pub(crate) mod router;
 pub(crate) mod runtimes;
@@ -79,6 +80,9 @@ pub(crate) fn requested_tool_mode(turn_context: &TurnContext, model_info: &Model
 }
 
 pub(crate) fn effective_tool_mode(turn_context: &TurnContext, model_info: &ModelInfo) -> ToolMode {
+    if !turn_context.provider.capabilities().custom_tools {
+        return ToolMode::Direct;
+    }
     let requested_tool_mode = requested_tool_mode(turn_context, model_info);
     if !turn_context.code_mode_available
         && requested_tool_mode == ToolMode::CodeMode

@@ -2340,6 +2340,8 @@ pub(crate) async fn built_tools(
         step_store,
         tool_suggest_candidates.as_ref(),
     )?);
+    crate::tools::provider_tool_surface::emit_pending_warnings(sess, turn_context, model_info)
+        .await;
     Ok((all_mcp_tools, tool_router))
 }
 

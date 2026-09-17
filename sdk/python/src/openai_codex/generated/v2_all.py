@@ -3179,6 +3179,7 @@ class ModelProviderCapabilitiesReadResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    custom_tools: Annotated[bool, Field(alias="customTools")]
     image_generation: Annotated[bool, Field(alias="imageGeneration")]
     namespace_tools: Annotated[bool, Field(alias="namespaceTools")]
     web_search: Annotated[bool, Field(alias="webSearch")]

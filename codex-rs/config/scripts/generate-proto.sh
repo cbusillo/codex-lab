@@ -5,7 +5,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../../.." && pwd)"
 proto_dir="$repo_root/codex-rs/config/src/thread_config/proto"
 generated="$proto_dir/codex.thread_config.v1.rs"
-tmpdir="$(mktemp -d)"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/codex-config-proto.XXXXXX")"
 
 cleanup() {
     rm -rf "$tmpdir"

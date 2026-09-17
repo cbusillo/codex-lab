@@ -346,6 +346,7 @@ pub struct TestCodexBuilder {
     models_manager: Option<SharedModelsManager>,
     thread_store: Option<Arc<dyn ThreadStore>>,
     image_store: Arc<dyn AttachmentStore>,
+    model_provider_override: Option<ModelProviderInfo>,
 }
 
 impl TestCodexBuilder {
@@ -372,6 +373,12 @@ impl TestCodexBuilder {
         analytics_events_client: AnalyticsEventsClient,
     ) -> Self {
         self.analytics_events_client = Some(analytics_events_client);
+        self
+    }
+
+    /// Replace the test model provider while retaining the mock server endpoint.
+    pub fn with_model_provider(mut self, model_provider: ModelProviderInfo) -> Self {
+        self.model_provider_override = Some(model_provider);
         self
     }
 
@@ -865,12 +872,21 @@ impl TestCodexBuilder {
         home: &TempDir,
         cwd_override: AbsolutePathBuf,
     ) -> anyhow::Result<(Config, Arc<TempDir>)> {
-        let model_provider = ModelProviderInfo {
-            base_url: Some(base_url),
-            // Most core tests use SSE-only mock servers, so keep websocket transport off unless
-            // a test explicitly opts into websocket coverage.
-            supports_websockets: false,
-            ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
+        let model_provider = match self.model_provider_override.take() {
+            Some(model_provider) => ModelProviderInfo {
+                base_url: Some(base_url),
+                // Most core tests use SSE-only mock servers, so keep websocket transport off
+                // unless a test explicitly opts into websocket coverage.
+                supports_websockets: false,
+                ..model_provider
+            },
+            None => ModelProviderInfo {
+                base_url: Some(base_url),
+                // Most core tests use SSE-only mock servers, so keep websocket transport off unless
+                // a test explicitly opts into websocket coverage.
+                supports_websockets: false,
+                ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
+            },
         };
         let cwd = Arc::new(TempDir::new()?);
         for hook in self.pre_build_hooks.drain(..) {
@@ -1419,6 +1435,7 @@ pub fn test_codex() -> TestCodexBuilder {
         models_manager: None,
         thread_store: None,
         image_store: codex_core::passthrough_image_store(),
+        model_provider_override: None,
     }
 }
 

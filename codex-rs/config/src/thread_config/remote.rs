@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use codex_model_provider_info::ModelProviderCapabilities;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::ModelProviderAuthInfo;
@@ -192,6 +193,22 @@ fn model_provider_from_proto(
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
         supports_standalone_web_search: provider.supports_standalone_web_search,
+        capabilities: provider
+            .capabilities
+            .map(|capabilities| {
+                let proto::ModelProviderCapabilities {
+                    namespace_tools,
+                    custom_tools,
+                    web_search,
+                } = capabilities;
+                ModelProviderCapabilities {
+                    // Absent fields preserve the full tool surface.
+                    namespace_tools: namespace_tools.unwrap_or(true),
+                    custom_tools: custom_tools.unwrap_or(true),
+                    web_search: web_search.unwrap_or(true),
+                }
+            })
+            .unwrap_or_default(),
     };
     Ok((id, info))
 }
@@ -220,6 +237,7 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
+        capabilities,
     } = provider;
 
     proto::ModelProvider {
@@ -241,6 +259,11 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
+        capabilities: Some(proto::ModelProviderCapabilities {
+            namespace_tools: Some(capabilities.namespace_tools),
+            custom_tools: Some(capabilities.custom_tools),
+            web_search: Some(capabilities.web_search),
+        }),
     }
 }
 
@@ -438,8 +461,21 @@ mod tests {
         let mut expected = expected_provider();
         expected.auth = None;
         expected.experimental_bearer_token = Some("synthetic-provider-token".into());
+        expected.capabilities = codex_model_provider_info::ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: true,
+        };
         let proto = model_provider_to_proto("local", expected.clone());
         assert!(proto.supports_standalone_web_search);
+        assert_eq!(
+            proto.capabilities.as_ref().expect("capabilities in proto"),
+            &proto::ModelProviderCapabilities {
+                namespace_tools: Some(false),
+                custom_tools: Some(false),
+                web_search: Some(true),
+            }
+        );
         let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
 
         assert_eq!(id, "local");
@@ -507,6 +543,7 @@ mod tests {
                             requires_openai_auth: false,
                             supports_websockets: true,
                             supports_standalone_web_search: true,
+                            capabilities: None,
                         }],
                         features: HashMap::from([
                             ("plugins".to_string(), false),
@@ -569,6 +606,7 @@ mod tests {
             supports_websockets: true,
             supports_standalone_web_search: true,
             aws: None,
+            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         }
     }
 

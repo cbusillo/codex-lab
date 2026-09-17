@@ -27,6 +27,7 @@ async fn read_default_provider_capabilities() -> Result<()> {
 
     let expected = ModelProviderCapabilitiesReadResponse {
         namespace_tools: true,
+        custom_tools: true,
         image_generation: true,
         web_search: true,
     };
@@ -56,6 +57,7 @@ async fn read_amazon_bedrock_provider_capabilities() -> Result<()> {
 
     let expected = ModelProviderCapabilitiesReadResponse {
         namespace_tools: true,
+        custom_tools: true,
         image_generation: false,
         web_search: true,
     };
@@ -86,7 +88,49 @@ async fn read_amazon_bedrock_runtime_provider_capabilities() -> Result<()> {
         received,
         ModelProviderCapabilitiesReadResponse {
             namespace_tools: true,
+            custom_tools: true,
             image_generation: false,
+            web_search: false,
+        }
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn read_custom_provider_declared_capabilities() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"model_provider = "test-local"
+
+[model_providers.test-local]
+name = "Test Local"
+base_url = "http://127.0.0.1:8080/v1"
+requires_openai_auth = false
+
+[model_providers.test-local.capabilities]
+namespace_tools = false
+custom_tools = false
+web_search = false
+"#,
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let request_id = mcp
+        .send_model_provider_capabilities_read_request(ModelProviderCapabilitiesReadParams {})
+        .await?;
+    let received: ModelProviderCapabilitiesReadResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+
+    assert_eq!(
+        received,
+        ModelProviderCapabilitiesReadResponse {
+            namespace_tools: false,
+            custom_tools: false,
+            image_generation: true,
             web_search: false,
         }
     );

@@ -1825,6 +1825,7 @@ async fn strict_namespace_ownership_requires_tool_namespace_inventory_opt_in() {
             registry,
             hosted_specs,
             &Default::default(),
+            &Default::default(),
         );
 
         if enabled && second_exposure != ToolExposure::Hidden {
@@ -2072,6 +2073,7 @@ async fn strict_tool_collisions_reject_external_and_synthetic_duplicates() {
             step_context.turn.model_info(),
             registry,
             hosted_specs,
+            &Default::default(),
             &Default::default(),
         )
         .err()
@@ -3560,4 +3562,75 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     bedrock_with_standalone_web_search.assert_visible_contains(&["web_search"]);
     bedrock_with_standalone_web_search.assert_visible_lacks(&["web"]);
+}
+
+fn enable_freeform_apply_patch(turn: &mut TurnContext) {
+    update_turn_settings_for_test(turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).apply_patch_tool_type =
+            Some(ApplyPatchToolType::Freeform);
+    });
+}
+
+fn use_flat_local_provider(turn: &mut TurnContext) {
+    let provider_info = ModelProviderInfo {
+        name: "Local Flat".to_string(),
+        base_url: Some("http://127.0.0.1:8080/v1".to_string()),
+        capabilities: codex_model_provider_info::ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: false,
+        },
+        ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+    };
+    update_config(turn, |config| {
+        config.model_provider_id = "local-flat".to_string();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
+#[tokio::test]
+async fn flat_local_provider_exposes_multi_agent_tools_as_functions() {
+    let namespaced = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+    namespaced.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+
+    let flat = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        use_flat_local_provider(turn);
+    })
+    .await;
+    flat.assert_visible_contains(&[
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ]);
+    flat.assert_visible_lacks(&[MULTI_AGENT_V2_NAMESPACE, "web_search"]);
+    assert!(
+        matches!(flat.visible_spec("spawn_agent"), ToolSpec::Function(_)),
+        "spawn_agent should be a top-level function for flat providers"
+    );
+}
+
+#[tokio::test]
+async fn flat_local_provider_drops_apply_patch_without_custom_tools() {
+    let full = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        enable_freeform_apply_patch(turn);
+    })
+    .await;
+    full.assert_visible_contains(&["apply_patch"]);
+
+    let flat = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        enable_freeform_apply_patch(turn);
+        use_flat_local_provider(turn);
+    })
+    .await;
+    flat.assert_visible_lacks(&["apply_patch"]);
 }

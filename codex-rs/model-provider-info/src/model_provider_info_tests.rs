@@ -30,6 +30,7 @@ base_url = "http://localhost:11434/v1"
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: ModelProviderCapabilities::default(),
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -65,6 +66,7 @@ query_params = { api-version = "2025-04-01-preview" }
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        capabilities: ModelProviderCapabilities::default(),
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -104,6 +106,7 @@ supports_standalone_web_search = true
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: true,
+        capabilities: ModelProviderCapabilities::default(),
     };
 
     let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -290,6 +293,7 @@ fn test_create_amazon_bedrock_provider() {
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
+            capabilities: ModelProviderCapabilities::default(),
         }
     );
 }
@@ -797,4 +801,87 @@ fn provider_cache_identity_is_canonical_redacted_and_config_sensitive() {
 
     provider.base_url = Some("https://two.example.test/v1".to_string());
     assert_ne!(identity, provider.cache_identity());
+}
+
+#[test]
+fn test_capabilities_table_parses_from_toml() {
+    let provider_toml = r#"
+name = "Local Server"
+base_url = "http://127.0.0.1:8080/v1"
+requires_openai_auth = false
+
+[capabilities]
+namespace_tools = false
+custom_tools = false
+web_search = false
+"#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(
+        provider.capabilities,
+        ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: false,
+            web_search: false,
+        }
+    );
+}
+
+#[test]
+fn test_capabilities_partial_table_keeps_true_defaults() {
+    let provider_toml = r#"
+name = "Local Server"
+base_url = "http://127.0.0.1:8080/v1"
+requires_openai_auth = false
+
+[capabilities]
+namespace_tools = false
+"#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(
+        provider.capabilities,
+        ModelProviderCapabilities {
+            namespace_tools: false,
+            custom_tools: true,
+            web_search: true,
+        }
+    );
+}
+
+#[test]
+fn test_capabilities_default_to_true_when_omitted() {
+    let provider_toml = r#"
+name = "Full Provider"
+base_url = "https://example.test/v1"
+requires_openai_auth = false
+"#;
+
+    let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+    assert_eq!(provider.capabilities, ModelProviderCapabilities::default());
+    assert!(provider.capabilities.namespace_tools);
+    assert!(provider.capabilities.custom_tools);
+    assert!(provider.capabilities.web_search);
+}
+
+#[test]
+fn test_built_in_oss_providers_default_to_flat_capabilities() {
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+    for provider_id in [OLLAMA_OSS_PROVIDER_ID, LMSTUDIO_OSS_PROVIDER_ID] {
+        let provider = &providers[provider_id];
+        assert_eq!(
+            provider.capabilities,
+            ModelProviderCapabilities {
+                namespace_tools: false,
+                custom_tools: false,
+                web_search: false,
+            },
+            "built-in {provider_id} provider should default to the flat tool surface"
+        );
+    }
+    // The OpenAI provider keeps the full tool surface.
+    assert_eq!(
+        providers[OPENAI_PROVIDER_ID].capabilities,
+        ModelProviderCapabilities::default()
+    );
 }

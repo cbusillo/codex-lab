@@ -2555,6 +2555,27 @@
       },
       "type": "object"
     },
+    "ModelProviderCapabilities": {
+      "description": "Tool-surface capabilities a provider declares for the models it serves.\n\nEvery field defaults to `true`, so providers that omit the `capabilities` table keep the current tool surface. Local OpenAI-compatible servers that only accept top-level `function` tools should set the unsupported capabilities to `false`; Codex then emits a flat tool surface for them.",
+      "properties": {
+        "custom_tools": {
+          "default": true,
+          "description": "Whether the provider accepts freeform `custom` tools such as `apply_patch`.",
+          "type": "boolean"
+        },
+        "namespace_tools": {
+          "default": true,
+          "description": "Whether the provider accepts the Responses API `namespace` tool type.",
+          "type": "boolean"
+        },
+        "web_search": {
+          "default": true,
+          "description": "Whether the provider accepts the hosted `web_search` tool.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "ModelProviderInfo": {
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
@@ -2578,6 +2599,19 @@
         "base_url": {
           "description": "Base URL for the provider's OpenAI-compatible API.",
           "type": "string"
+        },
+        "capabilities": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ModelProviderCapabilities"
+            }
+          ],
+          "default": {
+            "custom_tools": true,
+            "namespace_tools": true,
+            "web_search": true
+          },
+          "description": "Tool-surface capabilities the provider's API accepts."
         },
         "env_http_headers": {
           "additionalProperties": {

@@ -14,6 +14,7 @@ use crate::agent::user_agent_intent::UserAgentIntent;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::session::multi_agents::configured_tool_namespace;
 use crate::session::multi_agents::resolve_usage_hints;
 use crate::tools::handlers::multi_agents::collab_tool_call_status;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
@@ -316,6 +317,7 @@ async fn handle_spawn_agent(
             Some(resolve_usage_hints(
                 &config.multi_agent_v2,
                 child_catalog,
+                configured_tool_namespace(&config),
                 !config.update_plan_enabled && config.model_catalog.is_none(),
             ))
         } else {
