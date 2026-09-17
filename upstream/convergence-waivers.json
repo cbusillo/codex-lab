@@ -40,20 +40,6 @@
     },
     {
       "disposition": "upstream_deletion_adopted",
-      "issue": 928,
-      "path": "codex-rs/core/src/context/world_state/personality.rs",
-      "reason": "Issue #928 follows MODEL-1 and adopts upstream 132c739171 retirement of Friendly/Pragmatic personality selection. This path had no fork-specific delta at the admitted local baseline. Current personality/config/resume coverage follows the upstream replacement; no local history contract is intentionally removed.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
-      "issue": 928,
-      "path": "codex-rs/core/src/context/world_state/personality_tests.rs",
-      "reason": "Issue #928 follows MODEL-1 and adopts upstream 132c739171 retirement of Friendly/Pragmatic personality selection. This path had no fork-specific delta at the admitted local baseline. Current personality/config/resume coverage follows the upstream replacement; no local history contract is intentionally removed.",
-      "violation": "absent"
-    },
-    {
-      "disposition": "upstream_deletion_adopted",
       "issue": 307,
       "path": "codex-rs/core/src/tools/handlers/agent_jobs.rs",
       "reason": "Issue #307 retires the legacy scheduled agent-jobs tool family in favor of native V2 spawn, list, wait, message, interrupt, close, and resume semantics; restoring the dead parallel job subsystem would duplicate current orchestration.",
