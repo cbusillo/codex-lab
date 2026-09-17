@@ -714,6 +714,14 @@ pub(crate) async fn record_pending_input(
     additional_contexts: Vec<String>,
     persist_context: PersistContext,
 ) {
+    // Tool outputs keep their durability barrier with or without user-prompt hooks.
+    let persist_context = if persist_context == PersistContext::SteeredUserInput
+        && matches!(&pending_input, TurnInput::FunctionCallOutput(_))
+    {
+        PersistContext::Standard
+    } else {
+        persist_context
+    };
     match pending_input {
         TurnInput::UserInput {
             content,

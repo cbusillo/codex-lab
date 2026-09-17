@@ -1187,21 +1187,13 @@ pub(crate) async fn run_hooks_and_record_inputs(
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
-            // Tool outputs retain their durability barrier, including in mixed input batches.
-            let input_persist_context = if persist_context == PersistContext::SteeredUserInput
-                && matches!(input_item, TurnInput::FunctionCallOutput(_))
-            {
-                PersistContext::Standard
-            } else {
-                persist_context
-            };
             record_pending_input(
                 sess,
                 turn_context,
                 model_info,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
-                input_persist_context,
+                persist_context,
             )
             .await;
         }

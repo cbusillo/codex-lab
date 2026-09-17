@@ -43,6 +43,8 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 
+const STEERED_INPUT: &str = "checkpoint fixture input 7d4f57c4";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CheckpointPolicy {
     Background,
@@ -55,17 +57,17 @@ enum InputKind {
     ToolOutput,
 }
 
-fn request_input_contains_exact_text(
+fn request_input_exact_text_count(
     raw_request: &[u8],
     input_kind: InputKind,
     expected: &str,
-) -> bool {
+) -> usize {
     let body: Value = serde_json::from_slice(raw_request).expect("Responses request is JSON");
     body["input"]
         .as_array()
         .expect("Responses request has input items")
         .iter()
-        .any(|item| match input_kind {
+        .filter(|item| match input_kind {
             InputKind::User => {
                 item["type"] == "message"
                     && item["role"] == "user"
@@ -82,6 +84,7 @@ fn request_input_contains_exact_text(
                     && item["output"] == expected
             }
         })
+        .count()
 }
 
 #[derive(Debug)]
@@ -219,17 +222,17 @@ async fn steered_input_checkpoint_controls_next_request(
     store.armed.store(true, Ordering::SeqCst);
     let input = match input_kind {
         InputKind::User => TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "steered input".to_string(),
+            text: STEERED_INPUT.to_string(),
             text_elements: Vec::new(),
         }]),
-        InputKind::ToolOutput => TurnInputRequest::new(TurnInput::FunctionCallOutput(
-            serde_json::from_value(json!({
+        InputKind::ToolOutput => {
+            TurnInputRequest::new(TurnInput::ResponseItem(serde_json::from_value(json!({
                 "type": "function_call_output",
                 "name": "send_message_to_thread",
                 "namespace": "codex_app",
-                "output": "steered input",
-            }))?,
-        )),
+                "output": STEERED_INPUT,
+            }))?))
+        }
     };
     assert_eq!(
         test.codex.start_or_steer_turn(input).await?,
@@ -267,16 +270,11 @@ async fn steered_input_checkpoint_controls_next_request(
     .await?;
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
-    assert!(!request_input_contains_exact_text(
-        &requests[0],
-        input_kind,
-        "steered input"
-    ));
-    assert!(request_input_contains_exact_text(
-        &requests[1],
-        input_kind,
-        "steered input"
-    ));
+    assert!(!String::from_utf8_lossy(&requests[0]).contains(STEERED_INPUT));
+    assert_eq!(
+        request_input_exact_text_count(&requests[1], input_kind, STEERED_INPUT),
+        1
+    );
     second_completed
         .send(())
         .expect("finish follow-up inference");

@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -27,8 +28,19 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_skills_extension::HostSkillProvider;
+use codex_skills_extension::HostSkillsSnapshot;
+use codex_skills_extension::SkillProvider;
+use codex_skills_extension::SkillProviders;
 use codex_skills_extension::SkillsExtensionConfig;
-use codex_skills_extension::install;
+use codex_skills_extension::catalog::SkillCatalog;
+use codex_skills_extension::catalog::SkillReadResult;
+use codex_skills_extension::catalog::SkillSearchResult;
+use codex_skills_extension::install_with_providers;
+use codex_skills_extension::provider::SkillListQuery;
+use codex_skills_extension::provider::SkillProviderFuture;
+use codex_skills_extension::provider::SkillReadRequest;
+use codex_skills_extension::provider::SkillSearchRequest;
 use core_test_support::context_snapshot;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::SnapshotEntry;
@@ -50,22 +62,86 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
+use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
 const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
-fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
+type ListedSkillPaths = Arc<Mutex<Vec<Vec<String>>>>;
+
+struct FixtureHostSkillProvider {
+    inner: HostSkillProvider,
+    fixture_root: PathBuf,
+    listed_paths: ListedSkillPaths,
+}
+
+impl SkillProvider for FixtureHostSkillProvider {
+    fn list(&self, mut query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
+        let Some(snapshot) = query.host_snapshot.as_ref() else {
+            return self.inner.list(query);
+        };
+        let mut outcome = snapshot.outcome().clone();
+        outcome.skills.retain(|skill| {
+            skill
+                .path_to_skills_md
+                .as_path()
+                .starts_with(&self.fixture_root)
+        });
+        outcome
+            .errors
+            .retain(|error| error.path.as_path().starts_with(&self.fixture_root));
+        query.host_snapshot = Some(Arc::new(HostSkillsSnapshot::new(Arc::new(outcome))));
+        let listed_paths = Arc::clone(&self.listed_paths);
+        let future = self.inner.list(query);
+        Box::pin(async move {
+            let catalog = future.await?;
+            listed_paths.lock().expect("fixture skill list lock").push(
+                catalog
+                    .entries
+                    .iter()
+                    .map(|entry| entry.main_prompt.as_str().to_string())
+                    .collect(),
+            );
+            Ok(catalog)
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        request: SkillReadRequest<'a>,
+    ) -> SkillProviderFuture<'a, SkillReadResult> {
+        self.inner.read(request)
+    }
+
+    fn search(&self, request: SkillSearchRequest) -> SkillProviderFuture<'_, SkillSearchResult> {
+        self.inner.search(request)
+    }
+}
+
+fn skills_extensions(
+    fixture_root: &Path,
+) -> Result<(Arc<ExtensionRegistry<Config>>, ListedSkillPaths)> {
+    let listed_paths = Arc::new(Mutex::new(Vec::new()));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    install(&mut extensions, |config: &Config| SkillsExtensionConfig {
-        include_instructions: config.include_skill_instructions,
-        max_context_tokens: config.skill_max_context_tokens,
-        bundled_skills_enabled: config.bundled_skills_enabled(),
-        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
-        shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
-    });
-    Arc::new(extensions.build())
+    let provider = FixtureHostSkillProvider {
+        inner: HostSkillProvider::new(),
+        fixture_root: fs::canonicalize(fixture_root)?,
+        listed_paths: Arc::clone(&listed_paths),
+    };
+    install_with_providers(
+        &mut extensions,
+        SkillProviders::new().with_host_provider(Arc::new(provider)),
+        |config: &Config| SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
+            bundled_skills_enabled: config.bundled_skills_enabled(),
+            orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+            shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
+        },
+    );
+    Ok((Arc::new(extensions.build()), listed_paths))
 }
 
 fn write_skill(path: &Path, name: &str, description: &str, body: &str) -> Result<PathBuf> {
@@ -155,20 +231,14 @@ fn plugin(name: &str) -> UserInput {
 }
 
 fn configure_scenario_catalog(config: &mut Config) {
-    // Keep checkout configuration and real `$HOME/.agents/skills` out of the fixture. A
-    // system layer discovers only this test home's skills, while retaining its plugin config.
+    // Keep checkout configuration out of the fixture while retaining plugin config. The
+    // test-only host provider filters the discovered host snapshot to this test home's skills.
     let stack = &config.config_layer_stack;
     config.config_layer_stack = ConfigLayerStack::new(
         stack
             .all_layers_low_to_high()
             .filter(|layer| !matches!(&layer.name, ConfigLayerSource::Project { .. }))
             .cloned()
-            .map(|mut layer| {
-                if let ConfigLayerSource::User { file, .. } = &layer.name {
-                    layer.name = ConfigLayerSource::System { file: file.clone() };
-                }
-                layer
-            })
             .collect(),
         stack.requirements().clone(),
         stack.requirements_toml().clone(),
@@ -336,11 +406,12 @@ async fn astra_kickoff_with_skills_plugins_and_remote_compaction() -> Result<()>
         ],
     )
     .await;
+    let (extensions, listed_paths) = skills_extensions(home.path())?;
     let mut builder = test_codex()
         .with_model("gpt-6-astra")
         .with_home(home)
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_extensions(skills_extensions())
+        .with_extensions(extensions)
         .with_workspace_setup(|cwd, fs| async move {
             fs.write_file(
                 &executor_path_uri(cwd.join("AGENTS.md"))?,
@@ -403,6 +474,24 @@ async fn astra_kickoff_with_skills_plugins_and_remote_compaction() -> Result<()>
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+
+    let mut expected_paths = vec![
+        skills.outline.display().to_string(),
+        skills.agenda.display().to_string(),
+        skills.summarize.display().to_string(),
+        skills.final_check.display().to_string(),
+    ];
+    expected_paths.sort();
+    let observed_paths = listed_paths.lock().expect("fixture skill list lock");
+    assert!(
+        !observed_paths.is_empty(),
+        "kickoff should discover fixture skills"
+    );
+    for paths in observed_paths.iter() {
+        let mut paths = paths.clone();
+        paths.sort();
+        assert_eq!(paths, expected_paths);
+    }
 
     let requests = mock.requests();
     insta::assert_snapshot!(
@@ -586,11 +675,12 @@ async fn astra_refreshes_plugin_tools_and_skills_in_an_existing_thread() -> Resu
         ],
     )
     .await;
+    let (extensions, listed_paths) = skills_extensions(home.path())?;
     let mut builder = test_codex()
         .with_model("gpt-6-astra")
         .with_home(Arc::clone(&home))
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_extensions(skills_extensions())
+        .with_extensions(extensions)
         .with_config(configure_scenario_catalog);
     let test = builder.build(&server).await?;
 
@@ -633,6 +723,11 @@ async fn astra_refreshes_plugin_tools_and_skills_in_an_existing_thread() -> Resu
 
     test.submit_text_turn("Use the Notes tool again to check that the kickoff is Friday.")
         .await?;
+
+    assert_eq!(
+        listed_paths.lock().expect("fixture skill list lock").last(),
+        Some(&vec![skill.display().to_string()])
+    );
 
     insta::assert_snapshot!(
         "astra_plugin_refresh",
