@@ -14,6 +14,7 @@ mod permissions;
 mod persistent_mode;
 mod plugins_instructions;
 mod realtime;
+mod review_agents_md_part;
 #[cfg(test)]
 mod test_support;
 mod tools;
@@ -61,6 +62,12 @@ pub(crate) use permissions::PermissionsState;
 pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_KIND;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_PARTS;
+pub(crate) use review_agents_md_part::REVIEW_AGENTS_MD_TOTAL_BYTES;
+pub(crate) use review_agents_md_part::ReviewAgentsMdFragment;
+pub(crate) use review_agents_md_part::ReviewAgentsMdPart;
+pub(crate) use review_agents_md_part::ReviewAgentsMdSnapshot;
 pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {

@@ -2006,20 +2006,25 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
-        if let Some(instructions_gate) = sess
+        let instructions_gate = sess
             .services
             .thread_extension_data
-            .get::<crate::tasks::BackgroundReviewInstructionsGate>()
-        {
+            .get::<crate::tasks::BackgroundReviewInstructionsGate>();
+        let budget_gate = sess
+            .services
+            .thread_extension_data
+            .get::<crate::tasks::BackgroundReviewBudgetGate>();
+        if budget_gate.is_some() && instructions_gate.is_none() {
+            return Err(CodexErr::InvalidRequest(
+                "Background Review cannot verify complete AGENTS.md instructions: review instruction state is unavailable. The review request was not sent.".to_string(),
+            ));
+        }
+        if let Some(instructions_gate) = instructions_gate {
             instructions_gate
                 .authorize_request(step_context.as_ref(), &prompt)
                 .await?;
         }
-        if let Some(budget_gate) = sess
-            .services
-            .thread_extension_data
-            .get::<crate::tasks::BackgroundReviewBudgetGate>()
-        {
+        if let Some(budget_gate) = budget_gate {
             let token_usage = sess
                 .token_usage_info()
                 .await

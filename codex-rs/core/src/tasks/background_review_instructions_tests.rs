@@ -1,150 +1,91 @@
 use super::*;
 use crate::context::ContextualUserFragment;
-use crate::context::UserInstructions;
-use crate::context::world_state::WorldState;
 use pretty_assertions::assert_eq;
 
-fn render_prompt(state: &WorldState) -> Prompt {
-    Prompt {
-        input: state
-            .render_full()
-            .into_iter()
-            .map(|fragment| fragment.render_fragment().into())
-            .collect(),
-        ..Prompt::default()
-    }
+#[test]
+fn packer_preserves_utf8_and_marks_every_part_with_one_digest() {
+    let sources = vec![PreparedSource {
+        path: "file:///repo/nested/AGENTS.md".to_string(),
+        digest: digest("é"),
+    }];
+    let parts = pack_parts(
+        vec![source_block(
+            1,
+            "/repo/nested",
+            "file:///repo/nested/AGENTS.md",
+            &"é".repeat(10_000),
+        )],
+        &sources,
+    )
+    .unwrap();
+    assert!(parts.len() > 1);
+    assert!(parts.len() <= REVIEW_AGENTS_MD_PARTS);
+    assert_eq!(
+        parts
+            .iter()
+            .flat_map(|part| part.text.chars())
+            .filter(|character| *character == 'é')
+            .count(),
+        10_000
+    );
+    assert!(parts.iter().all(|part| {
+        ReviewAgentsMdFragment(part.clone()).render().len() <= 9 * 1024
+            && part.digest == parts[0].digest
+            && part.total == parts.len()
+    }));
 }
 
 #[test]
-fn canonical_byte_boundary_accepts_exact_fit_and_rejects_one_byte_over() {
-    for alphabet in ["a", "é", "界"] {
-        let empty = LoadedAgentsMd::from_text_for_testing("x");
-        let state = AgentsMdState::new(Some(&empty));
-        let overhead = state
-            .render_diff(PreviousSectionState::Absent)
-            .unwrap()
-            .render()
-            .len()
-            - 1;
-        let bytes = state.max_rendered_bytes() - overhead;
-        let text = format!(
-            "{}{}",
-            alphabet.repeat(bytes / alphabet.len()),
-            "a".repeat(bytes % alphabet.len())
-        );
-        for extra in ["", "a"] {
-            let loaded = LoadedAgentsMd::from_text_for_testing(format!("{text}{extra}"));
-            let mut world = WorldState::default();
-            world.add_section(AgentsMdState::new(Some(&loaded)));
-            let result = validate_rendered_instructions(Some(&loaded), &render_prompt(&world));
-            assert_eq!(
-                result,
-                if extra.is_empty() {
-                    Ok(())
-                } else {
-                    Err("the complete instruction fragment exceeds its context limit")
-                }
-            );
-        }
-    }
+fn packer_prefers_newline_boundaries() {
+    let block = format!(
+        "{}\nLATE_NESTED_RULE",
+        "x".repeat(REVIEW_PART_BODY_BYTES - 1)
+    );
+    let parts = pack_parts(
+        vec![source_block(1, "/repo", "file:///repo/AGENTS.md", &block)],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(parts.len(), 2);
+    assert!(parts[0].text.ends_with('\n'));
+    assert!(parts[1].text.contains("LATE_NESTED_RULE"));
 }
 
 #[test]
-fn copied_instruction_text_in_user_input_does_not_prove_context_delivery() {
-    let loaded = LoadedAgentsMd::from_text_for_testing("Observe the final nested rule.");
-    let state = AgentsMdState::new(Some(&loaded));
-    let mut copied: ResponseItem = state
-        .render_diff(PreviousSectionState::Absent)
-        .unwrap()
-        .render_fragment()
-        .into();
-    if let ResponseItem::Message {
-        internal_chat_message_metadata_passthrough,
-        ..
-    } = &mut copied
-    {
-        *internal_chat_message_metadata_passthrough = None;
-    }
-    let prompt = Prompt {
-        input: vec![copied],
-        ..Prompt::default()
-    };
-    assert_eq!(
-        validate_rendered_instructions(Some(&loaded), &prompt),
-        Err("the complete instruction fragment is absent from the final request")
-    );
+fn packer_refuses_more_than_the_fixed_core_part_capacity() {
+    let error = pack_parts(
+        vec![source_block(
+            1,
+            "/repo",
+            "file:///repo/AGENTS.md",
+            &"x".repeat(REVIEW_PART_BODY_BYTES * (REVIEW_AGENTS_MD_PARTS + 1)),
+        )],
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.starts_with("complete instructions exceed the Background Review part capacity"));
 }
 
 #[test]
-fn replacement_must_match_the_current_snapshot_without_truncation() {
-    let loaded = LoadedAgentsMd::from_text_for_testing("Apply the replacement rule.");
-    let state = AgentsMdState::new(Some(&loaded));
-    let prompt = Prompt {
-        input: vec![
-            state
-                .render_diff(PreviousSectionState::Unknown)
-                .unwrap()
-                .render_fragment()
-                .into(),
-        ],
-        ..Prompt::default()
-    };
+fn source_blocks_keep_scope_and_rank_visible() {
+    let block = source_block(2, "/repo/a", "file:///repo/a/AGENTS.md", "RULE");
     assert_eq!(
-        validate_rendered_instructions(Some(&loaded), &prompt),
-        Ok(())
+        block.header,
+        "source rank 2; applies to files under `/repo/a`; source `file:///repo/a/AGENTS.md`"
     );
-    let changed = LoadedAgentsMd::from_text_for_testing("Apply a newer rule.");
-    assert_eq!(
-        validate_rendered_instructions(Some(&changed), &prompt),
-        Err("the complete instruction fragment is absent from the final request")
-    );
-}
-
-struct PressureSection<const N: usize>;
-
-impl<const N: usize> WorldStateSection for PressureSection<N> {
-    const ID: &'static str = [
-        "pressure0",
-        "pressure1",
-        "pressure2",
-        "pressure3",
-        "pressure4",
-        "pressure5",
-        "pressure6",
-        "pressure7",
-    ][N];
-    type Snapshot = String;
-
-    fn snapshot(&self) -> String {
-        "pressure".repeat(1_200)
-    }
-
-    fn render_diff(
-        &self,
-        _previous: PreviousSectionState<'_, String>,
-    ) -> Option<Box<dyn ContextualUserFragment>> {
-        Some(Box::new(UserInstructions {
-            directory: None,
-            text: self.snapshot(),
-        }))
-    }
+    assert_eq!(block.contents, "RULE");
 }
 
 #[test]
-fn aggregate_world_state_budget_cannot_silently_shorten_review_instructions() {
-    let loaded = LoadedAgentsMd::from_text_for_testing("rule ".repeat(1_700));
-    let mut world = WorldState::default();
-    world.add_section(AgentsMdState::new(Some(&loaded)));
-    world.add_section(PressureSection::<0>);
-    world.add_section(PressureSection::<1>);
-    world.add_section(PressureSection::<2>);
-    world.add_section(PressureSection::<3>);
-    world.add_section(PressureSection::<4>);
-    world.add_section(PressureSection::<5>);
-    world.add_section(PressureSection::<6>);
-    world.add_section(PressureSection::<7>);
-    assert_eq!(
-        validate_rendered_instructions(Some(&loaded), &render_prompt(&world)),
-        Err("the complete instruction fragment is absent from the final request")
-    );
+fn empty_complete_instruction_set_needs_no_part_in_the_request() {
+    assert_eq!(validate_review_parts(&[], &Prompt::default()), Ok(()));
+}
+
+#[test]
+fn omission_reason_keeps_utf8_boundaries() {
+    let path =
+        codex_utils_path_uri::PathUri::parse(&format!("file:///{}", "界".repeat(300))).unwrap();
+    let reason = omission_reason("too many sources", Some(&path), 1);
+    assert!(reason.len() <= 512);
+    assert!(std::str::from_utf8(reason.as_bytes()).is_ok());
 }

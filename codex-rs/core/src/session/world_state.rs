@@ -20,6 +20,7 @@ use crate::context::world_state::PermissionsState;
 use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
+use crate::context::world_state::ReviewAgentsMdPart;
 use crate::context::world_state::ToolsState;
 use crate::context::world_state::WorldState;
 use codex_connectors::AppToolPolicyEvaluator;
@@ -128,7 +129,28 @@ impl Session {
                 .as_ref()
                 .and_then(|instructions| instructions.end.as_deref()),
         ));
-        world_state.add_section(AgentsMdState::new(step_context.loaded_agents_md.as_deref()));
+        if let Some(gate) = self
+            .services
+            .thread_extension_data
+            .get::<crate::tasks::BackgroundReviewInstructionsGate>()
+        {
+            let parts = gate.prepared_parts(step_context).await?;
+            for part in parts {
+                match part.ordinal {
+                    0 => world_state.add_section(ReviewAgentsMdPart::<0>::new(part)),
+                    1 => world_state.add_section(ReviewAgentsMdPart::<1>::new(part)),
+                    2 => world_state.add_section(ReviewAgentsMdPart::<2>::new(part)),
+                    3 => world_state.add_section(ReviewAgentsMdPart::<3>::new(part)),
+                    4 => world_state.add_section(ReviewAgentsMdPart::<4>::new(part)),
+                    5 => world_state.add_section(ReviewAgentsMdPart::<5>::new(part)),
+                    6 => world_state.add_section(ReviewAgentsMdPart::<6>::new(part)),
+                    7 => world_state.add_section(ReviewAgentsMdPart::<7>::new(part)),
+                    _ => unreachable!("prepared review instruction part exceeds fixed capacity"),
+                }
+            }
+        } else {
+            world_state.add_section(AgentsMdState::new(step_context.loaded_agents_md.as_deref()));
+        }
         let exec_policy = self
             .services
             .exec_policy
