@@ -21,6 +21,7 @@ use serde_json::json;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
+use test_case::test_case;
 
 #[cfg(unix)]
 #[path = "external_agent_bounded_worker.rs"]
@@ -693,8 +694,15 @@ async fn encrypted_external_agent_message_is_rejected_before_launch() -> Result<
 
 /// Production Responses traffic has returned an encrypted `message` with no
 /// `encrypted_function_args` at all, so the missing declaration cannot prove plaintext.
+#[test_case(None; "direct")]
+#[test_case(Some(json!({
+    "timeout_ms": 5000, "max_input_bytes": 8192, "max_result_bytes": 256,
+    "context": {"type": "text"}
+})); "bounded worker")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn undeclared_encrypted_external_agent_message_is_rejected_before_launch() -> Result<()> {
+async fn undeclared_encrypted_external_agent_message_is_rejected_before_launch(
+    bounded_worker: Option<Value>,
+) -> Result<()> {
     let stub_dir = TempDir::new()?;
     let launched = stub_dir.path().join("launched.txt");
     let script = format!(
@@ -712,6 +720,7 @@ async fn undeclared_encrypted_external_agent_message_is_rejected_before_launch()
         "task_size": "normal",
         "agent_type": ROLE,
         "fork_turns": "none",
+        "bounded_worker": bounded_worker,
     }))?;
     responses::mount_sse_once_match(
         &server,
