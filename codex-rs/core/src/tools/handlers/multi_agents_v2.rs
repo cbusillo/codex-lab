@@ -54,6 +54,27 @@ pub(crate) async fn emit_sub_agent_activity(
     session.emit_turn_item_completed(turn, item).await;
 }
 
+/// Responses-encrypted arguments are URL-safe base64 Fernet tokens, which always start this way.
+const ENCRYPTED_ARGUMENT_PREFIX: &[u8] = b"gAAAA";
+/// A Fernet token of an empty payload is 100 bytes, so shorter text cannot be one. Checking only
+/// this head keeps the answer stable after the message is truncated for the model.
+const ENCRYPTED_ARGUMENT_HEAD_BYTES: usize = 100;
+
+/// Production Responses traffic has returned an encrypted `message` without declaring it in
+/// `encrypted_function_args`, so the text itself has to be inspected.
+fn looks_like_encrypted_argument(message: &str) -> bool {
+    message
+        .trim_start()
+        .as_bytes()
+        .get(..ENCRYPTED_ARGUMENT_HEAD_BYTES)
+        .is_some_and(|head| {
+            head.starts_with(ENCRYPTED_ARGUMENT_PREFIX)
+                && head
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'='))
+        })
+}
+
 fn agent_message_from_tool(
     message: String,
     source: &crate::tools::context::ToolCallSource,
@@ -61,7 +82,8 @@ fn agent_message_from_tool(
     if matches!(
         source,
         crate::tools::context::ToolCallSource::DirectPlaintextMessage
-    ) {
+    ) && !looks_like_encrypted_argument(&message)
+    {
         AgentMessage::Plaintext(message)
     } else {
         AgentMessage::Encrypted(message)

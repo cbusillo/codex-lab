@@ -703,7 +703,8 @@ async fn undeclared_encrypted_external_agent_message_is_rejected_before_launch()
     );
     let backend = stub_cli(&stub_dir, "undeclared-encrypted-provider.sh", &script);
     let server = start_mock_server().await;
-    let encrypted_message = format!("gAAAAABqrwLQ{}", "Uv14n4Ccpw4Qwq1J-_".repeat(10));
+    // Long enough to be truncated for the model, which must not hide the token from the check.
+    let encrypted_message = format!("gAAAAABqrwLQ{}", "Uv14n4Ccpw4Qwq1J-_".repeat(400));
     let arguments = serde_json::to_string(&json!({
         "message": encrypted_message,
         "task_name": "external_probe",
