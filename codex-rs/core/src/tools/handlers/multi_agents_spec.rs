@@ -29,6 +29,16 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
+/// Whether the Responses API should encrypt the `spawn_agent` task text.
+///
+/// Encrypted text can only be read by a native child on the same provider. An external CLI agent
+/// receives the argument verbatim, so any spawn surface that can reach one must ask for plaintext.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMessageEncoding {
+    Encrypted,
+    Plaintext,
+}
+
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions {
     pub available_models: Vec<ModelPreset>,
@@ -38,6 +48,7 @@ pub struct SpawnAgentToolOptions {
     pub expose_spawn_agent_model_overrides: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
+    pub message_encoding: SpawnMessageEncoding,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -50,6 +61,7 @@ impl Default for SpawnAgentToolOptions {
             expose_spawn_agent_model_overrides: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
+            message_encoding: SpawnMessageEncoding::Encrypted,
         }
     }
 }
@@ -113,7 +125,8 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
         && !options.hide_agent_type_model_reasoning)
         .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let mut properties =
+        spawn_agent_common_properties_v2(&options.agent_type_description, options.message_encoding);
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
@@ -674,16 +687,20 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v2(
+    agent_type_description: &str,
+    message_encoding: SpawnMessageEncoding,
+) -> BTreeMap<String, JsonSchema> {
+    let message = JsonSchema::string(Some(
+        "Initial plain-text task for the new agent.".to_string(),
+    ));
+    let message = match message_encoding {
+        SpawnMessageEncoding::Encrypted => message.with_encrypted(),
+        SpawnMessageEncoding::Plaintext => message,
+    };
     BTreeMap::from([
         ("bounded_worker".to_string(), bounded_worker_input_schema()),
-        (
-            "message".to_string(),
-            JsonSchema::string(Some(
-                "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
-        ),
+        ("message".to_string(), message),
         ("task_kind".to_string(), create_agent_task_kind_schema()),
         ("task_size".to_string(), create_agent_task_size_schema()),
         (

@@ -3029,8 +3029,10 @@ async fn agent_type_is_hidden_when_every_external_selector_is_disabled() {
     ));
 }
 
+/// `spawn_agent` can route to an external CLI, which receives the argument verbatim, so its task
+/// text must not be encrypted. The follow-up tools only reach native agents and stay encrypted.
 #[tokio::test]
-async fn multi_agent_v2_message_schemas_are_encrypted() {
+async fn multi_agent_v2_encrypts_only_native_agent_messages() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
     })
@@ -3038,7 +3040,7 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
     let ToolSpec::Namespace(namespace) = plan.visible_spec(MULTI_AGENT_V2_NAMESPACE) else {
         panic!("expected {MULTI_AGENT_V2_NAMESPACE} namespace");
     };
-    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+    let message_encryption = ["spawn_agent", "send_message", "followup_task"].map(|tool_name| {
         let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
             matches!(
                 tool,
@@ -3052,13 +3054,21 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
             .properties
             .as_ref()
             .expect("tool should use object params");
-        assert_eq!(
+        (
+            tool_name,
             properties
                 .get("message")
                 .and_then(|schema| schema.encrypted),
-            Some(true)
-        );
-    }
+        )
+    });
+    assert_eq!(
+        message_encryption,
+        [
+            ("spawn_agent", None),
+            ("send_message", Some(true)),
+            ("followup_task", Some(true)),
+        ]
+    );
 }
 
 #[tokio::test]

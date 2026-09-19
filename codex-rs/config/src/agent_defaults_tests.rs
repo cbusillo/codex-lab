@@ -51,6 +51,17 @@ fn github_copilot_defaults_match_cli_contract() {
 }
 
 #[test]
+fn code_prefixed_external_selector_resolves_to_external_spec() {
+    assert_eq!(
+        (
+            agent_model_spec("code-claude-sonnet-4.6").map(|spec| spec.slug),
+            agent_model_spec("code-code-gpt-5.5").map(|spec| spec.slug),
+        ),
+        (Some("claude-sonnet-4.6"), None)
+    );
+}
+
+#[test]
 fn gpt_codex_aliases_resolve() {
     let codex = agent_model_spec("gpt-5.1-codex").expect("alias for codex present");
     assert_eq!(codex.slug, "code-gpt-5.5");

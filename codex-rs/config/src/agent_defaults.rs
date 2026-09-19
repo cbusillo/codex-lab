@@ -621,6 +621,14 @@ pub fn agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> {
                     .any(|alias| alias.eq_ignore_ascii_case(&lower))
             })
         })
+        // Models generalize the `code-` prefix from the native slugs onto external ones, such as
+        // `code-claude-sonnet-4.6`. Resolve those instead of failing the spawn.
+        .or_else(|| {
+            lower
+                .strip_prefix("code-")
+                .and_then(agent_model_spec)
+                .filter(|spec| spec.family != "code")
+        })
 }
 
 pub fn default_agent_configs() -> Vec<AgentConfigDefaults> {

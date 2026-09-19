@@ -46,6 +46,7 @@ use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
+use crate::tools::handlers::multi_agents_spec::SpawnMessageEncoding;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
@@ -1368,6 +1369,16 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 agent_type_plan(turn_context, context.default_agent_type_description);
             let hide_spawn_agent_metadata =
                 turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
+            let expose_spawn_agent_model_overrides = turn_context
+                .config
+                .multi_agent_v2
+                .expose_spawn_agent_model_overrides;
+            // `agent_type` and `model` are the two arguments that can select an external CLI.
+            let message_encoding = if agent_type_plan.expose || expose_spawn_agent_model_overrides {
+                SpawnMessageEncoding::Plaintext
+            } else {
+                SpawnMessageEncoding::Encrypted
+            };
             registry.register_trusted_with_exposure(
                 multi_agent_v2_handler(
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
@@ -1375,12 +1386,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                         agent_type_description: agent_type_plan.description,
                         expose_agent_type: agent_type_plan.expose,
                         hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
+                        expose_spawn_agent_model_overrides,
                         multi_agent_version: turn_context.multi_agent_version,
                         usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                        message_encoding,
                     }),
                     tool_namespace,
                 ),
@@ -1428,6 +1437,7 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     expose_spawn_agent_model_overrides: true,
                     multi_agent_version: turn_context.multi_agent_version,
                     usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    message_encoding: SpawnMessageEncoding::Plaintext,
                 }),
                 exposure,
             );

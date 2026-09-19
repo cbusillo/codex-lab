@@ -691,6 +691,72 @@ async fn encrypted_external_agent_message_is_rejected_before_launch() -> Result<
     Ok(())
 }
 
+/// Production Responses traffic has returned an encrypted `message` with no
+/// `encrypted_function_args` at all, so the missing declaration cannot prove plaintext.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undeclared_encrypted_external_agent_message_is_rejected_before_launch() -> Result<()> {
+    let stub_dir = TempDir::new()?;
+    let launched = stub_dir.path().join("launched.txt");
+    let script = format!(
+        "if [ \"${{1:-}}\" = \"--version\" ]; then printf 'test-provider 1.0\\n'; exit 0; fi\ntouch '{}'\nprintf 'must not run\\n'\n",
+        launched.display()
+    );
+    let backend = stub_cli(&stub_dir, "undeclared-encrypted-provider.sh", &script);
+    let server = start_mock_server().await;
+    let encrypted_message = format!("gAAAAABqrwLQ{}", "Uv14n4Ccpw4Qwq1J-_".repeat(10));
+    let arguments = serde_json::to_string(&json!({
+        "message": encrypted_message,
+        "task_name": "external_probe",
+        "task_kind": "other",
+        "task_size": "normal",
+        "agent_type": ROLE,
+        "fork_turns": "none",
+    }))?;
+    responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-undeclared"),
+            raw_ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                COLLABORATION_NAMESPACE,
+                "spawn_agent",
+                &arguments,
+            ),
+            ev_completed("resp-undeclared"),
+        ]),
+    )
+    .await;
+    let final_response = responses::mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-complete"),
+            ev_assistant_message("msg-complete", "probe complete"),
+            ev_completed("resp-complete"),
+        ]),
+    )
+    .await;
+
+    let mut builder = builder_with_external_role(backend);
+    let test = builder.build(&server).await?;
+    test.submit_turn(PROMPT).await?;
+
+    let output_item = final_response
+        .single_request()
+        .function_call_output(SPAWN_CALL_ID);
+    assert_eq!(
+        output_item["output"].as_str(),
+        Some(
+            "External agents cannot read an encrypted `message`; send the task again as plain text."
+        )
+    );
+    assert!(!launched.exists());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conflicting_external_selectors_fail_without_substitution() -> Result<()> {
     let stub_dir = TempDir::new()?;

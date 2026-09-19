@@ -27,6 +27,11 @@ use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
+/// Responses-encrypted arguments are URL-safe base64 Fernet tokens, which always start this way.
+const ENCRYPTED_ARGUMENT_PREFIX: &str = "gAAAA";
+/// A Fernet token of an empty payload is 100 bytes, so shorter text cannot be one.
+const MIN_ENCRYPTED_ARGUMENT_BYTES: usize = 100;
+
 #[derive(Default)]
 pub(crate) struct Handler {
     options: SpawnAgentToolOptions,
@@ -217,6 +222,20 @@ async fn handle_spawn_agent(
     if routing.is_external() && fork_mode.is_some() {
         return Err(FunctionCallError::RespondToModel(
             "External agents do not support fork_turns; use `fork_turns = \"none\"` or omit it when an external agent is selected."
+                .to_string(),
+        ));
+    }
+    // The Responses API can return an encrypted argument without declaring it, and an external CLI
+    // cannot decrypt one. Refuse the opaque token instead of handing it to a third party.
+    if routing.is_external()
+        && message.len() >= MIN_ENCRYPTED_ARGUMENT_BYTES
+        && message.starts_with(ENCRYPTED_ARGUMENT_PREFIX)
+        && message
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'='))
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "External agents cannot read an encrypted `message`; send the task again as plain text."
                 .to_string(),
         ));
     }
