@@ -651,6 +651,9 @@ jobs:
             exit "${remote_status}"
           fi
         env:
+          # The runners execute as the machine owner. A path that cannot exist makes a test that
+          # forgets to isolate its home fail instead of writing into the owner's real one.
+          CODEX_LAB_HOME: /var/empty/codex-lab-tests-must-set-a-home
           RUST_BACKTRACE: 1
           RUST_MIN_STACK: "16777216" # 16 MiB
           NEXTEST_STATUS_LEVEL: leak
