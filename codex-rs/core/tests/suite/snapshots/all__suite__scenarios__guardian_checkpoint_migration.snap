@@ -16,7 +16,7 @@ Settings:
   stream: true
   text: {"verbosity":"low"}
   tool_choice: "auto"
-  tools (10; hash=7d1d6131cfb03664):
+  tools (10; hash=b9ff5e8be3798330):
     - function/exec_command: Runs a command in a PTY, returning output or a session ID for ongoing interaction.; args=[cmd, justification, login, max_output_tokens, prefix_rule, sandbox_permissions, shell, tty, workdir, yield_time_ms]; hash=c04108e51a8548c5
     - function/write_stdin: Writes characters to an existing unified exec session and returns recent output.; args=[chars, max_output_tokens, session_id, yield_time_ms]; hash=7fb62d8a3e2df4e2
     - function/auto_review_disposition: Disposition current Background Review findings. Use repair before applying a bounded fix, defer t...; args=[action, reason, run_id]; hash=bae6f7de1dcc61fc
@@ -25,7 +25,7 @@ Settings:
     - function/request_user_input: Request user input for one to three short questions and wait for the response. This tool is only ...; args=[questions]; hash=7c8f464569dbaa9c
     - custom/apply_patch: The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the pat...; hash=dea9f12b0111a4ba
     - function/view_image: View a local image file from the filesystem when visual inspection is needed. Use this for images...; args=[detail, path]; hash=3b766d5bdec5d50e
-    - namespace/agents: Tools for spawning and managing sub-agents.; hash=ae540c7c08104365
+    - namespace/agents: Tools for spawning and managing sub-agents.; hash=15b64421d74fcd4b
       - function/followup_task
       - function/interrupt_agent
       - function/list_agents
@@ -78,12 +78,12 @@ Settings: relative to window 1
   tool_choice: <removed>
   tools: <removed>
 -- request 4 (turn) --
-00:additional_tools/developer (2; hash=cb1117765a4c10c1):
+00:additional_tools/developer (2; hash=6a6916409113799d):
         - namespace/functions; hash=c809c4ae1ebc6483
           - custom/exec
           - function/wait
           - function/request_user_input
-        - namespace/agents: Tools for spawning and managing sub-agents.; hash=ae540c7c08104365
+        - namespace/agents: Tools for spawning and managing sub-agents.; hash=15b64421d74fcd4b
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -220,12 +220,12 @@ Settings: relative to window 2
 ## Window 4 (after request 6: input diverged at item 00)
 Settings: same as window 2
 -- request 7 (turn) --
-00:additional_tools/developer (2; hash=cb1117765a4c10c1):
+00:additional_tools/developer (2; hash=6a6916409113799d):
         - namespace/functions; hash=c809c4ae1ebc6483
           - custom/exec
           - function/wait
           - function/request_user_input
-        - namespace/agents: Tools for spawning and managing sub-agents.; hash=ae540c7c08104365
+        - namespace/agents: Tools for spawning and managing sub-agents.; hash=15b64421d74fcd4b
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -276,12 +276,12 @@ Settings: same as window 2
 ## Window 5 (after request 8: input diverged at item 04)
 Settings: same as window 2
 -- request 9 (turn) --
-00:additional_tools/developer (2; hash=cb1117765a4c10c1):
+00:additional_tools/developer (2; hash=6a6916409113799d):
         - namespace/functions; hash=c809c4ae1ebc6483
           - custom/exec
           - function/wait
           - function/request_user_input
-        - namespace/agents: Tools for spawning and managing sub-agents.; hash=ae540c7c08104365
+        - namespace/agents: Tools for spawning and managing sub-agents.; hash=15b64421d74fcd4b
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -416,12 +416,12 @@ Settings: same as window 3
 ## Window 7 (after request 10: input diverged at item 00)
 Settings: same as window 2
 -- request 11 (turn) --
-00:additional_tools/developer (2; hash=cb1117765a4c10c1):
+00:additional_tools/developer (2; hash=6a6916409113799d):
         - namespace/functions; hash=c809c4ae1ebc6483
           - custom/exec
           - function/wait
           - function/request_user_input
-        - namespace/agents: Tools for spawning and managing sub-agents.; hash=ae540c7c08104365
+        - namespace/agents: Tools for spawning and managing sub-agents.; hash=15b64421d74fcd4b
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
