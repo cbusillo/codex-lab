@@ -90,13 +90,18 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   explicit caller/default-branch checks before they can reach the
   persistent runner. Resource controls serialize heavy commands with the
   existing shared lock and retain the 4-job/24576-MiB profile; local nextest
-  runs one complete `hash:1/1` job with four test threads, while hosted
-  execution retains four hash partitions. Rollback is a revert of this
-  matrix selection; `use_local_resources` remains the resource and isolation
-  switch. Local runs trade four-way parallelism for one full-suite retry unit:
-  rerunning a failed local job repeats the complete suite; Nextest still
-  retries individual failed tests once. Hosted shards preserve parallel
-  diagnostic completion. The 90-minute timeout and local resource guards
+  runs one complete `hash:1/1` job with eight test threads, while hosted
+  execution retains four hash partitions. Four local shards cannot run in
+  parallel on one runner, so they only added three archive downloads and kept
+  the shared host busy for about two and a half hours; the same suite runs
+  unsharded on that host in roughly twenty minutes at sixteen threads, so
+  eight threads should take about twice that. Rollback is a
+  revert of this matrix selection; `use_local_resources` remains the resource
+  and isolation switch. Rerunning a failed local job repeats the complete
+  suite. The Nextest `local` profile retries a failed test twice and ends a
+  test after three 60-second periods, because the persistent host also runs
+  unrelated work; hosted shards keep the default profile. The local job
+  timeout is 150 minutes, hosted shards keep 90, and local resource guards
   remain in force.
 - `sdk-integration.yml` builds Codex with Bazel and runs the TypeScript SDK
   integration tests against that real binary on the trusted Apple Silicon runner.

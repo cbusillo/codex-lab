@@ -95,12 +95,12 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             "${{ inputs.use_local_resources }}": "true" if local else "false",
             "${{ inputs.target }}": "aarch64-apple-darwin",
             "${{ inputs.profile }}": "ci-test",
-            "${{ inputs.test_threads }}": "4",
+            "${{ inputs.test_threads }}": "8",
             "${{ inputs.remote_env }}": "true" if remote else "false",
             "${{ inputs.remote_test_filter }}": "",
             "${{ github.run_id }}": "test-run",
             "${{ matrix.shard }}": "1",
-            "${{ matrix.partition_count }}": "4",
+            "${{ matrix.partition_count }}": "1" if local else "4",
         }
         for source, replacement in replacements.items():
             script = script.replace(source, replacement)

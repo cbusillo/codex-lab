@@ -273,7 +273,7 @@ jobs:
       profile: ci-test
       artifact_id: macos-aarch64
       use_sccache: true
-      test_threads: ${{ needs.execution_gate.outputs.execution_mode == 'local' && 4 || 0 }}
+      test_threads: ${{ needs.execution_gate.outputs.execution_mode == 'local' && 8 || 0 }}
       use_local_resources: ${{ needs.execution_gate.outputs.execution_mode == 'local' }}
     secrets: inherit
 
