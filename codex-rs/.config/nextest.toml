@@ -25,6 +25,13 @@ path = "junit.xml"
 slow-timeout = { period = "60s", terminate-after = 3 }
 retries = 2
 
+[[profile.local.overrides]]
+# Default-profile overrides outrank the profile's base settings, so without this the tests
+# already known to be slow would keep a tighter kill (60-120 s) than everything else here.
+# Keep this filter equal to the union of default overrides that end a test before 180 s.
+filter = '(package(codex-cli) & binary(app_server_daemon) & test(packaged_daemon_)) | (package(codex-exec) & test(worktree_start_and_fork_use_host_pool_and_preserve_legacy_resume)) | (test(approval_matrix_covers_all_modes)) | (test(start_thread_uses_all_default_environments_from_codex_home)) | (test(suite::resume::) | test(suite::cli_stream::) | test(suite::auth_env::) | test(start_thread_uses_all_default_environments_from_codex_home) | test(connect_stdio_command_initializes_json_rpc_client_on_windows)) | (package(codex-tui) & (test(overview_cold_resume_honors_working_directory_selection) | test(local_mcp_respects_configured_servers_and_managed_requirements))) | (package(codex-cli) & test(provider_reachability_))'
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 [profile.local.junit]
 path = "junit.xml"
 

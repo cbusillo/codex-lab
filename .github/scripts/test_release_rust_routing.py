@@ -100,7 +100,7 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             "${{ inputs.remote_test_filter }}": "",
             "${{ github.run_id }}": "test-run",
             "${{ matrix.shard }}": "1",
-            "${{ matrix.partition_count }}": "4",
+            "${{ matrix.partition_count }}": "1" if local else "4",
         }
         for source, replacement in replacements.items():
             script = script.replace(source, replacement)

@@ -94,7 +94,8 @@ in [#517](https://github.com/cbusillo/codex-lab/issues/517).
   execution retains four hash partitions. Four local shards cannot run in
   parallel on one runner, so they only added three archive downloads and kept
   the shared host busy for about two and a half hours; the same suite runs
-  unsharded on that host in roughly twenty minutes at full width. Rollback is a
+  unsharded on that host in roughly twenty minutes at sixteen threads, so
+  eight threads should take about twice that. Rollback is a
   revert of this matrix selection; `use_local_resources` remains the resource
   and isolation switch. Rerunning a failed local job repeats the complete
   suite. The Nextest `local` profile retries a failed test twice and ends a
