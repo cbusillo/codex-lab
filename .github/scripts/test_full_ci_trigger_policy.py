@@ -368,27 +368,30 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
             platform_workflow,
         )
 
-    def test_nextest_uses_all_four_partitions_for_every_runner(self) -> None:
+    def test_nextest_runs_one_local_partition_and_four_hosted_partitions(self) -> None:
         platform_workflow = RUST_NEXTEST_PLATFORM_WORKFLOW.read_text()
+        shard_job = platform_workflow.split("  shard:\n", 1)[1]
         self.assertIn(
             "max-parallel: ${{ inputs.use_local_resources && 1 || 4 }}",
-            platform_workflow.split("  shard:\n", 1)[1],
+            shard_job,
+        )
+        self.assertIn(
+            "timeout-minutes: ${{ inputs.use_local_resources && 150 || 90 }}",
+            shard_job,
         )
 
         matrix_match = re.search(
-            r"include: \$\{\{ fromJSON\('([^']+)'\) \}\}",
+            r"include: \$\{\{ fromJSON\(inputs\.use_local_resources && '([^']+)' \|\| '([^']+)'\) \}\}",
             platform_workflow,
         )
         self.assertIsNotNone(matrix_match)
         assert matrix_match is not None
-        matrix = json.loads(matrix_match.group(1))
         self.assertEqual(
-            matrix,
-            [{"shard": shard, "partition_count": 4} for shard in range(1, 5)],
-        )
-        self.assertEqual(
-            {entry["shard"] for entry in matrix},
-            set(range(1, 5)),
+            (json.loads(matrix_match.group(1)), json.loads(matrix_match.group(2))),
+            (
+                [{"shard": 1, "partition_count": 1}],
+                [{"shard": shard, "partition_count": 4} for shard in range(1, 5)],
+            ),
         )
         self.assertIn(
             '--partition "hash:${{ matrix.shard }}/${{ matrix.partition_count }}"',
@@ -397,6 +400,10 @@ class FullCiTriggerPolicyTest(unittest.TestCase):
         self.assertIn(
             "name: Tests shard ${{ matrix.shard }}/${{ matrix.partition_count }}",
             platform_workflow,
+        )
+        self.assertIn(
+            "test_threads: ${{ needs.execution_gate.outputs.execution_mode == 'local' && 8 || 0 }}",
+            RUST_FULL_CI_WORKFLOW.read_text(),
         )
 
     def test_argument_comment_lint_has_bounded_local_fallback(self) -> None:

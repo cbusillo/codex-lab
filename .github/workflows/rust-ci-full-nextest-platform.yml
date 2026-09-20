@@ -365,8 +365,9 @@ jobs:
     needs: archive
     runs-on: ${{ inputs.runner }}
     # Slower hosted lanes can approach the former 60-minute wall after reducing
-    # process concurrency to match runner capacity.
-    timeout-minutes: 90
+    # process concurrency to match runner capacity. The single local partition runs the whole
+    # suite on a shared host and needs room for retries.
+    timeout-minutes: ${{ inputs.use_local_resources && 150 || 90 }}
     defaults:
       run:
         working-directory: codex-rs
@@ -378,9 +379,10 @@ jobs:
       # Local shards share a process-lifetime lock; queue before the job timer starts.
       max-parallel: ${{ inputs.use_local_resources && 1 || 4 }}
       matrix:
-        # Local runners need the same partitioning to keep the full suite within
-        # the per-job deadline, including serial integration test groups.
-        include: ${{ fromJSON('[{"shard":1,"partition_count":4},{"shard":2,"partition_count":4},{"shard":3,"partition_count":4},{"shard":4,"partition_count":4}]') }}
+        # Local shards cannot run in parallel (one runner, one lock), so four of them only add
+        # three archive downloads and keep the persistent host busy for hours. Run one complete
+        # partition there; the caller gives it enough test threads to fit the local deadline.
+        include: ${{ fromJSON(inputs.use_local_resources && '[{"shard":1,"partition_count":1}]' || '[{"shard":1,"partition_count":4},{"shard":2,"partition_count":4},{"shard":3,"partition_count":4},{"shard":4,"partition_count":4}]') }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

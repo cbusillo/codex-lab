@@ -95,7 +95,7 @@ class ReleaseRustRoutingTests(unittest.TestCase):
             "${{ inputs.use_local_resources }}": "true" if local else "false",
             "${{ inputs.target }}": "aarch64-apple-darwin",
             "${{ inputs.profile }}": "ci-test",
-            "${{ inputs.test_threads }}": "4",
+            "${{ inputs.test_threads }}": "8",
             "${{ inputs.remote_env }}": "true" if remote else "false",
             "${{ inputs.remote_test_filter }}": "",
             "${{ github.run_id }}": "test-run",

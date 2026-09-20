@@ -19,6 +19,11 @@ slow-timeout = { period = "1m", terminate-after = 2 }
 path = "junit.xml"
 
 [profile.local]
+# Local runs share a persistent host with unrelated work. A fixed 60 s kill and one retry
+# turned host stalls into release failures twice on 2026-09-20, with a different set of
+# tests failing each time on unchanged source.
+slow-timeout = { period = "60s", terminate-after = 3 }
+retries = 2
 
 [profile.local.junit]
 path = "junit.xml"
