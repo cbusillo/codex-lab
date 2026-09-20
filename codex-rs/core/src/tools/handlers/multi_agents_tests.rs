@@ -1162,6 +1162,35 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                         && !communication.trigger_turn
             )
     }));
+
+    // The Responses API has returned a token without declaring it, which marks the call as
+    // plaintext. The token must still travel through the encrypted channel.
+    let undeclared_token = format!("gAAAAABqrwLQ{}", "Uv14n4Ccpw4Qwq1J-_".repeat(10));
+    let mut undeclared_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "send_message",
+        function_payload(json!({
+            "target": "test_process",
+            "message": undeclared_token
+        })),
+    );
+    undeclared_invocation.source = crate::tools::context::ToolCallSource::DirectPlaintextMessage;
+    SendMessageHandlerV2
+        .handle(undeclared_invocation)
+        .await
+        .expect("send_message should accept an undeclared token");
+
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == child_thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication, .. }
+                    if communication.content.is_empty()
+                        && communication.encrypted_content.as_deref()
+                            == Some(undeclared_token.as_str())
+            )
+    }));
 }
 
 #[tokio::test]

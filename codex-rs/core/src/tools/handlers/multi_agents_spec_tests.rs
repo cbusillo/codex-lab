@@ -99,7 +99,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(description.contains("you MUST set `agent_type` to its canonical selector"));
     assert!(description.contains("must never be encoded only in `task_name`"));

@@ -679,10 +679,11 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         ("bounded_worker".to_string(), bounded_worker_input_schema()),
         (
             "message".to_string(),
+            // Not `with_encrypted()`: any spawn can route to an external CLI, which receives the
+            // argument verbatim and cannot decrypt it.
             JsonSchema::string(Some(
                 "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
+            )),
         ),
         ("task_kind".to_string(), create_agent_task_kind_schema()),
         ("task_size".to_string(), create_agent_task_size_schema()),

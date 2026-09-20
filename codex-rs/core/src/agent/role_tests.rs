@@ -66,7 +66,10 @@ async fn apply_role_returns_error_for_unknown_role() {
         .await
         .expect_err("unknown role should fail");
 
-    assert_eq!(err, "unknown agent_type 'missing-role'");
+    assert_eq!(
+        err,
+        "unknown agent_type 'missing-role'; use a selector exactly as listed in the spawn_agent description"
+    );
 }
 
 #[tokio::test]

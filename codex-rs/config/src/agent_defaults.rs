@@ -611,16 +611,26 @@ pub fn filter_agent_model_names_for_auth(
 
 pub fn agent_model_spec(identifier: &str) -> Option<&'static AgentModelSpec> {
     let lower = identifier.to_ascii_lowercase();
-    agent_model_specs()
-        .iter()
-        .find(|spec| spec.slug.eq_ignore_ascii_case(&lower))
-        .or_else(|| {
-            agent_model_specs().iter().find(|spec| {
-                spec.aliases
-                    .iter()
-                    .any(|alias| alias.eq_ignore_ascii_case(&lower))
+    let lookup = |name: &str| {
+        agent_model_specs()
+            .iter()
+            .find(|spec| spec.slug.eq_ignore_ascii_case(name))
+            .or_else(|| {
+                agent_model_specs().iter().find(|spec| {
+                    spec.aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(name))
+                })
             })
-        })
+    };
+    // Models generalize the `code-` prefix from the native slugs onto external ones, such as
+    // `code-claude-sonnet-4.6`. Resolve one such prefix instead of failing the spawn.
+    lookup(&lower).or_else(|| {
+        lower
+            .strip_prefix("code-")
+            .and_then(lookup)
+            .filter(|spec| spec.family != "code")
+    })
 }
 
 pub fn default_agent_configs() -> Vec<AgentConfigDefaults> {

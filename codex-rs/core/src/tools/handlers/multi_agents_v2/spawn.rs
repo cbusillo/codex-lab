@@ -220,6 +220,14 @@ async fn handle_spawn_agent(
                 .to_string(),
         ));
     }
+    // An external CLI cannot decrypt a task. Inspect the raw argument: the bounded copy may be
+    // truncated, and a bounded worker rebuilds its input from the raw argument later.
+    if routing.is_external() && super::looks_like_encrypted_argument(&args.message) {
+        return Err(FunctionCallError::RespondToModel(
+            "External agents cannot read an encrypted `message`; send the task again as plain text."
+                .to_string(),
+        ));
+    }
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }

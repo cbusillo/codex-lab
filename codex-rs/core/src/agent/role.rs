@@ -100,7 +100,11 @@ async fn apply_role_to_config_with_developer_instructions(
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
 
     let role = resolve_role_config_owned(config, role_name)
-        .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
+        .ok_or_else(|| {
+            format!(
+                "unknown agent_type '{role_name}'; use a selector exactly as listed in the spawn_agent description"
+            )
+        })?;
 
     apply_role_to_config_inner(config, role_name, &role, developer_instructions)
         .await
