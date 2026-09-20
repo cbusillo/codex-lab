@@ -59,6 +59,30 @@
   specific.
 - Treat `../code/every-code-webui` as Every Code web UI reference material only.
 
+## Verifying outcomes
+
+A change is done when the real system shows the outcome, not when the change
+is merged, reviewed, or covered by tests that share its assumptions.
+
+- Every fix names one command against the real system and the result it must
+  show, and that command is run after the change is in place. Put it in the
+  issue's Finish Line or Validation section. If you cannot name one, the fix is
+  not yet understood.
+- Run the cheapest real check first, before building tests or evidence around
+  an assumption. Spawning one real agent, reading one real API response, or
+  measuring one directory usually takes minutes.
+- When a fix depends on a service this repository does not control, capture one
+  real response and build the fixture from it. Do not invent the response shape,
+  and do not let a shared test helper stamp an assumed field onto every mock.
+- A configured limit, schedule, or daemon is a claim until observed. Check that
+  the cache is under its limit, the job ran, the process is alive.
+- When a boundary hands content to a third party and classification is
+  uncertain, refuse rather than pass it through.
+- Say plainly what was not verified. "Focused tests passed; the full suite and
+  the installed build were not run" is a complete and acceptable status.
+- `lab-health` on the development host checks recurring outcomes daily. Add a
+  check there when a fix is the kind that can silently regress.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
