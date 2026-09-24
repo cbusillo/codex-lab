@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use app_test_support::AppServerJsonInvocation;
 use app_test_support::app_server_json_shutdown_event;
 use predicates::str::contains;
 use pretty_assertions::assert_eq;
@@ -10,7 +9,7 @@ use tempfile::TempDir;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_home);
+    cmd.env("CODEX_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -94,10 +93,6 @@ fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
             .as_slice(),
             "cannot apply local provider or additional-directory overrides",
         ),
-        (
-            ["--auth-profile", "work", "agents"].as_slice(),
-            "does not accept `--auth-profile`",
-        ),
     ] {
         let mut cmd = codex_command(codex_home.path())?;
         cmd.args(args)
@@ -112,8 +107,7 @@ fn agents_reject_inputs_that_cannot_be_applied() -> Result<()> {
 #[test]
 fn app_server_emits_json_info_events() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let event =
-        app_server_json_shutdown_event(AppServerJsonInvocation::CodexCli, codex_home.path())?;
+    let event = app_server_json_shutdown_event("codex", &["app-server"], codex_home.path())?;
 
     assert_eq!(
         event,

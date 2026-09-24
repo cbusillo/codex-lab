@@ -11,8 +11,6 @@ async fn api_key_discovery_disabled_preserves_command_auth_discovery_and_merging
         /*priority*/ 0,
     )];
     let endpoint = Arc::new(TestModelsEndpoint {
-        has_configured_credentials: false,
-        supports_api_key_models: true,
         has_command_auth: true,
         uses_codex_backend: false,
         responses: Mutex::new(vec![models.clone()].into()),

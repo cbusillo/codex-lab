@@ -319,13 +319,14 @@ macro_rules! client_request_definitions {
             pub fn into_jsonrpc_parts(
                 self,
             ) -> std::result::Result<(RequestId, crate::Result), serde_json::Error> {
-                match self {
+                let (request_id, response) = match self {
                     $(
                         Self::$variant { request_id, response } => {
-                            serde_json::to_value(response).map(|result| (request_id, result))
+                            (request_id, ClientResponsePayload::$variant(response))
                         }
                     )*
-                }
+                };
+                serde_json::to_value(response).map(|result| (request_id, result))
             }
         }
 
@@ -363,16 +364,7 @@ macro_rules! client_request_definitions {
                 &self,
                 request_id: RequestId,
             ) -> std::result::Result<(RequestId, crate::Result), serde_json::Error> {
-                match self {
-                    $(
-                        Self::$variant(response) => {
-                            serde_json::to_value(response).map(|result| (request_id, result))
-                        }
-                    )*
-                    Self::InterruptConversation(response) => {
-                        serde_json::to_value(response).map(|result| (request_id, result))
-                    }
-                }
+                serde_json::to_value(self).map(|result| (request_id, result))
             }
         }
 
@@ -516,19 +508,6 @@ client_request_definitions! {
         params: v2::ServerDiagnosticsParams,
         serialization: None,
         response: v2::ServerDiagnosticsResponse,
-    },
-
-    #[experimental("structuredRequest/start")]
-    StructuredRequestStart => "structuredRequest/start" {
-        params: v2::StructuredRequestStartParams,
-        serialization: None,
-        response: v2::StructuredRequestStartResponse,
-    },
-    #[experimental("structuredRequest/cancel")]
-    StructuredRequestCancel => "structuredRequest/cancel" {
-        params: v2::StructuredRequestCancelParams,
-        serialization: None,
-        response: v2::StructuredRequestCancelResponse,
     },
 
     #[experimental("userVerification/status")]
@@ -728,6 +707,13 @@ client_request_definitions! {
         serialization: global("memory"),
         response: v2::MemoryResetResponse,
     },
+    #[experimental("rollout/compress")]
+    /// Start a best-effort background compression pass for cold local rollouts.
+    RolloutCompress => "rollout/compress" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::RolloutCompressResponse,
+    },
     ThreadUnarchive => "thread/unarchive" {
         params: v2::ThreadUnarchiveParams,
         serialization: thread_id(params.thread_id),
@@ -873,12 +859,6 @@ client_request_definitions! {
         // Explicitly concurrent: this primarily reads append-only rollout storage.
         serialization: None,
         response: v2::ThreadItemsListResponse,
-    },
-    #[experimental("thread/turns/items/list")]
-    ThreadTurnsItemsList => "thread/turns/items/list" {
-        params: v2::ThreadTurnsItemsListParams,
-        serialization: None,
-        response: v2::ThreadTurnsItemsListResponse,
     },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
@@ -1119,31 +1099,26 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ReviewStartResponse,
     },
-    BackgroundAutoReviewControl => "review/background/control" {
-        params: v2::BackgroundAutoReviewControlParams,
-        serialization: thread_id(params.thread_id),
-        response: v2::BackgroundAutoReviewControlResponse,
-    },
-    AutoReviewSummaryRead => "review/summary/read" {
-        params: v2::AutoReviewSummaryReadParams,
-        serialization: thread_id(params.thread_id),
-        response: v2::AutoReviewSummaryReadResponse,
-    },
-    AutoReviewFindingDetailRead => "review/findingDetail/read" {
-        params: v2::AutoReviewFindingDetailReadParams,
-        serialization: thread_id(params.thread_id),
-        response: v2::AutoReviewFindingDetailReadResponse,
-    },
-    AutoReviewDispositionWrite => "review/disposition/write" {
-        params: v2::AutoReviewDispositionWriteParams,
-        serialization: thread_id(params.thread_id),
-        response: v2::AutoReviewDispositionWriteResponse,
-    },
 
     ModelList => "model/list" {
         params: v2::ModelListParams,
         serialization: None,
         response: v2::ModelListResponse,
+    },
+    GatewayOAuthRead => "account/gatewayOAuth/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthReadResponse,
+    },
+    GatewayOAuthLogin => "account/gatewayOAuth/login" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthLoginResponse,
+    },
+    GatewayOAuthCancel => "account/gatewayOAuth/cancel" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::GatewayOAuthCancelResponse,
     },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
@@ -1177,41 +1152,11 @@ client_request_definitions! {
         serialization: global("remote-control"),
         response: v2::RemoteControlDisableResponse,
     },
-    #[experimental("remoteControl/reconnect")]
-    RemoteControlReconnect => "remoteControl/reconnect" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global("remote-control"),
-        response: v2::RemoteControlReconnectResponse,
-    },
     #[experimental("remoteControl/status/read")]
     RemoteControlStatusRead => "remoteControl/status/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global_shared_read("remote-control"),
         response: v2::RemoteControlStatusReadResponse,
-    },
-    #[experimental("codeBridge/status/read")]
-    CodeBridgeStatusRead => "codeBridge/status/read" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global_shared_read("code-bridge-status"),
-        response: v2::CodeBridgeStatusReadResponse,
-    },
-    #[experimental("codeBridge/subscribe")]
-    CodeBridgeSubscribe => "codeBridge/subscribe" {
-        params: v2::CodeBridgeSubscribeParams,
-        serialization: global("code-bridge"),
-        response: v2::CodeBridgeSubscribeResponse,
-    },
-    #[experimental("codeBridge/screenshot")]
-    CodeBridgeScreenshot => "codeBridge/screenshot" {
-        params: v2::CodeBridgeScreenshotParams,
-        serialization: global("code-bridge"),
-        response: v2::CodeBridgeScreenshotResponse,
-    },
-    #[experimental("codeBridge/javascript")]
-    CodeBridgeJavascript => "codeBridge/javascript" {
-        params: v2::CodeBridgeJavascriptParams,
-        serialization: global("code-bridge"),
-        response: v2::CodeBridgeJavascriptResponse,
     },
     #[experimental("remoteControl/pairing/start")]
     RemoteControlPairingStart => "remoteControl/pairing/start" {
@@ -1355,24 +1300,6 @@ client_request_definitions! {
         response: v2::CancelLoginAccountResponse,
     },
 
-    SwitchActiveAccount => "account/switchActive" {
-        params: v2::SwitchActiveAccountParams,
-        serialization: global("account-auth"),
-        response: v2::SwitchActiveAccountResponse,
-    },
-
-    ListAccounts => "account/list" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global_shared_read("account-auth"),
-        response: v2::ListAccountsResponse,
-    },
-
-    RemoveAccount => "account/remove" {
-        params: v2::RemoveAccountParams,
-        serialization: global("account-auth"),
-        response: v2::RemoveAccountResponse,
-    },
-
     LogoutAccount => "account/logout" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global("account-auth"),
@@ -1493,18 +1420,6 @@ client_request_definitions! {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: global_shared_read("config"),
         response: v2::ExternalAgentConfigImportHistoriesReadResponse,
-    },
-    #[experimental("externalAgentCapability/read")]
-    ExternalAgentCapabilitiesRead => "externalAgentCapability/read" {
-        params: v2::ExternalAgentCapabilitiesReadParams,
-        serialization: global_shared_read("config"),
-        response: v2::ExternalAgentCapabilitiesReadResponse,
-    },
-    #[experimental("externalAgentCapability/refresh/cancel")]
-    ExternalAgentCapabilitiesRefreshCancel => "externalAgentCapability/refresh/cancel" {
-        params: v2::ExternalAgentCapabilitiesRefreshCancelParams,
-        serialization: None,
-        response: v2::ExternalAgentCapabilitiesRefreshCancelResponse,
     },
     ConfigValueWrite => "config/value/write" {
         params: v2::ConfigValueWriteParams,
@@ -2027,8 +1942,6 @@ server_notification_definitions! {
     ThreadSettingsUpdated => "thread/settings/updated" (v2::ThreadSettingsUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
-    ProjectValidationCompleted => "validation/completed" (v2::ProjectValidationCompletedNotification),
-    BackgroundAutoReviewStatusChanged => "review/backgroundStatus/changed" (v2::BackgroundAutoReviewStatusChangedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
     TurnCompleted => "turn/completed" (v2::TurnCompletedNotification),
     HookCompleted => "hook/completed" (v2::HookCompletedNotification),
@@ -2067,13 +1980,12 @@ server_notification_definitions! {
     #[experimental("mcpServer/event/stream/notification")]
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
+    GatewayOAuthChanged => "account/gatewayOAuth/changed" (v2::GatewayOAuthChangedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),
     ExternalAgentConfigImportCompleted => "externalAgentConfig/import/completed" (v2::ExternalAgentConfigImportCompletedNotification),
-    #[experimental("externalAgentCapability/updated")]
-    ExternalAgentCapabilitiesUpdated => "externalAgentCapability/updated" (v2::ExternalAgentCapabilitiesUpdatedNotification),
     FsChanged => "fs/changed" (v2::FsChangedNotification),
     ReasoningSummaryTextDelta => "item/reasoning/summaryTextDelta" (v2::ReasoningSummaryTextDeltaNotification),
     ReasoningSummaryPartAdded => "item/reasoning/summaryPartAdded" (v2::ReasoningSummaryPartAddedNotification),
@@ -2557,6 +2469,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(
@@ -2653,6 +2566,7 @@ mod tests {
         let environment_add = ClientRequest::EnvironmentAdd {
             request_id: request_id(),
             params: v2::EnvironmentAddParams {
+                auth_bearer_token: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,
@@ -2746,6 +2660,7 @@ mod tests {
                 server: "server-a".to_string(),
                 uri: "file:///tmp/resource".to_string(),
                 connector_id: None,
+                target: None,
             },
         };
         assert_eq!(mcp_resource_read.serialization_scope(), None);
@@ -2772,49 +2687,6 @@ mod tests {
             Some(ClientRequestSerializationScope::GlobalSharedRead(
                 "remote-control-pairing"
             ))
-        );
-        let code_bridge_status_read = ClientRequest::CodeBridgeStatusRead {
-            request_id: request_id(),
-            params: None,
-        };
-        assert_eq!(
-            code_bridge_status_read.serialization_scope(),
-            Some(ClientRequestSerializationScope::GlobalSharedRead(
-                "code-bridge-status"
-            ))
-        );
-        let code_bridge_subscribe = ClientRequest::CodeBridgeSubscribe {
-            request_id: request_id(),
-            params: v2::CodeBridgeSubscribeParams {
-                filter: v2::CodeBridgeSubscriptionFilter::default(),
-            },
-        };
-        assert_eq!(
-            code_bridge_subscribe.serialization_scope(),
-            Some(ClientRequestSerializationScope::Global("code-bridge"))
-        );
-        let code_bridge_screenshot = ClientRequest::CodeBridgeScreenshot {
-            request_id: request_id(),
-            params: v2::CodeBridgeScreenshotParams {
-                target_client_id: "browser-1".to_string(),
-                timeout_ms: None,
-            },
-        };
-        assert_eq!(
-            code_bridge_screenshot.serialization_scope(),
-            Some(ClientRequestSerializationScope::Global("code-bridge"))
-        );
-        let code_bridge_javascript = ClientRequest::CodeBridgeJavascript {
-            request_id: request_id(),
-            params: v2::CodeBridgeJavascriptParams {
-                target_client_id: "browser-1".to_string(),
-                code: "window.location.href".to_string(),
-                timeout_ms: None,
-            },
-        };
-        assert_eq!(
-            code_bridge_javascript.serialization_scope(),
-            Some(ClientRequestSerializationScope::Global("code-bridge"))
         );
         let remote_control_clients_list = ClientRequest::RemoteControlClientsList {
             request_id: request_id(),
@@ -2873,6 +2745,7 @@ mod tests {
                     version: "0.1.0".to_string(),
                 },
                 capabilities: Some(v1::InitializeCapabilities {
+                    explicit_gateway_oauth: false,
                     experimental_api: true,
                     request_attestation: true,
                     mcp_server_openai_form_elicitation: true,
@@ -2960,6 +2833,7 @@ mod tests {
                         version: "0.1.0".to_string(),
                     },
                     capabilities: Some(v1::InitializeCapabilities {
+                        explicit_gateway_oauth: false,
                         experimental_api: true,
                         request_attestation: true,
                         mcp_server_openai_form_elicitation: true,
@@ -3351,7 +3225,6 @@ mod tests {
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
                     source: v2::SessionSource::Exec,
-                    session_provenance: None,
                     can_accept_direct_input: None,
                     thread_source: None,
                     agent_nickname: None,
@@ -3416,7 +3289,6 @@ mod tests {
                         "source": "exec",
                         "canAcceptDirectInput": null,
                         "threadSource": null,
-                        "sessionProvenance": null,
                         "agentNickname": null,
                         "agentRole": null,
                         "gitInfo": null,
@@ -3542,7 +3414,6 @@ mod tests {
                 app_brand: None,
                 codex_streamlined_login: false,
                 use_hosted_login_success_page: false,
-                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3559,59 +3430,6 @@ mod tests {
         Ok(())
     }
 
-    /// Adding an account must not revoke and remove the account already stored. The TUI account
-    /// pane requests that by setting `preserveExistingAccount`, so the flag has to survive
-    /// serialization: omitting it is what makes the server take the revoke-and-remove path.
-    /// `codex_login::server::tests::persist_tokens_async_preserves_previous_account_when_adding_account`
-    /// pins what the server then does with it.
-    #[test]
-    fn serialize_account_login_chatgpt_preserves_existing_account() -> Result<()> {
-        let request = ClientRequest::LoginAccount {
-            request_id: RequestId::Integer(3),
-            params: v2::LoginAccountParams::Chatgpt {
-                app_brand: None,
-                codex_streamlined_login: false,
-                use_hosted_login_success_page: false,
-                preserve_existing_account: true,
-            },
-        };
-        assert_eq!(
-            json!({
-                "method": "account/login/start",
-                "id": 3,
-                "params": {
-                    "type": "chatgpt",
-                    "appBrand": null,
-                    "preserveExistingAccount": true
-                }
-            }),
-            serde_json::to_value(&request)?,
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn serialize_account_login_chatgpt_device_code_preserves_existing_account() -> Result<()> {
-        let request = ClientRequest::LoginAccount {
-            request_id: RequestId::Integer(4),
-            params: v2::LoginAccountParams::ChatgptDeviceCode {
-                preserve_existing_account: true,
-            },
-        };
-        assert_eq!(
-            json!({
-                "method": "account/login/start",
-                "id": 4,
-                "params": {
-                    "type": "chatgptDeviceCode",
-                    "preserveExistingAccount": true
-                }
-            }),
-            serde_json::to_value(&request)?,
-        );
-        Ok(())
-    }
-
     #[test]
     fn serialize_account_login_chatgpt_streamlined() -> Result<()> {
         let request = ClientRequest::LoginAccount {
@@ -3620,7 +3438,6 @@ mod tests {
                 app_brand: None,
                 codex_streamlined_login: true,
                 use_hosted_login_success_page: false,
-                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3646,7 +3463,6 @@ mod tests {
                 app_brand: Some(v2::LoginAppBrand::Chatgpt),
                 codex_streamlined_login: true,
                 use_hosted_login_success_page: true,
-                preserve_existing_account: false,
             },
         };
         assert_eq!(
@@ -3669,9 +3485,7 @@ mod tests {
     fn serialize_account_login_chatgpt_device_code() -> Result<()> {
         let request = ClientRequest::LoginAccount {
             request_id: RequestId::Integer(4),
-            params: v2::LoginAccountParams::ChatgptDeviceCode {
-                preserve_existing_account: false,
-            },
+            params: v2::LoginAccountParams::ChatgptDeviceCode,
         };
         assert_eq!(
             json!({
@@ -4006,11 +3820,13 @@ mod tests {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(9),
             params: v2::EnvironmentAddParams {
+                auth_bearer_token: Some("private-executor-token".into()),
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: Some(300_000),
             },
         };
+        assert!(!format!("{request:?}").contains("private-executor-token"));
         assert_eq!(
             json!({
                 "method": "environment/add",
@@ -4018,7 +3834,8 @@ mod tests {
                 "params": {
                     "environmentId": "remote-a",
                     "execServerUrl": "ws://127.0.0.1:8765",
-                    "connectTimeoutMs": 300000
+                    "connectTimeoutMs": 300000,
+                    "authBearerToken": "private-executor-token"
                 }
             }),
             serde_json::to_value(&request)?,
@@ -4196,6 +4013,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: Some(CodexResponseHandoffMode::BemTags),
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: Some(std::collections::BTreeMap::from([
                     ("analysis".to_string(), vec!["[THINKING]".to_string()]),
                     (
@@ -4282,6 +4100,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
@@ -4334,6 +4153,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,
@@ -4536,58 +4356,11 @@ mod tests {
     }
 
     #[test]
-    fn code_bridge_status_read_is_marked_experimental() {
-        let request = ClientRequest::CodeBridgeStatusRead {
-            request_id: RequestId::Integer(1),
-            params: None,
-        };
-        let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
-        assert_eq!(reason, Some("codeBridge/status/read"));
-    }
-
-    #[test]
-    fn code_bridge_control_methods_are_marked_experimental() {
-        let subscribe = ClientRequest::CodeBridgeSubscribe {
-            request_id: RequestId::Integer(1),
-            params: v2::CodeBridgeSubscribeParams {
-                filter: v2::CodeBridgeSubscriptionFilter::default(),
-            },
-        };
-        let screenshot = ClientRequest::CodeBridgeScreenshot {
-            request_id: RequestId::Integer(1),
-            params: v2::CodeBridgeScreenshotParams {
-                target_client_id: "browser-1".to_string(),
-                timeout_ms: None,
-            },
-        };
-        let javascript = ClientRequest::CodeBridgeJavascript {
-            request_id: RequestId::Integer(1),
-            params: v2::CodeBridgeJavascriptParams {
-                target_client_id: "browser-1".to_string(),
-                code: "window.location.href".to_string(),
-                timeout_ms: None,
-            },
-        };
-
-        assert_eq!(
-            crate::experimental_api::ExperimentalApi::experimental_reason(&subscribe),
-            Some("codeBridge/subscribe")
-        );
-        assert_eq!(
-            crate::experimental_api::ExperimentalApi::experimental_reason(&screenshot),
-            Some("codeBridge/screenshot")
-        );
-        assert_eq!(
-            crate::experimental_api::ExperimentalApi::experimental_reason(&javascript),
-            Some("codeBridge/javascript")
-        );
-    }
-
-    #[test]
     fn environment_add_is_marked_experimental() {
         let request = ClientRequest::EnvironmentAdd {
             request_id: RequestId::Integer(1),
             params: v2::EnvironmentAddParams {
+                auth_bearer_token: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,
@@ -4634,6 +4407,7 @@ mod tests {
                 codex_responses_as_items: None,
                 codex_response_item_prefix: None,
                 codex_response_handoff_mode: None,
+                backend_reasoning_status: false,
                 codex_response_handoff_channel_prefixes: None,
                 thread_id: "thr_123".to_string(),
                 model: None,

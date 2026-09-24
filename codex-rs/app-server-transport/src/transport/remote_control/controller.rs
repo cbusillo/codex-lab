@@ -88,15 +88,12 @@ impl RemoteControl {
             installation_id: self.config.installation_id.clone(),
             environment_id: None,
         });
-        let (reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
         let session = Arc::new(RemoteControlSession {
             policy: self.config.policy,
             shutdown_token: shutdown.clone(),
             desired_state_tx: desired_state_tx.clone(),
             desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
             persistence: self.persistence.clone(),
-            reconnect_tx,
-            next_reconnect_generation: Arc::new(AtomicU64::new(0)),
             status_tx: Arc::new(status_tx.clone()),
             state_db: self.state_db.clone(),
             remote_control_url: self.config.remote_control_url.clone(),
@@ -123,7 +120,6 @@ impl RemoteControl {
             },
             shutdown.clone(),
             desired_state_tx,
-            reconnect_rx,
         );
         let client_name_rx = if self.requires_client_name {
             let (tx, rx) = oneshot::channel();
@@ -202,12 +198,6 @@ impl RemoteControlHandle {
 
     pub async fn disable_ephemeral(&self) -> RemoteControlStatusChangedNotification {
         self.inner.session().disable_ephemeral().await
-    }
-
-    pub fn reconnect(
-        &self,
-    ) -> Result<RemoteControlStatusChangedNotification, RemoteControlReconnectUnavailable> {
-        self.inner.session().reconnect()
     }
 
     pub async fn enable(

@@ -18,13 +18,12 @@ use rmcp::model::RequestId;
 use tokio::sync::oneshot;
 
 use super::TurnTokenUsage;
-use crate::agent::control::AgentExecutionGuard;
+use crate::agent::types::AgentExecutionGuard;
 use crate::session::TurnInputQueue;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tasks::AnySessionTask;
-use crate::tasks::TaskStart;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TokenUsage;
@@ -76,7 +75,6 @@ pub(crate) struct RunningTask {
     pub(crate) done: Arc<Notify>,
     pub(crate) kind: TaskKind,
     pub(crate) task: Arc<dyn AnySessionTask>,
-    pub(crate) start: TaskStart,
     pub(crate) cancellation_token: CancellationToken,
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,
@@ -101,7 +99,6 @@ pub(crate) struct TurnState {
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,
     pub(crate) token_usage_at_turn_start: TokenUsage,
-    pub(crate) completed_turn_diff: Option<crate::turn_diff_tracker::CompletedTurnDiff>,
     pub(crate) token_usage_by_model: TurnTokenUsage,
     /// The last step captured for execution or selected from a speculative fallback.
     /// Remains absent until a step is captured; standalone local compaction has no step.
@@ -111,8 +108,8 @@ pub(crate) struct TurnState {
 /// Host receipt metadata follows the response through the asynchronous tool waiter.
 pub(crate) struct AcceptedUserInputResponse {
     pub(crate) response: RequestUserInputResponse,
-    /// Absent in legacy mode, which does not reserve or persist acceptance order.
-    pub(crate) acceptance_order: Option<u64>,
+    /// Order reserved when the host accepts this response.
+    pub(crate) acceptance_order: u64,
 }
 
 pub(crate) struct PendingRequestPermissions {

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::session::Submission;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_async_utils::OrCancelExt;
@@ -9,7 +10,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
@@ -57,7 +57,6 @@ pub(crate) async fn run_codex_thread_interactive(
     subagent_source: SubAgentSource,
     isolation: codex_extension_api::SessionIsolation,
     initial_history: Option<InitialHistory>,
-    mut thread_extension_init: codex_extension_api::ExtensionDataInit,
     git_enrichment_policy: GitEnrichmentPolicy,
     windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
@@ -82,6 +81,7 @@ pub(crate) async fn run_codex_thread_interactive(
     } else {
         Arc::clone(&parent_session.services.extensions)
     };
+    let mut thread_extension_init = codex_extension_api::ExtensionDataInit::default();
     thread_extension_init.insert(isolation);
     let (session, io) = Session::spawn(SessionSpawnArgs {
         startup: None,
@@ -96,9 +96,6 @@ pub(crate) async fn run_codex_thread_interactive(
             .services
             .turn_environments
             .environment_manager(),
-        project_validation_coordinator: Arc::clone(
-            &parent_session.services.project_validation_coordinator,
-        ),
         skills_service: Arc::clone(&parent_session.services.skills_service),
         plugins_manager: Arc::clone(&parent_session.services.plugins_manager),
         mcp_manager: Arc::clone(&parent_session.services.mcp_manager),
@@ -109,7 +106,6 @@ pub(crate) async fn run_codex_thread_interactive(
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source,
-        session_provenance: None,
         forked_from_thread_id,
         parent_thread_id: Some(parent_session.thread_id),
         thread_source: Some(if is_guardian_reviewer {
@@ -118,7 +114,10 @@ pub(crate) async fn run_codex_thread_interactive(
             ThreadSource::Subagent
         }),
         originator: parent_ctx.originator.clone(),
-        agent_control: parent_session.services.agent_control.clone(),
+        agent_control: crate::agent::control::AgentControlInit::Provided {
+            control: Arc::clone(&parent_session.services.agent_control),
+            runtime: parent_session.services.local_agent_runtime.clone(),
+        },
         dynamic_tools: Vec::new(),
         metrics_service_name: None,
         user_shell_override: None,
@@ -198,13 +197,12 @@ pub(crate) async fn run_codex_thread_one_shot(
     subagent_source: SubAgentSource,
     final_output_json_schema: Option<Value>,
     initial_history: Option<InitialHistory>,
-    thread_extension_init: codex_extension_api::ExtensionDataInit,
 ) -> Result<(Arc<Session>, SessionIo), CodexErr> {
     // Use a child token so we can stop the delegate after completion without
     // requiring the caller to cancel the parent token.
     let child_cancel = cancel_token.child_token();
     let parent_turn_id = parent_ctx.sub_id.clone();
-    let parent_environments = parent_ctx.environments.clone();
+    let parent_environments = parent_ctx.initial_environments.clone();
     let root_turn_id = parent_ctx.turn_metadata_state.root_turn_id();
     let (session, io) = Box::pin(run_codex_thread_interactive(
         config,
@@ -217,7 +215,6 @@ pub(crate) async fn run_codex_thread_one_shot(
         subagent_source,
         codex_extension_api::SessionIsolation::Inherit,
         initial_history,
-        thread_extension_init,
         GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
     ))
@@ -263,10 +260,10 @@ pub(crate) async fn run_codex_thread_one_shot(
                     .send(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
-                        client_user_message_id: None,
                         trace: None,
                         parent_turn_id: None,
                         root_turn_id: None,
+                        residency_guard: None,
                     })
                     .await;
                 child_cancel.cancel();

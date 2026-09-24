@@ -1,15 +1,10 @@
-//! Applies bounded agent-role overrides on top of an existing session config.
+//! Applies bounded agent-role overrides to an existing session config.
 //!
-//! Roles can customize model settings and instructions or disable selected tools and skills.
-//! A projected configuration layer preserves the parent's authority and caller-owned runtime
-//! settings. The multi-agent tool handler decides when to spawn a sub-agent and which role to use.
+//! Roles may customize the child or reduce its capabilities, but never replace the parent
+//! session's authority. A projected layer keeps existing layer-based consumers in sync.
 
-use crate::config::AgentRoleBackendConfig;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
-use crate::config::ConfigOverrides;
-use crate::config::ExternalCommandAgentBackendConfig;
-use crate::config::ExternalCommandProtocol;
 use crate::config::deserialize_config_toml_with_base;
 use anyhow::anyhow;
 use codex_agent_roles::parse_agent_role_file_contents;
@@ -17,13 +12,13 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::SkillsConfig;
-use codex_config::config_toml::ConfigToml;
 use codex_config::loader::resolve_relative_paths_in_config_toml;
-use codex_exec_server::LOCAL_FS;
+use codex_exec_server::read_sensitive_file_to_string;
 use codex_features::Feature;
 use codex_features::feature_for_key;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -52,61 +47,18 @@ struct AgentRoleOverrides {
     skills: Option<SkillsConfig>,
 }
 
-/// Applies a named role layer to `config` while preserving caller-owned provider settings.
-///
-/// The role layer is inserted at session-flag precedence so it can override persisted config, but
-/// the caller's current `model_provider` remains a sticky runtime choice. The service tier also
-/// stays unchanged unless the role explicitly sets it. Rebuilding the config without those
-/// overrides would make a spawned agent silently fall back to default settings.
+/// Applies typed role overrides to the existing parent-derived configuration.
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), String> {
-    apply_role_to_config_with_developer_instructions(
-        config,
-        role_name,
-        RoleDeveloperInstructions::UseConfigLayers,
-    )
-    .await
-}
-
-/// Applies a v2 role without losing developer instructions selected by its caller.
-///
-/// A role's own top-level developer instructions still take precedence. When its role file omits
-/// that setting, rebuilding the config must not restore inherited instructions from older layers.
-pub(crate) async fn apply_role_to_config_for_multi_agent_v2(
-    config: &mut Config,
-    role_name: Option<&str>,
-) -> Result<(), String> {
-    apply_role_to_config_with_developer_instructions(
-        config,
-        role_name,
-        RoleDeveloperInstructions::PreserveCallerInstructions,
-    )
-    .await
-}
-
-#[derive(Clone, Copy)]
-enum RoleDeveloperInstructions {
-    UseConfigLayers,
-    PreserveCallerInstructions,
-}
-
-async fn apply_role_to_config_with_developer_instructions(
-    config: &mut Config,
-    role_name: Option<&str>,
-    developer_instructions: RoleDeveloperInstructions,
-) -> Result<(), String> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
 
-    let role = resolve_role_config_owned(config, role_name)
-        .ok_or_else(|| {
-            format!(
-                "unknown agent_type '{role_name}'; use a selector exactly as listed in the spawn_agent description"
-            )
-        })?;
+    let role = resolve_role_config(config, role_name)
+        .cloned()
+        .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
 
-    apply_role_to_config_inner(config, role_name, &role, developer_instructions)
+    apply_role_to_config_inner(config, role_name, &role)
         .await
         .map_err(|err| {
             tracing::warn!("failed to apply role to config: {err}");
@@ -118,7 +70,6 @@ async fn apply_role_to_config_inner(
     config: &mut Config,
     role_name: &str,
     role: &AgentRoleConfig,
-    developer_instructions: RoleDeveloperInstructions,
 ) -> anyhow::Result<()> {
     let is_built_in = !config.agent_roles.contains_key(role_name);
     let Some(config_file) = role.config_file.as_ref() else {
@@ -126,7 +77,7 @@ async fn apply_role_to_config_inner(
     };
     let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
     let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
-    let mut role_overrides = AgentRoleOverrides {
+    let mut overrides = AgentRoleOverrides {
         developer_instructions: role_config.developer_instructions,
         model: role_config.model,
         model_reasoning_effort: role_config.model_reasoning_effort,
@@ -136,6 +87,7 @@ async fn apply_role_to_config_inner(
         service_tier: role_config.service_tier,
         ..Default::default()
     };
+
     if let Some(features) = role_config.features {
         for (key, enabled) in features.entries() {
             if !enabled
@@ -147,9 +99,7 @@ async fn apply_role_to_config_inner(
                     | Feature::RequestPermissionsTool),
                 ) = feature_for_key(&key)
             {
-                role_overrides
-                    .features
-                    .insert(feature.key().to_string(), false);
+                overrides.features.insert(feature.key().to_string(), false);
             }
         }
     }
@@ -162,51 +112,18 @@ async fn apply_role_to_config_inner(
             || skills.bundled.is_some()
             || skills.include_instructions.is_some()
         {
-            role_overrides.skills = Some(skills);
+            overrides.skills = Some(skills);
         }
     }
-    let role_layer_toml = TomlValue::try_from(&role_overrides)?;
+
+    let role_layer_toml = TomlValue::try_from(&overrides)?;
     if role_layer_toml
         .as_table()
         .is_some_and(toml::map::Map::is_empty)
     {
         return Ok(());
     }
-    let preserve_current_provider = role_layer_toml.get("model_provider").is_none();
-    let preserve_current_service_tier = role_layer_toml.get("service_tier").is_none();
-
-    let permissions = config.permissions.clone();
-    let approvals_reviewer = config.approvals_reviewer;
-    let mcp_servers = config.mcp_servers.clone();
-    let chatgpt_base_url = config.chatgpt_base_url.clone();
-    let notify = config.notify.clone();
-    let model_provider = config.model_provider.clone();
-    let model_providers = config.model_providers.clone();
-    let mut next_config = reload::build_next_config(
-        config,
-        role_layer_toml,
-        developer_instructions,
-        preserve_current_provider,
-        preserve_current_service_tier,
-    )
-    .await?;
-    if role_overrides
-        .skills
-        .as_ref()
-        .is_some_and(|skills| skills.include_instructions == Some(false))
-    {
-        next_config.include_skill_instructions = false;
-    }
-    next_config.permissions = permissions;
-    next_config.approvals_reviewer = approvals_reviewer;
-    next_config.mcp_servers = mcp_servers;
-    next_config.chatgpt_base_url = chatgpt_base_url;
-    next_config.notify = notify;
-    if preserve_current_provider {
-        next_config.model_provider = model_provider;
-    }
-    next_config.model_providers = model_providers;
-    *config = next_config;
+    *config = role_overrides::build_next_config(config, role_layer_toml, &overrides)?;
     Ok(())
 }
 
@@ -216,54 +133,27 @@ async fn load_role_layer_toml(
     is_built_in: bool,
     role_name: &str,
 ) -> anyhow::Result<TomlValue> {
-    let (mut role_config_toml, role_config_base) = if is_built_in {
+    let (role_config_toml, role_config_base) = if is_built_in {
         let role_config_contents = built_in::config_file_contents(config_file)
             .map(str::to_owned)
             .ok_or(anyhow!("No corresponding config content"))?;
         let role_config_toml: TomlValue = toml::from_str(&role_config_contents)?;
         (role_config_toml, config.codex_home.as_path())
     } else {
-        let metadata = tokio::fs::symlink_metadata(config_file).await?;
-        if metadata.file_type().is_symlink() {
-            anyhow::bail!("agent role config must not be a symlink");
-        }
-        let role_config_contents = tokio::fs::read_to_string(config_file).await?;
+        let role_config_contents = read_sensitive_file_to_string(config_file).await?;
         let role_config_base = config_file
             .parent()
             .ok_or(anyhow!("No corresponding config content"))?;
-        let mut role_config_toml = parse_agent_role_file_contents(
+        let role_config_toml = parse_agent_role_file_contents(
             &role_config_contents,
             config_file,
             role_config_base,
             Some(role_name),
         )?
         .config;
-        if let Some(table) = role_config_toml.as_table_mut() {
-            for key in [
-                "approval_policy",
-                "sandbox_mode",
-                "sandbox_workspace_write",
-                "permissions",
-                "model_provider",
-                "model_providers",
-                "notify",
-                "apps",
-                "mcp_servers",
-                "openai_base_url",
-                "chatgpt_base_url",
-            ] {
-                table.remove(key);
-            }
-        }
         (role_config_toml, role_config_base)
     };
 
-    if let Some(features) = role_config_toml
-        .get_mut("features")
-        .and_then(TomlValue::as_table_mut)
-    {
-        features.remove(Feature::Personality.key());
-    }
     deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
     Ok(resolve_relative_paths_in_config_toml(
         role_config_toml,
@@ -275,347 +165,72 @@ pub(crate) fn resolve_role_config<'a>(
     config: &'a Config,
     role_name: &str,
 ) -> Option<&'a AgentRoleConfig> {
-    if !agent_selector_enabled(config, role_name) {
-        return None;
-    }
     config
         .agent_roles
         .get(role_name)
         .or_else(|| built_in::configs().get(role_name))
 }
 
-pub(crate) fn resolve_role_config_owned(
-    config: &Config,
-    role_name: &str,
-) -> Option<AgentRoleConfig> {
-    if !agent_selector_enabled(config, role_name) {
-        return None;
-    }
-    resolve_role_config(config, role_name).cloned().or_else(|| {
-        built_in::external_agent_role_config_with_override(
-            role_name,
-            config
-                .agent_selector_overrides
-                .get(role_name)
-                .and_then(|override_config| override_config.enabled),
-        )
-    })
-}
-
-pub fn agent_selector_enabled(config: &Config, selector: &str) -> bool {
-    if let Some(spec) = codex_config::agent_defaults::agent_model_spec(selector) {
-        if let Some(enabled) = config
-            .agent_selector_overrides
-            .get(selector)
-            .and_then(|override_config| override_config.enabled)
-        {
-            return enabled;
-        }
-        if let Some(enabled) = config
-            .agent_selector_overrides
-            .get(spec.slug)
-            .and_then(|override_config| override_config.enabled)
-        {
-            return enabled;
-        }
-        return spec.is_enabled();
-    }
-    if crate::agent::external_capabilities::looks_like_antigravity_selector(selector) {
-        let Some(model) = selector.strip_prefix("antigravity-") else {
-            return false;
-        };
-        if !crate::agent::external_capabilities::is_valid_antigravity_model_name(model) {
-            return false;
-        }
-        if let Some(enabled) = config
-            .agent_selector_overrides
-            .get(selector)
-            .and_then(|override_config| override_config.enabled)
-        {
-            return enabled;
-        }
-        if config
-            .agent_selector_overrides
-            .get("antigravity")
-            .and_then(|override_config| override_config.enabled)
-            == Some(false)
-        {
-            return false;
-        }
-        let configured_provider_model = config
-            .agent_selector_overrides
-            .get("antigravity")
-            .and_then(|override_config| override_config.model.as_deref())
-            .is_some_and(|model| selector == format!("antigravity-{model}"));
-        if configured_provider_model {
-            return true;
-        }
-        return external_agent_backend_for_selector(config, "antigravity").is_some_and(|backend| {
-            crate::agent::external_capabilities::discovered_antigravity_selectors(
-                &backend,
-                config.cwd.as_path(),
-            )
-            .iter()
-            .any(|model| model.selector == selector)
-        });
-    }
-    true
-}
-
-pub(crate) fn antigravity_selector_rejection(config: &Config, selector: &str) -> Option<String> {
-    let model = selector.strip_prefix("antigravity-")?;
-    if !crate::agent::external_capabilities::is_valid_antigravity_model_name(model) {
-        return Some(format!(
-            "Antigravity selector `{selector}` was rejected before launch. Rule: the model portion must be a canonical identifier using only letters, digits, and `-_.:/+`. Remediation: refresh Antigravity capabilities and retry with an advertised `antigravity-<model>` selector; no provider or model was substituted."
-        ));
-    }
-    if config
-        .agent_selector_overrides
-        .get(selector)
-        .and_then(|override_config| override_config.enabled)
-        .is_some()
-    {
-        return None;
-    }
-    let provider_override = config.agent_selector_overrides.get("antigravity");
-    if provider_override.and_then(|override_config| override_config.enabled) == Some(false) {
-        return None;
-    }
-    if provider_override
-        .and_then(|override_config| override_config.model.as_deref())
-        .is_some_and(|configured| selector == format!("antigravity-{configured}"))
-    {
-        return None;
-    }
-    let backend = external_agent_backend_for_selector(config, "antigravity")?;
-    let advertised = crate::agent::external_capabilities::discovered_antigravity_selectors(
-        &backend,
-        config.cwd.as_path(),
-    );
-    if advertised
-        .iter()
-        .any(|candidate| candidate.selector == selector)
-    {
-        return None;
-    }
-    let advertised = advertised
-        .iter()
-        .map(|candidate| candidate.selector.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        "Antigravity selector `{selector}` was rejected before launch. Rule: a discovered selector must exactly match the current Antigravity capability catalog. Remediation: refresh Antigravity capabilities and retry with an advertised selector{}; no provider or model was substituted.",
-        if advertised.is_empty() {
-            String::new()
-        } else {
-            format!(" ({advertised})")
-        }
-    ))
-}
-
-pub(crate) fn dynamic_antigravity_role_config(
-    config: &Config,
-    selector: &str,
-    effort: Option<&str>,
-) -> Option<AgentRoleConfig> {
-    configured_antigravity_role_config(config, selector, /*model_override*/ None, effort)
-}
-
-fn configured_antigravity_role_config(
-    config: &Config,
-    selector: &str,
-    model_override: Option<&str>,
-    effort: Option<&str>,
-) -> Option<AgentRoleConfig> {
-    let model = selector.strip_prefix("antigravity-").or(model_override);
-    if let Some(model) = model
-        && !crate::agent::external_capabilities::is_valid_antigravity_model_name(model)
-    {
-        return None;
-    }
-    if selector != "antigravity" && model.is_none() {
-        return None;
-    }
-    let base = config.agent_roles.get("antigravity").cloned().or_else(|| {
-        built_in::external_agent_role_config_with_override("antigravity", Some(true))
-    })?;
-    let Some(AgentRoleBackendConfig::ExternalCommand(mut backend)) = base.backend else {
-        return None;
-    };
-    if let Some(model) = model {
-        replace_backend_argument(&mut backend.args, "--model", model);
-    }
-    if let Some(effort) = effort {
-        replace_backend_argument(&mut backend.args, "--effort", effort);
-    }
-    Some(AgentRoleConfig {
-        description: Some(if selector == "antigravity" {
-            "Antigravity provider-default selector with configured defaults.".to_string()
-        } else {
-            format!("Antigravity discovered model selector `{selector}`.")
-        }),
-        config_file: None,
-        nickname_candidates: None,
-        backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
-    })
-}
-
-fn replace_backend_argument(args: &mut Vec<String>, flag: &str, value: &str) {
-    let inline_prefix = format!("{flag}=");
-    let mut retained = Vec::with_capacity(args.len() + 2);
-    let mut index = 0;
-    while index < args.len() {
-        let argument = &args[index];
-        if argument == flag {
-            index += 1;
-            if index < args.len() && !args[index].starts_with("--") {
-                index += 1;
-            }
-            continue;
-        }
-        if argument.starts_with(&inline_prefix) {
-            index += 1;
-            continue;
-        }
-        retained.push(argument.clone());
-        index += 1;
-    }
-    retained.extend([flag.to_string(), value.to_string()]);
-    *args = retained;
-}
-
-pub(crate) fn install_dynamic_antigravity_role(
-    config: &mut Config,
-    selector: &str,
-    effort: Option<&str>,
-) -> Result<(), String> {
-    let role = dynamic_antigravity_role_config(config, selector, effort).ok_or_else(|| {
-        format!("Unable to construct external selector `{selector}` without substitution.")
-    })?;
-    config.agent_roles.insert(selector.to_string(), role);
-    Ok(())
-}
-
-pub(crate) fn install_configured_antigravity_role(
-    config: &mut Config,
-    selector: &str,
-    model_override: Option<&str>,
-    effort: Option<&str>,
-) -> Result<(), String> {
-    let role = configured_antigravity_role_config(config, selector, model_override, effort)
-        .ok_or_else(|| {
-            format!("Unable to construct external selector `{selector}` without substitution.")
-        })?;
-    config.agent_roles.insert(selector.to_string(), role);
-    Ok(())
-}
-
-pub(crate) fn install_external_role_defaults(
-    config: &mut Config,
-    selector: &str,
-    model: Option<&str>,
-    effort: Option<&str>,
-) -> Result<(), String> {
-    let mut role = config
-        .agent_roles
-        .get(selector)
-        .cloned()
-        .or_else(|| built_in::external_agent_role_config_with_override(selector, Some(true)))
-        .ok_or_else(|| format!("Unable to configure external selector `{selector}`."))?;
-    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend.as_mut() else {
-        return Err(format!("Selector `{selector}` is not an external agent."));
-    };
-    if let Some(model) = model {
-        replace_backend_argument(&mut backend.args, "--model", model);
-    }
-    if let Some(effort) = effort {
-        replace_backend_argument(&mut backend.args, "--effort", effort);
-    }
-    config.agent_roles.insert(selector.to_string(), role);
-    Ok(())
-}
-
-pub(crate) fn external_agent_role_config(role_name: &str) -> Option<AgentRoleConfig> {
-    built_in::external_agent_role_config_with_override(role_name, /*enabled_override*/ None)
-}
-
-/// Resolves an external-command backend regardless of selector enablement.
-pub fn external_agent_backend_for_selector(
-    config: &Config,
-    selector: &str,
-) -> Option<ExternalCommandAgentBackendConfig> {
-    let role = config
-        .agent_roles
-        .get(selector)
-        .cloned()
-        .or_else(|| built_in::external_agent_role_config_with_override(selector, Some(true)))?;
-    match role.backend? {
-        AgentRoleBackendConfig::ExternalCommand(backend) => Some(backend),
-    }
-}
-
-mod reload {
+mod role_overrides {
     use super::*;
 
-    pub(super) async fn build_next_config(
+    pub(super) fn build_next_config(
         config: &Config,
         role_layer_toml: TomlValue,
-        developer_instructions: RoleDeveloperInstructions,
-        preserve_current_provider: bool,
-        preserve_current_service_tier: bool,
+        overrides: &AgentRoleOverrides,
     ) -> anyhow::Result<Config> {
-        let preserve_current_model = role_layer_toml.get("model").is_none();
-        let preserve_current_reasoning_effort =
-            role_layer_toml.get("model_reasoning_effort").is_none();
-        let preserve_current_base_instructions = role_layer_toml.get("instructions").is_none()
-            && role_layer_toml.get("model_instructions_file").is_none();
-        let mut overrides = reload_overrides(
-            config,
-            preserve_current_model,
-            preserve_current_provider,
-            preserve_current_service_tier,
-        );
-        if let (RoleDeveloperInstructions::PreserveCallerInstructions, None) = (
-            developer_instructions,
-            role_layer_toml.get("developer_instructions"),
-        ) {
-            overrides
-                .developer_instructions
-                .clone_from(&config.developer_instructions);
+        let mut next_config = config.clone();
+        next_config.config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
+        if let Some(model) = &overrides.model {
+            next_config.model = Some(model.clone());
         }
-        let config_layer_stack = build_config_layer_stack(config, &role_layer_toml)?;
-        let merged_config = deserialize_effective_config(config, &config_layer_stack)?;
-
-        let mut next_config = Config::load_config_with_layer_stack(
-            LOCAL_FS.as_ref(),
-            merged_config,
-            overrides,
-            config.codex_home.clone(),
-            config_layer_stack,
-        )
-        .await?;
-        next_config.auth_home = config.auth_home.clone();
-        if preserve_current_reasoning_effort {
-            next_config
-                .model_reasoning_effort
-                .clone_from(&config.model_reasoning_effort);
+        if let Some(instructions) = &overrides.developer_instructions {
+            next_config.developer_instructions = Some(instructions.clone());
         }
-        if preserve_current_base_instructions {
-            let strips_baked_personality =
-                |config: &Config| config.personality == Some(Personality::None);
-            if strips_baked_personality(config) != strips_baked_personality(&next_config)
-                && matches!(
-                    config.base_instructions_provenance,
-                    Some(BaseInstructionsProvenance::Model { .. })
-                )
-            {
-                next_config.base_instructions = None;
-                next_config.base_instructions_provenance = None;
-            } else {
-                next_config.base_instructions = config.base_instructions.clone();
-                next_config.base_instructions_provenance =
-                    config.base_instructions_provenance.clone();
+        if let Some(effort) = overrides.model_reasoning_effort.clone() {
+            next_config.model_reasoning_effort = Some(effort);
+        }
+        if let Some(summary) = overrides.model_reasoning_summary {
+            next_config.model_reasoning_summary = Some(summary);
+        }
+        if let Some(verbosity) = overrides.model_verbosity {
+            next_config.model_verbosity = Some(verbosity);
+        }
+        if let Some(personality) = overrides.personality {
+            next_config.personality = Some(personality);
+        }
+        if let Some(service_tier) = &overrides.service_tier {
+            next_config.service_tier = match ServiceTier::from_request_value(service_tier) {
+                Some(ServiceTier::Fast) => next_config
+                    .features
+                    .enabled(Feature::FastMode)
+                    .then(|| ServiceTier::Fast.request_value().to_string()),
+                Some(ServiceTier::Flex) => Some(ServiceTier::Flex.request_value().to_string()),
+                None => Some(service_tier.clone()),
+            };
+        }
+        for key in overrides.features.keys() {
+            if let Some(feature) = feature_for_key(key) {
+                next_config.features.disable(feature)?;
             }
+        }
+        if overrides
+            .skills
+            .as_ref()
+            .is_some_and(|skills| skills.include_instructions == Some(false))
+        {
+            next_config.include_skill_instructions = false;
+        }
+        let strips_baked_personality =
+            |config: &Config| config.personality == Some(Personality::None);
+        if strips_baked_personality(config) != strips_baked_personality(&next_config)
+            && matches!(
+                config.base_instructions_provenance,
+                Some(BaseInstructionsProvenance::Model { .. })
+            )
+        {
+            next_config.base_instructions = None;
+            next_config.base_instructions_provenance = None;
         }
         Ok(next_config)
     }
@@ -624,60 +239,25 @@ mod reload {
         config: &Config,
         role_layer_toml: &TomlValue,
     ) -> anyhow::Result<ConfigLayerStack> {
-        let mut layers = existing_layers(config);
-        insert_layer(&mut layers, role_layer(role_layer_toml.clone()));
+        let mut layers: Vec<_> = config
+            .config_layer_stack
+            .all_layers_low_to_high()
+            .cloned()
+            .collect();
+        let role_layer =
+            ConfigLayerEntry::new(ConfigLayerSource::SessionFlags, role_layer_toml.clone());
+        let insertion_index = layers.partition_point(|layer| layer.name <= role_layer.name);
+        layers.insert(insertion_index, role_layer);
         Ok(ConfigLayerStack::new(
             layers,
             config.config_layer_stack.requirements().clone(),
             config.config_layer_stack.requirements_toml().clone(),
-        )?)
-    }
-
-    fn deserialize_effective_config(
-        config: &Config,
-        config_layer_stack: &ConfigLayerStack,
-    ) -> anyhow::Result<ConfigToml> {
-        Ok(deserialize_config_toml_with_base(
-            config_layer_stack.effective_config(),
-            &config.codex_home,
-        )?)
-    }
-
-    fn existing_layers(config: &Config) -> Vec<ConfigLayerEntry> {
-        config
-            .config_layer_stack
-            .all_layers_low_to_high()
-            .cloned()
-            .collect()
-    }
-
-    fn insert_layer(layers: &mut Vec<ConfigLayerEntry>, layer: ConfigLayerEntry) {
-        let insertion_index =
-            layers.partition_point(|existing_layer| existing_layer.name <= layer.name);
-        layers.insert(insertion_index, layer);
-    }
-
-    fn role_layer(role_layer_toml: TomlValue) -> ConfigLayerEntry {
-        ConfigLayerEntry::new(ConfigLayerSource::SessionFlags, role_layer_toml)
-    }
-
-    fn reload_overrides(
-        config: &Config,
-        preserve_current_model: bool,
-        preserve_current_provider: bool,
-        preserve_current_service_tier: bool,
-    ) -> ConfigOverrides {
-        ConfigOverrides {
-            cwd: Some(config.cwd.to_path_buf()),
-            model: preserve_current_model
-                .then(|| config.model.clone())
-                .flatten(),
-            model_provider: preserve_current_provider.then(|| config.model_provider_id.clone()),
-            service_tier: preserve_current_service_tier.then(|| config.service_tier.clone()),
-            codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
-            main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
-            ..Default::default()
-        }
+        )?
+        .with_user_and_project_exec_policy_rules_ignored(
+            config
+                .config_layer_stack
+                .ignore_user_and_project_exec_policy_rules(),
+        ))
     }
 }
 
@@ -686,83 +266,13 @@ pub(crate) mod spawn_tool_spec {
 
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
-        build_with_external_selectors(user_defined_agent_roles, &[])
-    }
-
-    pub(crate) fn build_with_external_selectors(
-        user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>,
-        selectors: &[String],
-    ) -> String {
         let built_in_roles = built_in::configs();
-        let external_agent_roles = built_in::external_agent_configs();
-        let mut description = build_from_configs(
-            built_in_roles,
-            external_agent_roles,
-            user_defined_agent_roles,
-        );
-        if !selectors.is_empty() {
-            description.push_str("\n\nDiscovered external selectors:\n");
-            description.push_str(
-                &selectors
-                    .iter()
-                    .map(|selector| format!("- `{selector}`: Antigravity model selector."))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-        }
-        description
-    }
-
-    pub(crate) fn build_for_config_with_external_selectors(
-        config: &Config,
-        selectors: &[String],
-    ) -> String {
-        let built_in_roles = built_in::configs();
-        let external_agent_roles = built_in::external_agent_configs();
-        let enabled_user_roles = config
-            .agent_roles
-            .iter()
-            .filter(|(name, _)| agent_selector_enabled(config, name))
-            .map(|(name, role)| (name.clone(), role.clone()))
-            .collect();
-        let mut enabled_external_roles = external_agent_roles
-            .iter()
-            .filter(|(name, _)| agent_selector_enabled(config, name))
-            .map(|(name, role)| (name.clone(), role.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (selector, override_config) in &config.agent_selector_overrides {
-            if override_config.enabled == Some(true)
-                && !enabled_external_roles.contains_key(selector)
-                && let Some(role) =
-                    built_in::external_agent_role_config_with_override(selector, Some(true))
-            {
-                enabled_external_roles.insert(selector.clone(), role);
-            }
-        }
-        let enabled_selectors = selectors
-            .iter()
-            .filter(|selector| agent_selector_enabled(config, selector))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut description =
-            build_from_configs(built_in_roles, &enabled_external_roles, &enabled_user_roles);
-        if !enabled_selectors.is_empty() {
-            description.push_str("\n\nDiscovered external selectors:\n");
-            description.push_str(
-                &enabled_selectors
-                    .iter()
-                    .map(|selector| format!("- `{selector}`: Antigravity model selector."))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            );
-        }
-        description
+        build_from_configs(built_in_roles, user_defined_agent_roles)
     }
 
     // This function is not inlined for testing purpose.
     fn build_from_configs(
         built_in_roles: &BTreeMap<String, AgentRoleConfig>,
-        external_agent_roles: &BTreeMap<String, AgentRoleConfig>,
         user_defined_roles: &BTreeMap<String, AgentRoleConfig>,
     ) -> String {
         let mut seen = BTreeSet::new();
@@ -773,11 +283,6 @@ pub(crate) mod spawn_tool_spec {
             }
         }
         for (name, declaration) in built_in_roles {
-            if seen.insert(name.as_str()) {
-                formatted_roles.push(format_role(name, declaration));
-            }
-        }
-        for (name, declaration) in external_agent_roles {
             if seen.insert(name.as_str()) {
                 formatted_roles.push(format_role(name, declaration));
             }
@@ -832,8 +337,6 @@ pub(crate) mod spawn_tool_spec {
 mod built_in {
     use super::*;
 
-    const BUILT_IN_EXTERNAL_AGENT_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-
     /// Returns the cached built-in role declarations defined in this module.
     pub(super) fn configs() -> &'static BTreeMap<String, AgentRoleConfig> {
         static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
@@ -844,7 +347,6 @@ mod built_in {
                         description: Some("Default agent.".to_string()),
                         config_file: None,
                         nickname_candidates: None,
-                        backend: None,
                     }
                 ),
                 (
@@ -859,7 +361,6 @@ Rules:
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
-                        backend: None,
                     }
                 ),
                 (
@@ -875,7 +376,6 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
                         config_file: None,
                         nickname_candidates: None,
-                        backend: None,
                     }
                 ),
                 // Awaiter is temp removed
@@ -899,58 +399,6 @@ Rules:
             ])
         });
         &CONFIG
-    }
-
-    pub(super) fn external_agent_configs() -> &'static BTreeMap<String, AgentRoleConfig> {
-        static CONFIG: LazyLock<BTreeMap<String, AgentRoleConfig>> = LazyLock::new(|| {
-            codex_config::agent_defaults::enabled_agent_model_specs()
-                .into_iter()
-                .map(|spec| {
-                    (
-                        spec.slug.to_string(),
-                        external_agent_role_config_from_spec(spec),
-                    )
-                })
-                .collect()
-        });
-        &CONFIG
-    }
-
-    pub(super) fn external_agent_role_config_with_override(
-        role_name: &str,
-        enabled_override: Option<bool>,
-    ) -> Option<AgentRoleConfig> {
-        external_agent_configs()
-            .get(role_name)
-            .cloned()
-            .or_else(|| {
-                codex_config::agent_defaults::agent_model_spec(role_name)
-                    .filter(|spec| enabled_override.unwrap_or_else(|| spec.is_enabled()))
-                    .map(external_agent_role_config_from_spec)
-            })
-    }
-
-    fn external_agent_role_config_from_spec(
-        spec: &'static codex_config::agent_defaults::AgentModelSpec,
-    ) -> AgentRoleConfig {
-        let defaults = codex_config::agent_defaults::agent_config_from_spec(spec);
-        AgentRoleConfig {
-            description: Some(spec.description.to_string()),
-            config_file: None,
-            nickname_candidates: None,
-            backend: Some(AgentRoleBackendConfig::ExternalCommand(
-                ExternalCommandAgentBackendConfig {
-                    command: defaults.command,
-                    protocol: ExternalCommandProtocol::RawCli,
-                    args: defaults.args,
-                    args_read_only: defaults.args_read_only.unwrap_or_default(),
-                    args_write: defaults.args_write.unwrap_or_default(),
-                    env: defaults.env.unwrap_or_default(),
-                    timeout_ms: BUILT_IN_EXTERNAL_AGENT_TIMEOUT_MS,
-                    launch_family: Some(spec.family.to_string()),
-                },
-            )),
-        }
     }
 
     /// Resolves a built-in role `config_file` path to embedded content.

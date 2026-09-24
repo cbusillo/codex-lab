@@ -9,11 +9,6 @@ use codex_protocol::protocol::TOOLS_CLOSE_TAG;
 use codex_protocol::protocol::TOOLS_OPEN_TAG;
 use std::collections::BTreeMap;
 
-/// MANUAL REVIEW (model-visible context rule 5): at the repo's ~4-bytes-per-token approximation
-/// this fragment can reach roughly 1K tokens, which is the threshold above which a single
-/// injected item needs explicit sign-off. Raising this constant requires re-reviewing the
-/// `<tools>` fragment against that rule; `tools_fragment_stays_within_the_manual_review_budget`
-/// pins the current ceiling.
 const MAX_RENDERED_FRAGMENT_BYTES: usize = 4 * 1024;
 const MAX_NAMESPACE_DESCRIPTION_CHARS: usize = 250;
 const OMITTED_LINE_RESERVE_BYTES: usize = 64;
@@ -56,19 +51,6 @@ impl WorldStateSection for ToolsState {
 
     fn should_persist(&self) -> bool {
         !self.deferred_namespaces.is_empty()
-    }
-
-    fn matches_legacy_fragment(role: &str, text: &str) -> bool {
-        let text = text.trim();
-        role == "developer" && text.starts_with(TOOLS_OPEN_TAG) && text.ends_with(TOOLS_CLOSE_TAG)
-    }
-
-    fn has_retained_fragment_matcher() -> bool {
-        true
-    }
-
-    fn matches_retained_fragment(role: &str, text: &str) -> bool {
-        Self::matches_legacy_fragment(role, text)
     }
 
     fn render_diff(

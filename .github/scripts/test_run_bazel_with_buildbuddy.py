@@ -9,22 +9,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import run_bazel_with_buildbuddy
-import rusty_v8_bazel
 
 
 class RunBazelWithBuildBuddyTest(unittest.TestCase):
-    @staticmethod
-    def local_profile_env(temp_dir: str) -> dict[str, str]:
-        return {
-            "CARGO_BUILD_JOBS": "4",
-            "CODEX_LOCAL_BUILD_JOBS": "4",
-            "CODEX_LOCAL_BUILD_LOCK": str(Path(temp_dir) / "build.lock"),
-            "CODEX_LOCAL_BUILD_MEMORY_MB": "24576",
-            "GITHUB_ACTIONS": "true",
-            "RUNNER_ENVIRONMENT": "self-hosted",
-            "RUNNER_OS": "macOS",
-        }
-
     def github_env(
         self,
         temp_dir: str,
@@ -229,8 +216,6 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
 
     def test_bazel_command_uses_configured_local_caches(self) -> None:
         env = {
-            "BAZEL_DISK_CACHE": "/tmp/bazel-disk",
-            "BAZEL_DISK_CACHE_GC_MAX_SIZE": "100G",
             "BAZEL_REPO_CONTENTS_CACHE": "/tmp/bazel-repo-contents",
             "BAZEL_REPOSITORY_CACHE": "/tmp/bazel-repository",
         }
@@ -249,19 +234,7 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                 "//codex-rs/...",
                 "--repo_contents_cache=/tmp/bazel-repo-contents",
                 "--repository_cache=/tmp/bazel-repository",
-                "--disk_cache=/tmp/bazel-disk",
-                "--experimental_disk_cache_gc_max_size=100G",
             ],
-        )
-
-    def test_bazel_command_ignores_disk_cache_gc_without_disk_cache(self) -> None:
-        self.assertEqual(
-            run_bazel_with_buildbuddy.bazel_command(
-                "build",
-                "//codex-rs/...",
-                env={"BAZEL_DISK_CACHE_GC_MAX_SIZE": "100G"},
-            ),
-            ["bazel", "build", "//codex-rs/..."],
         )
 
     def test_bazel_command_adds_local_caches_before_separator(self) -> None:
@@ -281,93 +254,6 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
                 "--",
                 "--program-arg",
             ],
-        )
-
-    def test_direct_bazel_build_gets_local_scheduler_args(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            env = self.local_profile_env(temp_dir)
-
-            args = run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["build", "--config=ci-macos", "//codex-rs/..."], env
-            )
-
-            self.assertEqual(
-                args,
-                [
-                    "build",
-                    "//codex-rs/...",
-                    "--jobs=4",
-                    "--local_resources=cpu=4",
-                    "--local_resources=memory=24576",
-                ],
-            )
-
-    def test_imported_bazel_command_gets_local_scheduler_args(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            env = self.local_profile_env(temp_dir)
-
-            command = rusty_v8_bazel.bazel_command(
-                "build", "--config=ci-macos", "//third_party/v8:target", env=env
-            )
-
-            self.assertIn("--jobs=4", command)
-            self.assertIn("--local_resources=cpu=4", command)
-            self.assertIn("--local_resources=memory=24576", command)
-
-    def test_local_scheduler_args_stay_before_program_arguments(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            env = self.local_profile_env(temp_dir)
-            args = run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                [
-                    "run",
-                    "//codex-rs/cli:codex",
-                    "--config=ci-macos",
-                    "--",
-                    "--jobs=1",
-                ],
-                env,
-            )
-
-            separator = args.index("--")
-            for option in (
-                "--jobs=4",
-                "--local_resources=cpu=4",
-                "--local_resources=memory=24576",
-            ):
-                self.assertLess(args.index(option), separator)
-            self.assertEqual(args[separator + 1 :], ["--jobs=1"])
-
-    def test_keyed_rbe_bypasses_local_scheduler_args(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            env = {
-                **self.local_profile_env(temp_dir),
-                "BUILDBUDDY_API_KEY": "token",
-            }
-
-            args = run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["build", "--config=ci-macos", "//codex-rs/..."], env
-            )
-
-            self.assertFalse(any(arg.startswith("--local_resources=") for arg in args))
-            self.assertNotIn("--jobs=4", args)
-
-    def test_non_build_commands_do_not_get_local_scheduler_args(self) -> None:
-        with TemporaryDirectory() as temp_dir:
-            env = self.local_profile_env(temp_dir)
-
-            args = run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["cquery", "--config=ci-macos", "//codex-rs/..."], env
-            )
-
-            self.assertFalse(any(arg.startswith("--local_resources=") for arg in args))
-            self.assertNotIn("--jobs=4", args)
-
-    def test_no_local_profile_keeps_existing_bazel_arguments(self) -> None:
-        self.assertEqual(
-            run_bazel_with_buildbuddy.bazel_args_with_remote_config(
-                ["build", "//codex-rs/..."], {}
-            ),
-            ["build", "//codex-rs/..."],
         )
 
     def test_main_preserves_spaced_argument_and_child_exit_status(self) -> None:

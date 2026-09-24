@@ -11,7 +11,6 @@ use crate::thread_status::ThreadWatchManager;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermissionProfile;
 use codex_app_server_protocol::AuthRecoveryNotification;
-use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CommandAction as V2ParsedCommand;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
@@ -47,7 +46,6 @@ use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendmen
 use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
 use codex_app_server_protocol::PermissionsRequestApprovalParams;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
-use codex_app_server_protocol::ProjectValidationCompletedNotification;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
@@ -883,7 +881,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 Some(turn_id) => Some(turn_id),
                 None => {
                     let state = thread_state.lock().await;
-                    state.active_turn_snapshot().map(|turn| turn.id)
+                    state.active_turn_id().map(str::to_owned)
                 }
             };
             let server_name = request.server_name.clone();
@@ -1134,20 +1132,6 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
             outgoing.send_server_notification(notification).await;
         }
-        EventMsg::BackgroundAutoReviewStatus(event) => {
-            let notification = BackgroundAutoReviewStatusChangedNotification {
-                thread_id: conversation_id.to_string(),
-                run_id: event.run_id,
-                status: event.status.into(),
-                review_target: event.review_target.into(),
-                error_summary: event.error_summary,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::BackgroundAutoReviewStatusChanged(
-                    notification,
-                ))
-                .await;
-        }
         msg @ (EventMsg::PatchApplyUpdated(_) | EventMsg::TerminalInteraction(_)) => {
             let notification = item_event_to_server_notification(
                 msg,
@@ -1155,28 +1139,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                 &event_turn_id,
             );
             outgoing.send_server_notification(notification).await;
-        }
-        EventMsg::ProjectValidationCompleted(event) => {
-            let notification = ProjectValidationCompletedNotification {
-                thread_id: conversation_id.to_string(),
-                turn_id: event.turn_id,
-                item_id: event.item_id,
-                command: event.command,
-                command_truncated: event.command_truncated,
-                cwd: event.cwd,
-                status: event.status.into(),
-                skip_reason: event.skip_reason.map(Into::into),
-                changed_file_count: event.changed_file_count,
-                exit_code: event.exit_code,
-                output: event.output,
-                output_truncated: event.output_truncated,
-                duration_ms: event.duration_ms,
-            };
-            outgoing
-                .send_server_notification(ServerNotification::ProjectValidationCompleted(
-                    notification,
-                ))
-                .await;
         }
         EventMsg::HookStarted(event) => {
             let notification = HookStartedNotification {
@@ -1460,6 +1422,7 @@ async fn start_command_execution_item(
             item: ThreadItem::CommandExecution {
                 id: item_id,
                 model_context,
+                sandbox_type: None,
                 plugin_id,
                 script_path,
                 command,
@@ -1505,6 +1468,7 @@ async fn complete_command_execution_item(
     let item = ThreadItem::CommandExecution {
         id: item_id,
         model_context: completion_item.model_context,
+        sandbox_type: None,
         plugin_id: completion_item.plugin_id,
         script_path: completion_item.script_path,
         command: completion_item.command,
@@ -2522,6 +2486,7 @@ mod tests {
                     payload.item,
                     ThreadItem::CommandExecution {
                         model_context: None,
+                        sandbox_type: None,
                         id: "cmd-1".to_string(),
                         plugin_id: completion_item.plugin_id.clone(),
                         script_path: completion_item.script_path.clone(),

@@ -1,5 +1,4 @@
 use codex_protocol::models::WebSearchAction;
-use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -32,9 +31,6 @@ pub enum ThreadEvent {
     /// Signals that an item has reached a terminal state—either success or failure.
     #[serde(rename = "item.completed")]
     ItemCompleted(ItemCompletedEvent),
-    /// A configured project validation command reached a terminal state.
-    #[serde(rename = "validation.completed")]
-    ProjectValidationCompleted(ProjectValidationCompletedEvent),
     /// Represents an unrecoverable error emitted directly by the event stream.
     #[serde(rename = "error")]
     Error(ThreadErrorEvent),
@@ -303,6 +299,10 @@ pub struct WebSearchItem {
     pub id: String,
     pub query: String,
     pub action: WebSearchAction,
+    /// Structured results returned by web search, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub results: Option<Vec<JsonValue>>,
 }
 
 /// An error notification.

@@ -219,7 +219,6 @@ async fn config_summary_entries_include_runtime_workspace_roots() {
         thread_id: ThreadId::new(),
         forked_from_id: None,
         parent_thread_id: None,
-        history_mode: Default::default(),
         thread_source: None,
         thread_name: None,
         model: "gpt-5.4".to_string(),
@@ -315,7 +314,6 @@ fn turn_completed_recovers_final_message_from_turn_items() {
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
-        product_identity: codex_version::ProductIdentity::Codex,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -366,7 +364,6 @@ fn turn_completed_overwrites_stale_final_message_from_turn_items() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
-        product_identity: codex_version::ProductIdentity::Codex,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -418,7 +415,6 @@ fn turn_completed_preserves_streamed_final_message_when_turn_items_are_empty() {
         final_message_rendered: false,
         emit_final_message_on_shutdown: false,
         last_total_token_usage: None,
-        product_identity: codex_version::ProductIdentity::Codex,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -463,7 +459,6 @@ fn turn_failed_clears_stale_final_message() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
-        product_identity: codex_version::ProductIdentity::Codex,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(
@@ -509,7 +504,6 @@ fn turn_interrupted_clears_stale_final_message() {
         final_message_rendered: true,
         emit_final_message_on_shutdown: true,
         last_total_token_usage: None,
-        product_identity: codex_version::ProductIdentity::Codex,
     };
 
     let status = processor.process_server_notification(ServerNotification::TurnCompleted(

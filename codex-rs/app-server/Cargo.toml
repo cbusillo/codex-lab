@@ -24,19 +24,6 @@ doctest = false
 [lints]
 workspace = true
 
-[package.metadata.cargo-shear]
-# These files are retained convergence references for behavior that is not wired
-# into this downstream app-server test target. They are not compiled modules.
-ignored-paths = [
-    "tests/suite/v2/account_thread_usage.rs",
-    "tests/suite/v2/external_agent_import_sync.rs",
-    "tests/suite/v2/model_auto_review.rs",
-    "tests/suite/v2/otel.rs",
-    "tests/suite/v2/rollout_migration.rs",
-    "tests/suite/v2/server_diagnostics.rs",
-    "tests/suite/v2/view_image.rs",
-]
-
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
@@ -49,11 +36,8 @@ axum = { workspace = true, default-features = false, features = [
 codex-analytics = { workspace = true }
 codex-agent-extension = { workspace = true }
 codex-arg0 = { workspace = true }
-codex-auto-review = { workspace = true }
 codex-aws-auth = { workspace = true }
 codex-cloud-config = { workspace = true }
-codex-code-bridge-client = { workspace = true }
-codex-code-bridge-protocol = { workspace = true }
 codex-code-mode = { workspace = true }
 codex-config = { workspace = true }
 codex-network-proxy = { workspace = true }
@@ -65,7 +49,6 @@ codex-home = { workspace = true }
 codex-exec-server = { workspace = true }
 codex-extension-api = { workspace = true }
 codex-external-agent-migration = { workspace = true }
-codex-external-agent-sessions = { workspace = true }
 codex-features = { workspace = true }
 codex-goal-extension = { workspace = true }
 codex-git-attribution = { workspace = true }
@@ -86,17 +69,18 @@ codex-utils-pty = { workspace = true }
 codex-backend-client = { workspace = true }
 codex-file-search = { workspace = true }
 codex-chatgpt = { workspace = true }
-codex-keyring-store = { workspace = true }
 codex-login = { workspace = true }
 codex-image-generation-extension = { workspace = true }
 codex-memories-extension = { workspace = true }
 codex-web-search-extension = { workspace = true }
+codex-websocket-auth = { workspace = true }
 codex-memories-write = { workspace = true }
 codex-mcp = { workspace = true }
 codex-mcp-extension = { workspace = true }
 codex-model-provider = { workspace = true }
 codex-model-provider-info = { workspace = true }
 codex-models-manager = { workspace = true }
+codex-prompts = { workspace = true }
 codex-protocol = { workspace = true }
 codex-queue-extension = { workspace = true }
 codex-app-server-protocol = { workspace = true }
@@ -111,7 +95,6 @@ codex-tools = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-json-to-toml = { workspace = true }
 codex-utils-path-uri = { workspace = true }
-codex-version = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 futures = { workspace = true }
@@ -130,7 +113,6 @@ tokio = { workspace = true, features = [
     "rt-multi-thread",
     "signal",
 ] }
-tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"] }
@@ -152,18 +134,14 @@ axum = { workspace = true, default-features = false, features = [
     "tokio",
 ] }
 base64 = { workspace = true }
-codex-code-bridge-service = { workspace = true }
-codex-model-provider-info = { workspace = true }
 codex-utils-cargo-bin = { workspace = true }
 core_test_support = { workspace = true }
-ctor = { workspace = true }
 flate2 = { workspace = true }
 hmac = { workspace = true }
 http = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 pretty_assertions = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls"] }
 rmcp = { workspace = true, default-features = false, features = [
     "elicitation",
     "server",

@@ -245,13 +245,17 @@ async fn cyber_access_program_is_inherited_by_child_turns() -> Result<()> {
             responses::ev_completed(id),
         ])
     };
-    for fork_turns in ["none", "all"] {
-        let namespace = "agents";
-        let spawn_arguments = json!({
-            "message": "inspect the repository",
-            "task_name": "worker",
-            "fork_turns": fork_turns,
-        });
+    for (namespace, fork_turns) in [
+        ("collaboration", "none"),
+        ("collaboration", "all"),
+        ("multi_agent_v1", "none"),
+    ] {
+        let is_v2 = namespace == "collaboration";
+        let spawn_arguments = if is_v2 {
+            json!({"message": "inspect the repository", "task_name": "worker", "fork_turns": fork_turns})
+        } else {
+            json!({"message": "inspect the repository"})
+        };
         let server = responses::start_mock_server().await;
         // V1 completion notifications can require another parent response.
         Mock::given(method("POST"))
@@ -282,16 +286,18 @@ async fn cyber_access_program_is_inherited_by_child_turns() -> Result<()> {
         .await;
         let test = test_codex()
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-            .with_model("gpt-5.6-sol")
+            .with_model(if is_v2 { "gpt-5.6-sol" } else { "gpt-5.1" })
             .with_config(move |config| {
                 config
                     .features
                     .enable(Feature::Collab)
                     .expect("enable multi-agent tools");
-                config
-                    .features
-                    .enable(Feature::MultiAgentV2)
-                    .expect("enable v2 tools");
+                if is_v2 {
+                    config
+                        .features
+                        .enable(Feature::MultiAgentV2)
+                        .expect("enable v2 tools");
+                }
             })
             .build_with_auto_env(&server)
             .await?;
@@ -340,19 +346,31 @@ async fn cyber_access_program_is_inherited_by_child_turns() -> Result<()> {
                 child.shutdown_and_wait().await?;
                 test.thread_manager.remove_thread(&child_id).await;
             }
-            let reply_sequence = vec![responses::sse(vec![
+            let mut reply_sequence = Vec::new();
+            if reload && !is_v2 {
+                reply_sequence.push(responses::sse(vec![
+                    responses::ev_function_call_with_namespace(
+                        "resume-worker",
+                        namespace,
+                        "resume_agent",
+                        &json!({"id": child_id}).to_string(),
+                    ),
+                    responses::ev_completed("resp-resume"),
+                ]));
+            }
+            reply_sequence.push(responses::sse(vec![
                 responses::ev_function_call_with_namespace(
                     "followup-worker",
                     namespace,
-                    "followup_task",
+                    if is_v2 { "followup_task" } else { "send_input" },
                     &json!({
-                        "target": "worker",
+                        "target": if is_v2 { "worker".to_string() } else { child_id.to_string() },
                         "message": "inspect the tests too",
                     })
                     .to_string(),
                 ),
                 responses::ev_completed("resp-followup"),
-            ])];
+            ]));
             responses::mount_sse_sequence(&server, reply_sequence).await;
             let followup_child_request = responses::mount_sse_once_match(
                 &server,

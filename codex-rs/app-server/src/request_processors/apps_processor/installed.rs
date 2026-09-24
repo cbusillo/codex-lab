@@ -50,15 +50,8 @@ impl AppsRequestProcessor {
             let (config, thread) = match params.thread_id.as_deref() {
                 Some(thread_id) => {
                     let (_, thread) = self.load_thread(thread_id).await?;
-                    let thread_config = thread.config().await;
-                    let config = self.config_manager
-                        .load_latest_config_with_session_layers(
-                            &thread_config.config_layer_stack,
-                            &thread_config.cwd,
-                        )
-                        .await
-                        .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
-                    (config, Some(thread))
+                    let config = thread.config().await;
+                    (config.as_ref().clone(), Some(thread))
                 }
                 None => (
                     self.load_latest_config(/*fallback_cwd*/ None).await?,
@@ -105,7 +98,7 @@ impl AppsRequestProcessor {
                         host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
                             .then(|| Arc::clone(&self.auth_manager));
                     let runtime = McpRuntime::new(McpRuntimeInput {
-                        startup_policy: McpStartupPolicy::OneShot,
+                        startup_policy: McpStartupPolicy::Eager,
                         config: Arc::clone(&mcp_config),
                         plugins_available: false,
                         ready_selected_capability_roots: Vec::new(),

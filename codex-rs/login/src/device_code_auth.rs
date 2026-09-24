@@ -1,8 +1,4 @@
-use codex_browser::BrowserConfig;
-use codex_browser::BrowserManager;
-use codex_browser::global;
 use codex_http_client::HttpClient;
-use http::HeaderMap;
 use http::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
@@ -11,7 +7,6 @@ use serde::de::{self};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::auth::LoginAccountCatalogPolicy;
 use crate::default_client::create_raw_auth_client;
 use crate::pkce::PkceCodes;
 use crate::server::ServerOptions;
@@ -29,7 +24,7 @@ pub struct DeviceCode {
     interval: u64,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq)]
+#[derive(Deserialize)]
 struct UserCodeResp {
     device_auth_id: String,
     #[serde(alias = "user_code", alias = "usercode")]
@@ -68,7 +63,6 @@ struct CodeSuccessResp {
 async fn request_user_code(
     client: &HttpClient,
     auth_base_url: &str,
-    base_url: &str,
     client_id: &str,
 ) -> std::io::Result<UserCodeResp> {
     let url = format!("{auth_base_url}/deviceauth/usercode");
@@ -84,11 +78,8 @@ async fn request_user_code(
         .await
         .map_err(std::io::Error::other)?;
 
-    let status = resp.status();
-    let headers = resp.headers().clone();
-    let body = resp.text().await.map_err(std::io::Error::other)?;
-
-    if !status.is_success() {
+    if !resp.status().is_success() {
+        let status = resp.status();
         if status == StatusCode::NOT_FOUND {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -96,160 +87,13 @@ async fn request_user_code(
             ));
         }
 
-        if looks_like_cloudflare_challenge(status, &headers, &body) {
-            return request_user_code_via_browser(base_url, client_id).await;
-        }
-
         return Err(std::io::Error::other(format!(
             "device code request failed with status {status}"
         )));
     }
 
+    let body = resp.text().await.map_err(std::io::Error::other)?;
     serde_json::from_str(&body).map_err(std::io::Error::other)
-}
-
-fn looks_like_cloudflare_challenge(status: StatusCode, headers: &HeaderMap, body: &str) -> bool {
-    if status != StatusCode::FORBIDDEN {
-        return false;
-    }
-
-    if body_has_cloudflare_challenge_signal(body) {
-        return true;
-    }
-
-    header_is_cloudflare_challenge(headers)
-}
-
-fn body_has_cloudflare_challenge_signal(body: &str) -> bool {
-    let lower = body.to_ascii_lowercase();
-    lower.contains("_cf_chl_opt")
-        || lower.contains("challenge-platform")
-        || lower.contains("just a moment")
-        || lower.contains("enable javascript and cookies")
-        || (lower.contains("cloudflare") && lower.contains("challenge"))
-}
-
-fn header_is_cloudflare_challenge(headers: &HeaderMap) -> bool {
-    headers
-        .get("cf-mitigated")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("challenge"))
-        || headers
-            .get_all("server-timing")
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .any(|value| value.to_ascii_lowercase().contains("chlray"))
-        || headers
-            .get_all("set-cookie")
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .any(|cookie| cookie.contains("__cf_bm="))
-}
-
-async fn request_user_code_via_browser(
-    base_url: &str,
-    client_id: &str,
-) -> std::io::Result<UserCodeResp> {
-    if let Some(manager) = global::get_browser_manager().await {
-        return request_user_code_via_browser_with_manager(
-            &manager,
-            base_url,
-            client_id,
-            Duration::from_secs(4),
-        )
-        .await;
-    }
-    let manager = BrowserManager::new(BrowserConfig {
-        enabled: true,
-        headless: true,
-        ..Default::default()
-    });
-    let result = request_user_code_via_browser_with_manager(
-        &manager,
-        base_url,
-        client_id,
-        Duration::from_secs(4),
-    )
-    .await;
-    let _ = manager.stop().await;
-    result
-}
-
-async fn request_user_code_via_browser_with_manager(
-    manager: &BrowserManager,
-    base_url: &str,
-    client_id: &str,
-    settle_delay: Duration,
-) -> std::io::Result<UserCodeResp> {
-    let issuer = base_url.trim_end_matches('/');
-    let authorize_page = format!("{issuer}/codex/device");
-
-    tokio::time::timeout(Duration::from_secs(30), manager.goto(&authorize_page))
-        .await
-        .map_err(|_| std::io::Error::other("browser navigation timed out"))?
-        .map_err(|err| std::io::Error::other(format!("browser navigation failed: {err}")))?;
-
-    tokio::time::sleep(settle_delay).await;
-
-    let api_url = format!("{issuer}/api/accounts/deviceauth/usercode");
-    let api_url_literal = serde_json::to_string(&api_url).map_err(std::io::Error::other)?;
-    let payload_literal = serde_json::to_string(&serde_json::json!({ "client_id": client_id }))
-        .map_err(std::io::Error::other)?;
-    let script = format!(
-        r#"(async () => {{
-            try {{
-                const resp = await fetch({api_url_literal}, {{
-                    method: "POST",
-                    credentials: "include",
-                    headers: {{ "Content-Type": "application/json" }},
-                    body: {payload_literal}
-                }});
-                const text = await resp.text();
-                return {{ ok: resp.ok, status: resp.status, body: text }};
-            }} catch (err) {{
-                return {{ ok: false, status: 0, body: String(err) }};
-            }}
-        }})()"#
-    );
-
-    for _ in 0..3 {
-        let value =
-            tokio::time::timeout(Duration::from_secs(15), manager.execute_javascript(&script))
-                .await
-                .map_err(|_| std::io::Error::other("browser fetch timed out"))?
-                .map_err(|err| std::io::Error::other(format!("browser execution failed: {err}")))?;
-
-        let fetch_result = value.get("value").unwrap_or(&value);
-        let status = fetch_result
-            .get("status")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or_default();
-        let ok = fetch_result
-            .get("ok")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let body = fetch_result
-            .get("body")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-
-        if ok {
-            return serde_json::from_str(body).map_err(std::io::Error::other);
-        }
-
-        if status == i64::from(StatusCode::FORBIDDEN.as_u16()) {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-
-        return Err(std::io::Error::other(format!(
-            "device code request failed with status {status} while using browser fallback"
-        )));
-    }
-
-    Err(std::io::Error::other(
-        "device code request failed after browser fallback retries",
-    ))
 }
 
 /// Poll token endpoint until a code is issued or timeout occurs.
@@ -303,7 +147,7 @@ async fn poll_for_token(
 }
 
 fn device_code_prompt(verification_url: &str, code: &str) -> String {
-    let version = codex_version::CODE_VERSION;
+    let version = env!("CARGO_PKG_VERSION");
     format!(
         "\nWelcome to Codex [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}OpenAI's command-line coding agent{ANSI_RESET}\n\
 \nFollow these steps to sign in with ChatGPT using device code authorization:\n\
@@ -320,11 +164,12 @@ fn print_device_code_prompt(verification_url: &str, code: &str) {
 
 pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<DeviceCode> {
     let base_url = opts.issuer.trim_end_matches('/');
-    // The route selected for the issuer is reused for all device-auth endpoint paths; the endpoint
-    // paths are not resolved separately.
-    let client = create_raw_auth_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
-    let uc = request_user_code(&client, &api_base_url, base_url, &opts.client_id).await?;
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/usercode"),
+        &opts.auth_route_config,
+    )?;
+    let uc = request_user_code(&client, &api_base_url, &opts.client_id).await?;
 
     Ok(DeviceCode {
         verification_url: format!("{base_url}/codex/device"),
@@ -338,36 +183,12 @@ pub async fn complete_device_code_login(
     opts: ServerOptions,
     device_code: DeviceCode,
 ) -> std::io::Result<()> {
-    complete_device_code_login_with_catalog_policy(
-        opts,
-        device_code,
-        LoginAccountCatalogPolicy::Mirror,
-    )
-    .await
-}
-
-/// Completes device-code login for a named auth profile without enrolling the
-/// resulting credentials in an account-switching catalog.
-pub async fn complete_profile_device_code_login(
-    opts: ServerOptions,
-    device_code: DeviceCode,
-) -> std::io::Result<()> {
-    complete_device_code_login_with_catalog_policy(
-        opts,
-        device_code,
-        LoginAccountCatalogPolicy::Isolated,
-    )
-    .await
-}
-
-async fn complete_device_code_login_with_catalog_policy(
-    opts: ServerOptions,
-    device_code: DeviceCode,
-    account_catalog_policy: LoginAccountCatalogPolicy,
-) -> std::io::Result<()> {
     let base_url = opts.issuer.trim_end_matches('/');
-    let client = create_raw_auth_client(base_url, &opts.auth_route_config)?;
     let api_base_url = format!("{base_url}/api/accounts");
+    let client = create_raw_auth_client(
+        &format!("{api_base_url}/deviceauth/token"),
+        &opts.auth_route_config,
+    )?;
 
     let code_resp = poll_for_token(
         &client,
@@ -384,7 +205,7 @@ async fn complete_device_code_login_with_catalog_policy(
     };
     let redirect_uri = format!("{base_url}/deviceauth/callback");
 
-    let tokens = crate::server::exchange_code_for_tokens(
+    let (tokens, _) = crate::server::exchange_code_for_tokens(
         base_url,
         &opts.client_id,
         &redirect_uri,
@@ -402,44 +223,22 @@ async fn complete_device_code_login_with_catalog_policy(
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, message));
     }
 
-    let tokens = crate::server::PersistedLoginTokens::from_exchanged(/*api_key*/ None, tokens);
-    match account_catalog_policy {
-        LoginAccountCatalogPolicy::Mirror => {
-            crate::server::persist_tokens_async(
-                &opts.codex_home,
-                tokens,
-                opts.cli_auth_credentials_store_mode,
-                opts.previous_auth_handling,
-                opts.auth_keyring_backend_kind,
-                opts.auth_route_config.clone(),
-            )
-            .await
-        }
-        LoginAccountCatalogPolicy::Isolated => {
-            crate::server::persist_profile_tokens_async(
-                &opts.codex_home,
-                tokens,
-                opts.cli_auth_credentials_store_mode,
-                opts.auth_keyring_backend_kind,
-                opts.auth_route_config.clone(),
-            )
-            .await
-        }
-    }
+    crate::server::persist_tokens_async(
+        &opts.codex_home,
+        /*api_key*/ None,
+        tokens.id_token,
+        tokens.access_token,
+        tokens.refresh_token,
+        opts.cli_auth_credentials_store_mode,
+        opts.auth_keyring_backend_kind,
+    )
+    .await
 }
 
 pub async fn run_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
     let device_code = request_device_code(&opts).await?;
     print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
     complete_device_code_login(opts, device_code).await
-}
-
-/// Runs device-code login for a named auth profile without enrolling the
-/// resulting credentials in an account-switching catalog.
-pub async fn run_profile_device_code_login(opts: ServerOptions) -> std::io::Result<()> {
-    let device_code = request_device_code(&opts).await?;
-    print_device_code_prompt(&device_code.verification_url, &device_code.user_code);
-    complete_profile_device_code_login(opts, device_code).await
 }
 
 #[cfg(test)]

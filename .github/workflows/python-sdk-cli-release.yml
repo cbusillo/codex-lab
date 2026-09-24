@@ -1,8 +1,10 @@
 name: python-sdk-cli-release
 
 on:
-  # Upstream-only publication remains unreachable under the Lab Apple Silicon policy.
-  workflow_call:
+  workflow_run:
+    workflows: [rust-release]
+    types: [completed]
+  workflow_dispatch:
     inputs:
       cli_run_id:
         description: "Stable rust-release run to publish or retry."
@@ -113,7 +115,6 @@ jobs:
             openai-codex-cli-bin "$PYTHON_RUNTIME_VERSION"
 
   publish-python-sdk:
-    if: github.repository == 'openai/codex'
     name: publish-python-sdk
     needs:
       - build-python-sdk

@@ -599,12 +599,6 @@
             "string",
             "null"
           ]
-        },
-        "windowsSandboxPrivateDesktop": {
-          "type": [
-            "boolean",
-            "null"
-          ]
         }
       },
       "type": "object"
@@ -629,14 +623,6 @@
               "type": "string"
             },
             "commandWindows": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "default": null,
-              "description": "Stable identifier for this handler, when the user configured one. It anchors persisted hook-state keys so reordering handlers does not drop enable/disable decisions.",
               "type": [
                 "string",
                 "null"

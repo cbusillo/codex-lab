@@ -4,9 +4,6 @@ use std::pin::Pin;
 use codex_protocol::ThreadId;
 
 use crate::AgentGraphStoreResult;
-use crate::ExternalAgentRun;
-use crate::ExternalAgentRunOutcome;
-use crate::ExternalAgentRunStart;
 use crate::ThreadSpawnEdgeStatus;
 
 /// Future returned by [`AgentGraphStore`] operations.
@@ -60,23 +57,4 @@ pub trait AgentGraphStore: Send + Sync {
         root_thread_id: ThreadId,
         status_filter: Option<ThreadSpawnEdgeStatus>,
     ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>>;
-
-    /// Persist the provenance recorded when an external agent run starts.
-    fn insert_external_agent_run(
-        &self,
-        run: ExternalAgentRunStart,
-    ) -> AgentGraphStoreFuture<'_, ()>;
-
-    /// Persist the terminal outcome for an external agent run.
-    fn finish_external_agent_run(
-        &self,
-        child_thread_id: ThreadId,
-        outcome: ExternalAgentRunOutcome,
-    ) -> AgentGraphStoreFuture<'_, ()>;
-
-    /// List external agent runs owned by a parent thread.
-    fn list_external_agent_runs(
-        &self,
-        parent_thread_id: ThreadId,
-    ) -> AgentGraphStoreFuture<'_, Vec<ExternalAgentRun>>;
 }

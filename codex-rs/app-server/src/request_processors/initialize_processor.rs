@@ -3,15 +3,13 @@ use std::sync::atomic::Ordering;
 
 use axum::http::HeaderValue;
 use codex_analytics::AppServerRpcTransport;
-use codex_app_server_protocol::ServerBuildInfo;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
-use codex_login::default_client::get_codex_app_server_user_agent;
+use codex_login::default_client::get_codex_user_agent;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_ELICITATION_EXTENSION_ID;
-use codex_version::BuildProvenance;
 
 use super::*;
 use crate::message_processor::ConnectionSessionState;
@@ -22,6 +20,8 @@ const NON_ORIGINATING_CLIENT_NAMES: &[&str] = &["codex_app_server_daemon", "code
 
 #[derive(Clone)]
 pub(crate) struct InitializeRequestProcessor {
+    gateway_login_control: Arc<codex_login::GatewayLoginControl>,
+    gateway_login_initialized: Arc<std::sync::OnceLock<()>>,
     outgoing: Arc<OutgoingMessageSender>,
     analytics_events_client: AnalyticsEventsClient,
     config: Arc<Config>,
@@ -32,6 +32,7 @@ pub(crate) struct InitializeRequestProcessor {
 
 impl InitializeRequestProcessor {
     pub(crate) fn new(
+        gateway_login_control: Arc<codex_login::GatewayLoginControl>,
         outgoing: Arc<OutgoingMessageSender>,
         analytics_events_client: AnalyticsEventsClient,
         config: Arc<Config>,
@@ -40,6 +41,8 @@ impl InitializeRequestProcessor {
         user_verification: Arc<crate::user_verification::Service>,
     ) -> Self {
         Self {
+            gateway_login_control,
+            gateway_login_initialized: Arc::new(std::sync::OnceLock::new()),
             outgoing,
             analytics_events_client,
             config,
@@ -146,6 +149,19 @@ impl InitializeRequestProcessor {
                 .await;
         }
 
+        if capabilities.explicit_gateway_oauth || mutates_global_identity {
+            // Only the first originating client may restore legacy automatic login.
+            // Any explicit opt-in is sticky across subsequent connections.
+            self.gateway_login_initialized.get_or_init(|| {
+                if !capabilities.explicit_gateway_oauth {
+                    self.gateway_login_control.allow_automatic_login();
+                }
+            });
+            if capabilities.explicit_gateway_oauth {
+                self.gateway_login_control.require_explicit_login();
+            }
+        }
+
         if mutates_global_identity {
             // Only real client initialization may mutate process-global client metadata.
             if let Err(error) = set_default_originator(originator.clone()) {
@@ -192,10 +208,9 @@ impl InitializeRequestProcessor {
             }
         }
 
-        let user_agent = get_codex_app_server_user_agent();
+        let user_agent = get_codex_user_agent();
         let response = InitializeResponse {
             user_agent,
-            server_build: Some(server_build_info(codex_version::build_provenance())),
             codex_home,
             platform_family: std::env::consts::FAMILY.to_string(),
             platform_os: std::env::consts::OS.to_string(),
@@ -243,16 +258,5 @@ impl InitializeRequestProcessor {
     ) {
         self.analytics_events_client
             .track_request(connection_id.0, request_id, request);
-    }
-}
-
-fn server_build_info(provenance: BuildProvenance) -> ServerBuildInfo {
-    ServerBuildInfo {
-        schema_version: 1,
-        version: provenance.version,
-        source_commit: provenance.source_commit,
-        dirty_state: provenance.dirty_state.as_str().to_string(),
-        build_profile: provenance.build_profile,
-        build_channel: provenance.build_channel,
     }
 }

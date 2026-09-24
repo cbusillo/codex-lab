@@ -1,8 +1,6 @@
 use super::*;
 use crate::auth::storage::FileAuthStorage;
 use crate::auth::storage::get_auth_file;
-use crate::auth_accounts::get_active_account_id;
-use crate::auth_accounts::list_accounts;
 use crate::token_data::IdTokenInfo;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode;
@@ -34,6 +32,31 @@ use wiremock::matchers::path;
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
+
+#[test]
+fn header_auth_exposes_a_valid_chatgpt_account_id() {
+    for (account_id_header, expected_account_id) in [
+        (
+            Some(WORKSPACE_ID_ALLOWED.as_bytes()),
+            Some(WORKSPACE_ID_ALLOWED),
+        ),
+        (None, None),
+        (Some(b""), None),
+        (Some(b" account "), None),
+        (Some(&[0xff]), None),
+    ] {
+        let mut headers = http::HeaderMap::new();
+        if let Some(account_id_header) = account_id_header {
+            headers.insert(
+                "chatgpt-account-id",
+                http::HeaderValue::from_bytes(account_id_header).expect("valid header bytes"),
+            );
+        }
+
+        let auth = CodexAuth::Headers(AuthHeaders::new(headers));
+        assert_eq!(auth.get_account_id().as_deref(), expected_account_id);
+    }
+}
 
 #[tokio::test]
 async fn refresh_without_id_token() {
@@ -100,76 +123,6 @@ fn login_with_api_key_overwrites_existing_auth_json() {
         .expect("auth.json should parse");
     assert_eq!(auth.openai_api_key.as_deref(), Some("sk-new"));
     assert!(auth.tokens.is_none(), "tokens should be cleared");
-}
-
-#[test]
-fn login_with_api_key_updates_file_account_catalog() {
-    let dir = tempdir().unwrap();
-
-    super::login_with_api_key(
-        dir.path(),
-        "sk-new",
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )
-    .expect("login_with_api_key should succeed");
-
-    let accounts = list_accounts(dir.path(), AuthCredentialsStoreMode::File)
-        .expect("stored accounts should load");
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].openai_api_key.as_deref(), Some("sk-new"));
-    assert_eq!(
-        get_active_account_id(dir.path(), AuthCredentialsStoreMode::File)
-            .expect("active account should load")
-            .as_deref(),
-        Some(accounts[0].id.as_str())
-    );
-}
-
-#[test]
-fn ephemeral_login_with_api_key_skips_account_catalog() {
-    let dir = tempdir().unwrap();
-
-    super::login_with_api_key(
-        dir.path(),
-        "sk-new",
-        AuthCredentialsStoreMode::Ephemeral,
-        AuthKeyringBackendKind::default(),
-    )
-    .expect("login_with_api_key should succeed");
-
-    assert_eq!(
-        list_accounts(dir.path(), AuthCredentialsStoreMode::File)
-            .expect("stored accounts should load"),
-        Vec::new()
-    );
-}
-
-#[test]
-fn logout_removes_matching_file_account() {
-    let dir = tempdir().unwrap();
-    super::login_with_api_key(
-        dir.path(),
-        "sk-new",
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )
-    .expect("login_with_api_key should succeed");
-
-    assert!(
-        super::logout(
-            dir.path(),
-            AuthCredentialsStoreMode::File,
-            AuthKeyringBackendKind::default(),
-        )
-        .expect("logout should succeed")
-    );
-
-    assert_eq!(
-        list_accounts(dir.path(), AuthCredentialsStoreMode::File)
-            .expect("stored accounts should load"),
-        Vec::new()
-    );
 }
 
 #[tokio::test]
@@ -427,6 +380,7 @@ async fn stored_agent_identity_jwt_keeps_auth_json_unchanged() -> anyhow::Result
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         Some(&chatgpt_base_url),
         AuthKeyringBackendKind::Direct,
@@ -616,6 +570,7 @@ async fn chatgpt_auth_registers_agent_identity_when_enabled() -> anyhow::Result<
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -698,6 +653,7 @@ async fn chatgpt_auth_registers_agent_identity_when_enabled() -> anyhow::Result<
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -740,6 +696,7 @@ async fn chatgpt_auth_retries_transient_agent_identity_registration() -> anyhow:
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -806,6 +763,7 @@ async fn chatgpt_auth_registration_retry_exhaustion_is_fallback_eligible() -> an
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -867,6 +825,7 @@ async fn chatgpt_auth_task_registration_retry_exhaustion_is_fallback_eligible() 
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -923,6 +882,7 @@ async fn chatgpt_auth_non_retryable_registration_error_is_hard_failure() -> anyh
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -1068,6 +1028,7 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -1131,6 +1092,7 @@ async fn loads_api_key_from_auth_json() {
         dir.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -1228,6 +1190,7 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -1246,17 +1209,14 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
         .expect("tokens should exist");
     updated_tokens.access_token = "new-access-token".to_string();
     updated_tokens.refresh_token = "new-refresh-token".to_string();
-    let auth_route_config = crate::test_support::transport_default_auth_route_config();
     let updated_auth = CodexAuth::from_auth_dot_json(
-        AuthLoadContext {
-            codex_home: codex_home.path(),
-            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-            chatgpt_base_url: None,
-            keyring_backend_kind: AuthKeyringBackendKind::Direct,
-            agent_identity_authapi_base_url: None,
-            auth_route_config: &auth_route_config,
-        },
+        codex_home.path(),
         updated_auth_dot_json,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::Direct,
+        /*agent_identity_authapi_base_url*/ None,
+        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect("updated auth should parse");
@@ -1401,24 +1361,34 @@ impl ExternalAuth for StaticExternalAuth {
     }
 }
 
-#[derive(Clone)]
-struct PermanentStaticExternalAuth(CodexAuth);
+struct RefreshingExternalAuth {
+    initial: CodexAuth,
+    refreshed: CodexAuth,
+}
 
-impl ExternalAuth for PermanentStaticExternalAuth {
+impl ExternalAuth for RefreshingExternalAuth {
     fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
-        Box::pin(async { Ok(self.0.clone()) })
+        Box::pin(async { Ok(self.initial.clone()) })
     }
 
     fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
-        Box::pin(async { Ok(self.0.clone()) })
+        Box::pin(async { Ok(self.refreshed.clone()) })
     }
+}
 
-    fn classify_error(&self, error: std::io::Error) -> RefreshTokenError {
-        RefreshTokenError::Permanent(RefreshTokenFailedError::new(
-            RefreshTokenFailedReason::Other,
-            error.to_string(),
-        ))
+fn external_header_auth(account_id: Option<&'static str>) -> CodexAuth {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer external"),
+    );
+    if let Some(account_id) = account_id {
+        headers.insert(
+            "chatgpt-account-id",
+            http::HeaderValue::from_static(account_id),
+        );
     }
+    CodexAuth::Headers(AuthHeaders::new(headers))
 }
 
 struct FailingExternalAuth {
@@ -1507,38 +1477,6 @@ async fn replacing_external_auth_clears_permanent_failure() {
 }
 
 #[tokio::test]
-async fn external_auth_does_not_fall_back_after_workspace_policy_changes() {
-    let codex_home = tempdir().expect("tempdir");
-    let manager = AuthManager::new(
-        codex_home.path().to_path_buf(),
-        /*enable_codex_api_key_env*/ false,
-        AuthCredentialsStoreMode::Ephemeral,
-        /*forced_chatgpt_workspace_id*/ None,
-        /*chatgpt_base_url*/ None,
-        AuthKeyringBackendKind::default(),
-        crate::test_support::transport_default_auth_route_config(),
-    )
-    .await;
-    let access_token = fake_jwt_for_auth_file_params(&AuthFileParams {
-        openai_api_key: None,
-        chatgpt_plan_type: Some("enterprise".to_string()),
-        chatgpt_account_id: Some("workspace-one".to_string()),
-    })
-    .expect("fake access token");
-    let auth =
-        CodexAuth::from_external_chatgpt_tokens(&access_token, "workspace-one", Some("enterprise"))
-            .expect("external ChatGPT auth");
-
-    manager
-        .set_external_auth(Arc::new(PermanentStaticExternalAuth(auth)))
-        .await
-        .expect("external auth should install");
-    manager.set_forced_chatgpt_workspace_id(Some(vec!["workspace-two".to_string()]));
-
-    assert_eq!(manager.auth().await, None);
-}
-
-#[tokio::test]
 async fn runtime_external_auth_uses_provider_error_classification() {
     let manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("seed"));
     manager
@@ -1592,6 +1530,49 @@ async fn external_auth_provider_can_install_headers() {
             .auth_cached()
             .is_some_and(|auth| auth.is_chatgpt_auth())
     );
+}
+
+#[tokio::test]
+async fn external_header_auth_obeys_workspace_policy() {
+    for (account_id, should_succeed) in [
+        (Some(WORKSPACE_ID_ALLOWED), true),
+        (Some(WORKSPACE_ID_DISALLOWED), false),
+        (None, false),
+    ] {
+        let auth = external_header_auth(account_id);
+        let expected_auth = should_succeed.then_some(auth.clone());
+        let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+        manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_ALLOWED.to_string()]));
+
+        let result = manager
+            .set_external_auth(Arc::new(StaticExternalAuth(auth)))
+            .await;
+
+        assert_eq!(result.is_ok(), should_succeed, "account ID: {account_id:?}");
+        assert_eq!(manager.auth_cached(), expected_auth);
+    }
+}
+
+#[tokio::test]
+async fn external_header_auth_rejects_a_disallowed_workspace_on_refresh() {
+    let allowed_auth = external_header_auth(Some(WORKSPACE_ID_ALLOWED));
+    let disallowed_auth = external_header_auth(Some(WORKSPACE_ID_DISALLOWED));
+    let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    manager.set_forced_chatgpt_workspace_id(Some(vec![WORKSPACE_ID_ALLOWED.to_string()]));
+    manager
+        .set_external_auth(Arc::new(RefreshingExternalAuth {
+            initial: allowed_auth.clone(),
+            refreshed: disallowed_auth,
+        }))
+        .await
+        .expect("initial external header auth should install");
+
+    manager
+        .refresh_token_from_authority()
+        .await
+        .expect_err("external header auth from a disallowed workspace must not replace the cache");
+
+    assert_eq!(manager.auth_cached(), Some(allowed_auth));
 }
 
 #[tokio::test]
@@ -2026,6 +2007,7 @@ async fn load_auth_reads_access_token_from_env() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         Some(&chatgpt_base_url),
         AuthKeyringBackendKind::Direct,
@@ -2074,6 +2056,7 @@ async fn load_auth_reads_personal_access_token_from_env() {
             codex_home.path(),
             /*enable_codex_api_key_env*/ false,
             auth_credentials_store_mode,
+            /*allowed_login_methods*/ None,
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
@@ -2247,6 +2230,7 @@ async fn load_auth_keeps_codex_api_key_env_precedence() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ true,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -2935,6 +2919,7 @@ async fn plan_type_maps_known_plan() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -2967,6 +2952,7 @@ async fn plan_type_maps_self_serve_business_usage_based_plan() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -3002,6 +2988,7 @@ async fn plan_type_maps_enterprise_cbp_usage_based_plan() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -3037,6 +3024,7 @@ async fn plan_type_maps_unknown_to_unknown() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -3069,6 +3057,7 @@ async fn missing_plan_type_maps_to_unknown() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
@@ -3080,200 +3069,4 @@ async fn missing_plan_type_maps_to_unknown() {
     .expect("auth available");
 
     pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
-}
-
-fn catalog_chatgpt_tokens(account_id: &str, email: &str) -> TokenData {
-    let header = serde_json::json!({"alg": "none", "typ": "JWT"});
-    let payload = serde_json::json!({
-        "email": email,
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": account_id,
-            "chatgpt_user_id": "catalog-user",
-            "user_id": "catalog-user"
-        }
-    });
-    let encode = |value: &serde_json::Value| {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(value).expect("serialize jwt segment"))
-    };
-    TokenData {
-        id_token: IdTokenInfo {
-            email: Some(email.to_string()),
-            chatgpt_plan_type: None,
-            chatgpt_user_id: Some("catalog-user".to_string()),
-            chatgpt_account_id: Some(account_id.to_string()),
-            chatgpt_account_is_fedramp: false,
-            raw_jwt: format!("{}.{}.signature", encode(&header), encode(&payload)),
-        },
-        access_token: "catalog-access".to_string(),
-        refresh_token: "catalog-refresh".to_string(),
-        account_id: Some(account_id.to_string()),
-    }
-}
-
-#[tokio::test]
-async fn chatgpt_account_id_falls_back_to_id_token_claim() {
-    let codex_home = tempdir().expect("tempdir");
-    let mut tokens = catalog_chatgpt_tokens("claim-account", "claim@example.com");
-    tokens.account_id = None;
-    save_auth(
-        codex_home.path(),
-        &AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: None,
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-            bedrock_access_keys: None,
-        },
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )
-    .expect("save auth");
-
-    let auth = super::load_auth(
-        codex_home.path(),
-        /*enable_codex_api_key_env*/ false,
-        AuthCredentialsStoreMode::File,
-        /*forced_chatgpt_workspace_id*/ None,
-        /*chatgpt_base_url*/ None,
-        AuthKeyringBackendKind::default(),
-        /*agent_identity_authapi_base_url*/ None,
-        &crate::test_support::transport_default_auth_route_config(),
-    )
-    .await
-    .expect("load auth")
-    .expect("auth should exist");
-
-    assert_eq!(auth.get_account_id().as_deref(), Some("claim-account"));
-}
-
-fn api_key_auth(api_key: &str) -> AuthDotJson {
-    AuthDotJson {
-        auth_mode: Some(AuthMode::ApiKey),
-        openai_api_key: Some(api_key.to_string()),
-        tokens: None,
-        last_refresh: None,
-        agent_identity: None,
-        personal_access_token: None,
-        bedrock_api_key: None,
-        bedrock_access_keys: None,
-    }
-}
-
-#[tokio::test]
-async fn catalog_account_manager_refresh_storage_preserves_active_account() {
-    let codex_home = tempdir().expect("tempdir");
-    let active = crate::auth_accounts::upsert_api_key_account(
-        codex_home.path(),
-        AuthCredentialsStoreMode::File,
-        "sk-control".to_string(),
-        /*label*/ None,
-        /*make_active*/ true,
-    )
-    .expect("store control account");
-    save_auth(
-        codex_home.path(),
-        &api_key_auth("sk-control"),
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )
-    .expect("save control auth");
-    let execution = crate::auth_accounts::upsert_chatgpt_account(
-        codex_home.path(),
-        AuthCredentialsStoreMode::File,
-        catalog_chatgpt_tokens("execution-account", "execution@example.com"),
-        Utc::now(),
-        /*label*/ None,
-        /*make_active*/ false,
-    )
-    .expect("store execution account");
-
-    let manager = AuthManager::for_catalog_account(
-        codex_home.path().to_path_buf(),
-        execution.id,
-        AuthCredentialsStoreMode::File,
-        /*chatgpt_base_url*/ None,
-        AuthKeyringBackendKind::default(),
-        /*forced_chatgpt_workspace_id*/ None,
-        crate::test_support::transport_default_auth_route_config(),
-    )
-    .await
-    .expect("create catalog account manager");
-    let auth = manager.auth_cached().expect("execution auth");
-    let CodexAuth::Chatgpt(chatgpt_auth) = auth else {
-        panic!("expected ChatGPT auth");
-    };
-    persist_tokens(
-        chatgpt_auth.storage(),
-        /*id_token*/ None,
-        Some("refreshed-access".to_string()),
-        Some("refreshed-refresh".to_string()),
-    )
-    .expect("persist refreshed tokens");
-    manager.reload().await;
-
-    let refreshed = manager
-        .auth_cached()
-        .expect("refreshed auth")
-        .get_token_data()
-        .expect("refreshed token data");
-    assert_eq!(refreshed.access_token, "refreshed-access");
-    assert_eq!(
-        get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
-            .expect("active account id"),
-        Some(active.id)
-    );
-    assert_eq!(
-        load_auth_dot_json(
-            codex_home.path(),
-            AuthCredentialsStoreMode::File,
-            AuthKeyringBackendKind::default(),
-        )
-        .expect("load auth.json"),
-        Some(api_key_auth("sk-control"))
-    );
-}
-
-#[tokio::test]
-async fn catalog_account_manager_supports_non_active_api_key() {
-    let codex_home = tempdir().expect("tempdir");
-    let active = crate::auth_accounts::upsert_api_key_account(
-        codex_home.path(),
-        AuthCredentialsStoreMode::File,
-        "sk-control".to_string(),
-        /*label*/ None,
-        /*make_active*/ true,
-    )
-    .expect("store control account");
-    let execution = crate::auth_accounts::upsert_api_key_account(
-        codex_home.path(),
-        AuthCredentialsStoreMode::File,
-        "sk-execution".to_string(),
-        /*label*/ None,
-        /*make_active*/ false,
-    )
-    .expect("store execution account");
-
-    let manager = AuthManager::for_catalog_account(
-        codex_home.path().to_path_buf(),
-        execution.id,
-        AuthCredentialsStoreMode::File,
-        /*chatgpt_base_url*/ None,
-        AuthKeyringBackendKind::default(),
-        /*forced_chatgpt_workspace_id*/ None,
-        crate::test_support::transport_default_auth_route_config(),
-    )
-    .await
-    .expect("create catalog account manager");
-
-    let execution_auth = manager.auth_cached().expect("execution auth");
-    assert_eq!(execution_auth.api_key(), Some("sk-execution"));
-    assert_eq!(
-        get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)
-            .expect("active account id"),
-        Some(active.id)
-    );
 }

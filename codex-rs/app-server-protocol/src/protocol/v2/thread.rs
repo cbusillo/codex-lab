@@ -3,7 +3,6 @@ use super::ApprovalsReviewer;
 use super::AskForApproval;
 use super::SandboxMode;
 use super::SandboxPolicy;
-use super::SessionProvenanceParams;
 use super::Thread;
 use super::ThreadHistoryMode;
 use super::ThreadItem;
@@ -123,10 +122,6 @@ pub struct ThreadStartParams {
     /// Optional client-supplied analytics source classification for this thread.
     #[ts(optional = nullable)]
     pub thread_source: Option<ThreadSource>,
-    /// Optional client-supplied launch provenance for externally orchestrated
-    /// sessions. This is descriptive metadata only.
-    #[ts(optional = nullable)]
-    pub session_provenance: Option<SessionProvenanceParams>,
     /// Optional project identity for this new thread. Durable threads persist
     /// the assignment; ephemeral threads expose it only in live responses.
     #[experimental("thread/start.projectId")]
@@ -1443,14 +1438,6 @@ pub struct ThreadListParams {
     /// Optional substring filter for the extracted thread title.
     #[ts(optional = nullable)]
     pub search_term: Option<String>,
-    /// Optional root thread id; when set, only persisted spawned descendants
-    /// of this thread are returned.
-    ///
-    /// Stable alias for `ancestorThreadId`, retained for clients that shipped
-    /// against it. Mutually exclusive with `parentThreadId` and
-    /// `ancestorThreadId`.
-    #[ts(optional = nullable)]
-    pub descendant_of_thread_id: Option<String>,
     /// Optional direct parent thread filter. Mutually exclusive with `ancestorThreadId`.
     #[experimental("thread/list.parentThreadId")]
     #[ts(optional = nullable)]
@@ -1772,6 +1759,12 @@ pub struct ThreadItemEntry {
     /// Turn containing this item.
     pub turn_id: String,
     pub item: ThreadItem,
+    /// Unix timestamp (milliseconds) when the item started, if recorded by the producer.
+    #[ts(type = "number | null")]
+    pub started_at_ms: Option<i64>,
+    /// Unix timestamp (milliseconds) when the item completed, if recorded by the producer.
+    #[ts(type = "number | null")]
+    pub completed_at_ms: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1785,63 +1778,6 @@ pub struct ThreadItemsListResponse {
     /// Opaque cursor to pass as `cursor` when reversing `sortDirection`.
     /// This is only populated when the page contains at least one item.
     pub backwards_cursor: Option<String>,
-}
-
-/// Compatibility params for older clients that call `thread/turns/items/list`
-/// with a required `turnId`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub struct ThreadTurnsItemsListParams {
-    pub thread_id: String,
-    pub turn_id: String,
-    /// Opaque cursor to pass to the next call to continue after the last item.
-    #[ts(optional = nullable)]
-    pub cursor: Option<String>,
-    /// Optional item page size.
-    #[ts(optional = nullable)]
-    pub limit: Option<u32>,
-    /// Optional item pagination direction; defaults to ascending.
-    #[ts(optional = nullable)]
-    pub sort_direction: Option<SortDirection>,
-}
-
-impl From<ThreadTurnsItemsListParams> for ThreadItemsListParams {
-    fn from(params: ThreadTurnsItemsListParams) -> Self {
-        Self {
-            thread_id: params.thread_id,
-            turn_id: Some(params.turn_id),
-            cursor: params.cursor,
-            limit: params.limit,
-            sort_direction: params.sort_direction,
-        }
-    }
-}
-
-/// Compatibility response for `thread/turns/items/list`. The turn is already
-/// pinned by the request, so items stay unwrapped rather than carrying the
-/// per-item `turnId` that `thread/items/list` reports.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export_to = "v2/")]
-pub struct ThreadTurnsItemsListResponse {
-    pub data: Vec<ThreadItem>,
-    pub next_cursor: Option<String>,
-    pub backwards_cursor: Option<String>,
-}
-
-impl From<ThreadItemsListResponse> for ThreadTurnsItemsListResponse {
-    fn from(response: ThreadItemsListResponse) -> Self {
-        Self {
-            data: response
-                .data
-                .into_iter()
-                .map(|entry| entry.item)
-                .collect::<Vec<_>>(),
-            next_cursor: response.next_cursor,
-            backwards_cursor: response.backwards_cursor,
-        }
-    }
 }
 
 /// EXPERIMENTAL - list ordinary and realtime thread history in rollout order.

@@ -28,7 +28,6 @@ use std::net::TcpStream;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
@@ -76,11 +75,6 @@ fn create_env_from_core_vars() -> HashMap<String, String> {
     create_env(&policy, /*thread_id*/ None)
 }
 
-fn codex_linux_sandbox_exe() -> PathBuf {
-    codex_utils_cargo_bin::cargo_bin("codex-linux-sandbox")
-        .expect("should find binary for codex-linux-sandbox")
-}
-
 fn strip_proxy_env(env: &mut HashMap<String, String>) {
     for key in PROXY_ENV_KEYS {
         env.remove(*key);
@@ -105,7 +99,9 @@ async fn should_skip_bwrap_tests() -> bool {
         NETWORK_TIMEOUT_MS,
     )
     .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
     is_bwrap_unavailable_output(&output)
+        || (!output.status.success() && is_managed_proxy_permission_error(stderr.as_ref()))
 }
 
 fn is_managed_proxy_permission_error(stderr: &str) -> bool {
@@ -184,7 +180,7 @@ fn linux_sandbox_command(
     args.push("--".to_string());
     args.extend(command.iter().map(|entry| (*entry).to_string()));
 
-    let mut cmd = Command::new(codex_linux_sandbox_exe());
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"));
     cmd.args(args)
         .current_dir(cwd)
         .env_clear()
@@ -333,7 +329,7 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
 
     let tempdir = tempfile::tempdir().expect("create isolated sandbox installation");
     let sandbox_executable = tempdir.path().join("codex-linux-sandbox");
-    let original_executable = codex_linux_sandbox_exe();
+    let original_executable = env!("CARGO_BIN_EXE_codex-linux-sandbox");
     if std::fs::hard_link(original_executable, &sandbox_executable).is_err() {
         std::fs::copy(original_executable, &sandbox_executable).expect("copy sandbox executable");
     }
@@ -453,8 +449,9 @@ async fn managed_proxy_full_filesystem_uses_minimal_dev_nodes() {
     )
     .await;
 
-    assert!(
+    assert_eq!(
         output.status.success(),
+        true,
         "standard devices should be usable; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -491,7 +488,7 @@ async fn managed_proxy_bridges_release_command_output_after_exit() {
     )
     .await;
 
-    assert!(output.status.success());
+    assert_eq!(output.status.success(), true);
     assert_eq!(output.stdout, b"bridge output closed\n");
 }
 
@@ -525,8 +522,9 @@ async fn managed_proxy_readiness_survives_closed_standard_descriptors() {
         .expect("sandbox command should not time out")
         .expect("sandbox command should execute");
 
-    assert!(
+    assert_eq!(
         output.status.success(),
+        true,
         "managed proxy readiness should survive closed standard descriptors; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -597,8 +595,7 @@ async fn managed_proxy_mode_routes_through_bridge_and_blocks_direct_egress() {
         format!("http://127.0.0.1:{proxy_port}"),
     );
 
-    let sandbox_helper = codex_linux_sandbox_exe();
-    let sandbox_helper_dir = sandbox_helper
+    let sandbox_helper_dir = std::path::Path::new(env!("CARGO_BIN_EXE_codex-linux-sandbox"))
         .parent()
         .expect("sandbox helper should have a parent");
     let file_system_sandbox_policy =

@@ -2,6 +2,7 @@ use clap::error::ErrorKind;
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::exec_server_command::ExecServerRemoteTransport;
 
 fn exec_server_from_args(args: &[&str]) -> ExecServerCommand {
     let cli = MultitoolCli::try_parse_from(
@@ -188,7 +189,6 @@ fn exec_server_transport_and_aws_options_require_registration_arguments() {
 
 #[tokio::test]
 async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
-    let homes = tempfile::tempdir().expect("test homes");
     for options in [vec![], vec!["--remote-transport", "noise"]] {
         let mut args = vec![
             "--remote",
@@ -200,18 +200,13 @@ async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
         args.extend(options);
         let command = exec_server_from_args(&args);
         // Unset runtime paths prove validation runs before startup or credential loading.
-        let error = run_exec_server_command(
-            command,
-            &Arg0DispatchPaths::default(),
-            ConfigHomes {
-                codex_home: homes.path().join("codex"),
-                auth_home: homes.path().join("auth"),
-            },
-            &CliConfigOverrides::default(),
-            /*strict_config*/ false,
-        )
-        .await
-        .expect_err("Noise auth is unchanged");
+        let error = command
+            .run(
+                &Arg0DispatchPaths::default(),
+                &CliConfigOverrides::default(),
+            )
+            .await
+            .expect_err("Noise auth is unchanged");
         assert_eq!(
             error.to_string(),
             "--aws-sigv4 requires --remote-transport direct"
@@ -221,7 +216,6 @@ async fn exec_server_sigv4_does_not_enable_aws_auth_for_noise() {
 
 #[tokio::test]
 async fn exec_server_direct_forwarding_remains_rejected() {
-    let homes = tempfile::tempdir().expect("test homes");
     let command = exec_server_from_args(&[
         "forward",
         "--connect",
@@ -256,18 +250,13 @@ async fn exec_server_direct_forwarding_remains_rejected() {
             "bedrock-mantle"
         ),
     );
-    let error = run_exec_server_command(
-        command,
-        &Arg0DispatchPaths::default(),
-        ConfigHomes {
-            codex_home: homes.path().join("codex"),
-            auth_home: homes.path().join("auth"),
-        },
-        &CliConfigOverrides::default(),
-        /*strict_config*/ false,
-    )
-    .await
-    .expect_err("Direct forwarding is unsupported before startup");
+    let error = command
+        .run(
+            &Arg0DispatchPaths::default(),
+            &CliConfigOverrides::default(),
+        )
+        .await
+        .expect_err("Direct forwarding is unsupported before startup");
     assert_eq!(
         error.to_string(),
         "direct exec-server transport does not support forwarding"

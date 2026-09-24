@@ -52,7 +52,6 @@ pub use review::ReviewHost;
 
 pub use completion::ReviewCompletion;
 pub use completion::complete_review;
-pub use completion::guardian_timeout_message;
 
 pub use execution::ReviewTurnResult;
 pub use execution::ReviewerRuntime;
@@ -60,8 +59,8 @@ pub use execution::start_review_turn;
 pub use execution::wait_for_guardian_review;
 pub use settings::ReviewerConfig;
 pub use settings::ReviewerTurn;
-pub use settings::reviewer_allowed_tools;
 pub use settings::reviewer_permission_profile;
+pub use settings::reviewer_tool_policy;
 
 pub use feedback::FailedReviewFeedback;
 pub use feedback::ReviewFeedbackContext;

@@ -5,65 +5,6 @@ use codex_protocol::protocol::SessionSource;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 
-#[derive(sqlx::FromRow)]
-struct ExternalAgentRunRow {
-    child_thread_id: String,
-    parent_thread_id: String,
-    agent_path: Option<String>,
-    routing_kind: String,
-    requested_selector: Option<String>,
-    effective_selector: String,
-    routing_reason: String,
-    skipped_candidates_json: String,
-    provider_family: Option<String>,
-    command: String,
-    cli_version: Option<String>,
-    capability_source: String,
-    capability_freshness: Option<String>,
-    protocol: String,
-    mode: String,
-    workspace: String,
-    model: Option<String>,
-    effort: Option<String>,
-    started_at_ms: i64,
-    completed_at_ms: Option<i64>,
-    duration_ms: Option<i64>,
-    terminal_state: Option<String>,
-    failure_kind: Option<String>,
-    failure_message: Option<String>,
-}
-
-impl ExternalAgentRunRow {
-    fn try_into_run(self) -> anyhow::Result<crate::ExternalAgentRun> {
-        Ok(crate::ExternalAgentRun {
-            child_thread_id: ThreadId::from_string(&self.child_thread_id)?,
-            parent_thread_id: ThreadId::from_string(&self.parent_thread_id)?,
-            agent_path: self.agent_path,
-            routing_kind: self.routing_kind,
-            requested_selector: self.requested_selector,
-            effective_selector: self.effective_selector,
-            routing_reason: self.routing_reason,
-            skipped_candidates_json: self.skipped_candidates_json,
-            provider_family: self.provider_family,
-            command: self.command,
-            cli_version: self.cli_version,
-            capability_source: self.capability_source,
-            capability_freshness: self.capability_freshness,
-            protocol: self.protocol,
-            mode: self.mode,
-            workspace: self.workspace,
-            model: self.model,
-            effort: self.effort,
-            started_at_ms: self.started_at_ms,
-            completed_at_ms: self.completed_at_ms,
-            duration_ms: self.duration_ms.map(|value| value.max(0) as u64),
-            terminal_state: self.terminal_state,
-            failure_kind: self.failure_kind,
-            failure_message: self.failure_message,
-        })
-    }
-}
-
 impl StateRuntime {
     pub async fn get_thread(&self, id: ThreadId) -> anyhow::Result<Option<crate::ThreadMetadata>> {
         let row = sqlx::query(
@@ -75,8 +16,9 @@ SELECT
     threads.updated_at_ms AS updated_at,
     threads.recency_at_ms AS recency_at,
     threads.source,
-    threads.session_provenance,
     threads.originator,
+    threads.creator_user_id,
+    threads.creator_account_id,
     threads.history_mode,
     threads.thread_source,
     threads.agent_nickname,
@@ -130,6 +72,9 @@ WHERE threads.id = ?
         thread_id: ThreadId,
         legacy_name: Option<&str>,
     ) -> anyhow::Result<bool> {
+        // Legacy threads display `title`, then fall back to the name index. Paginated threads
+        // display `name`; `title` remains derived metadata used for search. Preserve an existing
+        // `name`, unless it is the Guardian default seeded by metadata cleanup.
         let result = sqlx::query(
             r#"
 UPDATE threads
@@ -137,18 +82,22 @@ SET
     history_mode = 'paginated',
     name = CASE
         WHEN name IS NULL OR trim(name) = '' THEN ?
+        WHEN history_mode = 'legacy'
+            AND source = '{"subagent":{"other":"guardian"}}'
+            AND name = ? THEN COALESCE(?, name)
         ELSE name
     END
 WHERE id = ?
             "#,
         )
         .bind(legacy_name)
+        .bind(crate::GUARDIAN_THREAD_TITLE)
+        .bind(legacy_name)
         .bind(thread_id.to_string())
         .execute(self.pool.as_ref())
         .await?;
         Ok(result.rows_affected() > 0)
     }
-
     pub async fn get_thread_memory_mode(&self, id: ThreadId) -> anyhow::Result<Option<String>> {
         let row = sqlx::query("SELECT memory_mode FROM threads WHERE id = ?")
             .bind(id.to_string())
@@ -219,159 +168,6 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
             .execute(self.pool.as_ref())
             .await?;
         Ok(())
-    }
-
-    pub async fn insert_external_agent_run(
-        &self,
-        run: crate::ExternalAgentRunStart,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-INSERT INTO external_agent_runs (
-    child_thread_id,
-    parent_thread_id,
-    agent_path,
-    routing_kind,
-    requested_selector,
-    effective_selector,
-    routing_reason,
-    skipped_candidates_json,
-    provider_family,
-    command,
-    cli_version,
-    capability_source,
-    capability_freshness,
-    protocol,
-    mode,
-    workspace,
-    model,
-    effort,
-    started_at_ms
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(child_thread_id) DO UPDATE SET
-    parent_thread_id = excluded.parent_thread_id,
-    agent_path = excluded.agent_path,
-    routing_kind = excluded.routing_kind,
-    requested_selector = excluded.requested_selector,
-    effective_selector = excluded.effective_selector,
-    routing_reason = excluded.routing_reason,
-    skipped_candidates_json = excluded.skipped_candidates_json,
-    provider_family = excluded.provider_family,
-    command = excluded.command,
-    cli_version = excluded.cli_version,
-    capability_source = excluded.capability_source,
-    capability_freshness = excluded.capability_freshness,
-    protocol = excluded.protocol,
-    mode = excluded.mode,
-    workspace = excluded.workspace,
-    model = excluded.model,
-    effort = excluded.effort,
-    started_at_ms = excluded.started_at_ms,
-    completed_at_ms = NULL,
-    duration_ms = NULL,
-    terminal_state = NULL,
-    failure_kind = NULL,
-    failure_message = NULL
-            "#,
-        )
-        .bind(run.child_thread_id.to_string())
-        .bind(run.parent_thread_id.to_string())
-        .bind(run.agent_path)
-        .bind(run.routing_kind)
-        .bind(run.requested_selector)
-        .bind(run.effective_selector)
-        .bind(run.routing_reason)
-        .bind(run.skipped_candidates_json)
-        .bind(run.provider_family)
-        .bind(run.command)
-        .bind(run.cli_version)
-        .bind(run.capability_source)
-        .bind(run.capability_freshness)
-        .bind(run.protocol)
-        .bind(run.mode)
-        .bind(run.workspace)
-        .bind(run.model)
-        .bind(run.effort)
-        .bind(run.started_at_ms)
-        .execute(self.pool.as_ref())
-        .await?;
-        Ok(())
-    }
-
-    pub async fn finish_external_agent_run(
-        &self,
-        child_thread_id: ThreadId,
-        outcome: crate::ExternalAgentRunOutcome,
-    ) -> anyhow::Result<()> {
-        sqlx::query(
-            r#"
-UPDATE external_agent_runs
-SET completed_at_ms = ?,
-    duration_ms = ?,
-    terminal_state = ?,
-    failure_kind = ?,
-    failure_message = ?,
-    cli_version = COALESCE(?, cli_version),
-    capability_source = COALESCE(?, capability_source),
-    capability_freshness = COALESCE(?, capability_freshness)
-WHERE child_thread_id = ?
-            "#,
-        )
-        .bind(outcome.completed_at_ms)
-        .bind(i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX))
-        .bind(outcome.terminal_state)
-        .bind(outcome.failure_kind)
-        .bind(outcome.failure_message)
-        .bind(outcome.cli_version)
-        .bind(outcome.capability_source)
-        .bind(outcome.capability_freshness)
-        .bind(child_thread_id.to_string())
-        .execute(self.pool.as_ref())
-        .await?;
-        Ok(())
-    }
-
-    pub async fn list_external_agent_runs(
-        &self,
-        parent_thread_id: ThreadId,
-    ) -> anyhow::Result<Vec<crate::ExternalAgentRun>> {
-        let rows = sqlx::query_as::<_, ExternalAgentRunRow>(
-            r#"
-SELECT child_thread_id,
-       parent_thread_id,
-       agent_path,
-       routing_kind,
-       requested_selector,
-       effective_selector,
-       routing_reason,
-       skipped_candidates_json,
-       provider_family,
-       command,
-       cli_version,
-       capability_source,
-       capability_freshness,
-       protocol,
-       mode,
-       workspace,
-       model,
-       effort,
-       started_at_ms,
-       completed_at_ms,
-       duration_ms,
-       terminal_state,
-       failure_kind,
-       failure_message
-FROM external_agent_runs
-WHERE parent_thread_id = ?
-ORDER BY started_at_ms ASC, child_thread_id ASC
-            "#,
-        )
-        .bind(parent_thread_id.to_string())
-        .fetch_all(self.pool.as_ref())
-        .await?;
-        rows.into_iter()
-            .map(ExternalAgentRunRow::try_into_run)
-            .collect()
     }
 
     /// List direct spawned children of `parent_thread_id` whose edge matches `status`.
@@ -819,7 +615,6 @@ ON CONFLICT(child_thread_id) DO NOTHING
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
-        let session_provenance = serialize_session_provenance(metadata)?;
         let result = sqlx::query(
             r#"
 INSERT INTO threads (
@@ -832,8 +627,9 @@ INSERT INTO threads (
     updated_at_ms,
     recency_at_ms,
     source,
-    session_provenance,
     originator,
+    creator_user_id,
+    creator_account_id,
     history_mode,
     thread_source,
     agent_nickname,
@@ -862,7 +658,7 @@ INSERT INTO threads (
     memory_mode,
     project_id,
     daybreak_enabled
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -875,8 +671,9 @@ ON CONFLICT(id) DO NOTHING
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(recency_at))
         .bind(metadata.source.as_str())
-        .bind(session_provenance.as_deref())
         .bind(metadata.originator.as_deref())
+        .bind(metadata.creator_user_id.as_deref())
+        .bind(metadata.creator_account_id.as_deref())
         .bind(metadata.history_mode.as_str())
         .bind(
             metadata
@@ -1114,7 +911,6 @@ WHERE id = ?
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
         let preview = metadata_preview(metadata);
-        let session_provenance = serialize_session_provenance(metadata)?;
         // Backfill/reconcile callers merge existing git info before upserting, but that
         // read/modify/write is not atomic. Preserve non-null SQLite git fields here so
         // an explicit metadata update cannot be lost if a stale rollout upsert lands later.
@@ -1131,8 +927,9 @@ INSERT INTO threads (
     updated_at_ms,
     recency_at_ms,
     source,
-    session_provenance,
     originator,
+    creator_user_id,
+    creator_account_id,
     history_mode,
     thread_source,
     agent_nickname,
@@ -1161,7 +958,7 @@ INSERT INTO threads (
     memory_mode,
     project_id,
     daybreak_enabled
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
@@ -1171,8 +968,9 @@ ON CONFLICT(id) DO UPDATE SET
     updated_at_ms = excluded.updated_at_ms,
     recency_at_ms = threads.recency_at_ms,
     source = excluded.source,
-    session_provenance = COALESCE(excluded.session_provenance, threads.session_provenance),
     originator = COALESCE(threads.originator, excluded.originator),
+    creator_user_id = COALESCE(threads.creator_user_id, excluded.creator_user_id),
+    creator_account_id = COALESCE(threads.creator_account_id, excluded.creator_account_id),
     -- Paginated history is a one-way promotion; stale legacy metadata must not downgrade it.
     history_mode = CASE
         WHEN threads.history_mode = 'paginated' THEN threads.history_mode
@@ -1209,8 +1007,9 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(datetime_to_epoch_millis(updated_at))
         .bind(datetime_to_epoch_millis(insert_recency_at))
         .bind(metadata.source.as_str())
-        .bind(session_provenance.as_deref())
         .bind(metadata.originator.as_deref())
+        .bind(metadata.creator_user_id.as_deref())
+        .bind(metadata.creator_account_id.as_deref())
         .bind(metadata.history_mode.as_str())
         .bind(
             metadata
@@ -1372,10 +1171,9 @@ ON CONFLICT(id) DO UPDATE SET
                 .bind(thread_id_string)
                 .execute(self.logs_pool.as_ref())
                 .await?;
-            self.memories.delete_thread_memory(*thread_id).await?;
+            self.thread_queue.delete_thread_queue(*thread_id).await?;
             self.delete_versioned_thread_memory(*thread_id).await?;
             self.thread_goals.delete_thread_goal(*thread_id).await?;
-            self.thread_queue.delete_thread_queue(*thread_id).await?;
         }
 
         let mut tx = self.pool.begin().await?;
@@ -1388,15 +1186,6 @@ ON CONFLICT(id) DO UPDATE SET
         for thread_id_string in &thread_id_strings {
             sqlx::query(
                 "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ? OR child_thread_id = ?",
-            )
-            .bind(thread_id_string)
-            .bind(thread_id_string)
-            .execute(&mut *tx)
-            .await?;
-        }
-        for thread_id_string in &thread_id_strings {
-            sqlx::query(
-                "DELETE FROM external_agent_runs WHERE parent_thread_id = ? OR child_thread_id = ?",
             )
             .bind(thread_id_string)
             .bind(thread_id_string)
@@ -1527,8 +1316,9 @@ SELECT
     threads.updated_at_ms AS updated_at,
     threads.recency_at_ms AS recency_at,
     threads.source,
-    threads.session_provenance,
     threads.originator,
+    threads.creator_user_id,
+    threads.creator_account_id,
     threads.history_mode,
     threads.thread_source,
     threads.agent_nickname,
@@ -1786,18 +1576,6 @@ pub(super) fn push_thread_order_and_limit(
     builder.push_bind(limit as i64);
 }
 
-/// Encode structured launch provenance for the nullable `threads.session_provenance` column.
-fn serialize_session_provenance(
-    metadata: &crate::ThreadMetadata,
-) -> anyhow::Result<Option<String>> {
-    metadata
-        .session_provenance
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(anyhow::Error::from)
-}
-
 fn metadata_preview(metadata: &crate::ThreadMetadata) -> &str {
     metadata
         .preview
@@ -1818,7 +1596,6 @@ mod tests {
     use codex_protocol::protocol::GitInfo;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
-    use codex_protocol::protocol::SessionProvenance;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::ThreadHistoryMode;
     use codex_utils_absolute_path::test_support::PathExt;
@@ -1868,7 +1645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_metadata_round_trips_history_mode() {
+    async fn thread_metadata_history_mode_does_not_downgrade() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(
             crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
@@ -1878,13 +1655,19 @@ mod tests {
         .expect("state db should initialize");
         let thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000124").expect("valid thread id");
-        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
-        metadata.history_mode = ThreadHistoryMode::Paginated;
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
 
         runtime
             .upsert_thread(&metadata)
             .await
             .expect("upsert should succeed");
+
+        assert!(
+            runtime
+                .mark_thread_paginated(thread_id, /*legacy_name*/ None)
+                .await
+                .expect("mark paginated history")
+        );
 
         let metadata = runtime
             .get_thread(thread_id)
@@ -1892,6 +1675,22 @@ mod tests {
             .expect("thread should load")
             .expect("thread should exist");
         assert_eq!(metadata.history_mode, ThreadHistoryMode::Paginated);
+
+        let mut stale_metadata = metadata;
+        stale_metadata.history_mode = ThreadHistoryMode::Legacy;
+        runtime
+            .upsert_thread(&stale_metadata)
+            .await
+            .expect("upsert stale legacy metadata");
+        assert_eq!(
+            runtime
+                .get_thread(thread_id)
+                .await
+                .expect("read migrated thread")
+                .expect("thread should exist")
+                .history_mode,
+            ThreadHistoryMode::Paginated
+        );
     }
 
     #[tokio::test]
@@ -1926,6 +1725,10 @@ mod tests {
         ] {
             let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
             metadata.recency_at = DateTime::<Utc>::from_timestamp(recency_at, 0).unwrap();
+            if thread_id == oldest_pinned {
+                metadata.preview = Some(String::new());
+                metadata.first_user_message = None;
+            }
             metadata.section = section.map(|id| crate::ThreadSection {
                 id: id.to_string(),
                 name: crate::PINNED_THREAD_SECTION_NAME.to_string(),
@@ -2000,12 +1803,7 @@ mod tests {
                 .iter()
                 .map(|thread| thread.id)
                 .collect::<Vec<_>>(),
-            vec![
-                newest_unpinned,
-                newest_pinned,
-                oldest_pinned,
-                oldest_unpinned,
-            ]
+            vec![newest_unpinned, newest_pinned, oldest_unpinned,]
         );
 
         let mut builder = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
@@ -2058,6 +1856,10 @@ mod tests {
 
         for (thread_id, position) in [(first, 1_000_000), (tied, 1_000_000), (last, 2_000_000)] {
             let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+            if thread_id == tied {
+                metadata.preview = Some(String::new());
+                metadata.first_user_message = None;
+            }
             metadata.section = Some(crate::ThreadSection {
                 id: CUSTOM_THREAD_SECTION_ID.to_string(),
                 name: "Custom section".to_string(),
@@ -2272,69 +2074,6 @@ mod tests {
             .await?;
         assert!(logs.is_empty());
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn upsert_thread_round_trips_session_provenance() {
-        let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(
-            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
-            "test-provider".to_string(),
-        )
-        .await
-        .expect("state db should initialize");
-        let thread_id =
-            ThreadId::from_string("00000000-0000-0000-0000-000000000458").expect("valid thread id");
-        let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
-        metadata.session_provenance = Some(SessionProvenance {
-            request_id: Some("req-123".to_string()),
-            repository: Some("cbusillo/codex-lab".to_string()),
-            issue_number: Some(126),
-            issue_url: Some("https://github.com/cbusillo/codex-lab/issues/126".to_string()),
-            source: Some("github-plan".to_string()),
-            origin: Some("launchplane".to_string()),
-        });
-
-        runtime
-            .upsert_thread(&metadata)
-            .await
-            .expect("upsert should succeed");
-
-        let persisted = runtime
-            .get_thread(thread_id)
-            .await
-            .expect("thread should load")
-            .expect("thread should exist");
-
-        assert_eq!(persisted, metadata);
-    }
-
-    #[tokio::test]
-    async fn upsert_thread_keeps_session_provenance_absent_for_legacy_threads() {
-        let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(
-            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
-            "test-provider".to_string(),
-        )
-        .await
-        .expect("state db should initialize");
-        let thread_id =
-            ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
-        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
-
-        runtime
-            .upsert_thread(&metadata)
-            .await
-            .expect("upsert should succeed");
-
-        let persisted = runtime
-            .get_thread(thread_id)
-            .await
-            .expect("thread should load")
-            .expect("thread should exist");
-
-        assert_eq!(persisted, metadata);
-        assert_eq!(persisted.session_provenance, None);
     }
 
     #[tokio::test]
@@ -2875,6 +2614,8 @@ mod tests {
         );
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
+                creator_user_id: None,
+                creator_account_id: None,
                 session_id: thread_id.into(),
                 id: thread_id,
                 forked_from_id: None,
@@ -2886,7 +2627,6 @@ mod tests {
                 originator: String::new(),
                 cli_version: String::new(),
                 source: SessionSource::Cli,
-                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,
@@ -2948,6 +2688,8 @@ mod tests {
         );
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
+                creator_user_id: None,
+                creator_account_id: None,
                 session_id: thread_id.into(),
                 id: thread_id,
                 forked_from_id: None,
@@ -2959,7 +2701,6 @@ mod tests {
                 originator: String::new(),
                 cli_version: String::new(),
                 source: SessionSource::Cli,
-                session_provenance: None,
                 thread_source: None,
                 agent_path: None,
                 agent_nickname: None,
@@ -3032,6 +2773,8 @@ mod tests {
 
         let mut rollout_metadata = metadata.clone();
         rollout_metadata.originator = Some("recorded_client".to_string());
+        rollout_metadata.creator_user_id = Some("creator-user".to_string());
+        rollout_metadata.creator_account_id = Some("creator-account".to_string());
         rollout_metadata.git_sha = Some("rollout-sha".to_string());
         rollout_metadata.git_branch = Some("rollout-branch".to_string());
         rollout_metadata.git_origin_url = Some(
@@ -3059,6 +2802,8 @@ mod tests {
 
         for incoming_originator in [None, Some("resume_client")] {
             rollout_metadata.originator = incoming_originator.map(str::to_owned);
+            rollout_metadata.creator_user_id = incoming_originator.map(str::to_owned);
+            rollout_metadata.creator_account_id = incoming_originator.map(str::to_owned);
             runtime
                 .upsert_thread(&rollout_metadata)
                 .await
@@ -3069,6 +2814,13 @@ mod tests {
                 .expect("thread should load")
                 .expect("thread should exist");
             assert_eq!(persisted.originator.as_deref(), Some("recorded_client"));
+            assert_eq!(
+                (
+                    persisted.creator_user_id.as_deref(),
+                    persisted.creator_account_id.as_deref()
+                ),
+                (Some("creator-user"), Some("creator-account")),
+            );
         }
     }
 

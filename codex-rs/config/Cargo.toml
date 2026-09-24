@@ -14,7 +14,6 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
-codex-app-server-protocol = { workspace = true }
 codex-execpolicy = { workspace = true }
 codex-features = { workspace = true }
 codex-file-system = { workspace = true }
@@ -43,7 +42,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 toml = { workspace = true, features = ["preserve_order"] }
 toml_edit = { workspace = true }
-tonic = { workspace = true }
+tonic = { workspace = true, features = ["tls-native-roots", "tls-ring"] }
 tonic-prost = { workspace = true }
 tracing = { workspace = true }
 wildmatch = { workspace = true }

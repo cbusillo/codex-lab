@@ -45,41 +45,6 @@ use super::tool_log_payload;
 struct ExtensionEchoContributor;
 
 #[test]
-fn messaging_tool_source_distinguishes_plaintext_from_declared_encryption() {
-    let call = |name: &str, encrypted_function_args: Option<Vec<String>>| ToolCall {
-        tool_name: ToolName::plain(name),
-        call_id: "call-source".to_string(),
-        payload: ToolPayload::Function {
-            arguments: r#"{"message":"do not log this"}"#.to_string(),
-        },
-        encrypted_function_args,
-    };
-
-    for encrypted_function_args in [None, Some(Vec::new())] {
-        let call = call("spawn_agent", encrypted_function_args);
-        let source = call.direct_source();
-        assert_eq!(source, ToolCallSource::DirectPlaintextMessage);
-        assert_eq!(
-            tool_log_payload(&call.payload, &source),
-            "[plaintext arguments]"
-        );
-    }
-
-    assert_eq!(
-        call("spawn_agent", Some(vec!["message".to_string()])).direct_source(),
-        ToolCallSource::Direct
-    );
-    assert_eq!(
-        call("exec_command", None).direct_source(),
-        ToolCallSource::Direct
-    );
-    assert_eq!(
-        call("exec_command", Some(Vec::new())).direct_source(),
-        ToolCallSource::Direct
-    );
-}
-
-#[test]
 fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     let payload = ToolPayload::Function {
         arguments: json!({"target": "/root/worker", "message": "secret message"}).to_string(),

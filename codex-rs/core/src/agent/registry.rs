@@ -1,12 +1,9 @@
-use crate::agent::external_diagnostics::ExternalAgentFailureDetail;
-use crate::agent::external_diagnostics::ExternalAgentProviderProvenance;
-use crate::agent::external_diagnostics::ExternalAgentQuotaDiagnostic;
+use crate::agent::types::AgentMetadata;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
-use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
@@ -18,42 +15,17 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 
 /// This structure is used to add some limits on the multi-agent capabilities for Codex. In
 /// the current implementation, it limits:
 /// * Total number of sub-agents (i.e. threads) per user session
 ///
-/// This structure is shared by all agents in the same user session (because the `AgentControl`
+/// This structure is shared by all agents in the same user session (because the `LocalAgentControl`
 /// is).
 #[derive(Default)]
 pub(crate) struct AgentRegistry {
     active_agents: Mutex<ActiveAgents>,
-    external_agents: Mutex<HashMap<ThreadId, ExternalAgentRuntime>>,
     total_count: AtomicUsize,
-}
-
-struct ExternalAgentRuntime {
-    parent_thread_id: ThreadId,
-    status_tx: watch::Sender<AgentStatus>,
-    _status_rx: watch::Receiver<AgentStatus>,
-    cancellation_token: CancellationToken,
-    provider: ExternalAgentProviderProvenance,
-    failure: Option<ExternalAgentFailureDetail>,
-    quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
-    started_at: Instant,
-    completed_at: Option<Instant>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ExternalAgentRuntimeSnapshot {
-    pub(crate) status: AgentStatus,
-    pub(crate) provider: ExternalAgentProviderProvenance,
-    pub(crate) failure: Option<ExternalAgentFailureDetail>,
-    pub(crate) quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
-    pub(crate) duration_ms: u64,
 }
 
 #[derive(Default)]
@@ -76,14 +48,6 @@ impl RegisteredAgent {
             evicted_environments: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AgentMetadata {
-    pub(crate) agent_id: Option<ThreadId>,
-    pub(crate) agent_path: Option<AgentPath>,
-    pub(crate) agent_nickname: Option<String>,
-    pub(crate) agent_role: Option<String>,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -144,10 +108,6 @@ impl AgentRegistry {
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&thread_id);
         let removed_counted_agent = {
             let mut active_agents = self
                 .active_agents
@@ -259,192 +219,6 @@ impl AgentRegistry {
             })
             .cloned()
             .collect()
-    }
-
-    pub(crate) fn register_external_agent(
-        &self,
-        thread_id: ThreadId,
-        parent_thread_id: ThreadId,
-        initial_status: AgentStatus,
-        provider: ExternalAgentProviderProvenance,
-    ) -> CancellationToken {
-        let (status_tx, status_rx) = watch::channel(initial_status);
-        let cancellation_token = CancellationToken::new();
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                thread_id,
-                ExternalAgentRuntime {
-                    parent_thread_id,
-                    status_tx,
-                    _status_rx: status_rx,
-                    cancellation_token: cancellation_token.clone(),
-                    provider,
-                    failure: None,
-                    quota_diagnostic: None,
-                    started_at: Instant::now(),
-                    completed_at: None,
-                },
-            );
-        cancellation_token
-    }
-
-    pub(crate) fn external_agent_snapshot(
-        &self,
-        thread_id: ThreadId,
-    ) -> Option<ExternalAgentRuntimeSnapshot> {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread_id)
-            .map(|runtime| {
-                let completed_at = runtime.completed_at.unwrap_or_else(Instant::now);
-                let duration_ms = completed_at
-                    .saturating_duration_since(runtime.started_at)
-                    .as_millis()
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                ExternalAgentRuntimeSnapshot {
-                    status: runtime.status_tx.borrow().clone(),
-                    provider: runtime.provider.clone(),
-                    failure: runtime.failure.clone(),
-                    quota_diagnostic: runtime.quota_diagnostic.clone(),
-                    duration_ms,
-                }
-            })
-    }
-
-    pub(crate) fn update_external_agent_provider(
-        &self,
-        thread_id: ThreadId,
-        provider: ExternalAgentProviderProvenance,
-    ) {
-        if let Some(runtime) = self
-            .external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&thread_id)
-        {
-            runtime.provider = provider;
-        }
-    }
-
-    pub(crate) fn external_agent_status(&self, thread_id: ThreadId) -> Option<AgentStatus> {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread_id)
-            .map(|runtime| runtime.status_tx.borrow().clone())
-    }
-
-    pub(crate) fn has_registered_external_agents(&self) -> bool {
-        !self
-            .external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
-    }
-
-    pub(crate) fn live_external_thread_spawn_edges(&self) -> Vec<(ThreadId, ThreadId)> {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter_map(|(thread_id, runtime)| {
-                let status = runtime.status_tx.borrow().clone();
-                (!crate::agent::status::is_final(&status))
-                    .then_some((runtime.parent_thread_id, *thread_id))
-            })
-            .collect()
-    }
-
-    pub(crate) fn registered_external_thread_spawn_edges(&self) -> Vec<(ThreadId, ThreadId)> {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .map(|(thread_id, runtime)| (runtime.parent_thread_id, *thread_id))
-            .collect()
-    }
-
-    pub(crate) fn external_agent_status_rx(
-        &self,
-        thread_id: ThreadId,
-    ) -> Option<watch::Receiver<AgentStatus>> {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread_id)
-            .map(|runtime| runtime.status_tx.subscribe())
-    }
-
-    pub(crate) fn update_external_agent_status(
-        &self,
-        thread_id: ThreadId,
-        status: AgentStatus,
-    ) -> bool {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&thread_id)
-            .is_some_and(|runtime| {
-                if crate::agent::status::is_final(&status) {
-                    runtime.completed_at.get_or_insert_with(Instant::now);
-                }
-                runtime.status_tx.send(status).is_ok()
-            })
-    }
-
-    pub(crate) fn update_external_agent_status_with_quota(
-        &self,
-        thread_id: ThreadId,
-        status: AgentStatus,
-        quota_diagnostic: Option<ExternalAgentQuotaDiagnostic>,
-    ) -> bool {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&thread_id)
-            .is_some_and(|runtime| {
-                runtime.quota_diagnostic = quota_diagnostic;
-                if crate::agent::status::is_final(&status) {
-                    runtime.completed_at.get_or_insert_with(Instant::now);
-                }
-                runtime.status_tx.send(status).is_ok()
-            })
-    }
-
-    pub(crate) fn update_external_agent_failure(
-        &self,
-        thread_id: ThreadId,
-        status: AgentStatus,
-        failure: ExternalAgentFailureDetail,
-    ) -> bool {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&thread_id)
-            .is_some_and(|runtime| {
-                runtime.quota_diagnostic = failure.quota_diagnostic.clone();
-                runtime.failure = Some(failure);
-                runtime.completed_at.get_or_insert_with(Instant::now);
-                runtime.status_tx.send(status).is_ok()
-            })
-    }
-
-    pub(crate) fn cancel_external_agent(&self, thread_id: ThreadId) -> bool {
-        self.external_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&thread_id)
-            .is_some_and(|runtime| {
-                if crate::agent::status::is_final(&runtime.status_tx.borrow()) {
-                    return false;
-                }
-                runtime.cancellation_token.cancel();
-                true
-            })
     }
 
     fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {

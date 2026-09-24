@@ -1,22 +1,14 @@
 pub(crate) mod agent_resolver;
-mod antigravity_models;
-pub(crate) mod bounded_worker;
+pub(crate) mod api;
 pub(crate) mod child_config;
-pub(crate) mod claude_stream;
 pub(crate) mod control;
-pub(crate) mod external_capabilities;
-pub(crate) mod external_command;
-pub(crate) mod external_diagnostics;
-pub(crate) mod external_preflight;
-pub(crate) mod provider_routing;
 mod registry;
 pub(crate) mod role;
-pub(crate) mod selector_defaults;
 pub(crate) mod status;
-pub(crate) mod user_agent_intent;
+pub(crate) mod types;
 
 pub(crate) use codex_protocol::protocol::AgentStatus;
-pub(crate) use control::AgentControl;
+pub(crate) use control::LocalAgentControl;
 pub(crate) use registry::exceeds_thread_spawn_depth_limit;
 pub(crate) use registry::next_thread_spawn_depth;
 pub(crate) use status::agent_status_from_event;

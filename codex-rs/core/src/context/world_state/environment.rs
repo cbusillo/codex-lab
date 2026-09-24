@@ -1,8 +1,5 @@
 use super::PreviousSectionState;
 use super::WorldStateSection;
-use super::environment_limits::MAX_RENDERED_ENVIRONMENTS;
-use super::environment_limits::MAX_RENDERED_SUBAGENT_LINES;
-use super::environment_limits::bound_environment_context_body;
 use crate::context::ContextualUserFragment;
 use crate::context::environment_context::FileSystemContext;
 use crate::context::environment_context::NetworkContext;
@@ -10,12 +7,9 @@ use crate::context::environment_context::push_xml_escaped_text;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::session::turn_context::TurnContext;
-use crate::session::turn_context::TurnEnvironment;
 use crate::shell::ShellType;
 use codex_features::Feature;
 use codex_protocol::models::ContentItemKind;
-use codex_protocol::protocol::MAX_TURN_ENVIRONMENT_SELECTIONS;
-use codex_protocol::protocol::TurnContextItem;
 use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
@@ -49,13 +43,6 @@ impl EnvironmentsState {
         environments: &TurnEnvironmentSnapshot,
         current_date: Option<String>,
     ) -> Self {
-        let primary_environment = environments.primary();
-        let workspace_roots = primary_environment
-            .map(TurnEnvironment::workspace_roots)
-            .unwrap_or_default();
-        let permission_profile = primary_environment
-            .map(TurnEnvironment::permission_profile)
-            .unwrap_or_else(|| turn_context.config.permissions.permission_profile());
         let shell_version = if turn_context
             .config
             .features
@@ -74,29 +61,19 @@ impl EnvironmentsState {
             current_date,
             timezone: turn_context.timezone.clone(),
             network: network_from_turn_context(turn_context),
-            filesystem: Some(FileSystemContext::from_permission_profile(
-                permission_profile,
-                workspace_roots,
-            )),
+            filesystem: environments.primary().map(|environment| {
+                FileSystemContext::from_permission_profile(
+                    environment.permission_profile(),
+                    environment.workspace_roots(),
+                )
+            }),
             subagents: None,
         }
     }
 
     pub(crate) fn with_subagents(mut self, subagents: String) -> Self {
         if !subagents.is_empty() {
-            // The elision marker counts against the line cap so the rendered block never exceeds
-            // `MAX_RENDERED_SUBAGENT_LINES` lines.
-            let elided = subagents.lines().count() > MAX_RENDERED_SUBAGENT_LINES;
-            let kept = if elided {
-                MAX_RENDERED_SUBAGENT_LINES - 1
-            } else {
-                MAX_RENDERED_SUBAGENT_LINES
-            };
-            let mut lines = subagents.lines().take(kept).collect::<Vec<_>>().join("\n");
-            if elided {
-                lines.push_str("\n- ...");
-            }
-            self.subagents = Some(lines);
+            self.subagents = Some(subagents);
         }
         self
     }
@@ -155,18 +132,6 @@ impl WorldStateSection for EnvironmentsState {
         }
     }
 
-    fn matches_legacy_fragment(role: &str, text: &str) -> bool {
-        role == "user" && EnvironmentsState::matches_text(text)
-    }
-
-    fn has_retained_fragment_matcher() -> bool {
-        true
-    }
-
-    fn matches_retained_fragment(role: &str, text: &str) -> bool {
-        Self::matches_legacy_fragment(role, text)
-    }
-
     fn render_diff(
         &self,
         previous: PreviousSectionState<'_, Self::Snapshot>,
@@ -204,7 +169,6 @@ impl WorldStateSection for EnvironmentsState {
                 .environments
                 .keys()
                 .filter(|id| !self.environments.contains_key(*id))
-                .take(MAX_RENDERED_ENVIRONMENTS.saturating_sub(updates.len()))
                 .map(|id| (id.clone(), EnvironmentUpdate::Unavailable)),
         );
         let legacy_single = is_legacy_single(&self.environments)
@@ -297,7 +261,7 @@ impl ContextualUserFragment for RenderedEnvironments {
             }
         } else if !self.updates.is_empty() {
             rendered.push_str("  <environments>\n");
-            for (id, update) in self.updates.iter().take(MAX_RENDERED_ENVIRONMENTS) {
+            for (id, update) in &self.updates {
                 match update {
                     EnvironmentUpdate::Current(environment) => {
                         rendered.push_str("    <environment id=\"");
@@ -347,14 +311,14 @@ impl ContextualUserFragment for RenderedEnvironments {
         }
         if let Some(subagents) = &self.subagents {
             rendered.push_str("  <subagents>\n");
-            for line in subagents.lines().take(MAX_RENDERED_SUBAGENT_LINES) {
+            for line in subagents.lines() {
                 rendered.push_str("    ");
                 rendered.push_str(line);
                 rendered.push('\n');
             }
             rendered.push_str("  </subagents>\n");
         }
-        bound_environment_context_body(rendered)
+        rendered
     }
 }
 
@@ -428,68 +392,6 @@ struct EnvironmentSnapshot {
     error: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     is_primary: bool,
-}
-
-impl EnvironmentsSnapshot {
-    /// Rebuild this section's baseline from a rollout `TurnContextItem`.
-    ///
-    /// Rollouts written before world-state items existed carry the resolved
-    /// environment selections on the turn context instead. Without this, resume
-    /// and fork have no baseline for the section and re-render the whole
-    /// `<environment_context>` block, losing the recorded per-environment cwds.
-    ///
-    /// Returns `None` for turn contexts that never persisted selections, so
-    /// those rollouts keep the existing history-based fallback rather than
-    /// getting a baseline invented from the legacy single `cwd`.
-    pub(super) fn from_turn_context_item(turn_context_item: &TurnContextItem) -> Option<Self> {
-        let environments = turn_context_item.environments.as_ref()?;
-        Some(Self {
-            environments: environments
-                .iter()
-                .enumerate()
-                .map(|(index, environment)| {
-                    (
-                        environment.environment_id.clone(),
-                        EnvironmentSnapshot {
-                            cwd: PathUri::from_abs_path(&environment.cwd)
-                                .inferred_native_path_string(),
-                            status: EnvironmentStatus::Available,
-                            shell: environment.shell.clone(),
-                            error: None,
-                            is_primary: index == 0,
-                        },
-                    )
-                })
-                .collect(),
-            shell_version: None,
-            current_date: turn_context_item.current_date.clone(),
-            timezone: turn_context_item.timezone.clone(),
-            network: turn_context_item.network.as_ref().map(|network| {
-                NetworkContext::new(
-                    network.allowed_domains.clone(),
-                    network.denied_domains.clone(),
-                )
-                .render()
-            }),
-            filesystem: Some(
-                FileSystemContext::from_permission_profile(
-                    &turn_context_item.permission_profile(),
-                    &workspace_roots_from_turn_context_item(turn_context_item),
-                )
-                .render(),
-            ),
-            subagents: None,
-        })
-    }
-}
-
-/// Older rollout items did not persist workspace roots. Fall back to the legacy
-/// cwd binding only when reconstructing that historical context.
-fn workspace_roots_from_turn_context_item(turn_context_item: &TurnContextItem) -> Vec<PathUri> {
-    match turn_context_item.workspace_roots.as_ref() {
-        Some(workspace_roots) => workspace_roots.iter().map(PathUri::from_abs_path).collect(),
-        None => vec![PathUri::from_abs_path(&turn_context_item.cwd)],
-    }
 }
 
 impl EnvironmentSnapshot {
@@ -573,12 +475,8 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
                 },
             )
         })
-        .take(MAX_TURN_ENVIRONMENT_SELECTIONS)
         .collect::<BTreeMap<_, _>>();
     for environment in snapshot.starting() {
-        if environments.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS {
-            break;
-        }
         environments
             .entry(environment.selection.environment_id.clone())
             .or_insert_with(|| EnvironmentState {
@@ -595,11 +493,6 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
     let mut remaining_error_bytes = MAX_TOTAL_ERROR_BYTES;
     for environment in &snapshot.environments {
         if let TurnEnvironmentState::Failed { selection, error } = environment {
-            if environments.len() >= MAX_TURN_ENVIRONMENT_SELECTIONS
-                || environments.contains_key(&selection.environment_id)
-            {
-                continue;
-            }
             let detail = error
                 [..error.floor_char_boundary(remaining_error_bytes.min(MAX_ERROR_BYTES))]
                 .to_string();
@@ -616,8 +509,6 @@ fn environment_states(snapshot: &TurnEnvironmentSnapshot) -> BTreeMap<String, En
             );
         }
     }
-    // Preserve snapshot priority under overload: ready selections (primary first), then starting,
-    // then failed. Map ordering controls rendering only and must not decide which entries survive.
     environments
 }
 

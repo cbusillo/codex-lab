@@ -49,20 +49,24 @@ async fn cancelled_startup_does_not_record_unselected_review_evidence() {
         .insert(PendingReviewContext(context));
     session
         .set_session_startup_prewarm(
-            crate::session_startup_prewarm::SessionStartupPrewarmHandle::new(
+            crate::session::startup_prewarm::SessionStartupPrewarmHandle::new(
                 tokio::spawn(std::future::pending()),
                 std::time::Instant::now(),
                 crate::client::WEBSOCKET_CONNECT_TIMEOUT,
             ),
         )
         .await;
-    let input = vec![TurnInput::UserInput {
-        acceptance_order: None,
-        content,
-        client_id: None,
-    }];
-    let task = crate::tasks::RegularTask::new(&input);
-    session.spawn_task(turn, input, task).await;
+    session
+        .spawn_task(
+            turn,
+            vec![TurnInput::UserInput {
+                metadata: Default::default(),
+                content,
+                client_id: None,
+            }],
+            crate::tasks::RegularTask::new(),
+        )
+        .await;
     let started = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
         .await
         .unwrap()
@@ -115,7 +119,7 @@ async fn finalization_overflow_marks_the_reviewer_exhausted() {
         .unwrap();
     let context = required_context("required action".to_owned());
     let mut input = vec![TurnInput::UserInput {
-        acceptance_order: None,
+        metadata: Default::default(),
         content: context.clone().into_user_inputs().unwrap(),
         client_id: None,
     }];

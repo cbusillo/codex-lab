@@ -4,40 +4,6 @@
     "AbsolutePathBuf": {
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
-    },
-    "ServerBuildInfo": {
-      "description": "Compiled identity for the running app-server binary.\n\n`initialize.userAgent` remains the negotiated HTTP user-agent string for compatibility. This struct carries the immutable build identity consumers should use when comparing backend versions or release provenance.",
-      "properties": {
-        "buildChannel": {
-          "type": "string"
-        },
-        "buildProfile": {
-          "type": "string"
-        },
-        "dirtyState": {
-          "type": "string"
-        },
-        "schemaVersion": {
-          "format": "uint32",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "sourceCommit": {
-          "type": "string"
-        },
-        "version": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "buildChannel",
-        "buildProfile",
-        "dirtyState",
-        "schemaVersion",
-        "sourceCommit",
-        "version"
-      ],
-      "type": "object"
     }
   },
   "properties": {
@@ -47,7 +13,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Absolute path to the server's $CODEX_LAB_HOME directory."
+      "description": "Absolute path to the server's $CODEX_HOME directory."
     },
     "platformFamily": {
       "description": "Platform family for the running app-server target, for example `\"unix\"` or `\"windows\"`.",
@@ -56,17 +22,6 @@
     "platformOs": {
       "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
       "type": "string"
-    },
-    "serverBuild": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/ServerBuildInfo"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Actual compiled identity for the running app-server binary."
     },
     "userAgent": {
       "type": "string"

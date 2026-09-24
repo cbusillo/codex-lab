@@ -189,6 +189,8 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
 
     let session_meta_line = SessionMetaLine {
         meta: SessionMeta {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             id: thread_id,
             forked_from_id: None,
@@ -201,7 +203,6 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             cli_version: "test".to_string(),
             source: SessionSource::Cli,
             thread_source: None,
-            session_provenance: None,
             agent_path: None,
             agent_nickname: None,
             agent_role: None,
@@ -1612,7 +1613,6 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
                 .expect("valid git remote URL"),
         ),
         source: None,
-        session_provenance: None,
         history_mode: Default::default(),
         parent_thread_id: None,
         agent_nickname: None,
@@ -1646,7 +1646,6 @@ fn fill_missing_thread_item_metadata_preserves_identity_and_prefers_state_git_fi
                 .expect("valid git remote URL"),
         ),
         source: Some(SessionSource::Exec),
-        session_provenance: None,
         history_mode: Default::default(),
         parent_thread_id: None,
         agent_nickname: Some("state-agent".to_string()),
@@ -1804,7 +1803,6 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
             disabled_plugin_ids: None,
             cwd: serde_json::from_value(serde_json::json!(&latest_cwd))
                 .expect("absolute latest cwd"),
-            environments: None,
             workspace_roots: None,
             current_date: None,
             timezone: None,

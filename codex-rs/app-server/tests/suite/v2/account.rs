@@ -1,7 +1,6 @@
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::TestAppServer;
-use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::to_response;
 
 use app_test_support::ChatGptAuthFixture;
@@ -35,8 +34,6 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
-use codex_app_server_protocol::RemoveAccountResponse;
-use codex_app_server_protocol::RemoveAccountStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
@@ -48,13 +45,11 @@ use codex_login::AuthDotJson;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::CLIENT_ID_OVERRIDE_ENV_VAR;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
-use codex_login::TokenData;
 use codex_login::auth::BedrockAccessKeysAuth;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::load_auth_dot_json;
 use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
-use codex_login::token_data::parse_chatgpt_jwt_claims;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode as DomainAuthMode;
 use core_test_support::responses;
@@ -84,7 +79,6 @@ const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001"
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 const WORKSPACE_ID_EMBEDDED: &str = "123e4567-e89b-42d3-a456-426614174010";
 const WORKSPACE_ID_INITIAL: &str = "123e4567-e89b-42d3-a456-426614174011";
-const WORKSPACE_ID_REFRESHED: &str = "123e4567-e89b-42d3-a456-426614174012";
 const WORKSPACE_ID_DEVICE: &str = "123e4567-e89b-42d3-a456-426614174013";
 const WORKSPACE_ID_STALE: &str = "123e4567-e89b-42d3-a456-426614174014";
 
@@ -109,7 +103,6 @@ struct CreateConfigTomlParams {
     chatgpt_base_url: Option<String>,
     model_provider_id: Option<String>,
     extra_provider_config: Option<String>,
-    extra_top_level_config: Option<String>,
 }
 
 fn create_config_toml(codex_home: &Path, params: CreateConfigTomlParams) -> std::io::Result<()> {
@@ -160,7 +153,6 @@ stream_max_retries = 0
     } else {
         params.extra_provider_config.unwrap_or_default()
     };
-    let extra_top_level_config = params.extra_top_level_config.unwrap_or_default();
     let contents = format!(
         r#"
 model = "mock-model"
@@ -169,7 +161,6 @@ sandbox_mode = "danger-full-access"
 {chatgpt_base_url_line}
 {forced_line}
 {forced_workspace_line}
-{extra_top_level_config}
 
 model_provider = "{model_provider_id}"
 
@@ -623,17 +614,23 @@ async fn mount_disabled_attribution_settings(mock_server: &MockServer) {
         .await;
 }
 
+#[test_case("/v1"; "responses")]
+#[test_case("/backend-api/codex"; "discovery")]
 #[tokio::test]
 // 401 response triggers account/chatgptAuthTokens/refresh and retries with new tokens.
-async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
+async fn external_auth_refreshes_on_unauthorized(model_path: &str) -> Result<()> {
     let codex_home = TempDir::new()?;
     let mock_server = MockServer::start().await;
+    let backend = MockServer::start().await;
     create_config_toml(
         codex_home.path(),
         CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            chatgpt_base_url: Some(format!("{}/backend-api", mock_server.uri())),
+            model_provider_id: Some("routing".into()),
+            extra_provider_config: Some(format!(
+                "[model_providers.routing]\nname = \"OpenAI\"\nrequires_openai_auth = true\nbase_url = \"{}{model_path}\"\nrequest_max_retries = 0\nstream_max_retries = 0\n",
+                mock_server.uri(),
+            )),
+            chatgpt_base_url: Some(format!("{}/backend-api", backend.uri())),
             ..Default::default()
         },
     )?;
@@ -649,22 +646,29 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     }));
     let responses_mock = responses::mount_response_sequence(
         &mock_server,
-        vec![unauthorized, responses::sse_response(success_sse)],
+        if model_path == "/v1" {
+            vec![unauthorized, responses::sse_response(success_sse)]
+        } else {
+            vec![responses::sse_response(success_sse)]
+        },
     )
     .await;
-    mount_disabled_attribution_settings(&mock_server).await;
+    mount_disabled_attribution_settings(&backend).await;
 
     let initial_access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("initial@example.com")
+            .chatgpt_user_id("refresh-user")
             .plan_type("pro")
             .chatgpt_account_id(WORKSPACE_ID_INITIAL),
     )?;
+    let refreshed_workspace = WORKSPACE_ID_INITIAL;
     let refreshed_access_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("refreshed@example.com")
+            .chatgpt_user_id("refresh-user")
             .plan_type("pro")
-            .chatgpt_account_id(WORKSPACE_ID_REFRESHED),
+            .chatgpt_account_id(refreshed_workspace),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -699,6 +703,25 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     let thread: codex_app_server_protocol::ThreadStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
 
+    if model_path != "/v1" {
+        // Force discovery after login cached the same workspace's route.
+        let config_path = codex_home.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            std::fs::read_to_string(&config_path)?.replace("/backend-api\"", "/backend-api/\""),
+        )?;
+        Mock::given(path("/backend-api/wham/accounts/check"))
+            .and(header(
+                "authorization",
+                format!("Bearer {initial_access_token}"),
+            ))
+            .respond_with(ResponseTemplate::new(/*s*/ 401))
+            .with_priority(/*p*/ 1)
+            .expect(/*r*/ 1)
+            .mount(&backend)
+            .await;
+    }
+
     let turn_req = mcp
         .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
             thread_id: thread.thread.id,
@@ -713,26 +736,26 @@ async fn external_auth_refreshes_on_unauthorized() -> Result<()> {
     respond_to_refresh_request(
         &mut mcp,
         &refreshed_access_token,
-        WORKSPACE_ID_REFRESHED,
+        refreshed_workspace,
         Some("pro"),
     )
     .await?;
     let _: codex_app_server_protocol::TurnStartResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
-    let _turn_completed = timeout(
+    let turn_completed = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
 
+    let completed: TurnCompletedNotification =
+        serde_json::from_value(turn_completed.params.expect("turn/completed params"))?;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+
     let requests = responses_mock.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), if model_path == "/v1" { 2 } else { 1 });
     assert_eq!(
-        requests[0].header("authorization"),
-        Some(format!("Bearer {initial_access_token}"))
-    );
-    assert_eq!(
-        requests[1].header("authorization"),
+        requests[requests.len() - 1].header("authorization"),
         Some(format!("Bearer {refreshed_access_token}"))
     );
 
@@ -3477,404 +3500,5 @@ async fn get_account_with_chatgpt_missing_plan_claim_returns_unknown() -> Result
         requires_openai_auth: true,
     };
     assert_eq!(received, expected);
-    Ok(())
-}
-
-/// Starts a thread against the mock model so it stays loaded across auth changes.
-async fn start_mock_model_thread(mcp: &mut TestAppServer) -> Result<String> {
-    let thread_req = mcp
-        .send_thread_start_request_with_auto_env(codex_app_server_protocol::ThreadStartParams {
-            model: Some("mock-model".to_string()),
-            ..Default::default()
-        })
-        .await?;
-    let thread: codex_app_server_protocol::ThreadStartResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(thread_req)).await??;
-    Ok(thread.thread.id)
-}
-
-async fn run_text_turn(mcp: &mut TestAppServer, thread_id: &str, text: &str) -> Result<TurnStatus> {
-    let turn_req = mcp
-        .send_turn_start_request(codex_app_server_protocol::TurnStartParams {
-            thread_id: thread_id.to_string(),
-            client_user_message_id: None,
-            input: vec![codex_app_server_protocol::UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        })
-        .await?;
-    let _: codex_app_server_protocol::TurnStartResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_req)).await??;
-    let completed_notif: JSONRPCNotification = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("turn/completed"),
-    )
-    .await??;
-    let completed: TurnCompletedNotification = serde_json::from_value(
-        completed_notif
-            .params
-            .expect("turn/completed params must be present"),
-    )?;
-    Ok(completed.turn.status)
-}
-
-async fn complete_text_turn(mcp: &mut TestAppServer, thread_id: &str, text: &str) -> Result<()> {
-    assert_eq!(
-        run_text_turn(mcp, thread_id, text).await?,
-        TurnStatus::Completed
-    );
-    Ok(())
-}
-
-async fn await_login_notifications(mcp: &mut TestAppServer) -> Result<()> {
-    let _login_completed = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("account/login/completed"),
-    )
-    .await??;
-    let _account_updated = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("account/updated"),
-    )
-    .await??;
-    Ok(())
-}
-
-#[tokio::test]
-// A thread loaded before the login must issue its next turn with the new API key.
-async fn login_account_api_key_refreshes_auth_for_loaded_thread() -> Result<()> {
-    let mock_server = MockServer::start().await;
-    let response_mock = responses::mount_sse_sequence(
-        &mock_server,
-        vec![
-            create_final_assistant_message_sse_response("Old auth turn")?,
-            create_final_assistant_message_sse_response("New auth turn")?,
-        ],
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            ..Default::default()
-        },
-    )?;
-    write_models_cache(codex_home.path()).await?;
-    login_with_api_key(
-        codex_home.path(),
-        "sk-old",
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let thread_id = start_mock_model_thread(&mut mcp).await?;
-    complete_text_turn(&mut mcp, &thread_id, "Use the old key").await?;
-
-    let login_req = mcp.send_login_account_api_key_request("sk-new").await?;
-    let login: LoginAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(login_req)).await??;
-    assert_eq!(login, LoginAccountResponse::ApiKey {});
-    await_login_notifications(&mut mcp).await?;
-
-    complete_text_turn(&mut mcp, &thread_id, "Use the new key").await?;
-
-    let requests = response_mock.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].header("authorization"),
-        Some("Bearer sk-old".to_string())
-    );
-    assert_eq!(
-        requests[1].header("authorization"),
-        Some("Bearer sk-new".to_string())
-    );
-    // The thread keeps its execution-account window instead of being torn down and rebuilt.
-    assert_eq!(
-        requests[0].header("x-codex-window-id"),
-        requests[1].header("x-codex-window-id")
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-// Replacing external ChatGPT tokens must reach threads that were already loaded.
-async fn chatgpt_auth_tokens_login_refreshes_auth_for_loaded_thread() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let mock_server = MockServer::start().await;
-    let response_mock = responses::mount_sse_sequence(
-        &mock_server,
-        vec![
-            create_final_assistant_message_sse_response("Initial external auth turn")?,
-            create_final_assistant_message_sse_response("Updated external auth turn")?,
-        ],
-    )
-    .await;
-
-    create_config_toml(
-        codex_home.path(),
-        CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            ..Default::default()
-        },
-    )?;
-    write_models_cache(codex_home.path()).await?;
-
-    let initial_access_token = encode_id_token(
-        &ChatGptIdTokenClaims::new()
-            .email("initial@example.com")
-            .plan_type("pro")
-            .chatgpt_account_id(WORKSPACE_ID_INITIAL),
-    )?;
-    let updated_access_token = encode_id_token(
-        &ChatGptIdTokenClaims::new()
-            .email("updated@example.com")
-            .plan_type("pro")
-            .chatgpt_account_id(WORKSPACE_ID_REFRESHED),
-    )?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_mock_chatgpt_backend()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let login_req = mcp
-        .send_chatgpt_auth_tokens_login_request(
-            initial_access_token.clone(),
-            WORKSPACE_ID_INITIAL.to_string(),
-            Some("pro".to_string()),
-        )
-        .await?;
-    let login: LoginAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(login_req)).await??;
-    assert_eq!(login, LoginAccountResponse::ChatgptAuthTokens {});
-    await_login_notifications(&mut mcp).await?;
-
-    let thread_id = start_mock_model_thread(&mut mcp).await?;
-    complete_text_turn(&mut mcp, &thread_id, "Use initial external auth").await?;
-
-    let login_req = mcp
-        .send_chatgpt_auth_tokens_login_request(
-            updated_access_token.clone(),
-            WORKSPACE_ID_REFRESHED.to_string(),
-            Some("pro".to_string()),
-        )
-        .await?;
-    let login: LoginAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(login_req)).await??;
-    assert_eq!(login, LoginAccountResponse::ChatgptAuthTokens {});
-    await_login_notifications(&mut mcp).await?;
-
-    complete_text_turn(&mut mcp, &thread_id, "Use updated external auth").await?;
-
-    let requests = response_mock.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].header("authorization"),
-        Some(format!("Bearer {initial_access_token}"))
-    );
-    assert_eq!(
-        requests[1].header("authorization"),
-        Some(format!("Bearer {updated_access_token}"))
-    );
-    assert_eq!(
-        requests[0].header("x-codex-window-id"),
-        requests[1].header("x-codex-window-id")
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-// Logging out must drop credentials from threads that were already loaded.
-async fn logout_refreshes_auth_for_loaded_thread() -> Result<()> {
-    let mock_server = MockServer::start().await;
-    let response_mock = responses::mount_sse_sequence(
-        &mock_server,
-        vec![
-            create_final_assistant_message_sse_response("Logged in turn")?,
-            create_final_assistant_message_sse_response("Logged out turn")?,
-        ],
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            ..Default::default()
-        },
-    )?;
-    write_models_cache(codex_home.path()).await?;
-    login_with_api_key(
-        codex_home.path(),
-        "sk-old",
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let thread_id = start_mock_model_thread(&mut mcp).await?;
-    complete_text_turn(&mut mcp, &thread_id, "Use logged in auth").await?;
-
-    let logout_req = mcp.send_logout_account_request().await?;
-    let _logout: LogoutAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(logout_req)).await??;
-    let _account_updated = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("account/updated"),
-    )
-    .await??;
-
-    // The turn may fail without credentials; only the outbound auth header matters here.
-    let _status = run_text_turn(&mut mcp, &thread_id, "Use logged out auth").await?;
-
-    let requests = response_mock.requests();
-    assert_eq!(requests.len(), 2);
-    assert_eq!(
-        requests[0].header("authorization"),
-        Some("Bearer sk-old".to_string())
-    );
-    assert_eq!(requests[1].header("authorization"), None);
-    assert_eq!(
-        requests[0].header("x-codex-window-id"),
-        requests[1].header("x-codex-window-id")
-    );
-
-    Ok(())
-}
-
-/// Registers a ChatGPT account in the catalog and makes it the on-disk control auth.
-fn add_active_chatgpt_account(
-    codex_home: &Path,
-    account_id: &str,
-    access_token: &str,
-) -> Result<()> {
-    let claims = ChatGptIdTokenClaims::new()
-        .email(format!("{account_id}@example.com"))
-        .chatgpt_user_id(format!("user-{account_id}"))
-        .chatgpt_account_id(account_id);
-    let id_token = parse_chatgpt_jwt_claims(&encode_id_token(&claims)?)?;
-    let tokens = TokenData {
-        id_token,
-        access_token: access_token.to_string(),
-        refresh_token: format!("refresh-{account_id}"),
-        account_id: Some(account_id.to_string()),
-    };
-    codex_login::upsert_chatgpt_account(
-        codex_home,
-        AuthCredentialsStoreMode::File,
-        tokens,
-        Utc::now(),
-        Some(account_id.to_string()),
-        /*make_active*/ true,
-    )?;
-    write_chatgpt_auth(
-        codex_home,
-        ChatGptAuthFixture::new(access_token)
-            .refresh_token(format!("refresh-{account_id}"))
-            .account_id(account_id)
-            .claims(claims),
-        AuthCredentialsStoreMode::File,
-    )
-}
-
-#[tokio::test]
-// With execution-account pooling on, a thread that is already leased to a ChatGPT account keeps
-// that account when the control account changes underneath it. This only holds when the login path
-// runs the loaded-thread reconciliation; a bare `AuthManager::reload` lets the thread follow the
-// new control credentials.
-async fn login_account_api_key_pins_execution_auth_until_pinned_account_is_removed() -> Result<()> {
-    let mock_server = MockServer::start().await;
-    let response_mock = responses::mount_sse_sequence(
-        &mock_server,
-        vec![
-            create_final_assistant_message_sse_response("Leased account turn")?,
-            create_final_assistant_message_sse_response("Still leased account turn")?,
-            create_final_assistant_message_sse_response("Control account turn")?,
-        ],
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        CreateConfigTomlParams {
-            requires_openai_auth: Some(true),
-            base_url: Some(format!("{}/v1", mock_server.uri())),
-            extra_top_level_config: Some("auto_switch_accounts_on_rate_limit = true\n".to_string()),
-            ..Default::default()
-        },
-    )?;
-    write_models_cache(codex_home.path()).await?;
-    add_active_chatgpt_account(codex_home.path(), "leased-account", "access-leased-account")?;
-    let leased_account_id =
-        codex_login::get_active_account_id(codex_home.path(), AuthCredentialsStoreMode::File)?
-            .expect("leased account should be active");
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-
-    let thread_id = start_mock_model_thread(&mut mcp).await?;
-    complete_text_turn(&mut mcp, &thread_id, "Use the leased account").await?;
-
-    let login_req = mcp.send_login_account_api_key_request("sk-new").await?;
-    let login: LoginAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(login_req)).await??;
-    assert_eq!(login, LoginAccountResponse::ApiKey {});
-    await_login_notifications(&mut mcp).await?;
-
-    complete_text_turn(&mut mcp, &thread_id, "Still on the leased account").await?;
-
-    let remove_req = mcp
-        .send_raw_request(
-            "account/remove",
-            Some(json!({ "accountId": leased_account_id })),
-        )
-        .await?;
-    let removed: RemoveAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(remove_req)).await??;
-    assert_eq!(removed.status, RemoveAccountStatus::Removed);
-
-    complete_text_turn(&mut mcp, &thread_id, "Use the control account").await?;
-
-    let requests = response_mock.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.header("authorization"))
-            .collect::<Vec<_>>(),
-        vec![
-            Some("Bearer access-leased-account".to_string()),
-            Some("Bearer access-leased-account".to_string()),
-            Some("Bearer sk-new".to_string()),
-        ]
-    );
-
     Ok(())
 }

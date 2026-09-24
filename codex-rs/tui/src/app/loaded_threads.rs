@@ -135,7 +135,6 @@ mod tests {
 
     fn test_thread(thread_id: ThreadId, source: SessionSource) -> Thread {
         Thread {
-            session_provenance: None,
             originator: None,
             environments: None,
             id: thread_id.to_string(),

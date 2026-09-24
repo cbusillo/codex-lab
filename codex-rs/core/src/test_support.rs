@@ -6,7 +6,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use codex_exec_server::EnvironmentManager;
 use codex_extension_api::LoadInstructionsFuture;
@@ -32,7 +31,6 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::SessionSource;
 use once_cell::sync::Lazy;
 
-use crate::CodexThread;
 use crate::ThreadManager;
 use crate::config::Config;
 use crate::responses_metadata::CodexResponsesMetadata;
@@ -51,6 +49,26 @@ static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     presets
 });
 
+/// Inspect the same resolved environment configurations used to construct sampling steps.
+pub async fn environment_windows_sandbox_types(
+    thread: &crate::CodexThread,
+) -> Vec<(String, codex_sandboxing::SandboxType)> {
+    thread
+        .session
+        .services
+        .turn_environments
+        .snapshot()
+        .await
+        .turn_environments()
+        .map(|environment| {
+            (
+                environment.selection.environment_id.clone(),
+                environment.config().windows_sandbox_type,
+            )
+        })
+        .collect()
+}
+
 /// Reattaches request-only observations to a completed turn's history for capture assertions.
 /// Tests inspect this separately from the destination-filtered HTTP/WS request.
 pub async fn history_with_tool_call_metadata(
@@ -64,6 +82,18 @@ pub async fn history_with_tool_call_metadata(
         .executed_tool_calls
         .attach_to_prompt(&mut items, &mut Default::default());
     items
+}
+
+/// Returns the recorder state used by the next session metadata snapshot.
+/// This does not change destination filtering or issue a request.
+pub fn mcp_attribution_snapshot(
+    thread: &crate::CodexThread,
+) -> codex_protocol::mcp::McpAttribution {
+    thread
+        .session
+        .services
+        .executed_tool_calls
+        .mcp_attribution_snapshot()
 }
 
 /// Test-only provider that supplies no user instructions.
@@ -82,23 +112,6 @@ pub fn set_thread_manager_test_mode(enabled: bool) {
 
 pub fn set_deterministic_process_ids(enabled: bool) {
     unified_exec::set_deterministic_process_ids_for_tests(enabled);
-}
-
-pub async fn wait_for_async_hook_result_while_idle(
-    thread: &CodexThread,
-    timeout: Duration,
-) -> bool {
-    tokio::time::timeout(timeout, async {
-        loop {
-            let is_idle = thread.session.active_turn.lock().await.is_none();
-            if is_idle && !thread.session.async_hook_results.is_empty() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .is_ok()
 }
 
 pub fn auth_manager_from_auth(auth: CodexAuth) -> Arc<AuthManager> {

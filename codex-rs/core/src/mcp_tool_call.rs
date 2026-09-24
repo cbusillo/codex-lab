@@ -45,6 +45,7 @@ use codex_mcp::auth_elicitation_completed_result;
 use codex_mcp::build_auth_elicitation_plan;
 use codex_mcp::is_connector_auth_failure_from_tool_result;
 use codex_mcp::mcp_permission_prompt_is_auto_approved;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::items::McpAppDisplayMode;
 use codex_protocol::items::McpAppUi;
@@ -54,6 +55,7 @@ use codex_protocol::items::McpToolCallStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::CONFIRMATION_POLICIES_META_KEY;
 use codex_protocol::mcp::CallToolResult;
+use codex_protocol::mcp::is_node_repl_backed_connector;
 use codex_protocol::mcp::is_node_repl_backed_server;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_KEY as MCP_TOOL_APPROVAL_KIND_KEY;
 use codex_protocol::mcp_approval_meta::APPROVAL_KIND_MCP_TOOL_CALL as MCP_TOOL_APPROVAL_KIND_MCP_TOOL_CALL;
@@ -330,7 +332,10 @@ pub(crate) async fn handle_mcp_tool_call(
                     &call_id,
                     invocation,
                     item_metadata.clone(),
-                    crate::guardian::guardian_timeout_message(turn_context.model_info()),
+                    ResolvedModelMessages::from_model(turn_context.model_info())
+                        .auto_review()
+                        .timeout_instructions
+                        .to_string(),
                     /*already_started*/ true,
                 )
                 .await
@@ -591,6 +596,21 @@ async fn handle_approved_mcp_tool_call(
     if let Some(elicitation_type) = elicitation_type {
         track_mcp_tool_call_elicitation(sess, turn_context, call_id, elicitation_type);
     }
+    // Direct and Code Mode calls share this boundary. Once an approved call enters
+    // it, conservatively attribute returned errors too: they may contain peer data.
+    let source_connector_id = prepared_call
+        .is_host_owned_apps()
+        .then(|| prepared_call.tool_info().connector_id.clone())
+        .flatten();
+    sess.services.executed_tool_calls.record_mcp_source(
+        codex_protocol::mcp::McpAttributionSource {
+            connector_id: source_connector_id,
+            plugin_id: prepared_call.plugin_id().map(str::to_string),
+            server_name: prepared_call.server_name().to_string(),
+            tool_name: prepared_call.tool_info().tool.name.to_string(),
+            first_turn_id: turn_context.sub_id.clone(),
+        },
+    );
     notify_mcp_tool_call_completed(
         sess,
         turn_context,
@@ -777,16 +797,16 @@ async fn maybe_request_codex_apps_auth_elicitation(
         url: plan.elicitation.url,
         elicitation_id: plan.elicitation.elicitation_id,
     };
-    let response = sess
+    let outcome = sess
         .request_mcp_server_elicitation(
             turn_context,
             CODEX_APPS_MCP_SERVER_NAME.to_string(),
             request_id,
             request,
         )
-        .await
-        .response;
-    if !response
+        .await;
+    if !outcome
+        .response
         .as_ref()
         .is_some_and(|response| response.action == ElicitationAction::Accept)
     {
@@ -1101,6 +1121,7 @@ async fn maybe_track_codex_app_used(
         sess.thread_id.to_string(),
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
+        Some(turn_context.turn_metadata_state.clone()),
     );
     sess.services.analytics_events_client.track_app_used(
         tracking,
@@ -1331,7 +1352,11 @@ fn build_mcp_tool_call_request_meta(
         );
     }
 
-    if let Some(policies) = build_confirmation_policies_request_meta(step_context, server) {
+    if let Some(policies) = build_confirmation_policies_request_meta(
+        step_context,
+        server,
+        metadata.and_then(|metadata| metadata.connector_id.as_deref()),
+    ) {
         request_meta.insert(CONFIRMATION_POLICIES_META_KEY.to_string(), policies);
     }
 
@@ -1341,26 +1366,23 @@ fn build_mcp_tool_call_request_meta(
 /// Builds confirmation-policy metadata for eligible actor MCP calls.
 ///
 /// Policies follow the issuing step's model snapshot, including across approval
-/// waits. Only `node_repl`/`cua_repl` receive them; Guardian sessions are excluded.
+/// waits. REPL-backed connectors receive them; Guardian sessions are excluded.
 /// Eligible calls get an empty object when no policies are configured, clearing
 /// startup defaults. Text stays verbatim so runtimes own blank-value fallback.
 fn build_confirmation_policies_request_meta(
     step_context: &StepContext,
     server: &str,
+    connector_id: Option<&str>,
 ) -> Option<serde_json::Value> {
-    if !is_node_repl_backed_server(server)
+    if !is_node_repl_backed_connector(server, connector_id)
         || crate::guardian::is_basic_session_source(&step_context.turn.session_source)
     {
         return None;
     }
 
     let mut policies = serde_json::Map::new();
-    if let Some(confirmation_policies) = step_context
-        .settings
-        .model_info
-        .model_messages
-        .as_ref()
-        .and_then(|messages| messages.confirmation_policies.as_ref())
+    if let Some(confirmation_policies) =
+        ResolvedModelMessages::from_model(&step_context.settings.model_info).confirmation_policies()
     {
         for (name, policy) in [
             ("browser_use", confirmation_policies.browser_use.as_ref()),
@@ -1670,6 +1692,13 @@ pub(crate) async fn request_mcp_tool_user_approval(
             parse_mcp_tool_approval_elicitation_response(outcome.response, &question_id),
         )
     } else {
+        if turn_context.session_source.is_non_root_agent() {
+            return ReviewDecision::denied(concat!(
+                "MCP tool approval via request_user_input requires the root thread. ",
+                "Ask the parent agent to handle this request. ",
+                "Do not retry the blocked action until the parent confirms the blocker is resolved."
+            ));
+        }
         let args = RequestUserInputArgs {
             questions: vec![question],
             is_blocking: true,

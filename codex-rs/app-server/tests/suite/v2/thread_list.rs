@@ -115,7 +115,6 @@ async fn list_threads_with_sort(
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         },
@@ -124,10 +123,8 @@ async fn list_threads_with_sort(
 }
 
 enum ThreadListRelation {
-    DirectChildren(ThreadId),
-    Descendants(ThreadId),
-    /// Stable `descendantOfThreadId` spelling of `Descendants`.
-    StableDescendants(ThreadId),
+    DirectChildrenOf(ThreadId),
+    DescendantsOf(ThreadId),
 }
 
 async fn list_threads_for_relation(
@@ -138,12 +135,9 @@ async fn list_threads_for_relation(
     model_providers: Option<Vec<String>>,
     source_kinds: Option<Vec<ThreadSourceKind>>,
 ) -> Result<ThreadListResponse> {
-    let (descendant_of_thread_id, parent_thread_id, ancestor_thread_id) = match relation {
-        ThreadListRelation::DirectChildren(thread_id) => (None, Some(thread_id.to_string()), None),
-        ThreadListRelation::Descendants(thread_id) => (None, None, Some(thread_id.to_string())),
-        ThreadListRelation::StableDescendants(thread_id) => {
-            (Some(thread_id.to_string()), None, None)
-        }
+    let (parent_thread_id, ancestor_thread_id) = match relation {
+        ThreadListRelation::DirectChildrenOf(thread_id) => (Some(thread_id.to_string()), None),
+        ThreadListRelation::DescendantsOf(thread_id) => (None, Some(thread_id.to_string())),
     };
     mcp.request(|request_id| ClientRequest::ThreadList {
         request_id,
@@ -161,7 +155,6 @@ async fn list_threads_for_relation(
             cwd: None,
             use_state_db_only: true,
             search_term: None,
-            descendant_of_thread_id,
             parent_thread_id,
             ancestor_thread_id,
         },
@@ -571,7 +564,6 @@ async fn thread_list_respects_cwd_filters() -> Result<()> {
             ])),
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -683,7 +675,6 @@ sqlite = true
             cwd: None,
             use_state_db_only: false,
             search_term: Some("needle".to_string()),
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -972,7 +963,6 @@ sqlite = true
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -1012,7 +1002,6 @@ sqlite = true
             )),
             use_state_db_only: true,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -1043,7 +1032,6 @@ sqlite = true
             )),
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -1123,7 +1111,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
 
     let first_page = list_threads_for_relation(
         &mut mcp,
-        ThreadListRelation::DirectChildren(parent_id),
+        ThreadListRelation::DirectChildrenOf(parent_id),
         /*cursor*/ None,
         /*limit*/ 1,
         /*model_providers*/ None,
@@ -1132,7 +1120,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
     .await?;
     let second_page = list_threads_for_relation(
         &mut mcp,
-        ThreadListRelation::DirectChildren(parent_id),
+        ThreadListRelation::DirectChildrenOf(parent_id),
         first_page.next_cursor.clone(),
         /*limit*/ 1,
         /*model_providers*/ None,
@@ -1167,7 +1155,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
     );
     let interactive_only = list_threads_for_relation(
         &mut mcp,
-        ThreadListRelation::DirectChildren(parent_id),
+        ThreadListRelation::DirectChildrenOf(parent_id),
         /*cursor*/ None,
         /*limit*/ 10,
         /*model_providers*/ None,
@@ -1185,7 +1173,7 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
 
     let descendants = list_threads_for_relation(
         &mut mcp,
-        ThreadListRelation::Descendants(parent_id),
+        ThreadListRelation::DescendantsOf(parent_id),
         /*cursor*/ None,
         /*limit*/ 10,
         /*model_providers*/ None,
@@ -1205,19 +1193,6 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         ]
     );
     assert_eq!(descendants.next_cursor, None);
-
-    // `descendantOfThreadId` is the stable spelling of `ancestorThreadId` and
-    // must keep returning exactly the same page for non-experimental clients.
-    let stable_descendants = list_threads_for_relation(
-        &mut mcp,
-        ThreadListRelation::StableDescendants(parent_id),
-        /*cursor*/ None,
-        /*limit*/ 10,
-        /*model_providers*/ None,
-        /*source_kinds*/ None,
-    )
-    .await?;
-    assert_eq!(stable_descendants, descendants);
     Ok(())
 }
 
@@ -1241,7 +1216,6 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: Some("not-a-thread-id".to_string()),
             ancestor_thread_id: None,
         })
@@ -1269,9 +1243,8 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: Some(thread_id.clone()),
-            ancestor_thread_id: Some(thread_id.clone()),
+            ancestor_thread_id: Some(thread_id),
         })
         .await?;
     let error = timeout(
@@ -1285,83 +1258,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
         "parentThreadId and ancestorThreadId are mutually exclusive"
     );
 
-    for (params, expected_message) in [
-        (
-            thread_list_params_with_relations(
-                Some(thread_id.clone()),
-                Some(thread_id.clone()),
-                /*ancestor_thread_id*/ None,
-            ),
-            "descendantOfThreadId and parentThreadId are mutually exclusive",
-        ),
-        (
-            thread_list_params_with_relations(
-                Some(thread_id.clone()),
-                /*parent_thread_id*/ None,
-                Some(thread_id),
-            ),
-            "descendantOfThreadId and ancestorThreadId are mutually exclusive",
-        ),
-    ] {
-        let request_id = mcp.send_thread_list_request(params).await?;
-        let error = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-        )
-        .await??;
-        assert_eq!(error.error.code, -32600);
-        assert_eq!(error.error.message, expected_message);
-    }
-
-    let request_id = mcp
-        .send_thread_list_request(thread_list_params_with_relations(
-            Some("not-a-thread-id".to_string()),
-            /*parent_thread_id*/ None,
-            /*ancestor_thread_id*/ None,
-        ))
-        .await?;
-    let error = timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    assert_eq!(error.error.code, -32600);
-    assert_eq!(
-        error
-            .error
-            .message
-            .starts_with("invalid descendantOfThreadId: "),
-        true,
-        "unexpected message: {}",
-        error.error.message
-    );
-
     Ok(())
-}
-
-fn thread_list_params_with_relations(
-    descendant_of_thread_id: Option<String>,
-    parent_thread_id: Option<String>,
-    ancestor_thread_id: Option<String>,
-) -> codex_app_server_protocol::ThreadListParams {
-    codex_app_server_protocol::ThreadListParams {
-        cursor: None,
-        limit: Some(10),
-        sort_key: None,
-        sort_direction: None,
-        model_providers: None,
-        source_kinds: None,
-        originators: None,
-        archived: None,
-        section_id: None,
-        project_id: None,
-        cwd: None,
-        use_state_db_only: false,
-        search_term: None,
-        descendant_of_thread_id,
-        parent_thread_id,
-        ancestor_thread_id,
-    }
 }
 
 #[tokio::test]
@@ -1437,20 +1334,18 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
     let mut threads_to_resume = vec![(cli_id.clone(), SessionSource::Cli, Some(true))];
 
     for (filename_ts, timestamp, version, capability, should_resume) in [
-        // Stored V1 sessions are deliberately upgraded to V2 when agents are enabled, so direct
-        // input stays blocked after resume just as it is for a stored V2 session.
         (
             "2025-02-01T10-00-00",
             "2025-02-01T10:00:00Z",
             Some(MultiAgentVersion::V1),
-            Some(false),
+            Some(true),
             true,
         ),
         (
             "2025-02-01T10-30-00",
             "2025-02-01T10:30:00Z",
             None,
-            Some(false),
+            Some(true),
             true,
         ),
         (
@@ -1635,7 +1530,6 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
-                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: Some(parent_thread_id.to_string()),
             },
@@ -2458,7 +2352,6 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
-                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             })
@@ -2501,7 +2394,6 @@ async fn thread_list_backwards_cursor_can_seed_forward_delta_sync() -> Result<()
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
-                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             })
@@ -2872,7 +2764,6 @@ async fn thread_list_invalid_cursor_returns_error() -> Result<()> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })

@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from build_winget_package import prepare_winget_package
 from codex_package.layout import build_package_dir
-from codex_package.layout import prepare_package_dir
 from codex_package.layout import validate_package_dir
 from codex_package.targets import PACKAGE_VARIANTS
 from codex_package.targets import PackageInputs
@@ -19,27 +18,6 @@ from codex_package.targets import TARGET_SPECS
 
 
 class PackageLayoutTest(unittest.TestCase):
-    def test_prepare_accepts_existing_empty_directory_without_force(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            package_dir = Path(temp_dir) / "package"
-            package_dir.mkdir()
-
-            prepare_package_dir(package_dir, force=False)
-
-            self.assertEqual(list(package_dir.iterdir()), [])
-
-    def test_prepare_rejects_nonempty_directory_without_force(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            package_dir = Path(temp_dir) / "package"
-            package_dir.mkdir()
-            sentinel = package_dir / "sentinel"
-            sentinel.write_text("keep", encoding="utf-8")
-
-            with self.assertRaisesRegex(RuntimeError, "not empty"):
-                prepare_package_dir(package_dir, force=False)
-
-            self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
-
     def test_winget_preserves_signed_files_and_voice_hashes(self) -> None:
         for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:

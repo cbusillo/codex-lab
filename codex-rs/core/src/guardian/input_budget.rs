@@ -88,8 +88,7 @@ pub(crate) async fn finalize(
     let history = session.clone_history().await;
     let prompt = build_prompt(
         history.for_prompt(&model.input_modalities),
-        step.tool_router.as_ref(),
-        &step.turn,
+        step,
         session.get_prompt_base_instructions().await,
     );
     let request = session.services.model_client.build_responses_request(
@@ -101,6 +100,7 @@ pub(crate) async fn finalize(
         &session
             .responses_metadata(step, CodexResponsesRequestKind::Turn)
             .await,
+        /*include_internal*/ true,
     )?;
     let mut existing = super::request_budget::estimate_request_tokens(&request)
         .max(usize::try_from(session.get_total_token_usage().await).unwrap_or(usize::MAX));
@@ -124,8 +124,8 @@ pub(crate) async fn finalize(
     if let Some(reminder) = session
         .services
         .agent_control
-        .rollout_budget()
-        .pending_reminder(session.thread_id(), &session.current_window_id().await)
+        .pending_budget_reminder(session.thread_id(), &session.current_window_id().await)
+        .await
     {
         let reminder = ContextualUserFragment::into(crate::context::RolloutBudgetContext {
             remaining_tokens: reminder.remaining_tokens,

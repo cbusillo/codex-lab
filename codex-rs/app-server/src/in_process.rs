@@ -52,7 +52,6 @@ use std::time::Duration;
 
 use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
-use crate::config_manager::ConfigManagerArgs;
 use crate::error_code::OVERLOADED_ERROR_CODE;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
@@ -68,6 +67,7 @@ use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
+pub use bootstrap::EmbeddedNetworkPolicy;
 use codex_analytics::AppServerRpcTransport;
 use codex_app_server_protocol::AgentMessageDelivery;
 use codex_app_server_protocol::ClientNotification;
@@ -90,8 +90,6 @@ use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
-use codex_login::AuthManager;
-use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 pub use codex_rollout::StateDbHandle;
 pub use codex_state::log_db::LogDbLayer;
@@ -100,6 +98,9 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use toml::Value as TomlValue;
 use tracing::warn;
+
+#[path = "in_process_bootstrap.rs"]
+mod bootstrap;
 
 const IN_PROCESS_CONNECTION_ID: ConnectionId = ConnectionId(0);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,12 +115,10 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
     matches!(
         notification,
         ServerNotification::TurnCompleted(_)
-            | ServerNotification::ProjectValidationCompleted(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
-            | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
             | ServerNotification::ItemCompleted(ItemCompletedNotification {
                 item: ThreadItem::AgentMessage {
                     delivery: Some(AgentMessageDelivery::Async),
@@ -148,6 +147,8 @@ pub struct InProcessStartArgs {
     pub strict_config: bool,
     /// Preloaded cloud config bundle provider.
     pub cloud_config_bundle: CloudConfigBundleLoader,
+    /// Policy shared with transports created by the embedder before startup.
+    pub embedded_network_policy: EmbeddedNetworkPolicy,
     /// Loader used to fetch typed thread config sources before a thread starts.
     pub thread_config_loader: Arc<dyn ThreadConfigLoader>,
     /// Feedback sink used by app-server/core telemetry and logs.
@@ -162,9 +163,7 @@ pub struct InProcessStartArgs {
     pub config_warnings: Vec<ConfigWarningNotification>,
     /// Session source stamped into thread/session metadata.
     pub session_source: SessionSource,
-    /// Session provenance stamped into thread/session metadata.
-    pub session_provenance: Option<SessionProvenance>,
-    /// Whether auth loading should honor the `CODEX_API_KEY` environment variable.
+    /// Whether serving auth should honor `CODEX_API_KEY`; workspace policy still uses stored auth.
     pub enable_codex_api_key_env: bool,
     /// Initialize params used for initial handshake.
     pub initialize: InitializeParams,
@@ -176,7 +175,6 @@ pub struct InProcessStartArgs {
 ///
 /// [`Lagged`](Self::Lagged) is a transport health marker, not an application
 /// event — it signals that the consumer fell behind and some events were dropped.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum InProcessServerEvent {
     /// Server request that requires client response/rejection.
@@ -387,7 +385,7 @@ pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHand
         });
     }
     let initialize = args.initialize.clone();
-    let client = start_uninitialized(args).await?;
+    let client = Box::pin(start_uninitialized(args)).await?;
 
     let initialize_response = client
         .request(ClientRequest::Initialize {
@@ -426,14 +424,25 @@ async fn run_outbound_router(
     }
 }
 
-async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
-    args.config.auth_config().validate()?;
+async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    let config_manager = ConfigManager::new(
+        args.config.codex_home.to_path_buf(),
+        args.cli_overrides,
+        args.loader_overrides,
+        args.strict_config,
+        args.cloud_config_bundle,
+        args.arg0_paths.clone(),
+        args.thread_config_loader,
+    )
+    .with_embedded_network_policy(args.embedded_network_policy);
+    let auth_manager = bootstrap::configure(
+        &config_manager,
+        &mut args.config,
+        args.enable_codex_api_key_env,
+    )
+    .await?;
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
-    let auth_manager =
-        AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
-            .await
-            .map_err(IoError::other)?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
@@ -471,16 +480,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         ));
 
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
-        let config_manager = ConfigManager::new(ConfigManagerArgs {
-            auth_home: args.config.auth_home.to_path_buf(),
-            codex_home: args.config.codex_home.to_path_buf(),
-            cli_overrides: args.cli_overrides,
-            loader_overrides: args.loader_overrides,
-            strict_config: args.strict_config,
-            cloud_config_bundle: args.cloud_config_bundle,
-            arg0_paths: args.arg0_paths.clone(),
-            thread_config_loader: args.thread_config_loader,
-        });
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
@@ -495,7 +494,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 state_db: args.state_db,
                 config_warnings: args.config_warnings,
                 session_source: args.session_source,
-                session_provenance: args.session_provenance,
                 user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
                     &auth_manager,
                 ))),
@@ -748,6 +746,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                 match send_error {
                                     mpsc::error::TrySendError::Full(_) => {
                                         warn!("dropping in-process server notification (queue full)");
+                                        continue;
                                     }
                                     mpsc::error::TrySendError::Closed(_) => {
                                         break;
@@ -808,43 +807,38 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_app_server_protocol::AgentMessageDelivery;
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
-    use codex_app_server_protocol::InitializeCapabilities;
-    use codex_app_server_protocol::ItemCompletedNotification;
-    use codex_app_server_protocol::ProjectValidationCompletedNotification;
-    use codex_app_server_protocol::ProjectValidationSkipReason;
-    use codex_app_server_protocol::ProjectValidationStatus;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadAttachmentOperation;
     use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
-    use codex_app_server_protocol::ThreadItem;
+    use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnItemsView;
     use codex_app_server_protocol::TurnStatus;
-    use codex_features::Feature;
+    use codex_core::config::ConfigBuilder;
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use tempfile::TempDir;
 
     async fn build_test_config(codex_home: &Path) -> Config {
-        let mut config = Config::load_default_with_cli_overrides_for_codex_home(
-            codex_home.to_path_buf(),
-            Vec::new(),
-        )
-        .await
-        .expect("default config should load");
-        config.analytics_enabled = Some(false);
-        config
-            .features
-            .disable(Feature::Plugins)
-            .expect("plugins should be disabled for in-process tests");
-        config
+        match ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .build()
+            .await
+        {
+            Ok(config) => config,
+            Err(_) => Config::load_default_with_cli_overrides_for_codex_home(
+                codex_home.to_path_buf(),
+                Vec::new(),
+            )
+            .await
+            .expect("default config should load"),
+        }
     }
 
     async fn start_test_client_with_capacity(
@@ -860,9 +854,10 @@ mod tests {
             arg0_paths: Arg0DispatchPaths::default(),
             config,
             cli_overrides: Vec::new(),
-            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
+            loader_overrides: LoaderOverrides::default(),
             strict_config: false,
             cloud_config_bundle: CloudConfigBundleLoader::default(),
+            embedded_network_policy: Default::default(),
             thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
             feedback: CodexFeedback::new(),
             log_db: None,
@@ -870,7 +865,6 @@ mod tests {
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             config_warnings: Vec::new(),
             session_source,
-            session_provenance: None,
             enable_codex_api_key_env: false,
             initialize: InitializeParams {
                 client_info: ClientInfo {
@@ -878,10 +872,7 @@ mod tests {
                     title: None,
                     version: "0.0.0".to_string(),
                 },
-                capabilities: Some(InitializeCapabilities {
-                    experimental_api: true,
-                    ..Default::default()
-                }),
+                capabilities: None,
             },
             channel_capacity,
         };
@@ -917,34 +908,30 @@ mod tests {
 
     #[tokio::test]
     async fn in_process_start_uses_requested_session_source_for_thread_start() {
-        let client = timeout(
-            Duration::from_secs(/*secs*/ 30),
-            start_test_client(SessionSource::Exec),
-        )
-        .await
-        .expect("in-process Exec runtime startup should finish");
-        let response = timeout(
-            Duration::from_secs(/*secs*/ 10),
-            client.request(ClientRequest::ThreadStart {
-                request_id: RequestId::Integer(2),
-                params: ThreadStartParams {
-                    ephemeral: Some(true),
-                    environments: Some(Vec::new()),
-                    ..ThreadStartParams::default()
-                },
-            }),
-        )
-        .await
-        .expect("thread/start request should finish")
-        .expect("request transport should work")
-        .expect("thread/start should succeed");
-        let parsed: ThreadStartResponse =
-            serde_json::from_value(response).expect("thread/start response should parse");
-        assert_eq!(parsed.thread.source, ApiSessionSource::Exec);
-        timeout(Duration::from_secs(/*secs*/ 10), client.shutdown())
-            .await
-            .expect("in-process runtime shutdown should finish")
-            .expect("in-process runtime should shutdown cleanly");
+        for (requested_source, expected_source) in [
+            (SessionSource::Cli, ApiSessionSource::Cli),
+            (SessionSource::Exec, ApiSessionSource::Exec),
+        ] {
+            let client = start_test_client(requested_source).await;
+            let response = client
+                .request(ClientRequest::ThreadStart {
+                    request_id: RequestId::Integer(2),
+                    params: ThreadStartParams {
+                        ephemeral: Some(true),
+                        ..ThreadStartParams::default()
+                    },
+                })
+                .await
+                .expect("request transport should work")
+                .expect("thread/start should succeed");
+            let parsed: ThreadStartResponse =
+                serde_json::from_value(response).expect("thread/start response should parse");
+            assert_eq!(parsed.thread.source, expected_source);
+            client
+                .shutdown()
+                .await
+                .expect("in-process runtime should shutdown cleanly");
+        }
     }
 
     #[tokio::test]
@@ -1045,23 +1032,9 @@ mod tests {
             })
         ));
         assert!(server_notification_requires_delivery(
-            &ServerNotification::ProjectValidationCompleted(
-                ProjectValidationCompletedNotification {
-                    thread_id: "thread-1".to_string(),
-                    turn_id: "turn-1".to_string(),
-                    item_id: None,
-                    command: Vec::new(),
-                    command_truncated: false,
-                    cwd: None,
-                    status: ProjectValidationStatus::Skipped,
-                    skip_reason: Some(ProjectValidationSkipReason::ValidationDisabled),
-                    changed_file_count: None,
-                    exit_code: None,
-                    output: "validation disabled".to_string(),
-                    output_truncated: false,
-                    duration_ms: 0,
-                },
-            )
+            &ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
+                thread_id: "thread-1".to_string(),
+            })
         ));
         assert!(server_notification_requires_delivery(
             &ServerNotification::ExternalAgentConfigImportCompleted(

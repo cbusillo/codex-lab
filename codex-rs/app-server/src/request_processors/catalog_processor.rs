@@ -1,4 +1,5 @@
 use super::*;
+use crate::model_catalog::ModelCatalog;
 use codex_config::ConfigPathContext;
 use codex_core::config::permission_profile_catalog;
 use codex_hooks::HookListEntryHandler;
@@ -6,8 +7,6 @@ use codex_utils_absolute_path::AbsolutePathBufGuard;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
-use std::collections::HashMap;
-use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct CatalogRequestProcessor {
@@ -16,8 +15,7 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
-    pub(super) active_capability_refreshes:
-        Arc<tokio::sync::Mutex<HashMap<String, Arc<CancellationToken>>>>,
+    model_catalog: Arc<ModelCatalog>,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -128,6 +126,7 @@ impl CatalogRequestProcessor {
         thread_manager: Arc<ThreadManager>,
         config: Arc<Config>,
         config_manager: ConfigManager,
+        model_catalog: Arc<ModelCatalog>,
     ) -> Self {
         Self {
             outgoing,
@@ -135,7 +134,7 @@ impl CatalogRequestProcessor {
             thread_manager,
             config,
             config_manager,
-            active_capability_refreshes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            model_catalog,
         }
     }
 
@@ -179,13 +178,42 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        Self::list_models(
-            self.thread_manager.clone(),
-            self.config.http_client_factory(),
-            params,
+        // Gate the same provider used by the catalog, including when its model cache is warm.
+        // Resolving credentials may refresh them, but explicit host policy prevents browser login.
+        if let Some(gateway) = codex_model_provider::create_model_provider(
+            self.config.model_provider.clone(),
+            Some(self.thread_manager.auth_manager()),
         )
-        .await
-        .map(|response| Some(response.into()))
+        .gateway_auth_manager()
+        .map_err(|error| internal_error(error.to_string()))?
+        {
+            // Refreshing credentials can contact the gateway before the catalog's own check.
+            self.config_manager
+                .check_thread_model_provider(&self.config)
+                .await
+                .map_err(|err| config_load_error(&err))?;
+            if gateway.resolve_access_token().await.is_err() {
+                let current = self
+                    .config_manager
+                    .load_latest_config(/*fallback_cwd*/ None)
+                    .await
+                    .map_err(|err| config_load_error(&err))?;
+                // Login RPCs use current config, while the catalog retains its startup provider.
+                if current.model_provider_id != self.config.model_provider_id
+                    || current.model_provider != self.config.model_provider
+                {
+                    return Err(invalid_request(
+                        "Model provider settings changed. Restart Codex to apply them, then retry fetching the model list",
+                    ));
+                }
+                return Err(invalid_request(
+                    "Gateway sign-in required or unavailable. Complete gateway sign-in and retry fetching the model list",
+                ));
+            }
+        }
+        self.list_models(params)
+            .await
+            .map(|response| Some(response.into()))
     }
 
     pub(crate) async fn experimental_feature_list(
@@ -250,8 +278,7 @@ impl CatalogRequestProcessor {
     }
 
     async fn list_models(
-        thread_manager: Arc<ThreadManager>,
-        http_client_factory: codex_http_client::HttpClientFactory,
+        &self,
         params: ModelListParams,
     ) -> Result<ModelListResponse, JSONRPCErrorError> {
         let ModelListParams {
@@ -259,12 +286,12 @@ impl CatalogRequestProcessor {
             cursor,
             include_hidden,
         } = params;
-        let models = supported_models(
-            thread_manager,
-            include_hidden.unwrap_or(false),
-            http_client_factory,
-        )
-        .await;
+        let presets = self
+            .model_catalog
+            .list_models(codex_models_manager::manager::RefreshStrategy::OnlineIfUncached)
+            .await
+            .map_err(|err| config_load_error(&err))?;
+        let models = supported_models(presets, include_hidden.unwrap_or(false));
         let total = models.len();
 
         if total == 0 {
@@ -622,7 +649,8 @@ impl CatalogRequestProcessor {
                     continue;
                 }
             };
-            let plugin_hooks = if config.features.enabled(Feature::Plugins) {
+            let hooks_enabled = config.features.enabled(Feature::CodexHooks);
+            let plugin_hooks = if hooks_enabled && config.features.enabled(Feature::Plugins) {
                 let plugins_input = config.plugins_config_input();
                 let plugin_outcome = plugins_manager.plugins_for_config(&plugins_input).await;
                 codex_core_plugins::PluginHookLoadOutcome {
@@ -633,7 +661,7 @@ impl CatalogRequestProcessor {
                 codex_core_plugins::PluginHookLoadOutcome::default()
             };
             let hooks = codex_hooks::list_hooks(codex_hooks::HooksConfig {
-                feature_enabled: config.features.enabled(Feature::CodexHooks),
+                feature_enabled: hooks_enabled,
                 bypass_hook_trust: config.bypass_hook_trust,
                 config_layer_stack: Some(config.config_layer_stack),
                 plugin_hook_sources: plugin_hooks.hook_sources,
@@ -688,5 +716,3 @@ impl CatalogRequestProcessor {
             .map_err(|err| internal_error(format!("failed to update skill settings: {err}")))
     }
 }
-
-mod external_agent_capabilities;

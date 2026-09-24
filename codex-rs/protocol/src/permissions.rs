@@ -282,11 +282,6 @@ pub struct FileSystemSandboxPolicyContext<'a> {
 struct ResolvedFileSystemEntry {
     path: AbsolutePathBuf,
     access: FileSystemAccessMode,
-    /// True for the automatic metadata carveouts this module appends itself.
-    /// Explicit user rules never skip missing paths, so this flag is what
-    /// separates "the policy already protects this by default" from "the user
-    /// deliberately wrote a rule for this path".
-    skips_missing_path: bool,
 }
 
 struct PreparedFileSystemEntry<'a> {
@@ -679,6 +674,14 @@ impl FileSystemSandboxPolicy {
     }
 
     pub fn has_denied_read_restrictions(&self) -> bool {
+        // TODO(anp) Migrate callers to select the executor's path convention explicitly.
+        self.has_denied_read_restrictions_for_convention(Some(PathConvention::native()))
+    }
+
+    fn has_denied_read_restrictions_for_convention(
+        &self,
+        convention: Option<PathConvention>,
+    ) -> bool {
         matches!(self.kind, FileSystemSandboxKind::Restricted)
             && self.entries.iter().any(|entry| {
                 entry.access == FileSystemAccessMode::Deny
@@ -686,7 +689,7 @@ impl FileSystemSandboxPolicy {
                         &entry.path,
                         FileSystemPath::Special {
                             value: FileSystemSpecialPath::SlashTmp,
-                        } if !cfg!(unix)
+                        } if convention == Some(PathConvention::Windows)
                     )
             })
     }
@@ -893,19 +896,30 @@ impl FileSystemSandboxPolicy {
         file_system_policy
     }
 
-    /// Returns true when filesystem reads are unrestricted.
+    /// Returns true when filesystem reads are unrestricted on this host.
     pub fn has_full_disk_read_access(&self) -> bool {
+        // TODO(anp) Migrate callers to select the executor's path convention explicitly.
+        self.has_full_disk_read_access_for_convention(Some(PathConvention::native()))
+    }
+
+    /// Returns true when filesystem reads are unrestricted on the selected executor.
+    /// If the convention is unknown, a `:slash_tmp` denial is still treated as a restriction.
+    pub fn has_full_disk_read_access_for_convention(
+        &self,
+        convention: Option<PathConvention>,
+    ) -> bool {
         match self.kind {
             FileSystemSandboxKind::Unrestricted | FileSystemSandboxKind::ExternalSandbox => true,
             FileSystemSandboxKind::Restricted => {
                 self.has_root_access(FileSystemAccessMode::can_read)
-                    && !self.has_denied_read_restrictions()
+                    && !self.has_denied_read_restrictions_for_convention(convention)
             }
         }
     }
 
     /// Returns true when filesystem writes are unrestricted on this host.
     pub fn has_full_disk_write_access(&self) -> bool {
+        // TODO(anp) Migrate callers to select the executor's path convention explicitly.
         self.has_full_disk_write_access_for_convention(Some(PathConvention::native()))
     }
 
@@ -917,7 +931,8 @@ impl FileSystemSandboxPolicy {
         self.has_full_disk_write_access_for_convention(context.cwd.infer_path_convention())
     }
 
-    fn has_full_disk_write_access_for_convention(
+    /// Returns true when filesystem writes are unrestricted for the selected path convention.
+    pub fn has_full_disk_write_access_for_convention(
         &self,
         convention: Option<PathConvention>,
     ) -> bool {
@@ -1558,7 +1573,7 @@ impl FileSystemSandboxPolicy {
             let mut read_only_subpaths: Vec<AbsolutePathBuf> =
                 default_read_only_subpaths_for_writable_root(&root, protect_missing_dot_codex)
                     .into_iter()
-                    .filter(|path| !has_explicit_user_resolved_path_entry(&resolved_entries, path))
+                    .filter(|path| !has_explicit_resolved_path_entry(&resolved_entries, path))
                     .collect();
             // Narrower explicit non-write entries carve out broader writable roots.
             // More specific write entries still remain writable because they appear
@@ -1806,14 +1821,15 @@ impl FileSystemSandboxPolicy {
                     ResolvedFileSystemEntry {
                         path,
                         access: entry.access,
-                        skips_missing_path: entry.skips_missing_path(),
                     }
                 })
             })
             .collect()
     }
 
-    fn resolved_entries(
+    /// Resolves configured roots using executor paths without inspecting the filesystem.
+    /// Glob patterns are excluded; access precedence is evaluated by `resolve_access`.
+    pub fn resolved_entries(
         &self,
         context: &FileSystemSandboxPolicyContext<'_>,
     ) -> Vec<(PathUri, FileSystemAccessMode)> {
@@ -2368,23 +2384,11 @@ fn append_default_read_only_entry_if_no_explicit_rule(
     ));
 }
 
-/// Returns true when an explicit user rule already targets `path`.
-///
-/// The automatic metadata carveouts appended by this module resolve to the same
-/// locations as the defaults they protect, so they must not count here. If they
-/// did, whether a default carveout survived would depend on whether `cwd` was
-/// spelled canonically: a canonical cwd makes the auto entry resolve to exactly
-/// the default path and suppress it, while an aliased cwd resolves elsewhere and
-/// leaves it in place. Both spellings then produce the same carveout set in a
-/// different order, which downstream sandbox profiles surface as unstable
-/// positional parameter names.
-fn has_explicit_user_resolved_path_entry(
+fn has_explicit_resolved_path_entry(
     entries: &[ResolvedFileSystemEntry],
     path: &AbsolutePathBuf,
 ) -> bool {
-    entries
-        .iter()
-        .any(|entry| !entry.skips_missing_path && &entry.path == path)
+    entries.iter().any(|entry| &entry.path == path)
 }
 
 fn protected_metadata_names_for_writable_root(
@@ -3510,45 +3514,6 @@ mod tests {
                 .read_only_subpaths
                 .contains(&expected_codex)
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn project_root_metadata_carveout_order_is_stable_across_cwd_aliases() {
-        let temp = TempDir::new().expect("tempdir");
-        let real_root = temp.path().join("real");
-        let linked_root = temp.path().join("linked");
-        fs::create_dir_all(real_root.join(".git")).expect("create .git");
-        symlink_dir(&real_root, &linked_root).expect("create linked cwd");
-
-        let policy = FileSystemSandboxPolicy::workspace_write(
-            &[],
-            /*exclude_tmpdir_env_var*/ true,
-            /*exclude_slash_tmp*/ true,
-        );
-        let carveout_names = |cwd: &Path| {
-            let roots = policy.get_writable_roots_with_cwd(cwd);
-            assert_eq!(roots.len(), 1);
-            roots[0]
-                .read_only_subpaths
-                .iter()
-                .map(|path| {
-                    path.as_path()
-                        .file_name()
-                        .expect("metadata carveout name")
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let expected = vec![
-            ".git".to_string(),
-            ".codex".to_string(),
-            ".agents".to_string(),
-        ];
-        assert_eq!(carveout_names(&real_root), expected);
-        assert_eq!(carveout_names(&linked_root), expected);
     }
 
     #[cfg(unix)]

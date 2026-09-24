@@ -578,6 +578,7 @@ pub struct WebSocketTestServer {
     connections: Arc<Mutex<Vec<Vec<WebSocketRequest>>>>,
     handshakes: Arc<Mutex<Vec<WebSocketHandshake>>>,
     request_log_updated: Arc<Notify>,
+    closed_connections: watch::Receiver<usize>,
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -599,6 +600,16 @@ impl WebSocketTestServer {
         connections.first().cloned().unwrap_or_default()
     }
 
+    pub async fn wait_for_connections(&self, expected: usize, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            while self.connections.lock().unwrap().len() < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     pub async fn wait_for_request(
         &self,
         connection_index: usize,
@@ -618,6 +629,17 @@ impl WebSocketTestServer {
             }
             notified.await;
         }
+    }
+
+    /// Waits for the server to finish reading any frames preceding the socket close.
+    pub async fn wait_for_closed_connections(&self, expected: usize, timeout: Duration) -> bool {
+        let mut closed_connections = self.closed_connections.clone();
+        tokio::time::timeout(
+            timeout,
+            closed_connections.wait_for(|count| *count >= expected),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
     }
 
     pub fn handshakes(&self) -> Vec<WebSocketHandshake> {
@@ -1106,26 +1128,6 @@ where
     response_mock
 }
 
-pub async fn mount_sse_once_match_recording_matches<M>(
-    server: &MockServer,
-    matcher: M,
-    body: String,
-) -> ResponseMock
-where
-    M: wiremock::Match + Send + Sync + 'static,
-{
-    let response_mock = ResponseMock::new();
-    Mock::given(method("POST"))
-        .and(path_regex(".*/(responses|guardian)$"))
-        .and(matcher)
-        .and(response_mock.clone())
-        .respond_with(sse_response(body))
-        .up_to_n_times(1)
-        .mount(server)
-        .await;
-    response_mock
-}
-
 pub async fn mount_sse_once(server: &MockServer, body: String) -> ResponseMock {
     let (mock, response_mock) = base_mock();
     mock.respond_with(sse_response(body))
@@ -1218,21 +1220,6 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
 pub async fn start_websocket_server_with_headers(
     connections: Vec<WebSocketConnectionConfig>,
 ) -> WebSocketTestServer {
-    start_websocket_server_with_headers_inner(connections, /*accept_gate*/ None).await
-}
-
-/// Starts a WebSocket test server whose handshakes wait for `accept_gate`.
-pub async fn start_websocket_server_with_headers_gated(
-    connections: Vec<WebSocketConnectionConfig>,
-    accept_gate: watch::Receiver<bool>,
-) -> WebSocketTestServer {
-    start_websocket_server_with_headers_inner(connections, Some(accept_gate)).await
-}
-
-async fn start_websocket_server_with_headers_inner(
-    connections: Vec<WebSocketConnectionConfig>,
-    accept_gate: Option<watch::Receiver<bool>>,
-) -> WebSocketTestServer {
     let start = std::time::Instant::now();
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1242,6 +1229,7 @@ async fn start_websocket_server_with_headers_inner(
     let connections_log = Arc::new(Mutex::new(Vec::new()));
     let handshakes_log = Arc::new(Mutex::new(Vec::new()));
     let request_log_updated = Arc::new(Notify::new());
+    let (closed_tx, closed_connections) = watch::channel(0);
     let requests = Arc::clone(&connections_log);
     let handshakes = Arc::clone(&handshakes_log);
     let request_log = Arc::clone(&request_log_updated);
@@ -1269,12 +1257,6 @@ async fn start_websocket_server_with_headers_inner(
                 continue;
             };
 
-            if let Some(mut accept_gate) = accept_gate.clone() {
-                let accept_ready = *accept_gate.borrow();
-                if !accept_ready && accept_gate.wait_for(|ready| *ready).await.is_err() {
-                    return;
-                }
-            }
             if let Some(delay) = connection.accept_delay {
                 tokio::time::sleep(delay).await;
             }
@@ -1329,7 +1311,11 @@ async fn start_websocket_server_with_headers_inner(
             };
             let close_after_requests = connection.close_after_requests;
             for request_events in connection.requests {
-                let Some(Ok(message)) = ws_stream.next().await else {
+                let message = tokio::select! {
+                    _ = &mut shutdown_rx => return,
+                    message = ws_stream.next() => message,
+                };
+                let Some(Ok(message)) = message else {
                     break;
                 };
                 if let Some(body) = parse_ws_request_body(message) {
@@ -1393,6 +1379,7 @@ async fn start_websocket_server_with_headers_inner(
 
             if close_after_requests {
                 let _ = ws_stream.close(None).await;
+                closed_tx.send_modify(|count| *count += 1);
             } else {
                 let _ = shutdown_rx.await;
                 return;
@@ -1409,6 +1396,7 @@ async fn start_websocket_server_with_headers_inner(
         connections: connections_log,
         handshakes: handshakes_log,
         request_log_updated,
+        closed_connections,
         shutdown: shutdown_tx,
         task,
     }

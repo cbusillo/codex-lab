@@ -1,26 +1,17 @@
 use std::sync::Arc;
 
+use codex_async_utils::OrCancelExt;
+use codex_extension_api::TurnStartPhase;
 use tokio_util::sync::CancellationToken;
 
-use crate::context::ContextualUserFragment;
-use crate::context::ProjectValidationCorrectionConsumed;
-use crate::context::ProjectValidationFailure;
-use crate::context_manager::ModelRequestHistoryMode;
 use crate::session::TurnInput;
-use crate::session::project_validation::ProjectValidationAttempt;
-use crate::session::project_validation::ProjectValidationRun;
-use crate::session::project_validation::project_validation_worktree_fingerprint;
-use crate::session::project_validation::run_project_validation;
 use crate::session::session::Session;
-use crate::session::turn::InitialInputRecorder;
-use crate::session::turn::ProjectValidationEligibility;
-use crate::session::turn::RunTurnParams;
-use crate::session::turn::RunTurnState;
+use crate::session::startup_prewarm::SessionStartupPrewarmResolution;
+use crate::session::turn::McpStartupRequirements;
+use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
-use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
-use codex_protocol::protocol::EventMsg;
 use codex_thread_store::PersistContext;
 use tracing::Instrument;
 use tracing::trace_span;
@@ -28,23 +19,12 @@ use tracing::trace_span;
 use super::SessionTask;
 use super::SessionTaskResult;
 
-pub(crate) struct RegularTask {
-    initial_input_recorder: Arc<InitialInputRecorder>,
-}
-
-/// Tracks whether the next validation follows ordinary model work or the
-/// single corrective model run.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum NextProjectValidationAttempt {
-    Initial,
-    CorrectionRerun,
-}
+#[derive(Default)]
+pub(crate) struct RegularTask;
 
 impl RegularTask {
-    pub(crate) fn new(input: &[TurnInput]) -> Self {
-        Self {
-            initial_input_recorder: Arc::new(InitialInputRecorder::new(input)),
-        }
+    pub(crate) fn new() -> Self {
+        Self
     }
 }
 
@@ -57,15 +37,6 @@ impl SessionTask for RegularTask {
         "session_task.turn"
     }
 
-    fn background_review_trigger_eligible(&self) -> bool {
-        true
-    }
-
-    async fn start(&self, sess: Arc<Session>, ctx: Arc<TurnContext>) {
-        sess.emit_turn_started(&ctx).await;
-        sess.set_server_reasoning_included(/*included*/ false).await;
-    }
-
     async fn run(
         self: Arc<Self>,
         sess: Arc<Session>,
@@ -74,21 +45,52 @@ impl SessionTask for RegularTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let run_turn_span = trace_span!("run_turn");
-        // TaskStart emits TurnStarted exactly once before prewarm, including
-        // when abort cleanup wins the race to start a parked task.
-        let prewarmed_client_session = sess
-            .consume_startup_prewarm_for_regular_turn(&cancellation_token)
-            .instrument(trace_span!("regular_task.prepare_run_turn"))
-            .await;
+        // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
+        // not wait on startup prewarm resolution.
+        let prewarmed_client_session = async {
+            sess.emit_turn_started(&ctx).await;
+            // Regular-start contributors run once, after the task is visible and interruptible.
+            let prepares_mcp = sess
+                .services
+                .extensions
+                .turn_lifecycle_contributors()
+                .iter()
+                .any(|contributor| {
+                    contributor.turn_start_phase(&sess.services.thread_extension_data)
+                        == TurnStartPhase::RegularTaskStart
+                        && contributor.requires_mcp_runtime(&sess.services.thread_extension_data)
+                });
+            let preparation = sess
+                .emit_turn_start_lifecycle(
+                    &ctx,
+                    /*token_usage_at_turn_start*/ None,
+                    TurnStartPhase::RegularTaskStart,
+                )
+                .or_cancel(&cancellation_token)
+                .await;
+            // Even cancelled discovery may have cleared the previous account's catalog.
+            if prepares_mcp {
+                sess.request_mcp_runtime_reprojection();
+            }
+            if preparation.is_err() {
+                return SessionStartupPrewarmResolution::Cancelled;
+            }
+            sess.set_server_reasoning_included(/*included*/ false).await;
+            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
+                .await
+        }
+        .instrument(trace_span!("regular_task.prepare_run_turn"))
+        .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
-                self.initial_input_recorder
-                    .record(
-                        Arc::clone(&sess),
-                        Arc::clone(&ctx),
-                        PersistContext::Standard,
-                    )
-                    .await;
+                run_hooks_and_record_inputs(
+                    &sess,
+                    &ctx,
+                    &ctx.capture_current_model_info(),
+                    &input,
+                    PersistContext::Standard,
+                )
+                .await;
                 return Ok(None);
             }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
@@ -98,144 +100,27 @@ impl SessionTask for RegularTask {
         };
         let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
-        let mut next_project_validation_attempt = NextProjectValidationAttempt::Initial;
-        let mut correction_available = true;
-        // Capture worktree state before any model work so validation can tell
-        // turn-authored changes from pre-existing ones.
-        let project_validation_worktree_at_turn_start = tokio::select! {
-            _ = cancellation_token.cancelled() => {
-                self.initial_input_recorder
-                    .record(
-                        Arc::clone(&sess),
-                        Arc::clone(&ctx),
-                        PersistContext::Standard,
-                    )
-                    .await;
-                return Ok(None);
-            },
-            fingerprint = project_validation_worktree_fingerprint(&ctx) => fingerprint,
-        };
-        let mut project_validation_model_used_tools = false;
-        let mut run_turn_state = RunTurnState::new();
+        let mut mcp_startup_requirements = McpStartupRequirements::default();
         loop {
-            let model_request_history_mode = match next_project_validation_attempt {
-                NextProjectValidationAttempt::Initial => ModelRequestHistoryMode::Normal,
-                NextProjectValidationAttempt::CorrectionRerun => {
-                    ModelRequestHistoryMode::ProjectValidationCorrection
-                }
-            };
-            let turn_result = run_turn(
-                RunTurnParams {
-                    sess: Arc::clone(&sess),
-                    turn_context: Arc::clone(&ctx),
-                    turn_extension_data: Arc::clone(&ctx.extension_data),
-                    input: next_input,
-                    model_request_history_mode,
-                    prewarmed_client_session: prewarmed_client_session.take(),
-                    cancellation_token: cancellation_token.child_token(),
-                    initial_input_recorder: Arc::clone(&self.initial_input_recorder),
-                },
-                &mut run_turn_state,
-            )
-            .instrument(run_turn_span.clone())
-            .await;
-            let turn_result = turn_result?;
-            let last_agent_message = turn_result.last_agent_message.clone();
-            let validation_eligible = turn_result.project_validation_eligibility
-                == ProjectValidationEligibility::Eligible;
-            project_validation_model_used_tools |= turn_result.model_used_tools;
-            if ctx.terminal_error.lock().await.is_some() {
-                self.initial_input_recorder
-                    .record(
-                        Arc::clone(&sess),
-                        Arc::clone(&ctx),
-                        PersistContext::Standard,
-                    )
-                    .await;
-                return Ok(None);
-            }
-            if sess.input_queue.has_pending_input(&sess.active_turn).await {
-                next_input = Vec::new();
-                continue;
-            }
-            if !validation_eligible {
-                return Ok(last_agent_message);
-            }
-            let attempt = match next_project_validation_attempt {
-                NextProjectValidationAttempt::Initial => ProjectValidationAttempt::Initial {
-                    worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
-                    model_used_tools: project_validation_model_used_tools,
-                },
-                NextProjectValidationAttempt::CorrectionRerun => {
-                    ProjectValidationAttempt::CorrectionRerun {
-                        worktree_at_turn_start: project_validation_worktree_at_turn_start.clone(),
-                    }
-                }
-            };
-            let validation_event = match run_project_validation(
-                &sess,
-                &ctx,
-                attempt,
+            let last_agent_message = run_turn(
+                Arc::clone(&sess),
+                Arc::clone(&ctx),
+                next_input,
+                &mut mcp_startup_requirements,
+                prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
-            .await
-            {
-                ProjectValidationRun::NotApplicable => return Ok(last_agent_message),
-                ProjectValidationRun::Skipped(event) => event,
-                ProjectValidationRun::Completed(event) => {
-                    if correction_available
-                        && let Some(correction) = ProjectValidationFailure::from_event(&event)
-                    {
-                        sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
-                            .await;
-                        if cancellation_token.is_cancelled() {
-                            return Ok(None);
-                        }
-                        let correction_item = ContextualUserFragment::into(correction);
-                        let correction_consumed_item =
-                            ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
-                        sess.record_conversation_items(
-                            &ctx,
-                            ctx.model_info(),
-                            &[correction_item, correction_consumed_item],
-                        )
-                        .await;
-                        sess.flush_rollout().await?;
-                        correction_available = false;
-                        next_project_validation_attempt =
-                            NextProjectValidationAttempt::CorrectionRerun;
-                        next_input = Vec::new();
-                        continue;
-                    }
-                    event
-                }
-                ProjectValidationRun::Cancelled(event) => {
-                    sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(event))
-                        .await;
-                    return Ok(None);
-                }
-            };
-            next_project_validation_attempt = NextProjectValidationAttempt::Initial;
-            sess.send_event(&ctx, EventMsg::ProjectValidationCompleted(validation_event))
-                .await;
-            if sess.input_queue.has_pending_input(&sess.active_turn).await {
-                next_input = Vec::new();
-                continue;
+            .instrument(run_turn_span.clone())
+            .await?;
+            // Terminal errors are already reported. Let task completion preserve pending
+            // input instead of restarting the failed turn for that same input.
+            if ctx.terminal_error.lock().await.is_some() {
+                return Ok(last_agent_message);
             }
-            return Ok(last_agent_message);
-        }
-    }
-
-    fn abort(
-        &self,
-        sess: Arc<Session>,
-        ctx: Arc<TurnContext>,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        let initial_input_recorder = Arc::clone(&self.initial_input_recorder);
-        async move {
-            initial_input_recorder
-                .record(sess, ctx, PersistContext::Standard)
-                .await;
+            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
+                return Ok(last_agent_message);
+            }
+            next_input = Vec::new();
         }
     }
 }

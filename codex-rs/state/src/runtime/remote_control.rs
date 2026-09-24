@@ -339,7 +339,7 @@ mod tests {
                 STATE_MIGRATOR
                     .migrations
                     .iter()
-                    .filter(|migration| migration.version <= 38)
+                    .filter(|migration| migration.version <= 36)
                     .cloned()
                     .collect(),
             ),

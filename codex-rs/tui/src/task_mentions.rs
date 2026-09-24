@@ -98,7 +98,6 @@ pub(crate) fn spawn_search(
                         model_providers: Some(Vec::new()),
                         source_kinds: Some(Vec::new()),
                         archived: Some(false),
-                        descendant_of_thread_id: None,
                         section_id: None,
                         project_id: None,
                         cwd: None,

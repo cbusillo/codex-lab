@@ -12,21 +12,19 @@ on:
       prerelease:
         required: true
         type: boolean
+      stage:
+        required: true
+        type: string
 
 permissions: {}
 
 jobs:
   publish:
-    runs-on: macos-26
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     environment: codex-r2-publisher
     permissions:
       contents: read
-    # Assets are downloaded from openai/codex and uploaded to the upstream R2
-    # `releases` bucket. Callers already gate on this; guarding here too keeps
-    # the reusable workflow fork-safe for any future caller. publish_r2_release
-    # repeats the check at runtime before it reads a credential.
-    if: ${{ github.repository == 'openai/codex' }}
 
     steps:
       - name: Checkout
@@ -41,13 +39,21 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CODEX_R2_SECRET_ACCESS_KEY }}
           AWS_ENDPOINT_URL: ${{ vars.CODEX_R2_ENDPOINT_URL }}
           AWS_REGION: ${{ vars.CODEX_R2_REGION }}
+          AWS_RETRY_MODE: standard
+          AWS_MAX_ATTEMPTS: "6"
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_MAKE_LATEST: ${{ inputs.make_latest }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_STAGE: ${{ inputs.stage }}
+          PYTHONPATH: .github/scripts
         run: |
           set -euo pipefail
+          # The publisher parallelizes objects; serialize parts within each object to avoid R2 throttling.
+          aws configure set default.s3.preferred_transfer_client classic
+          aws configure set default.s3.max_concurrent_requests 1
           python3 .github/scripts/publish_r2_release.py \
             --tag "${RELEASE_TAG}" \
             --make-latest "${RELEASE_MAKE_LATEST}" \
-            --prerelease "${RELEASE_PRERELEASE}"
+            --prerelease "${RELEASE_PRERELEASE}" \
+            --stage "${RELEASE_STAGE}"

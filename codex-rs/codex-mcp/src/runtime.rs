@@ -12,12 +12,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_channel::Sender;
-use codex_api::SharedAuthProvider;
 use codex_config::types::McpServerDisabledReason;
 use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeManager;
@@ -35,6 +35,7 @@ use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_rmcp_client::ElicitationResponse;
 use codex_rmcp_client::with_http_headers_helper;
 use codex_utils_path_uri::PathUri;
@@ -56,34 +57,22 @@ use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::event_stream::McpEventStreamOpener;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+use crate::resource_client::McpResourceServerCacheKey;
 use crate::resource_origin::ResourceOrigins;
 use crate::server::EffectiveMcpServer;
 use crate::tool_catalog_cache::McpToolCatalogCache;
 use crate::tools::ToolInfo;
 
-/// Controls startup and startup-failure recovery for one task's MCP servers.
+/// Controls when one task starts its eligible MCP servers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum McpStartupPolicy {
     /// Start configured servers when their task's MCP runtime is published.
     Eager,
-    /// Start configured servers once, without background retries after startup failure.
-    OneShot,
     /// Start servers with cached tool definitions on first use.
     LazyWhenCached,
 }
 
-/// One coherent execution-account identity used by the reserved Codex Apps server.
-#[derive(Clone)]
-pub struct CodexAppsExecutionAuth {
-    pub auth: Option<CodexAuth>,
-    pub auth_provider: Option<SharedAuthProvider>,
-    pub auth_manager: Option<Arc<AuthManager>>,
-    pub tools_cache_key: Option<ConnectorRuntimeContextKey>,
-    pub connection_discriminator: String,
-    pub revision: u64,
-}
-
-/// Everything needed to materialize one exact MCP configuration.
+/// Configuration and owning-thread state needed to materialize an MCP runtime.
 pub struct McpRuntimeInput {
     pub startup_policy: McpStartupPolicy,
     pub config: Arc<McpConfig>,
@@ -112,6 +101,7 @@ pub struct McpRuntime {
     current: ArcSwap<PublishedMcpRuntime>,
     event_stream_cancellation: Mutex<EventStreamCancellation>,
     reconnect_pending: AtomicBool,
+    resource_cache_generation: AtomicU64,
     elicitation_router: ElicitationRequestRouter,
     resource_origins: Mutex<ResourceOrigins>,
 }
@@ -127,10 +117,11 @@ struct PublishedMcpRuntime {
     config: Option<Arc<McpConfig>>,
     auth: Option<CodexAuth>,
     auth_token: Option<String>,
-    codex_apps_execution_revision: Option<u64>,
+    auth_generation: Arc<()>,
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
-    selected_environments: HashMap<String, Arc<Environment>>,
+    environment_selections: Arc<[TurnEnvironmentSelection]>,
+    ready_environments: HashMap<String, Arc<Environment>>,
     cached_binding: Mutex<Option<CachedMcpBinding>>,
 }
 
@@ -151,6 +142,23 @@ fn ensure_host_owned_apps_registration(
         anyhow::bail!("MCP server '{server}' is not registered by the hosted runtime");
     }
     Ok(())
+}
+
+impl PublishedMcpRuntime {
+    // Shared by dirty detection and cache-key publication so their auth rules agree.
+    fn auth_matches(&self, auth: Option<&CodexAuth>) -> bool {
+        match (self.auth.as_ref(), auth) {
+            (Some(previous), Some(latest)) => {
+                previous == latest
+                    && previous.get_account_id() == latest.get_account_id()
+                    && previous.get_chatgpt_user_id() == latest.get_chatgpt_user_id()
+                    && previous.is_fedramp_account() == latest.is_fedramp_account()
+                    && self.auth_token == latest.get_token().ok()
+            }
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
 }
 
 struct CachedMcpBinding {
@@ -219,10 +227,11 @@ impl McpRuntime {
                 config: None,
                 auth: None,
                 auth_token: None,
-                codex_apps_execution_revision: None,
+                auth_generation: Arc::new(()),
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
-                selected_environments: HashMap::new(),
+                environment_selections: Arc::default(),
+                ready_environments: HashMap::new(),
                 cached_binding: Mutex::new(None),
             }),
             event_stream_cancellation: Mutex::new(EventStreamCancellation {
@@ -231,6 +240,7 @@ impl McpRuntime {
                 retained_subscription_cancellation: None,
             }),
             reconnect_pending: AtomicBool::new(false),
+            resource_cache_generation: AtomicU64::new(0),
             elicitation_router: ElicitationRequestRouter::default(),
             resource_origins: Mutex::default(),
         }
@@ -297,25 +307,6 @@ impl McpRuntime {
 
     /// Reconciles configured servers and publishes their immutable runtime snapshot.
     pub async fn replace(&self, input: McpRuntimeInput) {
-        self.replace_inner(input, /*codex_apps_execution_auth*/ None)
-            .await;
-    }
-
-    /// Reconciles configured servers with one execution-account Apps identity.
-    pub async fn replace_with_codex_apps_execution_auth(
-        &self,
-        input: McpRuntimeInput,
-        codex_apps_execution_auth: CodexAppsExecutionAuth,
-    ) {
-        self.replace_inner(input, Some(codex_apps_execution_auth))
-            .await;
-    }
-
-    async fn replace_inner(
-        &self,
-        input: McpRuntimeInput,
-        codex_apps_execution_auth: Option<CodexAppsExecutionAuth>,
-    ) {
         let current = self.current.load_full();
         let mut reconnect = McpReconnectGuard {
             pending: &self.reconnect_pending,
@@ -324,53 +315,37 @@ impl McpRuntime {
         self.publish(
             input,
             (!reconnect.claimed).then_some(current.connections.as_ref()),
-            codex_apps_execution_auth,
         )
         .await;
         reconnect.claimed = false;
     }
 
-    /// Starts fresh connections under one execution-account Apps identity.
-    pub async fn replace_fresh_with_codex_apps_execution_auth(
-        &self,
-        input: McpRuntimeInput,
-        codex_apps_execution_auth: CodexAppsExecutionAuth,
-    ) -> anyhow::Result<Vec<ToolInfo>> {
-        let published = self
-            .publish(
-                input,
-                /*previous*/ None,
-                Some(codex_apps_execution_auth),
-            )
-            .await;
-        published
-            .connections
-            .refresh_codex_apps_tools_for_discovery()
-            .await
+    /// Starts fresh connections and returns their complete, refreshed Apps catalog.
+    pub async fn replace_fresh(&self, input: McpRuntimeInput) -> anyhow::Result<Vec<ToolInfo>> {
+        self.publish(input, /*previous*/ None).await;
+        self.latest_hard_refresh_codex_apps_tools_cache().await
     }
 
-    async fn publish(
-        &self,
-        input: McpRuntimeInput,
-        previous: Option<&McpConnectionSet>,
-        codex_apps_execution_auth: Option<CodexAppsExecutionAuth>,
-    ) -> Arc<PublishedMcpRuntime> {
+    async fn publish(&self, input: McpRuntimeInput, previous: Option<&McpConnectionSet>) {
         let (publish, publication_gate) = McpPublicationGate::pending();
         let config = Arc::clone(&input.config);
         let auth = input.auth.clone();
         let auth_token = auth.as_ref().and_then(|auth| auth.get_token().ok());
-        let codex_apps_execution_revision = codex_apps_execution_auth
-            .as_ref()
-            .map(|execution| execution.revision);
+        let current = self.current.load_full();
+        let auth_generation = if current.auth_matches(auth.as_ref()) {
+            Arc::clone(&current.auth_generation)
+        } else {
+            Arc::new(())
+        };
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
-        let selected_environments = input.runtime_context.selected_environments.clone();
+        let environment_selections = Arc::clone(&input.runtime_context.environment_selections);
+        let ready_environments = input.runtime_context.ready_environments.clone();
         let connections = Arc::new(
             McpConnectionSet::new(
                 previous,
                 publication_gate,
                 input,
-                codex_apps_execution_auth,
                 self.elicitation_router.clone(),
             )
             .await,
@@ -388,18 +363,18 @@ impl McpRuntime {
             .event_stream_cancellation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let published = Arc::new(PublishedMcpRuntime {
+        self.current.store(Arc::new(PublishedMcpRuntime {
             connections,
             config: Some(config),
             auth,
             auth_token,
-            codex_apps_execution_revision,
+            auth_generation,
             plugins_available,
             ready_selected_capability_roots,
-            selected_environments,
+            environment_selections,
+            ready_environments,
             cached_binding: Mutex::new(None),
-        });
-        self.current.store(Arc::clone(&published));
+        }));
         let _ = publish.send(true);
         cancellation.event_server_available = hosted_event_server_retained;
         if !hosted_event_server_retained {
@@ -410,12 +385,23 @@ impl McpRuntime {
                 retained.send_replace(());
             }
         }
-        published
     }
 
     /// Ensures the next refresh creates fresh connections for every configured server.
     pub fn reconnect_on_next_refresh(&self) {
         self.reconnect_pending.store(true, Ordering::Release);
+    }
+
+    /// Invalidates resource catalogs and contents even when connections can be reused.
+    pub fn invalidate_resource_caches(&self) {
+        self.resource_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn resource_cache_key(&self, server: &str) -> Option<McpResourceServerCacheKey> {
+        let generation = self.resource_cache_generation.load(Ordering::Acquire);
+        self.latest_connections()
+            .resource_cache_key(server, generation)
     }
 
     /// Captures the latest published configuration and live client handles.
@@ -501,26 +487,19 @@ impl McpRuntime {
 
     /// Returns whether the published snapshot still belongs to the current credentials.
     pub fn current_auth_matches(&self, auth: Option<&CodexAuth>) -> bool {
-        let current = self.current.load();
-        match (current.auth.as_ref(), auth) {
-            (Some(previous), Some(latest)) => {
-                previous == latest
-                    && previous.get_account_id() == latest.get_account_id()
-                    && previous.get_chatgpt_user_id() == latest.get_chatgpt_user_id()
-                    && previous.is_fedramp_account() == latest.is_fedramp_account()
-                    && current.auth_token == latest.get_token().ok()
-            }
-            (None, None) => true,
-            (Some(_), None) | (None, Some(_)) => false,
-        }
+        self.current.load().auth_matches(auth)
     }
 
-    /// Returns whether the published Codex Apps binding belongs to this execution revision.
-    pub fn current_codex_apps_execution_revision_matches(&self, revision: u64) -> bool {
-        self.current
-            .load()
-            .codex_apps_execution_revision
-            .is_some_and(|published| published == revision)
+    pub(crate) fn auth_cache_key_for_server(
+        &self,
+        server: &str,
+    ) -> crate::McpResourceClientAuthKey {
+        let current = self.current.load();
+        crate::McpResourceClientAuthKey {
+            generation: Arc::clone(&current.auth_generation),
+            server: server.to_string(),
+            available: current.connections.contains_server(server),
+        }
     }
 
     /// Detects newly saved credentials for servers whose startup failed authentication.
@@ -579,17 +558,19 @@ impl McpRuntime {
         self.current.load().ready_selected_capability_roots.clone()
     }
 
-    /// Whether this publication uses the currently ready environment handles.
+    /// Whether this publication uses the same selections and currently ready environment handles.
     pub fn current_environments_match(
         &self,
-        environments: &HashMap<String, Arc<Environment>>,
+        selections: &[TurnEnvironmentSelection],
+        ready_environments: &HashMap<String, Arc<Environment>>,
     ) -> bool {
         let current = self.current.load();
         current.config.is_some()
-            && current.selected_environments.len() == environments.len()
-            && environments.iter().all(|(id, environment)| {
+            && current.environment_selections.as_ref() == selections
+            && current.ready_environments.len() == ready_environments.len()
+            && ready_environments.iter().all(|(id, environment)| {
                 current
-                    .selected_environments
+                    .ready_environments
                     .get(id)
                     .is_some_and(|published| Arc::ptr_eq(published, environment))
             })
@@ -800,11 +781,12 @@ pub struct SandboxState {
 /// Runtime context used when resolving per-server MCP environments.
 ///
 /// `McpConfig` describes what servers exist. This value carries the canonical
-/// environment registry plus the host-local cwd used by local MCP processes.
+/// environment registry, captured thread selections, and the host-local cwd used by MCP processes.
 #[derive(Clone)]
 pub struct McpRuntimeContext {
     environment_manager: Arc<EnvironmentManager>,
-    selected_environments: HashMap<String, Arc<Environment>>,
+    environment_selections: Arc<[TurnEnvironmentSelection]>,
+    ready_environments: HashMap<String, Arc<Environment>>,
     local_process_cwd: PathBuf,
     local_http_client: Arc<dyn HttpClient>,
 }
@@ -848,18 +830,21 @@ impl McpRuntimeContext {
         );
         Self {
             environment_manager,
-            selected_environments: HashMap::new(),
+            environment_selections: Arc::default(),
+            ready_environments: HashMap::new(),
             local_process_cwd,
             local_http_client,
         }
     }
 
-    /// Pins the concrete environment handles captured for this thread or model step.
+    /// Pins all captured selections and the concrete handles for environments already ready.
     pub fn with_selected_environments(
         mut self,
-        selected_environments: HashMap<String, Arc<Environment>>,
+        environment_selections: Arc<[TurnEnvironmentSelection]>,
+        ready_environments: HashMap<String, Arc<Environment>>,
     ) -> Self {
-        self.selected_environments = selected_environments;
+        self.environment_selections = environment_selections;
+        self.ready_environments = ready_environments;
         self
     }
 
@@ -880,7 +865,7 @@ impl McpRuntimeContext {
         // HTTP is the one current exception: it can use the ambient HTTP client
         // even when no local Environment is configured.
         if let Some(environment) = self
-            .selected_environments
+            .ready_environments
             .get(&config.environment_id)
             .cloned()
             .or_else(|| {
@@ -993,28 +978,6 @@ mod tests {
         assert!(!gate.wait().await);
     }
 
-    #[test]
-    fn execution_revision_match_requires_an_execution_owned_publication() {
-        let runtime = McpRuntime::empty(/*prefix_mcp_tool_names*/ false);
-        assert!(!runtime.current_codex_apps_execution_revision_matches(/*revision*/ 7));
-
-        let current = runtime.current.load_full();
-        runtime.current.store(Arc::new(PublishedMcpRuntime {
-            connections: Arc::clone(&current.connections),
-            config: current.config.clone(),
-            auth: current.auth.clone(),
-            auth_token: current.auth_token.clone(),
-            codex_apps_execution_revision: Some(7),
-            plugins_available: current.plugins_available,
-            ready_selected_capability_roots: current.ready_selected_capability_roots.clone(),
-            selected_environments: current.selected_environments.clone(),
-            cached_binding: Mutex::new(None),
-        }));
-
-        assert!(runtime.current_codex_apps_execution_revision_matches(/*revision*/ 7));
-        assert!(!runtime.current_codex_apps_execution_revision_matches(/*revision*/ 8));
-    }
-
     #[tokio::test]
     async fn cached_bindings_follow_the_clients_catalog_revision() -> anyhow::Result<()> {
         let codex_home = tempfile::tempdir()?;
@@ -1044,10 +1007,11 @@ mod tests {
             config: Some(Arc::new(config)),
             auth: None,
             auth_token: None,
-            codex_apps_execution_revision: None,
+            auth_generation: Arc::new(()),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
-            selected_environments: HashMap::new(),
+            environment_selections: Arc::default(),
+            ready_environments: HashMap::new(),
             cached_binding: Mutex::new(None),
         });
         let before = McpRuntime::binding_from_published_runtime(
@@ -1117,10 +1081,11 @@ mod tests {
             ))),
             auth: None,
             auth_token: None,
-            codex_apps_execution_revision: None,
+            auth_generation: Arc::new(()),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
-            selected_environments: HashMap::new(),
+            environment_selections: Arc::default(),
+            ready_environments: HashMap::new(),
             cached_binding: Mutex::new(None),
         });
         let first = McpRuntime::binding_from_published_runtime(

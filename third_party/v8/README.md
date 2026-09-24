@@ -12,15 +12,6 @@ Selected Cargo CI, release, and package builds override
 sets those variables independently in `MODULE.bazel` to select source-built
 local archives and bindings for its consumer builds.
 
-Cargo consumers authenticate the downloaded per-target checksum manifests
-against the reviewed
-`rusty_v8_<version>_release_manifests.sha256` manifest in this directory. Each
-authenticated per-target manifest then pins the archive and binding assets.
-The separate `rusty_v8_<version>_codex_release.sha256` manifest records the
-complete Codex release asset inventory used by local and Bazel tooling. The
-setup action consumes authoritative `openai/codex` release assets by default;
-publishing authority remains with the repository that owns the release.
-
 The Bazel `v8` crate feature selection enables V8's in-process sandbox for
 Darwin, Linux, and Windows GNU. Windows MSVC remains on upstream non-sandboxed
 prebuilts.
@@ -38,9 +29,7 @@ Use this as the maintainer flow for a version bump:
 2. Update the Bazel versioned inputs in `MODULE.bazel`, then refresh the
    matching checksum manifest and generated checksums as described below.
 3. Publish a release-candidate PR and validate that `v8-canary` passes.
-4. If the canary is green, publish the release tag and release build from the
-   repository that owns the release. Compile/test-only callers may consume the
-   authoritative `openai/codex` artifacts without acquiring publishing authority.
+4. If the canary is green, publish the release tag and release build.
 5. Independently verify the published Codex-built checksum manifests and record
    their SHA-256 digests in
    `third_party/v8/rusty_v8_<version>_release_manifests.sha256`.

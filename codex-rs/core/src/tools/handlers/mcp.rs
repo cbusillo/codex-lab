@@ -25,7 +25,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::tools::registry::ToolTelemetryTags;
 use codex_extension_api::McpToolContext;
 use codex_mcp::ToolInfo;
-use codex_protocol::mcp::is_node_repl_backed_server;
+use codex_protocol::mcp::is_node_repl_backed_connector;
 use codex_protocol::user_input::UserInput;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -185,8 +185,14 @@ impl McpHandler {
             )
             .await;
         // Use the executed call's binding; a later catalog refresh must not change eligibility.
-        // Only the new metadata is internal; tool execution and call accounting are not.
-        let result_metadata_capture_allowed = false;
+        let result_metadata_capture_allowed = invocation
+            .session
+            .services
+            .analytics_events_client
+            .is_enabled()
+            && prepared_mcp_call
+                .as_ref()
+                .is_some_and(codex_mcp::PreparedMcpCall::is_host_owned_apps);
         let mcp_tool = prepared_mcp_call.as_ref().map(|call| {
             McpToolContext::from_prepared_call(
                 call,
@@ -304,8 +310,10 @@ impl CoreToolRuntime for McpHandler {
             .thread_extension_data
             .get::<NodeReplReviewEvidence>()
             .is_some_and(|evidence| evidence.image_capture_enabled());
-        if !is_node_repl_backed_server(&self.tool_info.server_name)
-            || !result.success_for_logging()
+        if !is_node_repl_backed_connector(
+            &self.tool_info.server_name,
+            self.tool_info.connector_id.as_deref(),
+        ) || !result.success_for_logging()
             || evidence_mode == NodeReplReviewEvidenceMode::Disabled && !image_capture_enabled
         {
             return;

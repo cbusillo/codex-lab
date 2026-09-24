@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::connection_manager::McpConnectionSet;
+use crate::runtime::McpRuntimeInput;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
 use crate::tools::ToolInfo;
@@ -118,13 +119,8 @@ pub struct TrustedAccessContext {
 }
 
 impl TrustedAccessContext {
-    pub(crate) fn from_auth(
-        auth: Option<&CodexAuth>,
-        auth_manager: Option<Arc<AuthManager>>,
-        chatgpt_base_url: String,
-        http_client: Arc<dyn HttpClient>,
-    ) -> Option<Self> {
-        let auth = auth?;
+    pub(crate) fn from_runtime(input: &McpRuntimeInput) -> Option<Self> {
+        let auth = input.auth.as_ref()?;
         if !matches!(
             auth.api_auth_mode(),
             AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
@@ -133,9 +129,9 @@ impl TrustedAccessContext {
         }
         Some(Self::new(
             auth.clone(),
-            auth_manager?,
-            chatgpt_base_url,
-            http_client,
+            input.auth_manager.clone()?,
+            input.config.chatgpt_base_url.clone(),
+            input.runtime_context.local_http_client(),
         ))
     }
 

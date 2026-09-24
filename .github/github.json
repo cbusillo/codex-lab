@@ -8,23 +8,12 @@
         "python": {
           "version": "3.12",
           "moduleName": "codex-lab",
-          "testRoots": [
-            ".github/scripts",
-            "scripts",
-            "sdk/python/tests"
-          ],
+          "testRoots": [".github/scripts", "scripts", "sdk/python/tests"],
           "sync": false,
-          "requiredGeneratedState": [
-            ".venv",
-            ".idea"
-          ]
+          "requiredGeneratedState": [".venv", ".idea"]
         }
       },
-      "scopePreference": [
-        "changed_files",
-        "directory",
-        "whole_project"
-      ]
+      "scopePreference": ["changed_files", "directory", "whole_project"]
     }
   },
   "jetbrains": {

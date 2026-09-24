@@ -94,7 +94,6 @@ async fn review_op_emits_lifecycle_and_review_output() {
     // Submit review request.
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Please review my changes".to_string(),
@@ -322,7 +321,6 @@ async fn cancelled_review_does_not_forward_delegate_mcp_startup() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Cancel this review".to_string(),
@@ -407,7 +405,6 @@ async fn review_op_with_plain_text_emits_review_fallback() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Plain text review".to_string(),
@@ -464,7 +461,6 @@ async fn review_filters_agent_message_related_events() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Filter streaming events".to_string(),
@@ -539,7 +535,6 @@ async fn review_does_not_emit_agent_message_on_structured_output() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "check structured".to_string(),
@@ -704,7 +699,6 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
     let stored_settings = codex.thread_settings_snapshot().await;
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "review current permissions".to_string(),
@@ -812,7 +806,7 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn review_omits_retained_tier_when_fast_mode_disabled() -> anyhow::Result<()> {
+async fn review_preserves_flex_tier_when_fast_mode_disabled() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     let (server, request_log) =
         start_responses_server_with_sse(completed_sse(), /*expected_requests*/ 1).await;
@@ -842,7 +836,6 @@ async fn review_omits_retained_tier_when_fast_mode_disabled() -> anyhow::Result<
     .await?;
     test.codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "review the changes".to_string(),
@@ -866,7 +859,7 @@ async fn review_omits_retained_tier_when_fast_mode_disabled() -> anyhow::Result<
     );
     assert_eq!(
         request_log.single_request().body_json().get("service_tier"),
-        None
+        Some(&serde_json::json!("flex"))
     );
     Ok(())
 }
@@ -906,7 +899,6 @@ async fn review_resolves_inherited_summary_preferences() -> anyhow::Result<()> {
         let stored_settings = test.codex.thread_settings_snapshot().await;
         test.codex
             .submit(Op::Review {
-                persistence: None,
                 review_request: ReviewRequest {
                     target: ReviewTarget::Custom {
                         instructions: "review the changes".to_string(),
@@ -976,7 +968,6 @@ async fn review_uses_custom_review_model_from_config() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "use custom model".to_string(),
@@ -1044,7 +1035,6 @@ async fn review_uses_session_model_when_review_model_unset() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "use session model".to_string(),
@@ -1168,7 +1158,6 @@ async fn review_input_isolated_from_parent_history() {
     let review_prompt = "Please review only this".to_string();
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: review_prompt.clone(),
@@ -1283,7 +1272,6 @@ async fn review_history_surfaces_in_parent_session() {
     // 1) Run a review turn that produces an assistant message (isolated in child).
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Start a review".to_string(),
@@ -1428,7 +1416,6 @@ async fn review_uses_overridden_cwd_for_base_branch_merge_base() {
 
     codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::BaseBranch {
                     branch: "main".to_string(),

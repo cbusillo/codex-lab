@@ -93,7 +93,6 @@ async fn thread_section_move_pins_before_first_turn() -> Result<()> {
         model_providers: None,
         source_kinds: None,
         archived: None,
-        descendant_of_thread_id: None,
         section_id: Some(Some(PINNED_THREAD_SECTION_ID.to_string())),
         project_id: None,
         cwd: None,
@@ -276,7 +275,6 @@ async fn thread_section_move_pins_and_unpins_with_filtered_recency_pagination() 
         cwd: None,
         use_state_db_only: false,
         search_term: None,
-        descendant_of_thread_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
     };
@@ -469,7 +467,6 @@ async fn thread_sections_preserve_server_owned_manual_order_across_moves_and_res
         cwd: None,
         use_state_db_only: false,
         search_term: None,
-        descendant_of_thread_id: None,
         parent_thread_id: None,
         ancestor_thread_id: None,
     };

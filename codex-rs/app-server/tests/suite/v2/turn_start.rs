@@ -24,6 +24,9 @@ use codex_app_server_protocol::AdditionalContextKind;
 use codex_app_server_protocol::ByteRange;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::CollabAgentStatus;
+use codex_app_server_protocol::CollabAgentTool;
+use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionStatus;
@@ -123,7 +126,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TEST_ORIGINATOR: &str = "codex_vscode";
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -136,58 +139,6 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     String::from_utf8(req.body.clone())
         .ok()
         .is_some_and(|body| body.contains(text))
-}
-
-async fn wait_for_response_request(
-    server: &wiremock::MockServer,
-    mock: &responses::ResponseMock,
-    label: &str,
-) -> Result<responses::ResponsesRequest> {
-    let result = timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            if let Some(request) = mock.last_request() {
-                return request;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    match result {
-        Ok(request) => Ok(request),
-        Err(error) => {
-            let response_request_count = server.received_requests().await.map_or(0, |requests| {
-                requests
-                    .iter()
-                    .filter(|request| request.url.path().ends_with("/responses"))
-                    .count()
-            });
-            Err(error).with_context(|| {
-                format!(
-                    "timed out waiting for {label}; mock server observed {response_request_count} Responses API requests"
-                )
-            })
-        }
-    }
-}
-
-async fn wait_for_response_request_while_draining(
-    mcp: &mut TestAppServer,
-    server: &wiremock::MockServer,
-    mock: &responses::ResponseMock,
-    label: &str,
-) -> Result<responses::ResponsesRequest> {
-    let request = wait_for_response_request(server, mock, label);
-    tokio::pin!(request);
-    loop {
-        tokio::select! {
-            request = &mut request => return request,
-            message = mcp.read_next_message() => {
-                if message.is_err() {
-                    return request.await;
-                }
-            }
-        }
-    }
 }
 
 async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>> {
@@ -407,8 +358,13 @@ async fn turn_start_omits_notification_media_without_changing_model_input() -> R
     Ok(())
 }
 
+#[test_case(None; "analytics_unset")]
+#[test_case(Some(true); "analytics_enabled")]
+#[test_case(Some(false); "analytics_disabled")]
 #[tokio::test]
-async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Result<()> {
+async fn tool_call_metadata_stays_out_of_raw_response_item_notifications(
+    analytics_enabled: Option<bool>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let arguments = json!({"query": "redaction"});
@@ -441,7 +397,8 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
             "params": {"name": "calendar_list_events", "arguments": arguments},
         })))
         .respond_with(move |request: &Request| {
-            let request: Value = serde_json::from_slice(&request.body).unwrap();
+            let request: Value =
+                serde_json::from_slice(&request.body).expect("valid MCP tool call JSON");
             ResponseTemplate::new(200).set_body_json(json!({
                 "jsonrpc": "2.0",
                 "id": request["id"],
@@ -453,7 +410,7 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
         .mount(&server)
         .await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri())
+    let mut config = MockResponsesConfig::new(&server.uri())
         .with_provider_name("OpenAI")
         .with_provider_config("supports_websockets = false")
         .with_root_config(&format!(
@@ -461,8 +418,11 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
             apps.chatgpt_base_url
         ))
         .enable_feature(Feature::Apps)
-        .enable_feature(Feature::ExecutedToolCallMetadata)
-        .write(codex_home.path())?;
+        .enable_feature(Feature::ExecutedToolCallMetadata);
+    if let Some(enabled) = analytics_enabled {
+        config = config.with_extra_config(&format!("[analytics]\nenabled = {enabled}"));
+    }
+    config.write(codex_home.path())?;
     write_chatgpt_auth(
         codex_home.path(),
         ChatGptAuthFixture::new("chatgpt-test-token")
@@ -579,11 +539,10 @@ async fn tool_call_metadata_stays_out_of_raw_response_item_notifications() -> Re
         .context("persisted MCP output")?;
     assert_eq!(captured["output"], raw_output["output"]);
     // The custom inference endpoint omits raw metadata, so verify capture in the rollout.
-    let expected_metadata: Option<&Value> = None;
     assert_eq!(
         captured["internal_chat_message_metadata_passthrough"]["executed_tool_calls"][0]
             .get("tool_result_metadata"),
-        expected_metadata,
+        (analytics_enabled != Some(false)).then_some(&result_metadata),
     );
     Ok(())
 }
@@ -744,7 +703,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "start".to_string(),
                     text_elements: Vec::new(),
                 }],
-                turn_trigger: Some("user".to_string()),
+                turn_trigger: Some("goal".to_string()),
                 cyber_access_program: Some(CyberAccessProgram::DaybreakBlue),
                 ..Default::default()
             },
@@ -787,7 +746,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "steer".to_string(),
                     text_elements: Vec::new(),
                 }],
-                turn_trigger: Some("goal".to_string()),
+                turn_trigger: Some("user".to_string()),
                 cyber_access_program: Some(CyberAccessProgram::Standard),
                 ..Default::default()
             },
@@ -814,7 +773,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                 .as_str()
                 .context("expected x-codex-turn-metadata")?,
         )?;
-        assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("user"));
+        assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("goal"));
     }
     Ok(())
 }
@@ -1034,12 +993,9 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    let cache_path = codex_home.path().join("models_cache.json");
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
     write_models_cache(codex_home.path()).await?;
-    MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::Personality)
-        .with_root_config(&format!("model_catalog_json = {cache_path:?}"))
-        .write(codex_home.path())?;
+    let cache_path = codex_home.path().join("models_cache.json");
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
     let models = cache["models"]
@@ -1113,7 +1069,7 @@ async fn turn_start_emits_thread_scoped_warning_notification_for_trimmed_skills(
         .expect("expected at least one model request");
     assert!(
         body_contains(request, "## Skills"),
-        "expected the empty core-compatible skills section to be preserved after all descriptions were trimmed"
+        "expected outgoing request to include the skills section"
     );
     assert!(
         !body_contains(request, "- alpha-skill:") && !body_contains(request, "- beta-skill:"),
@@ -4249,15 +4205,14 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
         create_final_assistant_message_sse_response("patch applied")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
-    let cache_path = codex_home.join("models_cache.json");
-    write_models_cache(&codex_home).await?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::ApplyPatchStreamingEvents)
         .disable_feature(Feature::Plugins)
         .disable_feature(Feature::RemoteModels)
         .disable_feature(Feature::ShellSnapshot)
-        .with_root_config(&format!("model_catalog_json = {cache_path:?}"))
         .write(&codex_home)?;
+    write_models_cache(&codex_home).await?;
+    let cache_path = codex_home.join("models_cache.json");
     let mut cache: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&cache_path)?)?;
     let models = cache["models"]
@@ -4329,7 +4284,7 @@ async fn turn_start_streams_apply_patch_change_updates_v2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Result<()> {
+async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
@@ -4342,8 +4297,6 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
-        "task_name": "worker",
-        "fork_turns": "none",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
     }))?;
@@ -4354,7 +4307,7 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                "multi_agent_v1",
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -4362,7 +4315,7 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
         ]),
     )
     .await;
-    let child_turn = responses::mount_sse_once_match_recording_matches(
+    let child_turn = responses::mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -4436,24 +4389,82 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
         })
         .await?;
 
-    let (receiver_thread_id, agent_path) = timeout(DEFAULT_READ_TIMEOUT, async {
+    let spawn_started = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
-            let completed: ItemCompletedNotification =
-                mcp.read_notification("item/completed").await?;
-            if let ThreadItem::SubAgentActivity {
-                id,
-                kind: SubAgentActivityKind::Started,
-                agent_thread_id,
-                agent_path,
-            } = completed.item
+            let started: ItemStartedNotification = mcp.read_notification("item/started").await?;
+            if let ThreadItem::CollabAgentToolCall { id, .. } = &started.item
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<(String, String), anyhow::Error>((agent_thread_id, agent_path));
+                return Ok::<ThreadItem, anyhow::Error>(started.item);
             }
         }
     })
     .await??;
-    assert_eq!(agent_path, "/root/worker");
+    assert_eq!(
+        spawn_started,
+        ThreadItem::CollabAgentToolCall {
+            id: SPAWN_CALL_ID.to_string(),
+            tool: CollabAgentTool::SpawnAgent,
+            status: CollabAgentToolCallStatus::InProgress,
+            sender_thread_id: thread.id.clone(),
+            receiver_thread_ids: Vec::new(),
+            prompt: Some(CHILD_PROMPT.to_string()),
+            model: Some(REQUESTED_MODEL.to_string()),
+            reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
+            agents_states: HashMap::new(),
+        }
+    );
+
+    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: ItemCompletedNotification =
+                mcp.read_notification("item/completed").await?;
+            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
+                && id == SPAWN_CALL_ID
+            {
+                return Ok::<ThreadItem, anyhow::Error>(completed.item);
+            }
+        }
+    })
+    .await??;
+    let ThreadItem::CollabAgentToolCall {
+        id,
+        tool,
+        status,
+        sender_thread_id,
+        receiver_thread_ids,
+        prompt,
+        model,
+        reasoning_effort,
+        agents_states,
+    } = spawn_completed
+    else {
+        unreachable!("loop ensures we break on collab agent tool call items");
+    };
+    let receiver_thread_id = receiver_thread_ids
+        .first()
+        .cloned()
+        .expect("spawn completion should include child thread id");
+    assert_eq!(id, SPAWN_CALL_ID);
+    assert_eq!(tool, CollabAgentTool::SpawnAgent);
+    assert_eq!(status, CollabAgentToolCallStatus::Completed);
+    assert_eq!(sender_thread_id, thread.id);
+    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
+    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
+    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
+    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    let agent_state = agents_states
+        .get(&receiver_thread_id)
+        .expect("spawn completion should include child agent state");
+    assert!(
+        matches!(
+            agent_state.status,
+            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
+        ),
+        "child agent should still be initializing or already running, got {:?}",
+        agent_state.status
+    );
+    assert_eq!(agent_state.message, None);
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -4467,23 +4478,6 @@ async fn turn_start_emits_spawn_agent_activity_for_requested_model_v2() -> Resul
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
     assert_eq!(turn_completed.turn.id, turn.turn.id);
-    let child_request = wait_for_response_request_while_draining(
-        &mut mcp,
-        &server,
-        &child_turn,
-        "requested-model child request",
-    )
-    .await?;
-    let child_body = child_request.body_json();
-    assert_eq!(child_body["model"], json!(REQUESTED_MODEL));
-    assert_eq!(
-        child_body["client_metadata"]["thread_id"],
-        json!(receiver_thread_id)
-    );
-    assert_eq!(
-        child_body["reasoning"]["effort"],
-        json!(REQUESTED_REASONING_EFFORT.to_string())
-    );
 
     let child_turn_event =
         wait_for_matching_analytics_event(&server, DEFAULT_READ_TIMEOUT, |event| {
@@ -4678,7 +4672,6 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
-                descendant_of_thread_id: None,
                 parent_thread_id: Some(thread.id.clone()),
                 ancestor_thread_id: None,
             },
@@ -4947,7 +4940,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
 }
 
 #[tokio::test]
-async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()> {
+async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CHILD_PROMPT: &str = "child: do work";
@@ -4961,8 +4954,6 @@ async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
-        "task_name": "worker",
-        "fork_turns": "none",
         "agent_type": "custom",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
@@ -4974,7 +4965,7 @@ async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()
             responses::ev_response_created("resp-turn1-1"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
+                "multi_agent_v1",
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -4982,7 +4973,7 @@ async fn turn_start_emits_spawn_agent_activity_for_custom_role_v2() -> Result<()
         ]),
     )
     .await;
-    let child_turn = responses::mount_sse_once_match_recording_matches(
+    let _child_turn = responses::mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -5054,25 +5045,56 @@ config_file = "./custom-role.toml"
         })
         .await?;
 
-    let (receiver_thread_id, agent_path) = timeout(DEFAULT_READ_TIMEOUT, async {
+    let spawn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
             let completed: ItemCompletedNotification =
                 mcp.read_notification("item/completed").await?;
-            if let ThreadItem::SubAgentActivity {
-                id,
-                kind: SubAgentActivityKind::Started,
-                agent_thread_id,
-                agent_path,
-            } = completed.item
+            if let ThreadItem::CollabAgentToolCall { id, .. } = &completed.item
                 && id == SPAWN_CALL_ID
             {
-                return Ok::<(String, String), anyhow::Error>((agent_thread_id, agent_path));
+                return Ok::<ThreadItem, anyhow::Error>(completed.item);
             }
         }
     })
     .await??;
-    assert_eq!(agent_path, "/root/worker");
-    assert!(!receiver_thread_id.is_empty());
+    let ThreadItem::CollabAgentToolCall {
+        id,
+        tool,
+        status,
+        sender_thread_id,
+        receiver_thread_ids,
+        prompt,
+        model,
+        reasoning_effort,
+        agents_states,
+    } = spawn_completed
+    else {
+        unreachable!("loop ensures we break on collab agent tool call items");
+    };
+    let receiver_thread_id = receiver_thread_ids
+        .first()
+        .cloned()
+        .expect("spawn completion should include child thread id");
+    assert_eq!(id, SPAWN_CALL_ID);
+    assert_eq!(tool, CollabAgentTool::SpawnAgent);
+    assert_eq!(status, CollabAgentToolCallStatus::Completed);
+    assert_eq!(sender_thread_id, thread.id);
+    assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
+    assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
+    assert_eq!(model, Some(ROLE_MODEL.to_string()));
+    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
+    let agent_state = agents_states
+        .get(&receiver_thread_id)
+        .expect("spawn completion should include child agent state");
+    assert!(
+        matches!(
+            agent_state.status,
+            CollabAgentStatus::PendingInit | CollabAgentStatus::Running
+        ),
+        "child agent should still be initializing or already running, got {:?}",
+        agent_state.status
+    );
+    assert_eq!(agent_state.message, None);
 
     let turn_completed = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -5085,23 +5107,6 @@ config_file = "./custom-role.toml"
     })
     .await??;
     assert_eq!(turn_completed.thread_id, thread.id);
-    let child_request = wait_for_response_request_while_draining(
-        &mut mcp,
-        &server,
-        &child_turn,
-        "custom-role child request",
-    )
-    .await?;
-    let child_body = child_request.body_json();
-    assert_eq!(child_body["model"], json!(ROLE_MODEL));
-    assert_eq!(
-        child_body["client_metadata"]["thread_id"],
-        json!(receiver_thread_id)
-    );
-    assert_eq!(
-        child_body["reasoning"]["effort"],
-        json!(ROLE_REASONING_EFFORT.to_string())
-    );
 
     Ok(())
 }
@@ -5490,9 +5495,13 @@ async fn run_turn_start_file_change_approval_rejection_v2(
     Ok(())
 }
 
+#[cfg_attr(not(windows), test_case(None; "started"))]
+#[test_case(Some(json!({"cmd": "echo unreachable", "workdir": "missing-work-directory", "tty": false})); "pipe_launch_failure")]
+#[test_case(Some(json!({"cmd": "echo unreachable\u{0}", "tty": true, "login": false})); "pty_launch_failure")]
 #[tokio::test]
-#[cfg_attr(windows, ignore = "process id reporting differs on Windows")]
-async fn command_execution_notifications_include_process_id() -> Result<()> {
+async fn command_execution_notifications_include_process_id(
+    launch_failure_args: Option<Value>,
+) -> Result<()> {
     // TODO(anp): Add target-Windows process-id expectations for remote executors.
     skip_if_wine_exec!(
         Ok(()),
@@ -5500,8 +5509,18 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     );
     skip_if_no_network!(Ok(()));
 
+    let launch_failed = launch_failure_args.is_some();
+    let command = if let Some(args) = launch_failure_args {
+        responses::sse(vec![
+            responses::ev_response_created("launch"),
+            responses::ev_function_call("uexec-1", "exec_command", &args.to_string()),
+            responses::ev_completed("launch"),
+        ])
+    } else {
+        create_exec_command_sse_response("uexec-1")?
+    };
     let responses = vec![
-        create_exec_command_sse_response("uexec-1")?,
+        command,
         create_final_assistant_message_sse_response("done")?,
     ];
     let server = create_mock_responses_server_sequence(responses).await;
@@ -5509,6 +5528,8 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     MockResponsesConfig::new(&server.uri())
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::UnifiedExec)
+        .disable_feature(Feature::ShellZshFork)
+        .disable_feature(Feature::ShellSnapshot)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -5559,7 +5580,7 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     };
     assert_eq!(id, "uexec-1");
     assert_eq!(status, CommandExecutionStatus::InProgress);
-    let started_process_id = started_process_id.expect("process id should be present");
+    assert_eq!(started_process_id.is_none(), launch_failed);
 
     let completed_command = timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
@@ -5576,6 +5597,8 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         process_id: completed_process_id,
         status: completed_status,
         exit_code,
+        duration_ms,
+        aggregated_output,
         ..
     } = completed_command
     else {
@@ -5589,15 +5612,22 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
         ),
         "unexpected command execution status: {completed_status:?}"
     );
-    if completed_status == CommandExecutionStatus::Completed {
+    if launch_failed {
+        assert_eq!(
+            (completed_status, exit_code, duration_ms),
+            (CommandExecutionStatus::Failed, Some(-1), Some(0))
+        );
+        assert!(
+            aggregated_output
+                .context("launch diagnostic")?
+                .starts_with("Failed to create unified exec process:")
+        );
+    } else if completed_status == CommandExecutionStatus::Completed {
         assert_eq!(exit_code, Some(0));
     } else {
         assert!(exit_code.is_some(), "expected exit_code for failed command");
     }
-    assert_eq!(
-        completed_process_id.as_deref(),
-        Some(started_process_id.as_str())
-    );
+    assert_eq!(completed_process_id, started_process_id);
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -5605,16 +5635,30 @@ async fn command_execution_notifications_include_process_id() -> Result<()> {
     )
     .await??;
 
+    for method in mcp.pending_notification_methods() {
+        let notification = mcp.read_stream_until_notification_message(&method).await?;
+        assert_ne!(
+            notification.params.context("notification params")?["item"]["id"],
+            "uexec-1"
+        );
+    }
+
     Ok(())
 }
 
 #[cfg_attr(windows, ignore = "plugin attribution fixture is Unix-only")]
+#[test_case(CommandExecutionStatus::Completed; "completed")]
+#[test_case(CommandExecutionStatus::Failed; "launch_failure")]
 #[tokio::test]
-async fn command_execution_notifications_include_trusted_plugin_id() -> Result<()> {
+async fn command_execution_notifications_include_trusted_plugin_id(
+    expected_status: CommandExecutionStatus,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(Ok(()), "plugin attribution fixture is Unix-only");
 
     let codex_home = TempDir::new()?;
+    let missing_cwd = codex_home.path().join("missing-work-directory");
+    let launch_failed = expected_status == CommandExecutionStatus::Failed;
     let curated_sha = "0123456789abcdef0123456789abcdef01234567";
     let plugin_root = codex_home
         .path()
@@ -5656,7 +5700,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
                 "/bin/sh".to_string(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            /*workdir*/ None,
+            launch_failed.then_some(missing_cwd.as_path()),
             /*timeout_ms*/ None,
             "plugin-command",
         )?,
@@ -5667,7 +5711,10 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         .with_approval_policy("on-request")
         .with_sandbox_mode("danger-full-access")
         .enable_feature(Feature::Plugins)
+        .enable_feature(Feature::UnifiedExec)
         .disable_feature(Feature::RemotePlugin)
+        .disable_feature(Feature::ShellZshFork)
+        .disable_feature(Feature::ShellSnapshot)
         .with_extra_config("[plugins.\"google-calendar@openai-api-curated\"]\nenabled = true")
         .write(codex_home.path())?;
 
@@ -5728,7 +5775,7 @@ async fn command_execution_notifications_include_trusted_plugin_id() -> Result<(
         if method == "item/started" {
             assert_eq!(status, CommandExecutionStatus::InProgress);
         } else {
-            assert_eq!(status, CommandExecutionStatus::Completed);
+            assert_eq!(status, expected_status);
         }
     }
 

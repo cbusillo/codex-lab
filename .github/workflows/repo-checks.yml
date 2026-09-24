@@ -5,25 +5,15 @@ on:
 
 jobs:
   build-test:
-    runs-on: macos-26
-    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
           persist-credentials: false
-
-      - name: Configure canonical upstream provenance
-        run: |
-          set -euo pipefail
-          git remote remove openai 2>/dev/null || true
-          git remote add openai https://github.com/openai/codex.git
-          git fetch --no-tags openai \
-            +refs/heads/main:refs/remotes/openai/main
 
       - uses: ./.github/actions/setup-ci
 
@@ -36,107 +26,16 @@ jobs:
       - name: Verify Bazel clippy flags match Cargo workspace lints
         run: python3 .github/scripts/verify_bazel_clippy_lints.py
 
-      - name: Verify release-critical Bazel compile-data edges
-        run: python3 .github/scripts/upstream_convergence_bazel_data.py
-
-      - name: Verify blocking CI runner routing
-        run: python3 .github/scripts/verify_blocking_ci_runner_routing.py
-
-      - name: Verify Apple Silicon-only workflow routing
-        run: python3 .github/scripts/verify_apple_silicon_workflows.py
-
-      - name: Verify upstream-only release publishing stays fork-guarded
-        run: python3 .github/scripts/verify_upstream_only_release_publishing.py
-
-      - name: Verify release installers and Codex Lab assets stay fork-owned
-        run: python3 .github/scripts/verify_release_installer_provenance.py
-
-      - name: Verify upstream convergence governance
-        run: python3 .github/scripts/verify_upstream_convergence_governance.py
-
-      - name: Verify upstream convergence contract gates
-        run: python3 .github/scripts/upstream_convergence_gates.py
-
-      - name: Verify owned convergence paths survived the refresh
-        run: python3 .github/scripts/upstream_convergence_guard.py
-
-      - name: Verify every repo-check Python test is registered
-        run: python3 .github/scripts/verify_repo_checks_test_registration.py
-
-      - name: Validate upstream convergence evidence
-        env:
-          CONVERGENCE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$CONVERGENCE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::A full review-base SHA is required for convergence validation."
-            exit 1
-          fi
-          git cat-file -e "$CONVERGENCE_BASE_SHA^{commit}"
-          echo "Convergence comparison base: $CONVERGENCE_BASE_SHA"
-          report="$RUNNER_TEMP/upstream-convergence-validation.json"
-          python3 .github/scripts/upstream_convergence.py validate \
-            --against "$CONVERGENCE_BASE_SHA" --json | tee "$report"
-          {
-            echo "### Upstream convergence validation"
-            echo
-            echo "- Base: \`$CONVERGENCE_BASE_SHA\`"
-            jq -r '
-              "- Comparison mode: `\(.comparisonMode)`",
-              "- Policy state at base: `\(.policyStateAtBase)`",
-              "- Append-only checked: `\(.appendOnlyChecked)`",
-              "- Provenance checked: `\(.provenanceChecked)`",
-              "- Bootstrap reason: \(.bootstrapReason // "none")",
-              "- New snapshots: `\((.newSnapshots // []) | join(", "))`"
-            ' "$report"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: "1.26.5"
-          cache: false
-
-      - name: Install shellcheck
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: shellcheck@0.11.0
-
-      - name: Install actionlint
-        run: |
-          set -euo pipefail
-          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
-
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.3"
 
-      - name: Test repo-check helper scripts
-        # One discovery run over the whole directory instead of a per-file
-        # pattern list, so a new `.github/scripts/test_*.py` is executed the
-        # moment it lands. `verify_repo_checks_test_registration.py` above fails
-        # if that ever stops being true.
-        #
-        # Runs after actionlint installs because the convergence workflow lint
-        # tests need it; CONVERGENCE_LINT_REQUIRED makes a missing linter fail
-        # instead of skipping to green.
-        env:
-          CONVERGENCE_LINT_REQUIRED: "1"
-        run: uv run --no-project --with packaging==26.2 python -m unittest discover -s .github/scripts -p 'test_*.py'
-
-      - name: Test macOS signing helpers
-        run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_*.py'
-
-      - name: Test Codex exec harness
-        run: python3 -m unittest discover -s tools/codex-exec-harness -p 'test_*.py'
-
-      - name: Test Codex Lab provenance helper
-        run: python3 -m unittest discover -s scripts/local -p 'test_*.py'
-
       - name: Test downstream Python release resolution
         run: python3 -m unittest discover -s .github/scripts -p 'test_resolve_python_cli_release.py'
+
+      - name: Test release version comparison
+        run: python3 -m unittest discover -s .github/scripts -p 'test_releases.py'
 
       - name: Test PyPI release verification
         run: uv run --no-project --with packaging==26.2 python -m unittest discover -s .github/scripts -p 'test_verify_pypi_release.py'
@@ -144,20 +43,11 @@ jobs:
       - name: Test Codex package builder
         run: python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
 
-      # The Codex Lab packaging suite stubs every macOS tool it needs, so the
-      # host-independent coverage runs here. Tests that require a real macOS
-      # host keep their own skips and stay covered by the Codex Lab app and
-      # release workflows.
-      - name: Test Codex Lab packaging helpers
-        env:
-          PYTHONPATH: scripts
-        run: python3 -m unittest discover -s scripts/codex_lab_package -p 'test_*.py'
-
-      - name: Test Codex Lab GitHub helpers
-        run: python3 -m unittest discover -s scripts/github -p 'test_*.py'
-
       - name: Test standalone installer
         run: python3 -m unittest discover -s scripts/install -p 'test_*.py'
+
+      - name: Test macOS signing and notarization
+        run: python3 -m unittest discover -s .github/scripts/macos-signing -p 'test_*.py'
 
       - name: Setup pnpm
         uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
@@ -171,39 +61,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Stage npm package
-        id: stage_npm_package
-        run: |
-          set -euo pipefail
-          # Stage the root `codex` wrapper straight from this checkout. The
-          # wrapper carries no native payload (PACKAGE_NATIVE_COMPONENTS is
-          # empty for it), so `--no-expand-packages` keeps the platform packages
-          # -- the only part that needs release artifacts -- out of this check.
-          #
-          # This step previously downloaded ~GBs of artifacts from a pinned
-          # openai/codex Actions run, then threw all of them away and uploaded
-          # only this wrapper. GitHub expires Actions artifacts after 90 days,
-          # so that pin turned into a merge-blocking failure on a timer, and it
-          # depended on a cross-repo run staying readable. Building from the
-          # source tree is reproducible and cannot expire.
-          CODEX_VERSION="$(PYTHONPATH=scripts python3 -c \
-            'from codex_package.version import read_workspace_version; print(read_workspace_version())')"
-          OUTPUT_DIR="${RUNNER_TEMP}"
-          python3 ./scripts/stage_npm_packages.py \
-            --release-version "$CODEX_VERSION" \
-            --package codex \
-            --no-expand-packages \
-            --output-dir "$OUTPUT_DIR"
-          PACK_OUTPUT="${OUTPUT_DIR}/codex-npm-${CODEX_VERSION}.tgz"
-          test -f "$PACK_OUTPUT"
-          echo "pack_output=$PACK_OUTPUT" >> "$GITHUB_OUTPUT"
-
-      - name: Upload staged npm package artifact
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: codex-npm-staging
-          path: ${{ steps.stage_npm_package.outputs.pack_output }}
 
       - name: Ensure root README.md contains only ASCII and certain Unicode code points
         run: ./scripts/asciicheck.py README.md

@@ -4,7 +4,6 @@
 import type { AbsolutePathBuf } from "../AbsolutePathBuf";
 import type { ReasoningEffort } from "../ReasoningEffort";
 import type { GitInfo } from "./GitInfo";
-import type { SessionProvenance } from "./SessionProvenance";
 import type { SessionSource } from "./SessionSource";
 import type { ThreadHistoryMode } from "./ThreadHistoryMode";
 import type { ThreadSection } from "./ThreadSection";
@@ -41,9 +40,6 @@ sectionEnteredAt: number | null, /**
  */
 projectId: string | null, /**
  * Persisted thread history contract selected when this thread was created.
- *
- * This field is part of the published stable `Thread` surface; keep it
- * non-experimental so existing clients continue to receive it.
  */
 historyMode: ThreadHistoryMode, /**
  * Model provider used for this thread (for example, 'openai').
@@ -88,10 +84,6 @@ source: SessionSource, /**
  * Optional analytics source classification for this thread.
  */
 threadSource: ThreadSource | null, /**
- * Optional structured launch provenance supplied by an external agent
- * orchestrator.
- */
-sessionProvenance: SessionProvenance | null, /**
  * Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
  */
 agentNickname: string | null, /**

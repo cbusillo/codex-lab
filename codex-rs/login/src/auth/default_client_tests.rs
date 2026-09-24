@@ -39,39 +39,76 @@ impl Write for TestLogSink {
 }
 
 #[test]
-fn general_user_agent_uses_wire_compatible_version() {
+fn test_get_codex_user_agent() {
     let user_agent = get_codex_user_agent();
     let originator = originator().value;
-    let version = codex_version::wire_compatible_version();
-    let prefix = format!("{originator}/{version} ");
+    let prefix = format!("{originator}/");
     assert!(user_agent.starts_with(&prefix));
 }
 
 #[test]
-fn app_server_user_agent_uses_build_version() {
-    let user_agent = get_codex_app_server_user_agent();
-    let originator = originator().value;
-    let version = codex_version::version();
-    let prefix = format!("{originator}/{version} ");
-    assert!(user_agent.starts_with(&prefix));
-}
+#[cfg(target_os = "linux")]
+fn os_discovery_is_cached_without_freezing_user_agent_overrides() {
+    use std::os::unix::fs::PermissionsExt;
 
-#[test]
-fn model_headers_keep_discovery_and_inference_versions_separate() {
-    for (model, version) in [
-        ("gpt-6-astra", "0.153.0"),
-        ("openai/GPT-6-ASTRA", "0.153.0"),
-        ("gpt-5.6-sol", "0.144.0"),
-        ("gpt-5.6-terra", "0.144.0"),
-        ("gpt-5.6-luna", "0.144.0"),
-        ("gpt-5.5", "0.124.0"),
-        ("custom-model", codex_version::wire_compatible_version()),
-    ] {
-        let headers = requested_model_headers(model);
-        assert_eq!(headers["version"].to_str().unwrap(), version);
-        let prefix = format!("{}/{version} ", originator().value);
-        assert!(headers[USER_AGENT].to_str().unwrap().starts_with(&prefix));
+    const PROBE_DIR: &str = "CODEX_TEST_USER_AGENT_PROBE_DIR";
+    if std::env::var_os(PROBE_DIR).is_some() {
+        // Race the first lookup as well as exercising repeated requests.
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..4 {
+                        assert!(get_codex_user_agent().contains("Ubuntu 99.7.3"));
+                    }
+                });
+            }
+        });
+        set_default_originator("cached-os-test".to_string()).expect("set originator");
+        *USER_AGENT_SUFFIX.lock().expect("suffix lock") = Some("updated-client".to_string());
+        let user_agent = get_codex_user_agent();
+        assert!(user_agent.starts_with("cached-os-test/"));
+        assert!(user_agent.ends_with(" (updated-client)"));
+        return;
     }
+
+    // Use a fresh process so neither the cached OS nor the mutable overrides can
+    // be initialized by another test. Only the child's environment is changed.
+    let temp = tempfile::tempdir().expect("probe directory");
+    for (program, output) in [
+        ("lsb_release", "Distributor ID: Ubuntu\nRelease: 99.7.3\n"),
+        ("getconf", "64\n"),
+    ] {
+        let script = temp.path().join(program);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '{program}\\n' >> \"${PROBE_DIR}/calls\"\nprintf '{output}'\n"
+            ),
+        )
+        .expect("write probe");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make probe executable");
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            concat!(
+                module_path!(),
+                "::os_discovery_is_cached_without_freezing_user_agent_overrides"
+            )
+            .trim_start_matches("codex_login::"),
+            "--nocapture",
+        ])
+        .env(PROBE_DIR, temp.path())
+        .env("PATH", temp.path())
+        .env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR)
+        .output()
+        .expect("run isolated user-agent test");
+    assert!(output.status.success(), "{output:?}");
+    let calls = std::fs::read_to_string(temp.path().join("calls")).expect("probe calls");
+    let mut calls = calls.lines().collect::<Vec<_>>();
+    calls.sort_unstable();
+    assert_eq!(calls, vec!["getconf", "lsb_release"]);
 }
 
 #[test]

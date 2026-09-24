@@ -3,13 +3,18 @@
 
 use super::*;
 
+pub(super) struct ForkNetwork {
+    pub cloud_config_bundle: CloudConfigBundleLoader,
+    pub policy: codex_app_server_client::EmbeddedNetworkPolicy,
+}
+
 pub(super) async fn fork_source(
     args: &mut crate::cli::ForkArgs,
     config: &Config,
     arg0_paths: &Arg0DispatchPaths,
     cli_overrides: &[(String, codex_config::TomlValue)],
     loader_overrides: &LoaderOverrides,
-    cloud_config_bundle: CloudConfigBundleLoader,
+    network: ForkNetwork,
     strict_config: bool,
 ) -> anyhow::Result<std::path::PathBuf> {
     let state_db = codex_core::init_state_db(config).await;
@@ -19,7 +24,7 @@ pub(super) async fn fork_source(
             arg0_paths.codex_self_exe.clone(),
             arg0_paths.codex_linux_sandbox_exe.clone(),
         )?),
-        config.http_client_factory(),
+        network.policy.bind(config.http_client_factory()),
     )
     .await?;
     let client = InProcessAppServerClient::start(InProcessClientStartArgs {
@@ -31,14 +36,14 @@ pub(super) async fn fork_source(
             ..loader_overrides.clone()
         },
         strict_config,
-        cloud_config_bundle,
+        cloud_config_bundle: network.cloud_config_bundle,
+        embedded_network_policy: network.policy,
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: state_db.clone(),
         environment_manager: std::sync::Arc::new(environment_manager),
         config_warnings: Vec::new(),
         session_source: SessionSource::Exec,
-        session_provenance: None,
         enable_codex_api_key_env: true,
         client_name: "codex_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),

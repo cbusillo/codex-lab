@@ -355,7 +355,6 @@ async fn agents_md_paths(config: &TestConfig) -> std::io::Result<Vec<PathUri>> {
         &PathUri::from_abs_path(&config.cwd),
         LOCAL_FS.as_ref(),
         /*sandbox*/ None,
-        FindUpErrorPolicy::Ignore,
     )
     .await
 }
@@ -376,7 +375,7 @@ fn resolved_local_environments<const N: usize>(
                             allow_login_shell: true,
                             workspace_roots: Vec::new(),
                             windows_sandbox_level: WindowsSandboxLevel::Disabled,
-                            windows_sandbox_private_desktop: true,
+                            windows_sandbox_type: codex_protocol::sandbox::SandboxType::None,
                             use_legacy_landlock: false,
                             permission_profile: PermissionProfileSnapshot::legacy(
                                 PermissionProfile::read_only(),
@@ -423,7 +422,6 @@ fn foreign_agents_md_uses_environment_native_paths() {
     };
     let source_path = cwd.join("AGENTS.md").expect("AGENTS.md URI");
     let loaded = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![InstructionEntry {
@@ -458,7 +456,6 @@ fn multi_environment_agents_md_renders_mixed_path_conventions() {
         .join("AGENTS.md")
         .expect("Windows AGENTS.md URI");
     let loaded = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![
@@ -617,7 +614,6 @@ fn empty_loaded_instructions_are_empty() {
 #[test]
 fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
     let empty = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![InstructionEntry {
@@ -626,7 +622,6 @@ fn loaded_instructions_with_only_empty_or_whitespace_entries_are_empty() {
         }],
     };
     let whitespace = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![InstructionEntry {
@@ -699,7 +694,6 @@ async fn total_byte_limit_truncates_later_project_docs() {
 
     let loaded = load_agents_md(&config).await.expect("project instructions");
     let expected = LoadedAgentsMd {
-        incomplete: true,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![
@@ -830,13 +824,7 @@ async fn marker_search_does_not_wait_for_a_higher_ancestor() {
 
     let paths = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        super::agents_md_paths(
-            &config.config,
-            &cwd,
-            &fs,
-            /*sandbox*/ None,
-            FindUpErrorPolicy::Ignore,
-        ),
+        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None),
     )
     .await
     .expect("nearest marker should complete")
@@ -941,13 +929,7 @@ async fn project_root_marker_search_limits_concurrent_probes_and_preserves_order
         metadata_calls.release.add_permits(max_probe_count);
     };
     let (paths, ()) = tokio::join!(
-        super::agents_md_paths(
-            &config.config,
-            &cwd,
-            &fs,
-            /*sandbox*/ None,
-            FindUpErrorPolicy::Ignore
-        ),
+        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None),
         assertions
     );
     let paths = paths.expect("AGENTS.md discovery");
@@ -994,14 +976,7 @@ async fn agents_md_search_starts_all_directory_probes() {
         metadata_calls: Arc::clone(&metadata_calls),
     };
     let search = tokio::spawn(async move {
-        super::agents_md_paths(
-            &config.config,
-            &cwd,
-            &fs,
-            /*sandbox*/ None,
-            FindUpErrorPolicy::Ignore,
-        )
-        .await
+        super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None).await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -1076,15 +1051,9 @@ async fn empty_project_root_markers_only_probe_cwd_candidates() {
     };
     let cwd = PathUri::from_abs_path(&config.cwd);
 
-    let paths = super::agents_md_paths(
-        &config.config,
-        &cwd,
-        &fs,
-        /*sandbox*/ None,
-        FindUpErrorPolicy::Ignore,
-    )
-    .await
-    .expect("AGENTS.md discovery");
+    let paths = super::agents_md_paths(&config.config, &cwd, &fs, /*sandbox*/ None)
+        .await
+        .expect("AGENTS.md discovery");
 
     let override_path = cwd.join(LOCAL_AGENTS_MD_FILENAME).expect("override path");
     let agents_path = cwd.join(DEFAULT_AGENTS_MD_FILENAME).expect("agents path");
@@ -1418,7 +1387,6 @@ async fn concatenates_root_and_cwd_docs() {
     let root_agents = repo.path().join("AGENTS.md").abs();
     let crate_agents = cfg.cwd.join("AGENTS.md");
     let expected = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: None,
         thread_instructions: None,
         entries: vec![
@@ -1556,7 +1524,6 @@ async fn instruction_sources_include_global_before_agents_md_docs() {
     let project_agents = cfg.cwd.join("AGENTS.md");
 
     let expected = LoadedAgentsMd {
-        incomplete: false,
         user_instructions: Some(Instructions {
             text: "global doc".to_string(),
             source: Some(global_agents.clone()),
@@ -1653,15 +1620,9 @@ async fn fallback_paths_are_rejected_before_filesystem_probes() {
             failure: InjectedFailure::MetadataNotFound,
             metadata_calls: Arc::clone(&metadata_calls),
         };
-        let paths = super::agents_md_paths(
-            &cfg,
-            &cwd,
-            &filesystem,
-            /*sandbox*/ None,
-            codex_file_system::FindUpErrorPolicy::Ignore,
-        )
-        .await
-        .expect("discover paths");
+        let paths = super::agents_md_paths(&cfg, &cwd, &filesystem, /*sandbox*/ None)
+            .await
+            .expect("discover paths");
 
         assert_eq!(paths, Vec::<PathUri>::new());
         assert_eq!(

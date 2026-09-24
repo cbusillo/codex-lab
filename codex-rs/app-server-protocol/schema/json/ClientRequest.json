@@ -213,184 +213,6 @@
         }
       ]
     },
-    "AutoReviewDispositionAction": {
-      "enum": [
-        "repair",
-        "defer",
-        "obsolete"
-      ],
-      "type": "string"
-    },
-    "AutoReviewDispositionWriteParams": {
-      "properties": {
-        "action": {
-          "$ref": "#/definitions/AutoReviewDispositionAction"
-        },
-        "reason": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "runId": {
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "action",
-        "runId",
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "AutoReviewFindingDetailReadParams": {
-      "properties": {
-        "findingId": {
-          "default": null,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "maxBytes": {
-          "default": null,
-          "format": "uint",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "runId": {
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "runId",
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "AutoReviewSummaryReadParams": {
-      "properties": {
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "BackgroundAutoReviewControlAction": {
-      "enum": [
-        "cancel",
-        "supersede"
-      ],
-      "type": "string"
-    },
-    "BackgroundAutoReviewControlParams": {
-      "properties": {
-        "action": {
-          "$ref": "#/definitions/BackgroundAutoReviewControlAction"
-        },
-        "reason": {
-          "$ref": "#/definitions/BackgroundAutoReviewControlReason"
-        },
-        "runId": {
-          "type": "string"
-        },
-        "threadId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "action",
-        "reason",
-        "runId",
-        "threadId"
-      ],
-      "type": "object"
-    },
-    "BackgroundAutoReviewControlReason": {
-      "oneOf": [
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "userRequested"
-              ],
-              "title": "UserRequestedBackgroundAutoReviewControlReasonType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "UserRequestedBackgroundAutoReviewControlReason",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "runId": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "supersededByRun"
-              ],
-              "title": "SupersededByRunBackgroundAutoReviewControlReasonType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "runId",
-            "type"
-          ],
-          "title": "SupersededByRunBackgroundAutoReviewControlReason",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "foregroundWorkStarted"
-              ],
-              "title": "ForegroundWorkStartedBackgroundAutoReviewControlReasonType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "ForegroundWorkStartedBackgroundAutoReviewControlReason",
-          "type": "object"
-        },
-        {
-          "properties": {
-            "type": {
-              "enum": [
-                "threadClosing"
-              ],
-              "title": "ThreadClosingBackgroundAutoReviewControlReasonType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type"
-          ],
-          "title": "ThreadClosingBackgroundAutoReviewControlReason",
-          "type": "object"
-        }
-      ]
-    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -470,53 +292,6 @@
       "required": [
         "name",
         "version"
-      ],
-      "type": "object"
-    },
-    "CodeBridgeConsoleLevel": {
-      "enum": [
-        "trace",
-        "info",
-        "warn",
-        "error"
-      ],
-      "type": "string"
-    },
-    "CodeBridgeEventKind": {
-      "enum": [
-        "console",
-        "error",
-        "pageview",
-        "screenshot",
-        "controlResult"
-      ],
-      "type": "string"
-    },
-    "CodeBridgeSubscriptionFilter": {
-      "properties": {
-        "clientIds": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "eventKinds": {
-          "items": {
-            "$ref": "#/definitions/CodeBridgeEventKind"
-          },
-          "type": "array"
-        },
-        "levels": {
-          "items": {
-            "$ref": "#/definitions/CodeBridgeConsoleLevel"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "clientIds",
-        "eventKinds",
-        "levels"
       ],
       "type": "object"
     },
@@ -1133,17 +908,6 @@
           ]
         }
       },
-      "type": "object"
-    },
-    "ExternalAgentCapabilitiesRefreshParams": {
-      "properties": {
-        "refreshId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "refreshId"
-      ],
       "type": "object"
     },
     "ExternalAgentConfigDetectParams": {
@@ -1870,6 +1634,10 @@
           "description": "Opt into receiving experimental API methods and fields.",
           "type": "boolean"
         },
+        "explicitGatewayOauth": {
+          "description": "Use explicit gateway OAuth login instead of automatic browser authorization. Applies to this app-server's gateway runtime; later connections cannot undo it.",
+          "type": "boolean"
+        },
         "extensions": {
           "additionalProperties": true,
           "description": "MCP extension settings declared by the app-server client.",
@@ -2076,10 +1844,6 @@
             "codexStreamlinedLogin": {
               "type": "boolean"
             },
-            "preserveExistingAccount": {
-              "description": "Preserve the previously stored ChatGPT account instead of revoking and removing it.",
-              "type": "boolean"
-            },
             "type": {
               "enum": [
                 "chatgpt"
@@ -2099,10 +1863,6 @@
         },
         {
           "properties": {
-            "preserveExistingAccount": {
-              "description": "Preserve the previously stored ChatGPT account instead of revoking and removing it.",
-              "type": "boolean"
-            },
             "type": {
               "enum": [
                 "chatgptDeviceCode"
@@ -2286,6 +2046,17 @@
         "server": {
           "type": "string"
         },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpResourceReadTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Explicit hosted app/account. Omit to retain legacy resource discovery."
+        },
         "threadId": {
           "type": [
             "string",
@@ -2299,6 +2070,25 @@
       "required": [
         "server",
         "uri"
+      ],
+      "type": "object"
+    },
+    "McpResourceReadTarget": {
+      "properties": {
+        "connectorId": {
+          "type": "string"
+        },
+        "linkId": {
+          "description": "Null explicitly requests no-auth access, subject to the app's resource policy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "connectorId",
+        "linkId"
       ],
       "type": "object"
     },
@@ -3099,17 +2889,6 @@
           "type": "boolean"
         }
       },
-      "type": "object"
-    },
-    "RemoveAccountParams": {
-      "properties": {
-        "accountId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "accountId"
-      ],
       "type": "object"
     },
     "RequestId": {
@@ -4022,27 +3801,6 @@
           "type": "object"
         },
         {
-          "description": "Review the changes made by a completed turn.",
-          "properties": {
-            "fingerprint": {
-              "type": "string"
-            },
-            "type": {
-              "enum": [
-                "currentTurnDiff"
-              ],
-              "title": "CurrentTurnDiffReviewTargetType",
-              "type": "string"
-            }
-          },
-          "required": [
-            "fingerprint",
-            "type"
-          ],
-          "title": "CurrentTurnDiffReviewTarget",
-          "type": "object"
-        },
-        {
           "description": "Review changes between the current branch and the given base branch.",
           "properties": {
             "branch": {
@@ -4275,50 +4033,6 @@
       ],
       "type": "object"
     },
-    "SessionProvenanceParams": {
-      "description": "Client-supplied provenance for a thread started by an external orchestrator.\n\nThis request shape intentionally keeps nested fields optional so clients can submit partial descriptive metadata without sending explicit nulls.",
-      "properties": {
-        "issueNumber": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "issueUrl": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "origin": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "repository": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "requestId": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "source": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "Settings": {
       "description": "Settings for a collaboration mode.",
       "properties": {
@@ -4432,17 +4146,6 @@
       },
       "required": [
         "name"
-      ],
-      "type": "object"
-    },
-    "SwitchActiveAccountParams": {
-      "properties": {
-        "accountId": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "accountId"
       ],
       "type": "object"
     },
@@ -4872,13 +4575,6 @@
             }
           ],
           "description": "Optional cwd filter or filters; when set, only threads whose session cwd exactly matches one of these paths are returned."
-        },
-        "descendantOfThreadId": {
-          "description": "Optional root thread id; when set, only persisted spawned descendants of this thread are returned.\n\nStable alias for `ancestorThreadId`, retained for clients that shipped against it. Mutually exclusive with `parentThreadId` and `ancestorThreadId`.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "limit": {
           "description": "Optional page size; defaults to a reasonable server-side value.",
@@ -5631,17 +5327,6 @@
             "string",
             "null"
           ]
-        },
-        "sessionProvenance": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/SessionProvenanceParams"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional client-supplied launch provenance for externally orchestrated sessions. This is descriptive metadata only."
         },
         "sessionStartSource": {
           "anyOf": [
@@ -7836,102 +7521,6 @@
         },
         "method": {
           "enum": [
-            "review/background/control"
-          ],
-          "title": "Review/background/controlRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/BackgroundAutoReviewControlParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Review/background/controlRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "review/summary/read"
-          ],
-          "title": "Review/summary/readRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/AutoReviewSummaryReadParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Review/summary/readRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "review/findingDetail/read"
-          ],
-          "title": "Review/findingDetail/readRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/AutoReviewFindingDetailReadParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Review/findingDetail/readRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "review/disposition/write"
-          ],
-          "title": "Review/disposition/writeRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/AutoReviewDispositionWriteParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Review/disposition/writeRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
             "model/list"
           ],
           "title": "Model/listRequestMethod",
@@ -7947,6 +7536,75 @@
         "params"
       ],
       "title": "Model/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/gatewayOAuth/read"
+          ],
+          "title": "Account/gatewayOAuth/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "Account/gatewayOAuth/readRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/gatewayOAuth/login"
+          ],
+          "title": "Account/gatewayOAuth/loginRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "Account/gatewayOAuth/loginRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "account/gatewayOAuth/cancel"
+          ],
+          "title": "Account/gatewayOAuth/cancelRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "id",
+        "method"
+      ],
+      "title": "Account/gatewayOAuth/cancelRequest",
       "type": "object"
     },
     {
@@ -8257,77 +7915,6 @@
         "params"
       ],
       "title": "Account/login/cancelRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "account/switchActive"
-          ],
-          "title": "Account/switchActiveRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/SwitchActiveAccountParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Account/switchActiveRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "account/list"
-          ],
-          "title": "Account/listRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "type": "null"
-        }
-      },
-      "required": [
-        "id",
-        "method"
-      ],
-      "title": "Account/listRequest",
-      "type": "object"
-    },
-    {
-      "properties": {
-        "id": {
-          "$ref": "#/definitions/RequestId"
-        },
-        "method": {
-          "enum": [
-            "account/remove"
-          ],
-          "title": "Account/removeRequestMethod",
-          "type": "string"
-        },
-        "params": {
-          "$ref": "#/definitions/RemoveAccountParams"
-        }
-      },
-      "required": [
-        "id",
-        "method",
-        "params"
-      ],
-      "title": "Account/removeRequest",
       "type": "object"
     },
     {

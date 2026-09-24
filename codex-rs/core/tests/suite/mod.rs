@@ -1,9 +1,5 @@
 // Aggregates all former standalone integration tests as modules.
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
-use codex_config::ConfigLayerEntry;
-use codex_config::ConfigLayerSource;
-use codex_config::ConfigLayerStack;
-use codex_core::config::Config;
 #[cfg(unix)]
 use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
 use codex_exec_server::CODEX_FS_HELPER_ARG1;
@@ -12,65 +8,6 @@ use codex_test_binary_support::TestBinaryDispatchGuard;
 use codex_test_binary_support::TestBinaryDispatchMode;
 use codex_test_binary_support::configure_test_binary_dispatch;
 use ctor::ctor;
-use std::num::NonZeroUsize;
-use walkdir::WalkDir;
-
-fn configure_hermetic_skill_catalog(config: &mut Config) {
-    config.include_skill_instructions = true;
-    config.skill_max_context_tokens = NonZeroUsize::new(10_000);
-
-    let requirements = config.config_layer_stack.requirements().clone();
-    let requirements_toml = config.config_layer_stack.requirements_toml().clone();
-    let mut layers = config
-        .config_layer_stack
-        .all_layers_low_to_high()
-        .filter(|layer| matches!(layer.name, ConfigLayerSource::User { .. }))
-        .cloned()
-        .collect::<Vec<_>>();
-    let disabled_skills = dirs::home_dir()
-        .into_iter()
-        .flat_map(|home_dir| {
-            WalkDir::new(home_dir.join(".agents/skills"))
-                .max_depth(6)
-                .follow_links(true)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_type().is_file() && entry.file_name() == "SKILL.md")
-                .filter_map(|entry| entry.path().canonicalize().ok())
-        })
-        .map(|path| {
-            let mut entry = toml::map::Map::new();
-            entry.insert(
-                "path".to_string(),
-                toml::Value::String(path.to_string_lossy().into_owned()),
-            );
-            entry.insert("enabled".to_string(), toml::Value::Boolean(false));
-            toml::Value::Table(entry)
-        })
-        .collect::<Vec<_>>();
-    let mut skills = toml::map::Map::new();
-    skills.insert(
-        "bundled".to_string(),
-        toml::Value::Table(toml::map::Map::from_iter([(
-            "enabled".to_string(),
-            toml::Value::Boolean(false),
-        )])),
-    );
-    skills.insert(
-        "max_context_tokens".to_string(),
-        toml::Value::Integer(10_000),
-    );
-    skills.insert("config".to_string(), toml::Value::Array(disabled_skills));
-    layers.push(ConfigLayerEntry::new(
-        ConfigLayerSource::SessionFlags,
-        toml::Value::Table(toml::map::Map::from_iter([(
-            "skills".to_string(),
-            toml::Value::Table(skills),
-        )])),
-    ));
-    config.config_layer_stack = ConfigLayerStack::new(layers, requirements, requirements_toml)
-        .expect("hermetic skill catalog config should be valid");
-}
 
 // This code runs before any other tests are run.
 // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
@@ -99,18 +36,19 @@ pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
 #[cfg(not(target_os = "windows"))]
 mod abort_tasks;
 mod additional_context;
+#[path = "agent_control_tests.rs"]
+mod agent_control;
 mod agent_execution;
 mod agent_websocket;
 mod agents_md;
+mod app_tool_exposure;
 mod apply_patch_cli;
 mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
-#[path = "astra_compatibility_tests.rs"]
-mod astra_compatibility;
 mod audio_truncation;
+mod auth_recovery_policy;
 mod auto_review;
-mod background_review;
 mod catalog_permission_messages;
 mod cli_stream;
 mod client;
@@ -118,6 +56,7 @@ mod client_websockets;
 mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
+mod code_mode_model_messages;
 mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;
@@ -135,20 +74,25 @@ mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
-#[cfg(not(target_os = "windows"))]
-mod external_agent_preflight;
 mod external_auth;
 mod fork_thread;
 mod git_enrichment;
 mod guardian_authorization;
+mod guardian_authorization_refresh;
+#[path = "guardian_cached_score_tests.rs"]
+mod guardian_cached_score;
 #[path = "guardian_checkpoint_migration_tests.rs"]
 mod guardian_checkpoint_migration;
 // Uses the same command-approval harness as guardian_review below.
 mod canonical_plugin_connectors;
+mod gateway_auth;
 #[cfg(not(target_os = "windows"))]
 mod guardian_context_budget;
 mod guardian_history;
 mod guardian_mcp_elicitation;
+#[cfg(not(target_os = "windows"))]
+#[path = "guardian_persistence_tests.rs"]
+mod guardian_persistence;
 mod guardian_retained_context;
 mod guardian_retry;
 #[cfg(not(target_os = "windows"))]
@@ -167,11 +111,9 @@ mod image_rollout;
 mod injected_models_cache;
 #[cfg(not(target_os = "windows"))]
 mod interrupt_hooks;
-mod invalid_image_recovery;
 mod items;
 mod json_result;
 mod live_cli;
-mod local_provider_tool_surface;
 #[path = "managed_threads_tests.rs"]
 mod managed_threads;
 mod mcp_auth_elicitation;
@@ -182,6 +124,7 @@ mod mcp_optional_startup_grace;
 #[cfg(unix)]
 mod mcp_refresh_cleanup;
 mod mcp_startup_refresh_http_proxy;
+mod mcp_subagent_elicitation;
 mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
@@ -189,6 +132,7 @@ mod mcp_user_verification;
 mod model_overrides;
 #[path = "model_provider_requirements_tests.rs"]
 mod model_provider_requirements;
+mod model_request;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
@@ -197,6 +141,7 @@ mod models_cache_ttl;
 mod models_etag_responses;
 mod multi_agent_mode;
 mod multi_agent_resume;
+mod multi_agent_tool_descriptions;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
 mod network_approval;
@@ -208,7 +153,6 @@ mod pending_input_persistence;
 mod permissions_messages;
 mod personality;
 mod plugins;
-mod project_validation;
 mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
@@ -217,6 +161,7 @@ mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
 mod realtime_sideband_endpoint;
+mod realtime_system_proxy;
 mod reasoning_effort_override;
 mod remote_env;
 mod remote_models;
@@ -244,7 +189,6 @@ mod safety_buffering;
 mod safety_check_downgrade;
 mod scenarios;
 mod search_tool;
-mod session_provenance;
 mod settings_commits;
 mod settings_constraints;
 mod shell_snapshot;
@@ -266,12 +210,12 @@ mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
 mod tools;
-mod tools_disabled;
 mod truncation;
-mod turn_context_environments;
 mod turn_input_submission;
 mod turn_state;
 mod unified_exec;
+#[path = "unified_exec_launch_failure_tests.rs"]
+mod unified_exec_launch_failure;
 mod unified_exec_process_events;
 mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;
@@ -282,9 +226,14 @@ mod user_notification;
 mod user_shell_cmd;
 mod view_image;
 mod web_search;
+#[path = "web_search_system_proxy_tests.rs"]
+mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
 #[cfg(target_os = "windows")]
 mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
+
+#[path = "guardian_sender_messages_tests.rs"]
+mod guardian_sender_messages;

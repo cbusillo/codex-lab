@@ -6,7 +6,6 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
-use crate::ValidationConfig;
 use crate::browser_use::BrowserUseConfigToml;
 use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
@@ -56,7 +55,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_path::normalize_for_path_comparison;
+use codex_utils_path_uri::Platform;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -140,14 +139,23 @@ of strings; comma-separated strings are not supported. Use \
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct OrchestratorToml {
-    pub skills: Option<OrchestratorFeatureToml>,
-    pub mcp: Option<OrchestratorFeatureToml>,
+    /// Legacy no-op setting retained for compatibility. Use `cloud.skills` to configure cloud skills.
+    pub skills: Option<FeatureToggleToml>,
+    pub mcp: Option<FeatureToggleToml>,
 }
 
-/// Settings for a feature owned by the orchestrator.
+/// Cloud-owned feature settings.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-pub struct OrchestratorFeatureToml {
+pub struct CloudToml {
+    /// Cloud skills are permitted by default; the host must supply a cloud provider.
+    pub skills: Option<FeatureToggleToml>,
+}
+
+/// Optional enablement of a configured feature.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct FeatureToggleToml {
     pub enabled: Option<bool>,
 }
 
@@ -173,6 +181,12 @@ pub struct ConfigToml {
     /// only to tokens after the carried prefix in the current compaction window.
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
+    /// Percentage of the usable context window that triggers compaction after a final
+    /// response. Existing auto-compaction limits still apply. Omitted or zero disables
+    /// turn-end compaction; valid values are 0–100.
+    #[schemars(range(min = 0, max = 100))]
+    pub model_post_turn_compact_threshold_percent: Option<u8>,
+
     /// Default approval policy for executing commands.
     #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,
@@ -185,10 +199,6 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
-
-    /// Patch-local validation policy.
-    #[serde(default)]
-    pub validation: Option<ValidationConfig>,
 
     pub browser_use: Option<BrowserUseConfigToml>,
 
@@ -349,17 +359,17 @@ pub struct ConfigToml {
     #[serde(default)]
     pub profiles: HashMap<String, ConfigProfile>,
 
-    /// Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.
+    /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
     #[serde(default = "default_history")]
     pub history: Option<History>,
 
     /// Directory where Codex stores the SQLite state DB.
-    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`.
+    /// Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`.
     pub sqlite_home: Option<AbsolutePathBuf>,
 
     /// Directory where Codex writes log files. Setting this value explicitly
     /// also enables the TUI text log in this directory.
-    /// Defaults to `$CODEX_LAB_HOME/log`.
+    /// Defaults to `$CODEX_HOME/log`.
     pub log_dir: Option<AbsolutePathBuf>,
 
     /// Optional URI-based file opener. If set, citations to files in the model
@@ -398,14 +408,6 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
-    /// Whether Codex may automatically switch saved accounts when the active
-    /// ChatGPT account is rate or usage limited.
-    pub auto_switch_accounts_on_rate_limit: Option<bool>,
-
-    /// Whether Codex may fall back to a saved API key account once all saved
-    /// ChatGPT accounts are rate or usage limited.
-    pub api_key_fallback_on_all_accounts_limited: Option<bool>,
-
     /// Optional product SKU forwarded on host-owned Codex Apps MCP requests.
     pub apps_mcp_product_sku: Option<String>,
 
@@ -414,6 +416,9 @@ pub struct ConfigToml {
 
     /// Orchestrator-owned feature settings.
     pub orchestrator: Option<OrchestratorToml>,
+
+    /// Cloud-owned feature settings.
+    pub cloud: Option<CloudToml>,
 
     /// Base URL override for the built-in `openai` model provider.
     pub openai_base_url: Option<String>,
@@ -450,10 +455,6 @@ pub struct ConfigToml {
     /// instructions inserted into developer messages when realtime becomes
     /// active.
     pub experimental_realtime_start_instructions: Option<String>,
-
-    /// Experimental / do not use. When set, app-server fetches thread-scoped
-    /// config from a remote service at this endpoint.
-    pub experimental_thread_config_endpoint: Option<String>,
 
     /// Removed. Former remote thread-store endpoint setting kept only so we can
     /// fail fast instead of silently falling back to local persistence.
@@ -570,11 +571,8 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
-    pub background_max_diff_bytes: Option<usize>,
-    pub background_max_elapsed_seconds: Option<u64>,
-    pub background_max_total_tokens: Option<u64>,
-    pub background_max_output_bytes: Option<usize>,
-    pub background_max_findings: Option<usize>,
+    /// Additional policy text inserted into the Guardian template's `{{ extra_policy }}` slot.
+    pub extra_policy: Option<String>,
     /// Experimental full Guardian prompt template containing the tenant policy placeholder.
     pub experimental_policy_template: Option<String>,
 }
@@ -648,12 +646,9 @@ pub struct RealtimeAudioToml {
     pub speaker: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolsToml {
-    /// Whether model-visible tools are available for turns using this config.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_web_search_tool_config"
@@ -661,17 +656,6 @@ pub struct ToolsToml {
     pub web_search: Option<WebSearchToolConfig>,
     pub experimental_request_user_input: Option<ExperimentalRequestUserInput>,
     pub update_plan: Option<UpdatePlanToolConfig>,
-}
-
-impl Default for ToolsToml {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            web_search: None,
-            experimental_request_user_input: None,
-            update_plan: None,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -744,10 +728,6 @@ pub struct AgentsToml {
     /// Defaults to true.
     pub interrupt_message: Option<bool>,
 
-    /// Explicit enablement overrides for built-in and discovered agent selectors.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub selectors: BTreeMap<String, AgentSelectorToml>,
-
     /// User-defined role declarations keyed by role name.
     ///
     /// Example:
@@ -763,17 +743,6 @@ pub struct AgentsToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
-pub struct AgentSelectorToml {
-    /// Whether this selector is available to the model and explicit spawn calls.
-    pub enabled: Option<bool>,
-    /// Provider-native model used when this selector does not name one explicitly.
-    pub model: Option<String>,
-    /// Provider-native effort used when a spawn call does not select one explicitly.
-    pub effort: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
 pub struct AgentRoleToml {
     /// Human-facing role documentation used in spawn tool guidance.
     /// Required unless supplied by the referenced agent role file.
@@ -785,46 +754,6 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
-
-    /// Optional non-Codex backend used to run agents spawned with this role.
-    pub backend: Option<AgentRoleBackendToml>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case")]
-#[schemars(deny_unknown_fields)]
-pub enum AgentRoleBackendToml {
-    ExternalCommand(ExternalCommandAgentBackendToml),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ExternalCommandProtocolToml {
-    #[default]
-    Json,
-    RawCli,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct ExternalCommandAgentBackendToml {
-    /// Command to execute for each spawned external agent.
-    #[schemars(length(min = 1))]
-    pub command: String,
-    /// Protocol to communicate with the external agent.
-    #[serde(default)]
-    pub protocol: ExternalCommandProtocolToml,
-    /// Arguments passed to the command after the executable path.
-    pub args: Option<Vec<String>>,
-    /// Arguments appended when the agent is running in read-only mode.
-    pub args_read_only: Option<Vec<String>>,
-    /// Arguments appended when the agent is running in workspace-write mode.
-    pub args_write: Option<Vec<String>>,
-    /// Environment variables to set for the spawned agent.
-    pub env: Option<HashMap<String, String>>,
-    /// Maximum process runtime in milliseconds.
-    #[schemars(range(min = 1))]
-    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -840,8 +769,28 @@ pub struct GhostSnapshotToml {
     pub disable_warnings: Option<bool>,
 }
 
+/// Apply the executor's sandbox availability to an already selected sandbox mode.
+///
+/// Call this before resolving workspace-write settings so unused writable roots
+/// do not affect the read-only fallback. Named permission profiles are resolved
+/// separately and must not be downgraded through this helper.
+pub fn effective_sandbox_mode(
+    mode: SandboxMode,
+    platform: Platform,
+    windows_sandbox_level: WindowsSandboxLevel,
+) -> SandboxMode {
+    if platform == Platform::Windows
+        && windows_sandbox_level == WindowsSandboxLevel::Disabled
+        && mode == SandboxMode::WorkspaceWrite
+    {
+        SandboxMode::ReadOnly
+    } else {
+        mode
+    }
+}
+
 impl ConfigToml {
-    /// Derive the effective permission profile from legacy sandbox config.
+    /// Derive the effective permission profile from sandbox config.
     ///
     /// Call this only after ruling out `default_permissions`: named
     /// `[permissions]` profiles must be compiled through the permissions
@@ -857,30 +806,17 @@ impl ConfigToml {
         let resolved_sandbox_mode = configured_sandbox_mode
             .or_else(|| {
                 // If no sandbox_mode is set but this directory has a trust decision,
-                // default to workspace-write except on unsandboxed Windows where we
-                // default to read-only.
+                // default to workspace-write before applying the platform fallback.
                 active_project
                     .filter(|project| project.is_trusted() || project.is_untrusted())
-                    .map(|_| {
-                        if cfg!(target_os = "windows")
-                            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-                        {
-                            SandboxMode::ReadOnly
-                        } else {
-                            SandboxMode::WorkspaceWrite
-                        }
-                    })
+                    .map(|_| SandboxMode::WorkspaceWrite)
             })
             .unwrap_or_default();
-        let effective_sandbox_mode = if cfg!(target_os = "windows")
-            // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
-        {
-            SandboxMode::ReadOnly
-        } else {
-            resolved_sandbox_mode
-        };
+        let effective_sandbox_mode = effective_sandbox_mode(
+            resolved_sandbox_mode,
+            Platform::native(),
+            windows_sandbox_level,
+        );
 
         let permission_profile = match effective_sandbox_mode {
             SandboxMode::ReadOnly => PermissionProfile::read_only(),
@@ -929,70 +865,12 @@ impl ConfigToml {
         resolved_cwd: &Path,
         repo_root: Option<&Path>,
     ) -> Option<ProjectConfig> {
-        let projects = self.projects.as_ref()?;
-
-        for normalized_cwd in normalized_project_lookup_keys(resolved_cwd) {
-            if let Some(project_config) = project_config_for_lookup_key(projects, &normalized_cwd) {
-                return Some(project_config);
-            }
-        }
-
-        if let Some(repo_root) = repo_root {
-            for normalized_repo_root in normalized_project_lookup_keys(repo_root) {
-                if let Some(project_config_for_root) =
-                    project_config_for_lookup_key(projects, &normalized_repo_root)
-                {
-                    return Some(project_config_for_root);
-                }
-            }
-        }
-
-        None
+        self.projects.as_ref()?;
+        self.get_active_project_for_lookup(&crate::ProjectTrustLookup::from_native(
+            resolved_cwd,
+            repo_root,
+        ))
     }
-}
-
-/// Canonicalize the path and convert it to a string to be used as a key in the
-/// projects trust map. On Windows, strips UNC, when possible, to try to ensure
-/// that different paths that point to the same location have the same key.
-fn normalized_project_lookup_keys(path: &Path) -> Vec<String> {
-    let normalized_path = normalize_project_lookup_key(path.to_string_lossy().to_string());
-    let normalized_canonical_path = normalize_project_lookup_key(
-        normalize_for_path_comparison(path)
-            .unwrap_or_else(|_| path.to_path_buf())
-            .to_string_lossy()
-            .to_string(),
-    );
-    if normalized_path == normalized_canonical_path {
-        vec![normalized_canonical_path]
-    } else {
-        vec![normalized_canonical_path, normalized_path]
-    }
-}
-
-fn normalize_project_lookup_key(key: String) -> String {
-    if cfg!(windows) {
-        key.to_ascii_lowercase()
-    } else {
-        key
-    }
-}
-
-fn project_config_for_lookup_key(
-    projects: &HashMap<String, ProjectConfig>,
-    lookup_key: &str,
-) -> Option<ProjectConfig> {
-    if let Some(project_config) = projects.get(lookup_key) {
-        return Some(project_config.clone());
-    }
-
-    let mut normalized_matches: Vec<_> = projects
-        .iter()
-        .filter(|(key, _)| normalize_project_lookup_key((*key).clone()) == lookup_key)
-        .collect();
-    normalized_matches.sort_by_key(|(key, _)| *key);
-    normalized_matches
-        .first()
-        .map(|(_, project_config)| (**project_config).clone())
 }
 
 pub fn validate_reserved_model_provider_ids(
@@ -1090,6 +968,37 @@ mod tests {
 
     const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
     const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
+
+    #[test]
+    fn sandbox_mode_uses_executor_platform_and_sandbox_level() {
+        use Platform::Linux;
+        use Platform::Macos;
+        use Platform::Unknown;
+        use Platform::Windows;
+        use SandboxMode::DangerFullAccess;
+        use SandboxMode::ReadOnly;
+        use SandboxMode::WorkspaceWrite;
+        use WindowsSandboxLevel::Disabled;
+        use WindowsSandboxLevel::Elevated;
+        use WindowsSandboxLevel::RestrictedToken;
+
+        for (mode, platform, level, expected) in [
+            (WorkspaceWrite, Windows, Disabled, ReadOnly),
+            (WorkspaceWrite, Windows, RestrictedToken, WorkspaceWrite),
+            (WorkspaceWrite, Windows, Elevated, WorkspaceWrite),
+            (WorkspaceWrite, Linux, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Macos, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Unknown, Disabled, WorkspaceWrite),
+            (ReadOnly, Windows, Disabled, ReadOnly),
+            (DangerFullAccess, Windows, Disabled, DangerFullAccess),
+        ] {
+            assert_eq!(
+                effective_sandbox_mode(mode, platform, level),
+                expected,
+                "{mode:?}, {platform:?}, {level:?}"
+            );
+        }
+    }
 
     #[test]
     fn thread_unload_delay_requires_nonnegative_seconds() {

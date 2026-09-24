@@ -4,10 +4,6 @@ inputs:
   target:
     description: Rust target triple with Codex-built V8 release artifacts.
     required: true
-  artifact-repository:
-    description: Repository (owner/name) that publishes rusty_v8 release artifacts.
-    required: false
-    default: ""
 
 runs:
   using: composite
@@ -16,21 +12,12 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-        RUSTY_V8_ARTIFACT_REPOSITORY: ${{ inputs.artifact-repository }}
       run: |
         set -euo pipefail
 
-        repository="${RUSTY_V8_ARTIFACT_REPOSITORY:-${GITHUB_REPOSITORY:-}}"
-        if [[ ! "$repository" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
-          echo "Invalid rusty_v8 artifact repository: ${repository}" >&2
-          exit 1
-        fi
-        server_url="${GITHUB_SERVER_URL:-https://github.com}"
-        server_url="${server_url%/}"
-
         version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
         release_tag="rusty-v8-v${version}"
-        base_url="${server_url}/${repository}/releases/download/${release_tag}"
+        base_url="https://github.com/openai/codex/releases/download/${release_tag}"
         binding_dir="${RUNNER_TEMP}/rusty_v8"
         
         profile="ptrcomp_sandbox_release"
@@ -65,6 +52,7 @@ runs:
         fi
         curl -fsSL "${base_url}/${archive_name}" -o "${archive_path}"
         curl -fsSL "${base_url}/${binding_name}" -o "${binding_path}"
+
         if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
           echo "Expected exactly two checksums for ${TARGET} in ${checksums_path}" >&2
           exit 1

@@ -29,14 +29,13 @@ pub(crate) async fn warm_http_client(
     Ok(())
 }
 
-/// Serializes tests that mutate process-wide CODEX_LAB_HOME.
+/// Serializes tests that mutate process-wide CODEX_HOME.
 ///
 /// Keep OAuth tests on this one guard instead of defining per-module helpers; otherwise
 /// concurrently running test modules can point File/Secrets storage at different homes.
 pub(crate) struct TempCodexHome {
     _guard: MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
-    previous_codex_lab_home: Option<std::ffi::OsString>,
 }
 
 impl TempCodexHome {
@@ -46,15 +45,13 @@ impl TempCodexHome {
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let dir = tempdir().expect("create CODEX_LAB_HOME temp dir");
-        let previous_codex_lab_home = std::env::var_os("CODEX_LAB_HOME");
+        let dir = tempdir().expect("create CODEX_HOME temp dir");
         unsafe {
-            std::env::set_var("CODEX_LAB_HOME", dir.path());
+            std::env::set_var("CODEX_HOME", dir.path());
         }
         Self {
             _guard: guard,
             _dir: dir,
-            previous_codex_lab_home,
         }
     }
 
@@ -65,13 +62,8 @@ impl TempCodexHome {
 
 impl Drop for TempCodexHome {
     fn drop(&mut self) {
-        match self.previous_codex_lab_home.as_ref() {
-            Some(previous) => unsafe {
-                std::env::set_var("CODEX_LAB_HOME", previous);
-            },
-            None => unsafe {
-                std::env::remove_var("CODEX_LAB_HOME");
-            },
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
         }
     }
 }

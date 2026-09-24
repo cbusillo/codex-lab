@@ -321,6 +321,7 @@ async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result
         loader_overrides: overrides,
         strict_config: false,
         cloud_config_bundle: CloudConfigBundleLoader::default(),
+        embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -328,7 +329,6 @@ async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
-        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {

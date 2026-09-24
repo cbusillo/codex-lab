@@ -4,8 +4,6 @@ import json
 import os
 import queue
 import shutil
-import socket
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -239,7 +237,6 @@ class AppServerHarness:
             codex_bin=codex_bin,
             cwd=str(self.workspace),
             env={
-                "CODEX_LAB_HOME": str(self.codex_home),
                 "CODEX_HOME": str(self.codex_home),
                 "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG": "1",
                 "RUST_LOG": "warn",
@@ -280,16 +277,6 @@ class _ResponsesHttpServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, handler_class)
         self.mock = mock
-
-    def handle_error(
-        self,
-        request: socket.socket | tuple[bytes, socket.socket],
-        client_address: tuple[str, int],
-    ) -> None:
-        """Ignore expected client disconnects while preserving other tracebacks."""
-        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
-            return
-        super().handle_error(request, client_address)
 
 
 class _ResponsesHandler(BaseHTTPRequestHandler):

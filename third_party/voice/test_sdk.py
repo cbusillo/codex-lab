@@ -2,17 +2,16 @@
 
 import json
 import os
+from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from runtime import digest
-
-from sdk import PKG_CONFIG_MODULES, export_sdk
+from sdk import MODULES, export_sdk
 
 
 class SdkTests(unittest.TestCase):
@@ -23,7 +22,6 @@ class SdkTests(unittest.TestCase):
         self.prefix = self.root / "prefix"
         self.receipts = self.root / "receipts"
         self.output = self.root / "sdk"
-        self.runtime = self.root / "runtime"
         self.target = "aarch64-apple-darwin"
         for name in ("include/glib-2.0", "lib/glib-2.0/include", "lib/pkgconfig"):
             (self.prefix / name).mkdir(parents=True)
@@ -31,12 +29,7 @@ class SdkTests(unittest.TestCase):
         (self.prefix / "lib/glib-2.0/include/glibconfig.h").write_text("/* target */")
         self.library = self.prefix / "lib/libfixture.0.dylib"
         self.library.write_bytes(b"receipt-verified fixture bytes")
-        self.alias = self.prefix / "lib/libfixture.dylib"
-        try:
-            self.alias.symlink_to(self.library.name)
-        except OSError:
-            self.skipTest("host cannot create the SDK's development symlink")
-        for module in PKG_CONFIG_MODULES:
+        for module in (*MODULES, "zlib"):
             (self.prefix / f"lib/pkgconfig/{module}.pc").write_text(
                 "prefix=${pcfiledir}/../..\n"
                 f"Name: {module}\nDescription: SDK fixture\nVersion: 1.0\n"
@@ -45,13 +38,6 @@ class SdkTests(unittest.TestCase):
         audio = self.prefix / "lib/pkgconfig/gstreamer-audio-1.0.pc"
         audio.write_text(
             audio.read_text() + "Requires.private: gstreamer-tag-1.0, zlib\n"
-        )
-        zlib = self.prefix / "lib/pkgconfig/zlib.pc"
-        zlib.write_text(
-            zlib.read_text().replace(
-                "Libs: -L${prefix}/lib",
-                "exec_prefix=${prefix}\nLibs: -L${exec_prefix}/lib",
-            )
         )
         (self.receipts / "inspection").mkdir(parents=True)
         self.ci = {
@@ -73,40 +59,9 @@ class SdkTests(unittest.TestCase):
                 ]
             )
         )
-        (self.runtime / "lib").mkdir(parents=True)
-        projected = self.runtime / "lib/libfixture.0.dylib"
-        projected.write_bytes(self.library.read_bytes())
-        (self.runtime / "runtime.json").write_text(
-            json.dumps(
-                {
-                    "schemaVersion": 1,
-                    "target": self.target,
-                    "sourceCommit": "a" * 40,
-                    "sourceManifestSha256": self.ci["manifest_sha256"],
-                    "libraries": [
-                        {
-                            "path": "lib/libfixture.0.dylib",
-                            "sourcePath": "lib/libfixture.0.dylib",
-                            "sourceSha256": digest(self.library),
-                            "sha256": digest(projected),
-                            "imports": [],
-                        }
-                    ],
-                }
-            )
-        )
-
-    def export(self, output=None, target=None):
-        export_sdk(
-            self.prefix,
-            self.receipts,
-            target or self.target,
-            output or self.output,
-            runtime=self.runtime,
-        )
 
     def test_exported_bytes_and_receipt_survive_move_without_original(self):
-        self.export()
+        export_sdk(self.prefix, self.receipts, self.target, self.output)
         moved = self.root / "moved SDK"
         self.output.rename(moved)
         shutil.rmtree(self.prefix)
@@ -154,68 +109,40 @@ class SdkTests(unittest.TestCase):
 
     def test_native_mutation_and_wrong_target_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "sources and target"):
-            self.export(target="x86_64-apple-darwin")
+            export_sdk(self.prefix, self.receipts, "x86_64-apple-darwin", self.output)
         self.library.write_bytes(b"changed")
         with self.assertRaisesRegex(ValueError, "does not match"):
-            self.export()
+            export_sdk(self.prefix, self.receipts, self.target, self.output)
         self.assertFalse(self.output.exists())
 
     def test_development_alias_is_materialized_and_escape_is_rejected(self):
-        self.export()
+        alias = self.prefix / "lib/libfixture.dylib"
+        try:
+            alias.symlink_to(self.library.name)
+        except OSError:
+            self.skipTest("host cannot create the SDK's development symlink")
+        export_sdk(self.prefix, self.receipts, self.target, self.output)
         self.assertFalse((self.output / "lib/libfixture.dylib").is_symlink())
         self.assertEqual(
             (self.output / "lib/libfixture.dylib").read_bytes(),
             self.library.read_bytes(),
         )
         shutil.rmtree(self.output)
-        self.alias.unlink()
-        self.alias.symlink_to(self.receipts / "ci.json")
+        alias.unlink()
+        alias.symlink_to(self.receipts / "ci.json")
         with self.assertRaisesRegex(ValueError, "inside the prefix"):
-            self.export()
-
-    def test_projected_runtime_mapping_is_required_and_verified(self):
-        manifest = json.loads((self.runtime / "runtime.json").read_text())
-        for change, message in (
-            ({"libraries": []}, "does not match"),
-            (
-                {
-                    "libraries": [
-                        *manifest["libraries"],
-                        {**manifest["libraries"][0], "path": "lib/duplicate.dylib"},
-                    ]
-                },
-                "invalid",
-            ),
-        ):
-            with self.subTest(change=change):
-                (self.runtime / "runtime.json").write_text(
-                    json.dumps({**manifest, **change})
-                )
-                with self.assertRaisesRegex(ValueError, message):
-                    self.export()
-                self.assertFalse(self.output.exists())
-        (self.runtime / "runtime.json").write_text(json.dumps(manifest))
+            export_sdk(self.prefix, self.receipts, self.target, self.output)
 
     def test_nonrelocatable_metadata_and_failed_copy_leave_no_output(self):
-        for module, field in (
-            ("gstreamer-1.0", "prefix=${pcfiledir}/../.."),
-            ("zlib", "exec_prefix=${prefix}"),
-        ):
-            with self.subTest(module=module):
-                metadata = self.prefix / f"lib/pkgconfig/{module}.pc"
-                original = metadata.read_text()
-                metadata.write_text(
-                    original.replace(field, f"{field.partition('=')[0]}=/old/build")
-                )
-                with self.assertRaisesRegex(ValueError, "rebuild the SDK"):
-                    self.export()
-                metadata.write_text(original)
-                self.assertFalse(self.output.exists())
-        with (
-            patch("sdk.shutil.copy2", side_effect=OSError("copy failed")),
-            self.assertRaises(OSError),
-        ):
-            self.export()
+        metadata = self.prefix / "lib/pkgconfig/gstreamer-1.0.pc"
+        original = metadata.read_text()
+        metadata.write_text(original.replace("${pcfiledir}/../..", "/old/build"))
+        with self.assertRaisesRegex(ValueError, "rebuild the SDK"):
+            export_sdk(self.prefix, self.receipts, self.target, self.output)
+        metadata.write_text(original)
+        with patch("sdk.shutil.copy2", side_effect=OSError("copy failed")):
+            with self.assertRaises(OSError):
+                export_sdk(self.prefix, self.receipts, self.target, self.output)
         self.assertFalse(self.output.exists())
 
     def test_output_cannot_overwrite_or_nest_inside_inputs(self):
@@ -224,4 +151,4 @@ class SdkTests(unittest.TestCase):
                 self.subTest(output=output),
                 self.assertRaisesRegex(ValueError, "fresh"),
             ):
-                self.export(output=output)
+                export_sdk(self.prefix, self.receipts, self.target, output)

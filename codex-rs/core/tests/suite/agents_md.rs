@@ -9,7 +9,6 @@ use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_extension_api::Instructions;
 use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
-use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
 use codex_extension_api::ThreadInstructionsProvider;
 use codex_extension_api::UserInstructionsProvider;
 use codex_features::Feature;
@@ -91,14 +90,6 @@ const SPAWN_CHILD_PROMPT: &str = "inspect inherited global instructions";
 const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
 const SPAWN_PARENT_PROMPT: &str = "spawn a child with the parent context";
 const SPAWN_SEED_PROMPT: &str = "seed parent history";
-const SPAWN_SEED_RESPONSE: &str = "seeded";
-
-#[derive(Clone, Copy)]
-enum SubagentHistory {
-    None,
-    Full,
-}
-
 const PROVIDER_WARNING: &str = "global instruction source unavailable; using fallback";
 
 struct WarningInstructionsProvider {
@@ -118,9 +109,10 @@ impl UserInstructionsProvider for WarningInstructionsProvider {
     }
 }
 
-struct RecordingThreadInstructionsProvider {
+pub(super) struct RecordingThreadInstructionsProvider {
     loaded: Mutex<LoadedUserInstructions>,
     load_count: AtomicUsize,
+    shared: bool,
 }
 
 impl RecordingThreadInstructionsProvider {
@@ -131,21 +123,27 @@ impl RecordingThreadInstructionsProvider {
                 warnings: Vec::new(),
             }),
             load_count: AtomicUsize::new(0),
+            shared: false,
         }
     }
 
-    fn with_text(text: impl Into<String>) -> Self {
+    pub(super) fn with_text(text: impl Into<String>) -> Self {
         Self::new(Some(Instructions {
             text: text.into(),
             source: None,
         }))
     }
 
-    fn load_count(&self) -> usize {
+    pub(super) fn shared(mut self) -> Self {
+        self.shared = true;
+        self
+    }
+
+    pub(super) fn load_count(&self) -> usize {
         self.load_count.load(Ordering::SeqCst)
     }
 
-    fn set_instructions(&self, instructions: Option<Instructions>) {
+    pub(super) fn set_instructions(&self, instructions: Option<Instructions>) {
         self.loaded
             .lock()
             .expect("instruction snapshot lock")
@@ -161,6 +159,10 @@ impl RecordingThreadInstructionsProvider {
 }
 
 impl ThreadInstructionsProvider for RecordingThreadInstructionsProvider {
+    fn share_with_subagents(&self) -> bool {
+        self.shared
+    }
+
     fn load_thread_instructions(&self) -> LoadInstructionsFuture<'_> {
         self.load_count.fetch_add(1, Ordering::SeqCst);
         let loaded = self
@@ -211,8 +213,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item
-                && let Some(state) = world_state.state.as_object_mut()
-                && state.remove("agents_md").is_some()
+                && world_state.state.remove("agents_md").is_some()
             {
                 removed_section = true;
             }
@@ -228,7 +229,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
+pub(super) fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
     request
         .message_input_texts("user")
         .into_iter()
@@ -241,7 +242,7 @@ fn expected_instruction_fragment(cwd: &PathUri, contents: &str) -> String {
     format!("# AGENTS.md instructions for {cwd}\n\n<INSTRUCTIONS>\n{contents}\n</INSTRUCTIONS>")
 }
 
-fn expected_provider_only_instruction_fragment(contents: &str) -> String {
+pub(super) fn expected_provider_only_instruction_fragment(contents: &str) -> String {
     format!("# AGENTS.md instructions\n\n<INSTRUCTIONS>\n{contents}\n</INSTRUCTIONS>")
 }
 
@@ -249,7 +250,10 @@ fn assert_single_instruction_fragment(request: &responses::ResponsesRequest, exp
     assert_eq!(instruction_fragments(request), vec![expected.to_string()]);
 }
 
-async fn submit_thread_turn(thread: &Arc<codex_core::CodexThread>, prompt: &str) -> Result<()> {
+pub(super) async fn submit_thread_turn(
+    thread: &Arc<codex_core::CodexThread>,
+    prompt: &str,
+) -> Result<()> {
     thread
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: prompt.to_string(),
@@ -260,7 +264,7 @@ async fn submit_thread_turn(thread: &Arc<codex_core::CodexThread>, prompt: &str)
     Ok(())
 }
 
-async fn persisted_resume_history(
+pub(super) async fn persisted_resume_history(
     thread: &Arc<codex_core::CodexThread>,
 ) -> Result<(ThreadId, InitialHistory)> {
     thread.ensure_rollout_materialized().await;
@@ -1304,6 +1308,75 @@ async fn thread_provider_refreshes_at_the_next_step_of_an_active_turn() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn isolated_guardian_keeps_applied_thread_instructions() -> Result<()> {
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.permissions.approval_policy = codex_core::config::Constrained::allow_any(
+                codex_protocol::protocol::AskForApproval::OnRequest,
+            );
+            config.approvals_reviewer = codex_protocol::config_types::ApprovalsReviewer::AutoReview;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let provider =
+        Arc::new(RecordingThreadInstructionsProvider::with_text(TASK_USER_INSTRUCTIONS).shared());
+    let parent = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(test.codex.environment_selections().await),
+            thread_instructions_provider: Some(provider.clone()),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    // Publish an update after the parent captured its instructions, before it starts Guardian.
+    let parent_request = responses::mount_sse_once_match(
+        &server,
+        move |_: &wiremock::Request| {
+            provider.set_instructions(Some(Instructions {
+                text: UPDATED_TASK_USER_INSTRUCTIONS.to_owned(),
+                source: None,
+            }));
+            true
+        },
+        sse(vec![
+            responses::ev_exec_command_call_with_args(
+                "action",
+                &serde_json::json!({
+                    "cmd": "echo reviewed",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "Check the requested action.",
+                }),
+            ),
+            ev_completed("parent-action"),
+        ]),
+    )
+    .await;
+    let remaining = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                responses::ev_assistant_message("decision", r#"{"outcome":"deny"}"#),
+                ev_completed("guardian-review"),
+            ]),
+            responses::sse_completed("parent-done"),
+        ],
+    )
+    .await;
+    submit_thread_turn(&parent.thread, "Check the action before executing it.").await?;
+    let requests = remaining.requests();
+    let initial = expected_provider_only_instruction_fragment(TASK_USER_INSTRUCTIONS);
+    assert_single_instruction_fragment(&parent_request.single_request(), &initial);
+    assert_eq!(
+        requests[0].body_json()["client_metadata"]["x-openai-subagent"],
+        "guardian"
+    );
+    assert_single_instruction_fragment(&requests[0], &initial);
+    assert!(requests[1].body_contains_text(UPDATED_TASK_USER_INSTRUCTIONS));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() -> Result<()> {
     let server = start_mock_server().await;
     let response_mock = responses::mount_sse_sequence(
@@ -1376,6 +1449,9 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
     // The full thread budget is independent of global instructions and wrapping.
     // Changing environments must also remove the previously selected repository docs.
     let host_text = "x".repeat(approx_bytes_for_tokens(/*tokens*/ 10_000));
+    let expected = expected_provider_only_instruction_fragment(&format!(
+        "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n{GLOBAL_INSTRUCTIONS}\n\n{host_text}"
+    ));
     fixture.provider.set_instructions(Some(Instructions {
         text: host_text,
         source: None,
@@ -1402,19 +1478,7 @@ async fn thread_provider_enforces_its_own_limit_before_startup_and_sampling() ->
     .await;
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
-    let fragments = instruction_fragments(&requests[1]);
-    let rendered = fragments
-        .last()
-        .expect("the refreshed provider fragment should be present");
-    assert!(rendered.starts_with("# AGENTS.md instructions<bounded_world_state_section "));
-    assert!(rendered.contains(&format!(
-        "<INSTRUCTIONS>\nThese AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n{GLOBAL_INSTRUCTIONS}\n"
-    )));
-    assert!(rendered.contains("world-state content truncated"));
-    assert!(rendered.ends_with("</INSTRUCTIONS>"));
-    assert!(rendered.len() <= MAX_WORLD_STATE_SECTION_BYTES);
-    assert!(rendered.contains(&"x".repeat(128)));
-    assert!(!rendered.contains(PROJECT_INSTRUCTIONS));
+    assert_eq!(instruction_fragments(&requests[1]).last(), Some(&expected));
     Ok(())
 }
 
@@ -1425,11 +1489,15 @@ enum InstructionForkSource {
     OfflinePrepared,
 }
 
-#[test_case::test_case(InstructionForkSource::LiveRollout; "live snapshot")]
-#[test_case::test_case(InstructionForkSource::OfflineHistory; "offline history provider")]
-#[test_case::test_case(InstructionForkSource::OfflinePrepared; "offline prepared provider")]
+#[test_case::test_case(InstructionForkSource::LiveRollout, false; "live snapshot")]
+#[test_case::test_case(InstructionForkSource::LiveRollout, true; "shared provider stays with source root")]
+#[test_case::test_case(InstructionForkSource::OfflineHistory, false; "offline history provider")]
+#[test_case::test_case(InstructionForkSource::OfflinePrepared, false; "offline prepared provider")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn fork_preserves_thread_instructions(source: InstructionForkSource) -> Result<()> {
+async fn fork_preserves_thread_instructions(
+    source: InstructionForkSource,
+    shared: bool,
+) -> Result<()> {
     let server = start_mock_server().await;
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -1453,9 +1521,12 @@ async fn fork_preserves_thread_instructions(source: InstructionForkSource) -> Re
         })
         .with_history_mode(history_mode);
     let test = builder.build_with_auto_env(&server).await?;
-    let parent_provider = Arc::new(RecordingThreadInstructionsProvider::with_text(
-        TASK_USER_INSTRUCTIONS,
-    ));
+    let parent_provider = RecordingThreadInstructionsProvider::with_text(TASK_USER_INSTRUCTIONS);
+    let parent_provider = Arc::new(if shared {
+        parent_provider.shared()
+    } else {
+        parent_provider
+    });
     let parent = test
         .thread_manager
         .start_thread(StartThreadOptions {
@@ -2313,39 +2384,36 @@ async fn fork_injects_changed_agents_md_once() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forked_subagent_replays_parent_applied_global_instructions() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    run_subagent_global_instruction_case(SubagentHistory::Full).await
+    run_subagent_global_instruction_case(/*fork_context*/ true).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_subagent_uses_parent_applied_instructions_without_parent_history() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    run_subagent_global_instruction_case(SubagentHistory::None).await
+    run_subagent_global_instruction_case(/*fork_context*/ false).await
 }
 
-async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Result<()> {
+async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> {
     // Set up matched responses for the parent seed, spawn call, child turn, and parent follow-up.
     let server = responses::start_mock_server().await;
-    let parent_prompt = match history {
-        SubagentHistory::None => SPAWN_FRESH_PARENT_PROMPT,
-        SubagentHistory::Full => SPAWN_PARENT_PROMPT,
+    let parent_prompt = if fork_context {
+        SPAWN_PARENT_PROMPT
+    } else {
+        SPAWN_FRESH_PARENT_PROMPT
     };
     let seed_mock = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| request_body_contains(request, SPAWN_SEED_PROMPT),
         responses::sse(vec![
             responses::ev_response_created("seed-response"),
-            responses::ev_assistant_message("seed-message", SPAWN_SEED_RESPONSE),
+            responses::ev_assistant_message("seed-message", "seeded"),
             responses::ev_completed("seed-response"),
         ]),
     )
     .await;
     let spawn_args = serde_json::to_string(&json!({
         "message": SPAWN_CHILD_PROMPT,
-        "task_name": "child",
-        "fork_turns": match history {
-            SubagentHistory::None => "none",
-            SubagentHistory::Full => "all",
-        },
+        "fork_context": fork_context,
     }))?;
     let spawn_mock = responses::mount_sse_once_match(
         &server,
@@ -2354,7 +2422,7 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
             responses::ev_response_created("spawn-response"),
             responses::ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                "agents",
+                "multi_agent_v1",
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -2362,38 +2430,22 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         ]),
     )
     .await;
-    let child_mock = responses::mount_sse_once_match_recording_matches(
+    let child_mock = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             request_body_contains(request, SPAWN_CHILD_PROMPT)
-                && request
-                    .headers
-                    .get("x-openai-subagent")
-                    .and_then(|value| value.to_str().ok())
-                    == Some("collab_spawn")
+                && !request_body_contains(request, SPAWN_CALL_ID)
         },
         responses::sse(vec![
             responses::ev_response_created("child-response"),
-            json!({
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "message",
-                    "role": "assistant",
-                    "id": "child-message",
-                    "content": [{"type": "output_text", "text": "done"}],
-                    "phase": "final_answer"
-                }
-            }),
+            responses::ev_assistant_message("child-message", "done"),
             responses::ev_completed("child-response"),
         ]),
     )
     .await;
     responses::mount_sse_once_match(
         &server,
-        |request: &wiremock::Request| {
-            request_body_contains(request, SPAWN_CALL_ID)
-                && !request.headers.contains_key("x-openai-subagent")
-        },
+        |request: &wiremock::Request| request_body_contains(request, SPAWN_CALL_ID),
         responses::sse(vec![
             responses::ev_response_created("spawn-follow-up-response"),
             responses::ev_assistant_message("spawn-follow-up-message", "child started"),
@@ -2414,9 +2466,6 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         .with_config(|config| {
             let _ = config.features.enable(Feature::Collab);
             let _ = config.features.disable(Feature::EnableRequestCompression);
-            config.multi_agent_v2.root_agent_usage_hint_text = Some("root usage hint".to_string());
-            config.multi_agent_v2.subagent_usage_hint_text =
-                Some("subagent usage hint".to_string());
         });
     let test = builder.build(&server).await?;
 
@@ -2429,7 +2478,7 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
     test.submit_turn(SPAWN_SEED_PROMPT).await?;
     let seed_request = seed_mock.single_request();
 
-    // Add a preferred override, then spawn a child while observing its thread ID.
+    // Add a preferred override, then spawn a full-history child while observing its thread ID.
     let new_source = write_global_file(
         home.as_ref(),
         GLOBAL_AGENTS_OVERRIDE_FILENAME,
@@ -2443,17 +2492,21 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         .map_err(|_| anyhow!("timed out waiting for the subagent thread"))??;
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
     let spawn_request = spawn_mock.single_request();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let child_request = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if !child_mock.requests().is_empty() {
-                break;
+            if let Some(request) = child_mock.requests().into_iter().find(|request| {
+                request
+                    .message_input_texts("user")
+                    .iter()
+                    .any(|text| text == SPAWN_CHILD_PROMPT)
+            }) {
+                break request;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .map_err(|_| anyhow!("timed out waiting for the subagent request"))?;
-    let child_request = child_mock.single_request();
 
     // The parent refreshes global instructions before spawning. The child inherits
     // that applied snapshot without independently loading the global provider.
@@ -2464,18 +2517,12 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
     ));
     let inherited_fragments = vec![expected_fragment, replacement];
     assert_eq!(instruction_fragments(&spawn_request), inherited_fragments);
-    if matches!(history, SubagentHistory::Full) {
+    if fork_context {
         assert_eq!(instruction_fragments(&child_request), inherited_fragments);
     } else {
         assert_single_instruction_fragment(
             &child_request,
             &expected_provider_only_instruction_fragment(NEW_GLOBAL_INSTRUCTIONS),
-        );
-    }
-    for seeded_text in [SPAWN_SEED_PROMPT, SPAWN_SEED_RESPONSE] {
-        assert!(
-            spawn_request.body_contains_text(seeded_text),
-            "parent spawn request should contain seeded history item {seeded_text:?}"
         );
     }
     assert_eq!(
@@ -2488,109 +2535,33 @@ async fn run_subagent_global_instruction_case(history: SubagentHistory) -> Resul
         vec![PathUri::from_abs_path(&new_source)],
         "subagent reports the parent's applied global source"
     );
-    match history {
-        SubagentHistory::Full => {
-            let seed_input = seed_request.input();
-            let child_input = child_request.input();
-            let root_agent_usage_hint = test
-                .config
-                .multi_agent_v2
-                .root_agent_usage_hint_text
-                .as_deref()
-                .expect("root agent usage hint");
-            let root_agent_usage_hint_count = seed_input
+    if fork_context {
+        let seed_input = seed_request.input();
+        let child_input = child_request.input();
+        assert_eq!(
+            child_input.get(..seed_input.len()),
+            Some(seed_input.as_slice()),
+            "forked subagent should replay the parent's original structured input prefix"
+        );
+    } else {
+        let child_user_texts = child_request.message_input_texts("user");
+        assert_eq!(
+            child_user_texts
                 .iter()
-                .filter(|item| {
-                    item.get("type").and_then(serde_json::Value::as_str) == Some("message")
-                        && item.get("role").and_then(serde_json::Value::as_str) == Some("developer")
-                        && item
-                            .get("content")
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|content| {
-                                content.len() == 1
-                                    && content[0].get("type").and_then(serde_json::Value::as_str)
-                                        == Some("input_text")
-                                    && content[0].get("text").and_then(serde_json::Value::as_str)
-                                        == Some(root_agent_usage_hint)
-                            })
-                })
-                .count();
-            assert_eq!(
-                root_agent_usage_hint_count, 1,
-                "parent seed should contain exactly one standalone root usage hint"
-            );
-            let spawn_input = spawn_request.input();
-            let seeded_user_item = spawn_input
+                .filter(|text| text.as_str() == SPAWN_SEED_PROMPT)
+                .count(),
+            0,
+            "fresh-context subagent should omit parent user history; observed: {child_user_texts:?}"
+        );
+        assert_eq!(
+            child_user_texts
                 .iter()
-                .find(|item| item.to_string().contains(SPAWN_SEED_PROMPT))
-                .expect("parent spawn request missing seeded user item");
-            assert!(
-                child_input.contains(seeded_user_item),
-                "forked subagent should preserve the structured seeded user item"
-            );
-            assert!(
-                !child_request.body_contains_text(SPAWN_SEED_RESPONSE),
-                "forked subagent should filter non-final assistant history"
-            );
-            assert!(
-                !child_request
-                    .message_input_texts("developer")
-                    .iter()
-                    .any(|text| text == root_agent_usage_hint),
-                "forked subagent should omit the parent-only root usage hint"
-            );
-        }
-        SubagentHistory::None => {
-            let child_input = child_request.input();
-            for parent_text in [
-                SPAWN_SEED_PROMPT,
-                SPAWN_SEED_RESPONSE,
-                SPAWN_FRESH_PARENT_PROMPT,
-                SPAWN_CALL_ID,
-            ] {
-                assert!(
-                    !child_request.body_contains_text(parent_text),
-                    "fresh-context subagent should omit parent history item {parent_text:?}; observed: {child_input:#?}"
-                );
-            }
-            let assistant_messages = child_request
-                .inputs_of_type("message")
-                .into_iter()
-                .filter(|item| {
-                    item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                assistant_messages,
-                Vec::<serde_json::Value>::new(),
-                "fresh-context subagent should not inherit parent assistant messages"
-            );
-            for forbidden_type in [
-                "function_call",
-                "function_call_output",
-                "custom_tool_call",
-                "custom_tool_call_output",
-                "reasoning",
-                "tool_search_call",
-                "tool_search_output",
-            ] {
-                assert_eq!(
-                    child_request.inputs_of_type(forbidden_type),
-                    Vec::<serde_json::Value>::new(),
-                    "fresh-context subagent should not inherit parent {forbidden_type} items"
-                );
-            }
-            assert!(
-                child_request.body_contains_text(SPAWN_CHILD_PROMPT),
-                "fresh-context subagent should contain its own task"
-            );
-        }
+                .filter(|text| text.as_str() == SPAWN_CHILD_PROMPT)
+                .count(),
+            1,
+            "fresh-context subagent should contain its own prompt exactly once; observed: {child_user_texts:?}"
+        );
     }
-    assert_eq!(
-        child_request.inputs_of_type("agent_message").len(),
-        1,
-        "subagent should contain its own task exactly once"
-    );
 
     wait_for_event(&child_thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))

@@ -29,7 +29,7 @@ use wiremock::matchers::path;
 
 fn codex_command(codex_home: &Path) -> Result<assert_cmd::Command> {
     let mut cmd = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
-    cmd.env("CODEX_LAB_HOME", codex_home);
+    cmd.env("CODEX_HOME", codex_home);
     Ok(cmd)
 }
 
@@ -88,27 +88,18 @@ fn login_status_reports_auth_storage_errors() -> Result<()> {
 
 #[test]
 fn login_status_validates_configured_workload_identity() -> Result<()> {
-    for stored_chatgpt_auth in [false, true] {
-        let codex_home = TempDir::new()?;
-        write_file_auth_config(codex_home.path())?;
-        if stored_chatgpt_auth {
-            write_chatgpt_auth(
-                codex_home.path(),
-                ChatGptAuthFixture::new("chatgpt-token").account_id("workspace-123"),
-                AuthCredentialsStoreMode::File,
-            )?;
-        }
-        let missing_assertion = codex_home.path().join("missing-identity-token");
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+    let missing_assertion = codex_home.path().join("missing-identity-token");
 
-        codex_command(codex_home.path())?
-            .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
-            .env(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "rule-test")
-            .env(OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR, &missing_assertion)
-            .args(["login", "status"])
-            .assert()
-            .failure()
-            .stderr(contains("could not read workload identity assertion file"));
-    }
+    codex_command(codex_home.path())?
+        .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
+        .env(OPENAI_FEDERATION_RULE_ID_ENV_VAR, "rule-test")
+        .env(OPENAI_IDENTITY_TOKEN_FILE_ENV_VAR, &missing_assertion)
+        .args(["login", "status"])
+        .assert()
+        .failure()
+        .stderr(contains("could not read workload identity assertion file"));
 
     Ok(())
 }

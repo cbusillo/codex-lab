@@ -6,85 +6,9 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
-    "AgentRoleBackendToml": {
-      "oneOf": [
-        {
-          "additionalProperties": false,
-          "properties": {
-            "args": {
-              "description": "Arguments passed to the command after the executable path.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "args_read_only": {
-              "description": "Arguments appended when the agent is running in read-only mode.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "args_write": {
-              "description": "Arguments appended when the agent is running in workspace-write mode.",
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "command": {
-              "description": "Command to execute for each spawned external agent.",
-              "minLength": 1,
-              "type": "string"
-            },
-            "env": {
-              "additionalProperties": {
-                "type": "string"
-              },
-              "description": "Environment variables to set for the spawned agent.",
-              "type": "object"
-            },
-            "protocol": {
-              "allOf": [
-                {
-                  "$ref": "#/definitions/ExternalCommandProtocolToml"
-                }
-              ],
-              "default": "json",
-              "description": "Protocol to communicate with the external agent."
-            },
-            "timeout_ms": {
-              "description": "Maximum process runtime in milliseconds.",
-              "format": "uint64",
-              "minimum": 1.0,
-              "type": "integer"
-            },
-            "type": {
-              "enum": [
-                "external_command"
-              ],
-              "type": "string"
-            }
-          },
-          "required": [
-            "command",
-            "type"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
-        "backend": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/AgentRoleBackendToml"
-            }
-          ],
-          "description": "Optional non-Codex backend used to run agents spawned with this role."
-        },
         "config_file": {
           "allOf": [
             {
@@ -103,24 +27,6 @@
             "type": "string"
           },
           "type": "array"
-        }
-      },
-      "type": "object"
-    },
-    "AgentSelectorToml": {
-      "additionalProperties": false,
-      "properties": {
-        "effort": {
-          "description": "Provider-native effort used when a spawn call does not select one explicitly.",
-          "type": "string"
-        },
-        "enabled": {
-          "description": "Whether this selector is available to the model and explicit spawn calls.",
-          "type": "boolean"
-        },
-        "model": {
-          "description": "Provider-native model used when this selector does not name one explicitly.",
-          "type": "string"
         }
       },
       "type": "object"
@@ -160,13 +66,6 @@
           "description": "Maximum nesting depth for V1 agent threads. Ignored by V2.",
           "format": "int32",
           "type": "integer"
-        },
-        "selectors": {
-          "additionalProperties": {
-            "$ref": "#/definitions/AgentSelectorToml"
-          },
-          "description": "Explicit enablement overrides for built-in and discovered agent selectors.",
-          "type": "object"
         }
       },
       "type": "object"
@@ -255,6 +154,13 @@
             }
           ],
           "description": "Per-account approval settings keyed by link ID."
+        },
+        "omit_tools_from": {
+          "description": "Model-facing surfaces from which this connector's tools must be omitted, in addition to any server-level omissions. `None` leaves lower-priority configuration unchanged; an empty list clears connector-level omissions.",
+          "items": {
+            "$ref": "#/definitions/ToolExposureSurface"
+          },
+          "type": "array"
         },
         "open_world_enabled": {
           "description": "Whether tools with `open_world_hint = true` are allowed for this app.",
@@ -434,7 +340,7 @@
       "description": "Determine where Codex should store CLI auth credentials.",
       "oneOf": [
         {
-          "description": "Persist credentials in CODEX_LAB_HOME/auth.json.",
+          "description": "Persist credentials in CODEX_HOME/auth.json.",
           "enum": [
             "file"
           ],
@@ -448,7 +354,7 @@
           "type": "string"
         },
         {
-          "description": "Use keyring when available; otherwise, fall back to a file in CODEX_LAB_HOME.",
+          "description": "Use keyring when available; otherwise, fall back to a file in CODEX_HOME.",
           "enum": [
             "auto"
           ],
@@ -484,33 +390,12 @@
     },
     "AutoReviewToml": {
       "properties": {
-        "background_max_diff_bytes": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "background_max_elapsed_seconds": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "background_max_findings": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "background_max_output_bytes": {
-          "format": "uint",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "background_max_total_tokens": {
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        },
         "experimental_policy_template": {
           "description": "Experimental full Guardian prompt template containing the tenant policy placeholder.",
+          "type": "string"
+        },
+        "extra_policy": {
+          "description": "Additional policy text inserted into the Guardian template's `{{ extra_policy }}` slot.",
           "type": "string"
         },
         "policy": {
@@ -624,28 +509,17 @@
       },
       "type": "object"
     },
-    "CargoValidationProviderConfig": {
+    "CloudToml": {
       "additionalProperties": false,
+      "description": "Cloud-owned feature settings.",
       "properties": {
-        "command": {
-          "default": [
-            "cargo"
+        "skills": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeatureToggleToml"
+            }
           ],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
-        "timeout_ms": {
-          "default": 30000,
-          "format": "uint64",
-          "maximum": 30000.0,
-          "minimum": 1.0,
-          "type": "integer"
+          "description": "Cloud skills are permitted by default; the host must supply a cloud provider."
         }
       },
       "type": "object"
@@ -675,6 +549,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "experimental_show_cell_overhead": {
+          "description": "Show handler duration, code-mode host duration, and harness overhead in each code-mode cell response. Experimental: this option and the response format may change or be removed.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -787,6 +665,9 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "agent_message_board": {
+              "type": "boolean"
+            },
             "analytics_plan_history": {
               "type": "boolean"
             },
@@ -900,6 +781,9 @@
               "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
             },
             "cwd_relative_turn_diffs": {
+              "type": "boolean"
+            },
+            "daemon_auto_start": {
               "type": "boolean"
             },
             "default_mode_request_user_input": {
@@ -1067,6 +951,9 @@
             "powershell_shell_version": {
               "type": "boolean"
             },
+            "prefer_mxc": {
+              "type": "boolean"
+            },
             "prevent_idle_sleep": {
               "type": "boolean"
             },
@@ -1173,6 +1060,9 @@
               "type": "boolean"
             },
             "step_model_switching": {
+              "type": "boolean"
+            },
+            "system_proxy_fallback": {
               "type": "boolean"
             },
             "telepathy": {
@@ -1372,6 +1262,32 @@
       },
       "type": "object"
     },
+    "CopyOnSelect": {
+      "description": "When transcript mouse selections are copied on release.",
+      "oneOf": [
+        {
+          "description": "Use the terminal-specific default.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Copy every nonempty transcript mouse selection on release.",
+          "enum": [
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Require an explicit copy action.",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "CredentialAuthMethod": {
       "description": "Authentication formats supported by declarative credential providers.",
       "enum": [
@@ -1488,13 +1404,6 @@
       },
       "type": "object"
     },
-    "ExternalCommandProtocolToml": {
-      "enum": [
-        "json",
-        "raw_cli"
-      ],
-      "type": "string"
-    },
     "ExternalConfigMigrationPrompts": {
       "additionalProperties": false,
       "description": "Settings for notices we display to users via the tui and app-server clients (primarily the Codex IDE extension). NOTE: these are different from notifications - notices are warnings, NUX screens, acknowledgements, etc.",
@@ -1524,6 +1433,16 @@
           "default": {},
           "description": "Tracks which project paths have opted out of external config migration prompts.",
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "FeatureToggleToml": {
+      "additionalProperties": false,
+      "description": "Optional enablement of a configured feature.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1712,6 +1631,91 @@
       ],
       "type": "string"
     },
+    "GatewayOAuthConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization_url": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "delivery": {
+          "$ref": "#/definitions/GatewayOAuthDelivery"
+        },
+        "redirect_port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "scopes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "token_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorization_url",
+        "client_id",
+        "delivery",
+        "token_url"
+      ],
+      "type": "object"
+    },
+    "GatewayOAuthDelivery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "header"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "scheme": {
+              "default": "Bearer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "cookie"
+              ],
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "name"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "GhostSnapshotToml": {
       "additionalProperties": false,
       "properties": {
@@ -1833,7 +1837,7 @@
           "type": "number"
         },
         "thread_context": {
-          "description": "Use thread-owned context for sync and async Guardian. Defaults to false. Independent of the Guardian v2 `enabled` toggle.",
+          "description": "Deprecated and ignored; thread-owned Guardian context is always enabled.",
           "type": "boolean"
         },
         "transcript": {
@@ -1914,7 +1918,7 @@
     },
     "History": {
       "additionalProperties": false,
-      "description": "Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.",
+      "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`.",
       "properties": {
         "max_bytes": {
           "default": null,
@@ -1972,10 +1976,6 @@
             },
             "commandWindows": {
               "default": null,
-              "type": "string"
-            },
-            "id": {
-              "description": "Stable identifier for this handler. When present it anchors the persisted hook-state key (enable/disable and `trusted_hash`) so reordering handlers does not silently drop the user's decisions.",
               "type": "string"
             },
             "statusMessage": {
@@ -2555,27 +2555,6 @@
       },
       "type": "object"
     },
-    "ModelProviderCapabilities": {
-      "description": "Tool-surface capabilities a provider declares for the models it serves.\n\nEvery field defaults to `true`, so providers that omit the `capabilities` table keep the current tool surface. Local OpenAI-compatible servers that only accept top-level `function` tools should set the unsupported capabilities to `false`; Codex then emits a flat tool surface for them.",
-      "properties": {
-        "custom_tools": {
-          "default": true,
-          "description": "Whether the provider accepts freeform `custom` tools such as `apply_patch`.",
-          "type": "boolean"
-        },
-        "namespace_tools": {
-          "default": true,
-          "description": "Whether the provider accepts the Responses API `namespace` tool type.",
-          "type": "boolean"
-        },
-        "web_search": {
-          "default": true,
-          "description": "Whether the provider accepts the hosted `web_search` tool.",
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "ModelProviderInfo": {
       "additionalProperties": false,
       "description": "Serializable representation of a provider definition.",
@@ -2600,19 +2579,6 @@
           "description": "Base URL for the provider's OpenAI-compatible API.",
           "type": "string"
         },
-        "capabilities": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ModelProviderCapabilities"
-            }
-          ],
-          "default": {
-            "custom_tools": true,
-            "namespace_tools": true,
-            "web_search": true
-          },
-          "description": "Tool-surface capabilities the provider's API accepts."
-        },
         "env_http_headers": {
           "additionalProperties": {
             "type": "string"
@@ -2632,12 +2598,24 @@
           "description": "Value to use with `Authorization: Bearer <token>` header. Use of this config is discouraged in favor of `env_key` for security reasons, but this may be necessary when using this programmatically.",
           "type": "string"
         },
+        "gateway_oauth": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthConfig"
+            }
+          ],
+          "description": "Secondary OAuth credentials required by the provider's gateway."
+        },
         "http_headers": {
           "additionalProperties": {
             "type": "string"
           },
           "description": "Additional HTTP headers to include in requests to this provider where the (key, value) pairs are the header name and value.",
           "type": "object"
+        },
+        "model_catalog_url": {
+          "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
+          "type": "string"
         },
         "name": {
           "default": "",
@@ -2710,6 +2688,10 @@
           "maximum": 3600000.0,
           "minimum": 0.0,
           "type": "integer"
+        },
+        "disable_direct_message": {
+          "description": "Disable the model's direct-message tools; spawning and automatic child results remain available.",
+          "type": "boolean"
         },
         "enabled": {
           "type": "boolean"
@@ -2907,6 +2889,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -2985,6 +2968,7 @@
       "additionalProperties": false,
       "properties": {
         "allow_local_binding": {
+          "description": "Permits local servers and direct host-loopback connections and skips the proxy's additional private-network destination checks. Proxy domain rules still apply. Defaults to true for MXC, which cannot enforce false; otherwise defaults to false.",
           "type": "boolean"
         },
         "allow_upstream_proxy": {
@@ -3154,7 +3138,7 @@
           "type": "string"
         },
         {
-          "description": "CODEX_LAB_HOME/.credentials.json This file will be readable to Codex and other applications running as the same user.",
+          "description": "CODEX_HOME/.credentials.json This file will be readable to Codex and other applications running as the same user.",
           "enum": [
             "file"
           ],
@@ -3169,25 +3153,20 @@
         }
       ]
     },
-    "OrchestratorFeatureToml": {
-      "additionalProperties": false,
-      "description": "Settings for a feature owned by the orchestrator.",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "OrchestratorToml": {
       "additionalProperties": false,
       "description": "Orchestrator-owned feature settings.",
       "properties": {
         "mcp": {
-          "$ref": "#/definitions/OrchestratorFeatureToml"
+          "$ref": "#/definitions/FeatureToggleToml"
         },
         "skills": {
-          "$ref": "#/definitions/OrchestratorFeatureToml"
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeatureToggleToml"
+            }
+          ],
+          "description": "Legacy no-op setting retained for compatibility. Use `cloud.skills` to configure cloud skills."
         }
       },
       "type": "object"
@@ -3207,6 +3186,10 @@
             }
           ],
           "description": "Optional log exporter"
+        },
+        "log_agent_responses": {
+          "description": "Opt in to logging final main-agent and spawned-subagent responses to an OTLP log exporter. Defaults to false. Response text can be sensitive and is capped at 64 KiB.",
+          "type": "boolean"
         },
         "log_user_prompt": {
           "description": "Log user prompt in traces",
@@ -3533,25 +3516,6 @@
       "properties": {
         "trust_level": {
           "$ref": "#/definitions/TrustLevel"
-        }
-      },
-      "type": "object"
-    },
-    "ProjectValidationCommand": {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
-          "default": [],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "timeout_ms": {
-          "default": 60000,
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
         }
       },
       "type": "object"
@@ -4004,31 +3968,6 @@
       },
       "type": "object"
     },
-    "ShellcheckValidationProviderConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "command": {
-          "default": [
-            "shellcheck"
-          ],
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "enabled": {
-          "default": true,
-          "type": "boolean"
-        },
-        "timeout_ms": {
-          "default": 6000,
-          "format": "uint64",
-          "minimum": 0.0,
-          "type": "integer"
-        }
-      },
-      "type": "object"
-    },
     "SkillConfig": {
       "additionalProperties": false,
       "properties": {
@@ -4283,11 +4222,6 @@
     "ToolsToml": {
       "additionalProperties": false,
       "properties": {
-        "enabled": {
-          "default": true,
-          "description": "Whether model-visible tools are available for turns using this config.",
-          "type": "boolean"
-        },
         "experimental_request_user_input": {
           "$ref": "#/definitions/ExperimentalRequestUserInput"
         },
@@ -4336,8 +4270,38 @@
           "description": "Generate automatic conversation recaps when the terminal is unfocused. Defaults to `true`. Disabling this leaves `/recap` available on demand.",
           "type": "boolean"
         },
+        "copy_on_select": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CopyOnSelect"
+            }
+          ],
+          "default": "auto",
+          "description": "Copy selected transcript text when the mouse button is released. Defaults to `auto`: enabled in tmux/Zellij and in direct macOS terminals except Ghostty/Kitty. On other platforms, direct terminals default off except iTerm2/Terminal.app."
+        },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
+          "type": "boolean"
+        },
+        "effects": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiEffects"
+            }
+          ],
+          "default": {
+            "effort": true,
+            "progress": true,
+            "shimmer": true,
+            "starfield": true,
+            "title": true,
+            "welcome": true
+          },
+          "description": "Individual visual effects. Each also requires animations to be enabled."
+        },
+        "fullscreen_transcript": {
+          "default": true,
+          "description": "Own the fullscreen transcript, including scrolling, selection, and search. Defaults to `true`; alternate-screen restrictions take precedence.",
           "type": "boolean"
         },
         "keymap": {
@@ -4378,6 +4342,7 @@
               "previous_permission_mode": null,
               "prompt_stack_back": null,
               "skip_question": null,
+              "toggle_voice": null,
               "toggle_voice_mute": null
             },
             "composer": {
@@ -4409,6 +4374,8 @@
             "global": {
               "clear_terminal": null,
               "copy": null,
+              "find_transcript": null,
+              "focus_activity": null,
               "open_agents": null,
               "open_external_editor": null,
               "open_transcript": null,
@@ -4435,6 +4402,7 @@
             "pager": {
               "close": null,
               "close_transcript": null,
+              "find": null,
               "half_page_down": null,
               "half_page_up": null,
               "jump_bottom": null,
@@ -4562,7 +4530,7 @@
         },
         "pet": {
           "default": null,
-          "description": "Pet id to preselect in the terminal pet picker.\n\nCustom pet ids resolve against CODEX_LAB_HOME/pets/<pet-id>/pet.json.",
+          "description": "Pet id to preselect in the terminal pet picker.\n\nCustom pet ids resolve against CODEX_HOME/pets/<pet-id>/pet.json.",
           "type": "string"
         },
         "pet_anchor": {
@@ -4584,6 +4552,20 @@
           "description": "Start the TUI in raw scrollback mode for copy-friendly transcript output. Defaults to `false`.",
           "type": "boolean"
         },
+        "rendering": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TuiRendering"
+            }
+          ],
+          "default": {
+            "lists": true,
+            "math": true,
+            "mermaid": true,
+            "tables": true
+          },
+          "description": "Rich content rendering. Independent of animations and visual effects."
+        },
         "resume_cwd": {
           "allOf": [
             {
@@ -4592,6 +4574,10 @@
           ],
           "default": null,
           "description": "Working directory to use when resuming or forking a session. When unset, prompt if the current and session directories differ."
+        },
+        "screen_reader_detection_done": {
+          "description": "Records the one-time screen-reader detection attempt. Either value skips detection.",
+          "type": "boolean"
         },
         "session_picker_view": {
           "allOf": [
@@ -4604,7 +4590,7 @@
         },
         "show_server_version_notice": {
           "default": true,
-          "description": "Show an informational notice when the connected app server is an older stable release. Defaults to `true`; this does not control compatibility errors or version status.",
+          "description": "Show informational notices about connected app server version differences. Defaults to `true`; this does not control compatibility errors or version status.",
           "type": "boolean"
         },
         "show_tooltips": {
@@ -4642,17 +4628,12 @@
         },
         "theme": {
           "default": null,
-          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_LAB_HOME/themes` for custom themes.",
+          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.",
           "type": "string"
         },
         "vim_mode_default": {
           "default": false,
           "description": "Start the composer in Vim mode (`Normal`) by default. Defaults to `false`.",
-          "type": "boolean"
-        },
-        "whimsy": {
-          "default": true,
-          "description": "Enable decorative effects such as Astra composer stars. Also requires animations. Defaults to `true`.",
           "type": "boolean"
         }
       },
@@ -4884,6 +4865,14 @@
           ],
           "description": "Skip the focused question."
         },
+        "toggle_voice": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Start or stop a voice conversation."
+        },
         "toggle_voice_mute": {
           "allOf": [
             {
@@ -5085,6 +5074,43 @@
       },
       "type": "object"
     },
+    "TuiEffects": {
+      "additionalProperties": false,
+      "description": "Optional visual effects. Disabling an effect preserves its underlying activity.",
+      "properties": {
+        "effort": {
+          "default": true,
+          "description": "Animate reasoning-effort changes in the composer and footer.",
+          "type": "boolean"
+        },
+        "progress": {
+          "default": true,
+          "description": "Animate activity bullets and loading spinners.",
+          "type": "boolean"
+        },
+        "shimmer": {
+          "default": true,
+          "description": "Shimmer status and loading text.",
+          "type": "boolean"
+        },
+        "starfield": {
+          "default": true,
+          "description": "Animate the composer starfield.",
+          "type": "boolean"
+        },
+        "title": {
+          "default": true,
+          "description": "Blink the terminal-title indicator when user action is required.",
+          "type": "boolean"
+        },
+        "welcome": {
+          "default": true,
+          "description": "Animate the welcome artwork.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "TuiGlobalKeymap": {
       "additionalProperties": false,
       "description": "Global keybindings. These are used when a context does not define an override.",
@@ -5104,6 +5130,22 @@
             }
           ],
           "description": "Copy the last agent response to the clipboard."
+        },
+        "find_transcript": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in the full transcript."
+        },
+        "focus_activity": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Focus activity groups in the owned transcript to inspect their details."
         },
         "open_agents": {
           "allOf": [
@@ -5243,6 +5285,7 @@
             "previous_permission_mode": null,
             "prompt_stack_back": null,
             "skip_question": null,
+            "toggle_voice": null,
             "toggle_voice_mute": null
           }
         },
@@ -5295,6 +5338,8 @@
           "default": {
             "clear_terminal": null,
             "copy": null,
+            "find_transcript": null,
+            "focus_activity": null,
             "open_agents": null,
             "open_external_editor": null,
             "open_transcript": null,
@@ -5335,6 +5380,7 @@
           "default": {
             "close": null,
             "close_transcript": null,
+            "find": null,
             "half_page_down": null,
             "half_page_up": null,
             "jump_bottom": null,
@@ -5560,6 +5606,14 @@
           ],
           "description": "Close the transcript overlay via its dedicated toggle key."
         },
+        "find": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Find text in a transcript pager."
+        },
         "half_page_down": {
           "allOf": [
             {
@@ -5644,6 +5698,33 @@
           "type": "string"
         }
       ]
+    },
+    "TuiRendering": {
+      "additionalProperties": false,
+      "description": "Optional rich renderers. Disabled renderers preserve the original source.",
+      "properties": {
+        "lists": {
+          "default": true,
+          "description": "Render Markdown bullets and task-list markers as Unicode symbols.",
+          "type": "boolean"
+        },
+        "math": {
+          "default": true,
+          "description": "Render math expressions using Unicode notation.",
+          "type": "boolean"
+        },
+        "mermaid": {
+          "default": true,
+          "description": "Render Mermaid code blocks as diagrams.",
+          "type": "boolean"
+        },
+        "tables": {
+          "default": true,
+          "description": "Render pipe tables, including tables inside Markdown fences.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "TuiVimNormalKeymap": {
       "additionalProperties": false,
@@ -6255,103 +6336,6 @@
         }
       ]
     },
-    "ValidationConfig": {
-      "additionalProperties": false,
-      "description": "Patch-local validation settings.",
-      "properties": {
-        "groups": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ValidationGroups"
-            }
-          ],
-          "default": {
-            "functional": true,
-            "stylistic": false
-          }
-        },
-        "project_command": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ProjectValidationCommand"
-            }
-          ],
-          "default": null
-        },
-        "providers": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ValidationProviders"
-            }
-          ],
-          "default": {
-            "cargo": {
-              "command": [
-                "cargo"
-              ],
-              "enabled": true,
-              "timeout_ms": 30000
-            },
-            "shellcheck": {
-              "command": [
-                "shellcheck"
-              ],
-              "enabled": true,
-              "timeout_ms": 6000
-            }
-          }
-        }
-      },
-      "type": "object"
-    },
-    "ValidationGroups": {
-      "additionalProperties": false,
-      "properties": {
-        "functional": {
-          "default": true,
-          "type": "boolean"
-        },
-        "stylistic": {
-          "default": false,
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
-    "ValidationProviders": {
-      "additionalProperties": false,
-      "properties": {
-        "cargo": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/CargoValidationProviderConfig"
-            }
-          ],
-          "default": {
-            "command": [
-              "cargo"
-            ],
-            "enabled": true,
-            "timeout_ms": 30000
-          }
-        },
-        "shellcheck": {
-          "allOf": [
-            {
-              "$ref": "#/definitions/ShellcheckValidationProviderConfig"
-            }
-          ],
-          "default": {
-            "command": [
-              "shellcheck"
-            ],
-            "enabled": true,
-            "timeout_ms": 6000
-          }
-        }
-      },
-      "type": "object"
-    },
     "Verbosity": {
       "description": "Controls output length/detail on GPT-5 models via the Responses API. Serialized with lowercase values to match the OpenAI API.",
       "enum": [
@@ -6417,7 +6401,8 @@
     "WindowsSandboxModeToml": {
       "enum": [
         "elevated",
-        "unelevated"
+        "unelevated",
+        "mxc"
       ],
       "type": "string"
     },
@@ -6426,10 +6411,6 @@
       "properties": {
         "sandbox": {
           "$ref": "#/definitions/WindowsSandboxModeToml"
-        },
-        "sandbox_private_desktop": {
-          "description": "Defaults to `true`. Set to `false` to launch the final sandboxed child process on `Winsta0\\\\Default` instead of a private desktop.",
-          "type": "boolean"
         }
       },
       "type": "object"
@@ -6475,10 +6456,6 @@
         }
       ],
       "description": "When `false`, disables analytics across Codex product surfaces in this machine. Defaults to `true`."
-    },
-    "api_key_fallback_on_all_accounts_limited": {
-      "description": "Whether Codex may fall back to a saved API key account once all saved ChatGPT accounts are rate or usage limited.",
-      "type": "boolean"
     },
     "approval_policy": {
       "allOf": [
@@ -6527,10 +6504,6 @@
       "default": null,
       "description": "Optional policy instructions for the guardian auto-reviewer."
     },
-    "auto_switch_accounts_on_rate_limit": {
-      "description": "Whether Codex may automatically switch saved accounts when the active ChatGPT account is rate or usage limited.",
-      "type": "boolean"
-    },
     "background_terminal_max_timeout": {
       "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `300000` (5 minutes).",
       "format": "uint64",
@@ -6556,6 +6529,14 @@
       ],
       "default": null,
       "description": "Preferred backend for storing CLI auth credentials. file (default): Use a file in the Codex home directory. keyring: Use an OS-specific keyring service. auto: Use the keyring if available, otherwise use a file."
+    },
+    "cloud": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CloudToml"
+        }
+      ],
+      "description": "Cloud-owned feature settings."
     },
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
@@ -6610,10 +6591,6 @@
       "description": "Experimental / do not use. Replaces the synthesized realtime startup context appended to websocket session instructions. An empty string disables startup context injection entirely.",
       "type": "string"
     },
-    "experimental_thread_config_endpoint": {
-      "description": "Experimental / do not use. When set, app-server fetches thread-scoped config from a remote service at this endpoint.",
-      "type": "string"
-    },
     "experimental_thread_store": {
       "allOf": [
         {
@@ -6630,6 +6607,9 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "agent_message_board": {
+          "type": "boolean"
+        },
         "analytics_plan_history": {
           "type": "boolean"
         },
@@ -6743,6 +6723,9 @@
           "$ref": "#/definitions/FeatureToml_for_CurrentTimeReminderConfigToml"
         },
         "cwd_relative_turn_diffs": {
+          "type": "boolean"
+        },
+        "daemon_auto_start": {
           "type": "boolean"
         },
         "default_mode_request_user_input": {
@@ -6910,6 +6893,9 @@
         "powershell_shell_version": {
           "type": "boolean"
         },
+        "prefer_mxc": {
+          "type": "boolean"
+        },
         "prevent_idle_sleep": {
           "type": "boolean"
         },
@@ -7016,6 +7002,9 @@
           "type": "boolean"
         },
         "step_model_switching": {
+          "type": "boolean"
+        },
+        "system_proxy_fallback": {
           "type": "boolean"
         },
         "telepathy": {
@@ -7180,7 +7169,7 @@
         "max_bytes": null,
         "persistence": "save-all"
       },
-      "description": "Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`."
+      "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`."
     },
     "hooks": {
       "allOf": [
@@ -7216,7 +7205,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$CODEX_LAB_HOME/log`."
+      "description": "Directory where Codex writes log files. Setting this value explicitly also enables the TUI text log in this directory. Defaults to `$CODEX_HOME/log`."
     },
     "marketplaces": {
       "additionalProperties": {
@@ -7313,6 +7302,13 @@
         }
       ],
       "description": "Optional path to a file containing model instructions that will override the built-in instructions for the selected model. Users are STRONGLY DISCOURAGED from using this field, as deviating from the instructions sanctioned by Codex will likely degrade model performance."
+    },
+    "model_post_turn_compact_threshold_percent": {
+      "description": "Percentage of the usable context window that triggers compaction after a final response. Existing auto-compaction limits still apply. Omitted or zero disables turn-end compaction; valid values are 0–100.",
+      "format": "uint8",
+      "maximum": 100.0,
+      "minimum": 0.0,
+      "type": "integer"
     },
     "model_provider": {
       "description": "Provider to use from the model_providers map.",
@@ -7523,7 +7519,7 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_LAB_HOME`."
+      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",
@@ -7564,15 +7560,6 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
-    },
-    "validation": {
-      "allOf": [
-        {
-          "$ref": "#/definitions/ValidationConfig"
-        }
-      ],
-      "default": null,
-      "description": "Patch-local validation policy."
     },
     "web_search": {
       "allOf": [

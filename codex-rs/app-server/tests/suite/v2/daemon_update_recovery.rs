@@ -377,7 +377,7 @@ async fn managed_force_shutdown_exits_with_blocked_rollout_writer() -> Result<()
                 responses::ev_response_created("spawn-child"),
                 responses::ev_function_call_with_namespace(
                     "spawn-child",
-                    "agents",
+                    "collaboration",
                     "spawn_agent",
                     r#"{"task_name":"child","message":"Wait here","fork_turns":"none"}"#,
                 ),
@@ -813,7 +813,7 @@ fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
     Ok(Command::new(binary)
         .args(["--listen", &format!("unix://{}", socket_path.display())])
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
-        .env("CODEX_LAB_HOME", home)
+        .env("CODEX_HOME", home)
         .arg("--managed-daemon")
         .env(
             codex_app_server_transport::DAEMON_SHUTDOWN_SOCKET_ENV,

@@ -261,13 +261,14 @@ fn staged_model_patch() -> ThreadMetadataPatch {
 
 fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
     CreateThreadParams {
+        creator_user_id: None,
+        creator_account_id: None,
         session_id: thread_id.into(),
         thread_id,
         extra_config: None,
         forked_from_id: None,
         parent_thread_id: None,
         source: SessionSource::Exec,
-        session_provenance: None,
         thread_source: None,
         originator: "test_originator".to_string(),
         base_instructions: BaseInstructions::default(),

@@ -5,7 +5,7 @@ export JUST_SHELL := justfile_directory() / "scripts/just-shell.py"
 set shell := ["python3", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
 
-rust_min_stack := "16777216" # 16 MiB
+rust_min_stack := "8388608" # 8 MiB
 python := if os_family() == "windows" { "python" } else { "python3" }
 
 # Display help
@@ -41,33 +41,10 @@ code-mode-host *args:
 assemble-codex-package *args:
     {{ python }} {{ justfile_directory() }}/scripts/build_codex_package.py {args}
 
-# Run a Cargo build under the explicit managed-target contract.
-[no-cd]
-[unix]
-managed-build *args:
-    {{ python }} {{ justfile_directory() }}/scripts/local/managed_targets.py run --recipe build -- {args}
-
-# Preview or apply managed-target retention collection.
-[no-cd]
-[unix]
-managed-target-gc *args:
-    {{ python }} {{ justfile_directory() }}/scripts/local/managed_targets.py gc {args}
-
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli
     cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex {args}
-
-# Remove rebuildable local build and harness artifacts. Defaults to a dry run.
-[no-cd]
-[unix]
-local-cleanup-space *args:
-    {{ justfile_directory() }}/scripts/local/cleanup-space.sh {args}
-
-[doc('Inspect explicitly named build storage without deleting data')]
-[no-cd]
-local-build-storage *args:
-    {{ python }} {{ justfile_directory() }}/scripts/local/build_storage.py {args}
 
 # Format the justfile, Rust, Bazel/Starlark, Python SDK code, and Python scripts.
 fmt:
@@ -174,7 +151,7 @@ bazel-lock-check:
 
 [windows]
 bazel-lock-check:
-    bazel mod deps --lockfile_mode=error; if ($LASTEXITCODE -ne 0) { Write-Error "MODULE.bazel.lock is out of date. Run 'just bazel-lock-update' and commit the updated lockfile."; exit 1 }
+    bazel mod deps --lockfile_mode=error; if ($LASTEXITCODE -ne 0) { Write-Error "Unable to verify MODULE.bazel.lock; see the Bazel error above. If Bazel reports an out-of-date lockfile, run 'just bazel-lock-update' and commit the updated lockfile."; exit 1 }
 
 bazel-test:
     bazel test --test_tag_filters=-argument-comment-lint //... --keep_going

@@ -80,14 +80,13 @@ use codex_core::path_utils;
 use codex_core::read_session_meta_line;
 use codex_features::Feature;
 use codex_feedback::CodexFeedback;
-use codex_git_utils::diff_fingerprint;
 use codex_git_utils::get_git_repo_root;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_login::default_client::set_default_originator;
 use codex_login::enforce_login_restrictions;
-use codex_login::profile_home;
+use codex_login::is_workload_identity_selected;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_otel::set_parent_from_context;
@@ -97,12 +96,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::ActivePermissionProfile;
-use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
-pub use codex_protocol::protocol::ProjectValidationCompletedEvent;
-pub use codex_protocol::protocol::ProjectValidationSkipReason;
-pub use codex_protocol::protocol::ProjectValidationStatus;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -155,13 +150,11 @@ pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 use supports_color::Stream;
 use tokio::sync::mpsc;
 use tracing::Instrument;
@@ -179,118 +172,6 @@ use crate::event_processor::EventProcessor;
 
 const DEFAULT_ANALYTICS_ENABLED: bool = true;
 const EXEC_DEFAULT_LOG_FILTER: &str = "error,opentelemetry_sdk=off,opentelemetry_otlp=off";
-const BACKGROUND_REVIEW_SCHEDULE_GRACE: Duration = Duration::from_secs(/*secs*/ 10);
-const BACKGROUND_REVIEW_COMPLETION_SLACK: Duration = Duration::from_secs(/*secs*/ 30);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BackgroundReviewDeadlineKind {
-    Schedule,
-    Completion,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct BackgroundReviewDeadline {
-    at: tokio::time::Instant,
-    kind: BackgroundReviewDeadlineKind,
-}
-
-#[derive(Default)]
-struct BackgroundReviewWaitState {
-    active_run_ids: HashSet<String>,
-    completed_for_turn: bool,
-    turn_review_fingerprint: Option<String>,
-    waiting: bool,
-    deadline: Option<BackgroundReviewDeadline>,
-}
-
-impl BackgroundReviewWaitState {
-    fn record_turn_diff(&mut self, diff: &str) {
-        self.turn_review_fingerprint = diff_fingerprint(diff);
-    }
-
-    fn begin_wait(&mut self, now: tokio::time::Instant, completion_grace: Duration) -> bool {
-        if self.completed_for_turn
-            || (self.turn_review_fingerprint.is_none() && self.active_run_ids.is_empty())
-        {
-            return false;
-        }
-
-        self.waiting = true;
-        self.deadline = Some(if self.active_run_ids.is_empty() {
-            BackgroundReviewDeadline {
-                at: now + BACKGROUND_REVIEW_SCHEDULE_GRACE,
-                kind: BackgroundReviewDeadlineKind::Schedule,
-            }
-        } else {
-            BackgroundReviewDeadline {
-                at: now + completion_grace,
-                kind: BackgroundReviewDeadlineKind::Completion,
-            }
-        });
-        true
-    }
-
-    fn record_status(
-        &mut self,
-        target: &ApiReviewTarget,
-        run_id: &str,
-        status: codex_app_server_protocol::BackgroundAutoReviewStatus,
-        now: tokio::time::Instant,
-        completion_grace: Duration,
-    ) {
-        if !background_review_target_matches_turn(target, self.turn_review_fingerprint.as_deref()) {
-            return;
-        }
-
-        match status {
-            codex_app_server_protocol::BackgroundAutoReviewStatus::Pending
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Running => {
-                self.active_run_ids.insert(run_id.to_string());
-                if self.waiting
-                    && !matches!(
-                        self.deadline,
-                        Some(BackgroundReviewDeadline {
-                            kind: BackgroundReviewDeadlineKind::Completion,
-                            ..
-                        })
-                    )
-                {
-                    self.deadline = Some(BackgroundReviewDeadline {
-                        at: now + completion_grace,
-                        kind: BackgroundReviewDeadlineKind::Completion,
-                    });
-                }
-            }
-            codex_app_server_protocol::BackgroundAutoReviewStatus::Completed
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Failed
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Cancelled
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Superseded
-            | codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped => {
-                let observed_run = self.active_run_ids.remove(run_id);
-                let resolves_without_active_run = matches!(
-                    status,
-                    codex_app_server_protocol::BackgroundAutoReviewStatus::Skipped
-                );
-                if (observed_run || resolves_without_active_run) && self.active_run_ids.is_empty() {
-                    self.completed_for_turn = true;
-                    self.deadline = None;
-                }
-            }
-        }
-    }
-
-    fn should_shutdown(&self) -> bool {
-        self.waiting && self.completed_for_turn && self.active_run_ids.is_empty()
-    }
-
-    fn is_waiting(&self) -> bool {
-        self.waiting
-    }
-
-    fn deadline(&self) -> Option<BackgroundReviewDeadline> {
-        self.deadline
-    }
-}
 
 enum InitialOperation {
     ForkOnly,
@@ -349,7 +230,6 @@ struct ExecRunArgs {
     prompt: Option<String>,
     skip_git_repo_check: bool,
     stderr_with_ansi: bool,
-    product_identity: codex_version::ProductIdentity,
     thread_source: ThreadSource,
 }
 
@@ -376,11 +256,7 @@ fn exec_stderr_env_filter() -> EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new("error"))
 }
 
-pub async fn run_main(
-    cli: Cli,
-    arg0_paths: Arg0DispatchPaths,
-    product_identity: codex_version::ProductIdentity,
-) -> anyhow::Result<()> {
+pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
@@ -402,9 +278,6 @@ pub async fn run_main(
         mut config_overrides,
     } = cli;
     let mut shared = shared.into_inner();
-    shared
-        .validate_workspace_root_mode()
-        .map_err(anyhow::Error::msg)?;
     shared.take_auto_review_config_overrides(&mut config_overrides);
     let SharedCliOptions {
         images,
@@ -412,14 +285,12 @@ pub async fn run_main(
         oss,
         oss_provider,
         config_profile_v2,
-        auth_profile,
         sandbox_mode: sandbox_mode_cli_arg,
         auto_review: _,
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
         cwd,
         mut add_dir,
-        workspace_root,
         worktree,
     } = shared;
 
@@ -477,20 +348,6 @@ pub async fn run_main(
         }
         None => AbsolutePathBuf::current_dir()?,
     };
-    let workspace_roots = (!workspace_root.is_empty()).then(|| {
-        workspace_root
-            .into_iter()
-            .map(|path| AbsolutePathBuf::resolve_path_against_base(path, config_cwd.as_path()))
-            .collect()
-    });
-    let exact_workspace_profile = workspace_roots
-        .as_ref()
-        .is_some_and(|_| sandbox_mode == Some(SandboxMode::WorkspaceWrite));
-    let sandbox_mode_override = if exact_workspace_profile {
-        None
-    } else {
-        sandbox_mode
-    };
 
     // we load config.toml here to determine project state.
     #[allow(clippy::print_stderr)]
@@ -504,11 +361,6 @@ pub async fn run_main(
     let user_config_path = config_profile_v2
         .as_ref()
         .map(|profile_v2| resolve_profile_v2_config_path(&codex_home, profile_v2));
-    let auth_home = match auth_profile.as_deref() {
-        Some(profile) => profile_home(&codex_home, profile)
-            .map_err(|err| anyhow::anyhow!("invalid --auth-profile {profile:?}: {err}"))?,
-        None => codex_home.to_path_buf(),
-    };
     let loader_overrides = LoaderOverrides {
         user_config_path,
         user_config_profile: config_profile_v2,
@@ -516,7 +368,6 @@ pub async fn run_main(
         ignore_user_and_project_exec_policy_rules: ignore_rules,
         ..Default::default()
     };
-
     if worktree
         && EnvironmentManager::prepare_from_codex_home(&codex_home)
             .await?
@@ -526,6 +377,8 @@ pub async fn run_main(
     }
 
     let managed_worktree = if worktree {
+        let embedded_network_policy =
+            codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
         let gate_bootstrap = load_bootstrap_config_or_exit(
             &codex_home,
             /*cwd*/ None,
@@ -536,7 +389,8 @@ pub async fn run_main(
         )
         .await;
         let gate_cloud_config = cloud_config_bundle_loader_for_storage(
-            bootstrap_auth_config(&codex_home, &gate_bootstrap)?,
+            embedded_network_policy
+                .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &gate_bootstrap)?),
             /*enable_codex_api_key_env*/ false,
         )
         .await?;
@@ -564,7 +418,10 @@ pub async fn run_main(
                 &arg0_paths,
                 &cli_kv_overrides,
                 &loader_overrides,
-                gate_cloud_config.clone(),
+                worktree::ForkNetwork {
+                    cloud_config_bundle: gate_cloud_config.clone(),
+                    policy: embedded_network_policy.clone(),
+                },
                 strict_config,
             )
             .await?;
@@ -619,6 +476,8 @@ pub async fn run_main(
     } else {
         None
     };
+    let embedded_network_policy =
+        codex_app_server_client::EmbeddedNetworkPolicy::load(&loader_overrides).await;
     let bootstrap_config = load_bootstrap_config_or_exit(
         &codex_home,
         Some(&config_cwd),
@@ -629,10 +488,13 @@ pub async fn run_main(
     )
     .await;
     let bootstrap_config_toml = &bootstrap_config.config_toml;
-    let mut auth_config = bootstrap_auth_config(&codex_home, &bootstrap_config)?;
-    auth_config.codex_home = auth_home.clone();
+    let bootstrap_auth_config = embedded_network_policy
+        .bind_bootstrap_auth(bootstrap_auth_config(&codex_home, &bootstrap_config)?);
+    // API keys cannot fetch workspace-managed configuration. Preserve the
+    // existing ChatGPT bootstrap identity even when model requests allow
+    // CODEX_API_KEY.
     let cloud_config_bundle = cloud_config_bundle_loader_for_storage(
-        auth_config,
+        bootstrap_auth_config,
         /*enable_codex_api_key_env*/ false,
     )
     .await?;
@@ -713,13 +575,12 @@ pub async fn run_main(
         // the fully resolved reviewer is AutoReview.
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: None,
-        sandbox_mode: sandbox_mode_override,
+        sandbox_mode,
         permission_profile: None,
-        default_permissions: exact_workspace_profile
-            .then(|| BUILT_IN_PERMISSION_PROFILE_WORKSPACE.to_string()),
+        default_permissions: None,
         persisted_permission_profile_id: None,
         cwd: resolved_cwd,
-        workspace_roots,
+        workspace_roots: None,
         model_provider: model_provider.clone(),
         service_tier: None,
         codex_self_exe: arg0_paths.codex_self_exe.clone(),
@@ -740,7 +601,6 @@ pub async fn run_main(
     let build_config = |overrides| {
         ConfigBuilder::default()
             .codex_home(codex_home.to_path_buf())
-            .auth_home(auth_home.clone())
             .cli_overrides(cli_kv_overrides.clone())
             .harness_overrides(overrides)
             .loader_overrides(loader_overrides.clone())
@@ -748,12 +608,13 @@ pub async fn run_main(
             .cloud_config_bundle(cloud_config_bundle.clone())
             .build()
     };
-    let config = build_exec_config(
+    let mut config = build_exec_config(
         overrides,
         dangerously_bypass_approvals_and_sandbox,
         build_config,
     )
     .await?;
+    embedded_network_policy.activate(&mut config);
     let resume_approvals_reviewer_override = cli_kv_overrides
         .iter()
         .any(|(key, _)| key == "approvals_reviewer")
@@ -773,7 +634,9 @@ pub async fn run_main(
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    if let Err(err) = enforce_login_restrictions(&config.auth_config()).await {
+    if !is_workload_identity_selected()
+        && let Err(err) = enforce_login_restrictions(&config.auth_config()).await
+    {
         eprintln!("{err}");
         std::process::exit(1);
     }
@@ -833,13 +696,16 @@ pub async fn run_main(
     );
     let state_db = codex_core::init_state_db(&config).await;
     let environment_manager = if run_loader_overrides.ignore_user_config {
-        EnvironmentManager::from_env(Some(local_runtime_paths), config.http_client_factory())
-            .await?
+        EnvironmentManager::from_env(
+            Some(local_runtime_paths),
+            embedded_network_policy.bind(config.http_client_factory()),
+        )
+        .await?
     } else {
         EnvironmentManager::from_codex_home(
             config.codex_home.clone(),
             Some(local_runtime_paths),
-            config.http_client_factory(),
+            embedded_network_policy.bind(config.http_client_factory()),
         )
         .await?
     };
@@ -850,13 +716,13 @@ pub async fn run_main(
         loader_overrides: run_loader_overrides,
         strict_config,
         cloud_config_bundle: run_cloud_config_bundle,
+        embedded_network_policy,
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: state_db.clone(),
         environment_manager: std::sync::Arc::new(environment_manager),
         config_warnings,
         session_source: SessionSource::Exec,
-        session_provenance: None,
         enable_codex_api_key_env: true,
         client_name: "codex_exec".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -883,7 +749,6 @@ pub async fn run_main(
         prompt,
         skip_git_repo_check,
         stderr_with_ansi,
-        product_identity,
         thread_source: thread_source.map(Into::into).unwrap_or(ThreadSource::User),
     })
     .instrument(exec_span)
@@ -984,20 +849,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         prompt,
         skip_git_repo_check,
         stderr_with_ansi,
-        product_identity,
         thread_source,
     } = args;
 
     let mut event_processor: Box<dyn EventProcessor> = match json_mode {
         true => Box::new(EventProcessorWithJsonOutput::new(last_message_file.clone())),
-        _ => Box::new(
-            EventProcessorWithHumanOutput::create_with_ansi_and_identity(
-                stderr_with_ansi,
-                &config,
-                last_message_file.clone(),
-                product_identity,
-            ),
-        ),
+        _ => Box::new(EventProcessorWithHumanOutput::create_with_ansi(
+            stderr_with_ansi,
+            &config,
+            last_message_file.clone(),
+        )),
     };
     if oss {
         // We're in the oss section, so provider_id should be Some
@@ -1128,8 +989,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
         })?;
 
-    // Handle resume subcommand through existing `thread/list` + `thread/resume`
-    // APIs so exec no longer reaches into rollout storage directly.
+    // Resolve resume and fork through existing app-server thread lifecycle APIs.
     let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
         command.as_ref()
     {
@@ -1294,7 +1154,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     params: TurnStartParams {
                         disabled_plugin_ids: None,
                         thread_id: primary_thread_id_for_span.clone(),
-                        turn_trigger: None,
+                        turn_trigger: Some("exec".to_string()),
                         client_user_message_id: None,
                         input: items.into_iter().map(Into::into).collect(),
                         tool_output: None,
@@ -1360,10 +1220,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // exit with a non-zero status for automation-friendly signaling.
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
-    let mut background_review_wait = BackgroundReviewWaitState::default();
-    let background_review_completion_grace =
-        Duration::from_millis(config.background_auto_review_budget.max_elapsed_ms)
-            .saturating_add(BACKGROUND_REVIEW_COMPLETION_SLACK);
     let primary_thread_id_for_requests = primary_thread_id.to_string();
     loop {
         let server_event = tokio::select! {
@@ -1371,18 +1227,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 if maybe_interrupt.is_none() {
                     interrupt_channel_open = false;
                     continue;
-                }
-                if background_review_wait.is_waiting() {
-                    if let Err(err) = request_shutdown(
-                        &client,
-                        &mut request_ids,
-                        &primary_thread_id_for_requests,
-                    )
-                    .await
-                    {
-                        warn!("thread/unsubscribe failed during shutdown: {err}");
-                    }
-                    break;
                 }
                 if let Err(err) = send_request_with_response::<TurnInterruptResponse>(
                     &client,
@@ -1402,24 +1246,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 continue;
             }
             maybe_event = client.next_event() => maybe_event,
-            deadline_kind = wait_for_background_review_deadline(
-                background_review_wait.deadline()
-            ), if background_review_wait.deadline().is_some() => {
-                let Some(deadline_kind) = deadline_kind else {
-                    continue;
-                };
-                event_processor.process_warning(background_review_deadline_warning(deadline_kind));
-                if let Err(err) = request_shutdown(
-                    &client,
-                    &mut request_ids,
-                    &primary_thread_id_for_requests,
-                )
-                .await
-                {
-                    warn!("thread/unsubscribe failed during shutdown: {err}");
-                }
-                break;
-            }
         };
 
         let Some(server_event) = server_event else {
@@ -1432,32 +1258,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             }
             InProcessServerEvent::ServerNotification(notification) => {
                 let mut notification = *notification;
-                if let ServerNotification::TurnDiffUpdated(payload) = &notification
-                    && payload.thread_id == primary_thread_id_for_requests
-                    && payload.turn_id == task_id
-                {
-                    background_review_wait.record_turn_diff(&payload.diff);
-                }
-                let completed_primary_turn = matches!(
-                    &notification,
-                    ServerNotification::TurnCompleted(payload)
-                        if payload.thread_id == primary_thread_id_for_requests
-                            && payload.turn.id == task_id
-                            && payload.turn.status
-                                == codex_app_server_protocol::TurnStatus::Completed
-                );
-                if let ServerNotification::BackgroundAutoReviewStatusChanged(payload) =
-                    &notification
-                    && payload.thread_id == primary_thread_id_for_requests
-                {
-                    background_review_wait.record_status(
-                        &payload.review_target,
-                        &payload.run_id,
-                        payload.status,
-                        tokio::time::Instant::now(),
-                        background_review_completion_grace,
-                    );
-                }
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -1493,14 +1293,6 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
-                            if completed_primary_turn
-                                && background_review_wait.begin_wait(
-                                    tokio::time::Instant::now(),
-                                    background_review_completion_grace,
-                                )
-                            {
-                                continue;
-                            }
                             if let Err(err) = request_shutdown(
                                 &client,
                                 &mut request_ids,
@@ -1514,29 +1306,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         }
                     }
                 }
-                if background_review_wait.should_shutdown() {
-                    if let Err(err) =
-                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
-                            .await
-                    {
-                        warn!("thread/unsubscribe failed during shutdown: {err}");
-                    }
-                    break;
-                }
             }
             InProcessServerEvent::Lagged { skipped } => {
                 let message = lagged_event_warning_message(skipped);
                 warn!("{message}");
                 event_processor.process_warning(message);
-                if background_review_wait.is_waiting() {
-                    if let Err(err) =
-                        request_shutdown(&client, &mut request_ids, &primary_thread_id_for_requests)
-                            .await
-                    {
-                        warn!("thread/unsubscribe failed during shutdown: {err}");
-                    }
-                    break;
-                }
             }
         }
     }
@@ -1747,9 +1521,6 @@ fn session_configured_from_thread_resume_response(
 fn review_target_to_api(target: ReviewTarget) -> ApiReviewTarget {
     match target {
         ReviewTarget::UncommittedChanges => ApiReviewTarget::UncommittedChanges,
-        ReviewTarget::CurrentTurnDiff { .. } => {
-            unreachable!("current-turn diff reviews are background status targets only")
-        }
         ReviewTarget::BaseBranch { branch } => ApiReviewTarget::BaseBranch { branch },
         ReviewTarget::Commit { sha, title } => ApiReviewTarget::Commit { sha, title },
         ReviewTarget::Custom { instructions } => ApiReviewTarget::Custom { instructions },
@@ -1798,9 +1569,6 @@ fn session_configured_from_thread_response(
         parent_thread_id,
         thread_source,
         thread_name,
-        // The app-server thread response does not expose the persisted history
-        // contract, so legacy consumers see the defaulted value here.
-        history_mode: codex_protocol::protocol::ThreadHistoryMode::default(),
         model,
         model_provider_id,
         service_tier,
@@ -1818,43 +1586,6 @@ fn session_configured_from_thread_response(
 
 fn lagged_event_warning_message(skipped: usize) -> String {
     format!("in-process app-server event stream lagged; dropped {skipped} events")
-}
-
-async fn wait_for_background_review_deadline(
-    deadline: Option<BackgroundReviewDeadline>,
-) -> Option<BackgroundReviewDeadlineKind> {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(deadline.at).await;
-        Some(deadline.kind)
-    } else {
-        None
-    }
-}
-
-fn background_review_deadline_warning(kind: BackgroundReviewDeadlineKind) -> String {
-    match kind {
-        BackgroundReviewDeadlineKind::Schedule => {
-            "Background Review did not schedule before the bounded exec grace period elapsed; exiting without waiting for it."
-                .to_string()
-        }
-        BackgroundReviewDeadlineKind::Completion => {
-            "Background Review did not reach a terminal status within its configured execution budget; exiting."
-                .to_string()
-        }
-    }
-}
-
-fn background_review_target_matches_turn(
-    target: &ApiReviewTarget,
-    turn_review_fingerprint: Option<&str>,
-) -> bool {
-    matches!(
-        (target, turn_review_fingerprint),
-        (
-            ApiReviewTarget::CurrentTurnDiff { fingerprint },
-            Some(turn_review_fingerprint)
-        ) if fingerprint == turn_review_fingerprint
-    )
 }
 
 fn should_process_notification(
@@ -1900,9 +1631,6 @@ fn should_process_notification(
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
         ServerNotification::ModelVerification(notification) => {
-            notification.thread_id == thread_id && notification.turn_id == turn_id
-        }
-        ServerNotification::ProjectValidationCompleted(notification) => {
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }
         ServerNotification::ThreadTokenUsageUpdated(notification) => {
@@ -2049,9 +1777,8 @@ async fn resolve_resume_thread_id(
     let model_providers = resume_lookup_model_providers(config, args);
 
     if args.last {
+        let mut use_state_db_only = state_db.is_some();
         let mut cursor = None;
-        let mut saw_state_db_candidate = false;
-        let mut use_state_db_only = true;
         loop {
             let response: ThreadListResponse = send_request_with_response(
                 client,
@@ -2066,7 +1793,6 @@ async fn resolve_resume_thread_id(
                         model_providers: model_providers.clone(),
                         source_kinds: Some(all_thread_source_kinds()),
                         archived: Some(false),
-                        descendant_of_thread_id: None,
                         section_id: None,
                         project_id: None,
                         parent_thread_id: None,
@@ -2080,26 +1806,25 @@ async fn resolve_resume_thread_id(
             )
             .await
             .map_err(anyhow::Error::msg)?;
-            if use_state_db_only {
-                saw_state_db_candidate |= !response.data.is_empty();
-            }
             for thread in response.data {
-                let Some(path) = thread.path.as_deref() else {
-                    continue;
-                };
-                let Ok(session_meta) = read_session_meta_line(path).await else {
-                    continue;
-                };
-                if session_meta.meta.id.to_string() != thread.id {
-                    continue;
+                if use_state_db_only && let Some(path) = thread.path.as_deref() {
+                    let Ok(session_meta) = read_session_meta_line(path).await else {
+                        continue;
+                    };
+                    if session_meta.meta.id.to_string() != thread.id {
+                        continue;
+                    }
                 }
                 let latest_cwd = latest_thread_cwd(&thread).await;
                 if args.all || cwds_match(config.cwd.as_path(), latest_cwd.as_path()) {
+                    // A usable SQLite candidate is authoritative. Scanning is reserved for a
+                    // complete miss so successful `--last` lookups avoid auditing every rollout.
                     return Ok(Some(thread.id));
                 }
             }
             let Some(next_cursor) = response.next_cursor else {
-                if use_state_db_only && !saw_state_db_candidate {
+                if use_state_db_only {
+                    // Repair from rollouts before giving up on a missing SQLite match.
                     use_state_db_only = false;
                     cursor = None;
                     continue;
@@ -2154,7 +1879,6 @@ async fn resolve_resume_thread_id(
                     model_providers: model_providers.clone(),
                     source_kinds: Some(all_thread_source_kinds()),
                     archived: Some(false),
-                    descendant_of_thread_id: None,
                     section_id: None,
                     project_id: None,
                     parent_thread_id: None,

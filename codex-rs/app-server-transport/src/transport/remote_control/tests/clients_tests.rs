@@ -27,8 +27,6 @@ fn client_management_handle(
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         persistence: RemoteControlPersistence::default(),
-        reconnect_tx: mpsc::channel(RECONNECT_CHANNEL_CAPACITY).0,
-        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url,

@@ -211,6 +211,7 @@ impl ChatWidget {
         self.codex_rate_limit_reached_type = None;
         self.codex_spend_control_reached = None;
         self.rate_limit_warnings = RateLimitWarningState::default();
+        self.usage_notice_state = usage_notice::UsageNoticeState::default();
         self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
         self.bottom_pane
             .dismiss_view_by_id(RATE_LIMIT_SWITCH_PROMPT_VIEW_ID);
@@ -415,6 +416,8 @@ impl ChatWidget {
 
     pub(super) fn refresh_model_display(&mut self) {
         let effective = self.effective_collaboration_mode();
+        self.bottom_pane
+            .stop_ineligible_sparkle(effective.model(), &self.local_settings.tui);
         self.session_header.set_model(effective.model());
         // Keep composer paste affordances aligned with the currently effective model.
         self.sync_image_paste_enabled();
@@ -541,12 +544,12 @@ impl ChatWidget {
         self.refresh_model_dependent_surfaces();
     }
 
-    pub(super) fn model_display_name(&self) -> &str {
+    pub(crate) fn model_display_name(&self) -> &str {
         let model = self.current_model();
         if model.is_empty() {
             DEFAULT_MODEL_DISPLAY_NAME
         } else {
-            crate::model_catalog::model_display_name(model)
+            self.model_catalog.display_name(model)
         }
     }
 

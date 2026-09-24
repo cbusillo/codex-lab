@@ -2,12 +2,8 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
-use codex_config::config_toml::AgentSelectorToml;
-use codex_core::config::AgentRoleBackendConfig;
 use codex_core::config::AgentRoleConfig;
 use codex_core::config::Config;
-use codex_core::config::ExternalCommandAgentBackendConfig;
-use codex_core::config::ExternalCommandProtocol;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
@@ -24,7 +20,6 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
-use codex_protocol::protocol::MultiAgentVersion;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -34,20 +29,19 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
-use core_test_support::test_codex::test_codex_with_agents as test_codex;
+use core_test_support::test_codex::test_codex;
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 use std::time::Instant;
-use tempfile::TempDir;
 use test_case::test_case;
 use tokio::time::sleep;
 
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 
 fn spawn_agent_description(body: &Value) -> Option<String> {
-    namespace_child_tool(body, MULTI_AGENT_V2_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
+    namespace_child_tool(body, MULTI_AGENT_V1_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
         .and_then(|tool| tool.get("description"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -98,13 +92,14 @@ fn test_model_info(
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
         auto_review_model_override: None,
         model_specialty: None,
         tool_mode: None,
-        multi_agent_version: Some(MultiAgentVersion::V2),
+        multi_agent_version: None,
         multi_agent_reasoning_effort: None,
         priority: 1,
         additional_speed_tiers: Vec::new(),
@@ -217,7 +212,6 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
                 .enable(Feature::Collab)
                 .expect("test config should allow feature update");
             config.multi_agent_v2.hide_spawn_agent_metadata = false;
-            config.multi_agent_v2.expose_spawn_agent_model_overrides = true;
         });
     let test = builder.build(&server).await?;
     wait_for_model_available(&test.thread_manager.get_models_manager(), "visible-model").await;
@@ -244,6 +238,12 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         "expected inherited-model guidance in spawn_agent description: {description:?}"
     );
     assert!(
+        description.contains(
+            "Do not set the `model` field unless the user explicitly asks for a different model."
+        ),
+        "expected model override usage guidance in spawn_agent description: {description:?}"
+    );
+    assert!(
         description.contains("Reasoning efforts: low, medium (default), high."),
         "expected default reasoning effort in spawn_agent description: {description:?}"
     );
@@ -256,6 +256,24 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         "hidden picker model should be omitted from spawn_agent description: {description:?}"
     );
     assert!(
+        description.contains(
+            "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work."
+        ),
+        "expected explicit authorization rule in spawn_agent description: {description:?}"
+    );
+    assert!(
+        description.contains(
+            "Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn."
+        ) && description.contains("### When to delegate vs. do the subtask yourself"),
+        "expected delegation decision guidance in spawn_agent description: {description:?}"
+    );
+    assert!(
+        description.contains(
+            "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
+        ),
+        "expected agent-role clarification in spawn_agent description: {description:?}"
+    );
+    assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),
         "spawn_agent description should not encourage choosing a smaller model by default: {description:?}"
     );
@@ -263,86 +281,14 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     Ok(())
 }
 
+#[test_case(false, false, MULTI_AGENT_V1_NAMESPACE; "v1 hides agent type without roles")]
+#[test_case(true, true, "collaboration"; "v2 exposes agent type with a role")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_config_exposes_multi_agent_v2_tools() -> Result<()> {
-    let server = start_mock_server().await;
-    let response = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
-    )
-    .await;
-    let test = test_codex().build(&server).await?;
-
-    test.submit_turn("hello").await?;
-
-    let body = response.single_request().body_json();
-    assert!(namespace_child_tool(&body, MULTI_AGENT_V2_NAMESPACE, SPAWN_AGENT_TOOL_NAME).is_some());
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configured_agent_roles_expose_spawn_agent_type() -> Result<()> {
-    let server = start_mock_server().await;
-    let response = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
-    )
-    .await;
-    let test = test_codex()
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("test config should allow feature update");
-            config.agent_roles.insert(
-                "researcher".to_string(),
-                AgentRoleConfig {
-                    description: Some("Research role".to_string()),
-                    config_file: None,
-                    nickname_candidates: None,
-                    backend: None,
-                },
-            );
-        })
-        .build_with_auto_env(&server)
-        .await?;
-
-    test.submit_turn("hello").await?;
-
-    assert!(spawn_agent_exposes_agent_type(
-        &response.single_request().body_json(),
-        MULTI_AGENT_V2_NAMESPACE
-    ));
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_description_matches_configured_and_discovered_selectors() -> Result<()> {
-    let stub_dir = TempDir::new()?;
-    let agy = stub_dir.path().join("agy");
-    std::fs::write(
-        &agy,
-        r#"#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "1.1.10"
-  exit 0
-fi
-if [ "$1" = "models" ]; then
-  echo "gemini-3.6-flash-high"
-  exit 0
-fi
-if [ "$1" = "--help" ]; then
-  echo '--model Model'
-  echo '--effort low|medium|high'
-  exit 0
-fi
-exit 0
-"#,
-    )?;
-    let mut permissions = std::fs::metadata(&agy)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&agy, permissions)?;
-
+async fn configured_agent_roles_control_spawn_agent_type(
+    multi_agent_v2: bool,
+    has_agent_role: bool,
+    namespace: &str,
+) -> Result<()> {
     let server = start_mock_server().await;
     let response = mount_sse_once(
         &server,
@@ -354,58 +300,38 @@ exit 0
             config
                 .features
                 .enable(Feature::Collab)
-                .expect("test config should enable Collab");
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("test config should enable MultiAgentV2");
-            config.multi_agent_v2.hide_spawn_agent_metadata = false;
-            config.agent_roles.insert(
-                "antigravity".to_string(),
-                AgentRoleConfig {
-                    description: Some("Antigravity test backend".to_string()),
-                    backend: Some(AgentRoleBackendConfig::ExternalCommand(
-                        ExternalCommandAgentBackendConfig {
-                            command: agy.display().to_string(),
-                            protocol: ExternalCommandProtocol::RawCli,
-                            launch_family: Some("antigravity".to_string()),
-                            ..Default::default()
-                        },
-                    )),
-                    ..Default::default()
-                },
-            );
-            config.agent_selector_overrides.insert(
-                "claude-sonnet-4.6".to_string(),
-                AgentSelectorToml {
-                    enabled: Some(false),
-                    ..Default::default()
-                },
-            );
-            config.agent_selector_overrides.insert(
-                "cloud-gpt-5.1-codex-max".to_string(),
-                AgentSelectorToml {
-                    enabled: Some(true),
-                    ..Default::default()
-                },
-            );
+                .expect("test config should allow feature update");
+            if multi_agent_v2 {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            } else {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            }
+            if has_agent_role {
+                config.agent_roles.insert(
+                    "researcher".to_string(),
+                    AgentRoleConfig {
+                        description: Some("Research role".to_string()),
+                        config_file: None,
+                        nickname_candidates: None,
+                    },
+                );
+            }
         })
-        .build(&server)
+        .build_with_auto_env(&server)
         .await?;
 
     test.submit_turn("hello").await?;
 
-    let body = response.single_request().body_json();
-    let spawn_agent = namespace_child_tool(&body, MULTI_AGENT_V2_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
-        .expect("spawn_agent tool should be present");
-    let description = spawn_agent
-        .pointer("/parameters/properties/agent_type/description")
-        .and_then(Value::as_str)
-        .expect("spawn_agent agent_type description should be present");
-    assert!(!description.contains("claude-sonnet-4.6"));
-    assert!(description.contains("cloud-gpt-5.1-codex-max"));
-    assert!(description.contains("antigravity-gemini-3.6-flash-high"));
-
+    assert_eq!(
+        spawn_agent_exposes_agent_type(&response.single_request().body_json(), namespace),
+        has_agent_role
+    );
     Ok(())
 }
 
@@ -536,10 +462,7 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
         .into_iter()
         .map(|mut line| {
             if let RolloutItem::WorldState(world_state) = &mut line.item {
-                let state = world_state
-                    .state
-                    .as_object_mut()
-                    .expect("world-state payload should be an object");
+                let state = &mut world_state.state;
                 removed_recorded_usage_hint |= state.remove("multi_agent_usage_hint").is_some();
                 if let Some(mode) = state
                     .get_mut("multi_agent_mode")
@@ -824,6 +747,17 @@ wait_agent_enabled = {wait_agent_enabled}
     assert_eq!(
         namespace_child_tool(&body, "clock", "sleep").is_some(),
         sleep_tool_enabled
+    );
+    assert_eq!(
+        request
+            .message_input_texts("developer")
+            .iter()
+            .any(|message| {
+                message.contains(
+                "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.",
+            )
+            }),
+        wait_agent_enabled
     );
 
     Ok(())

@@ -3,6 +3,7 @@
 use super::*;
 use crate::line_truncation::line_width;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+use crate::style::accent_color;
 use crate::width::display_width;
 
 pub(crate) const SESSION_HEADER_MAX_INNER_WIDTH: usize = 56; // Just an eyeballed value
@@ -79,21 +80,28 @@ impl TooltipHistoryCell {
 }
 
 impl HistoryCell for TooltipHistoryCell {
+    fn compact_hyperlink_lines(&self, _width: u16) -> Vec<HyperlinkLine> {
+        // Optional tips stay available in detailed history without occupying the conversation.
+        Vec::new()
+    }
+
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        visible_lines(self.display_hyperlink_lines(width))
+    }
+
+    fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
         let indent = "  ";
         let indent_width = display_width(indent);
         let wrap_width = usize::from(width.max(1))
             .saturating_sub(indent_width)
             .max(1);
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        append_markdown(
-            &format!("**Tip:** {}", self.tip),
-            Some(wrap_width),
-            Some(self.cwd.as_path()),
-            &mut lines,
-        );
+        let lines = crate::tooltips::render_tooltip_lines(&self.tip, wrap_width, &self.cwd);
 
-        prefix_lines(lines, indent.into(), indent.into())
+        prefix_hyperlink_lines(lines, indent.into(), indent.into())
+    }
+
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.display_hyperlink_lines(width)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -101,12 +109,34 @@ impl HistoryCell for TooltipHistoryCell {
     }
 }
 
+/// Startup metadata, including prior-session summaries and available usage resets.
+#[derive(Debug)]
+pub(crate) struct SessionNoticeCell(pub(crate) PlainHistoryCell);
+
+impl HistoryCell for SessionNoticeCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.0.display_lines(width)
+    }
+
+    fn raw_lines(&self) -> Vec<Line<'static>> {
+        self.0.raw_lines()
+    }
+}
+
 #[derive(Debug)]
 pub struct SessionInfoCell(CompositeHistoryCell);
 
 impl HistoryCell for SessionInfoCell {
+    fn compact_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.0.compact_hyperlink_lines(width)
+    }
+
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         self.0.display_lines(width)
+    }
+
+    fn display_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.0.display_hyperlink_lines(width)
     }
 
     fn desired_height(&self, width: u16) -> u16 {
@@ -117,12 +147,15 @@ impl HistoryCell for SessionInfoCell {
         self.0.transcript_lines(width)
     }
 
+    fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
+        self.0.transcript_hyperlink_lines(width)
+    }
+
     fn raw_lines(&self) -> Vec<Line<'static>> {
         self.0.raw_lines()
     }
 }
 
-#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "keep local preferences separate while the legacy Config parameter is still required"
@@ -131,31 +164,7 @@ pub(crate) fn new_session_info(
     config: &Config,
     local_settings: &crate::local_settings::LocalSettings,
     requested_model: &str,
-    session: &ThreadSessionState,
-    is_first_event: bool,
-    tooltip_override: Option<String>,
-    auth_plan: Option<PlanType>,
-    show_fast_status: bool,
-) -> SessionInfoCell {
-    new_session_info_with_identity(
-        codex_version::ProductIdentity::Codex,
-        config,
-        local_settings,
-        requested_model,
-        session,
-        is_first_event,
-        tooltip_override,
-        auth_plan,
-        show_fast_status,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn new_session_info_with_identity(
-    product_identity: codex_version::ProductIdentity,
-    config: &Config,
-    local_settings: &crate::local_settings::LocalSettings,
-    requested_model: &str,
+    model_display_name: &str,
     session: &ThreadSessionState,
     is_first_event: bool,
     tooltip_override: Option<String>,
@@ -163,12 +172,12 @@ pub(crate) fn new_session_info_with_identity(
     show_fast_status: bool,
 ) -> SessionInfoCell {
     // Header box rendered as history (so it appears at the very top)
-    let header = SessionHeaderHistoryCell::new_with_identity(
-        product_identity,
-        session.model.clone(),
+    let header = SessionHeaderHistoryCell::new(
+        model_display_name.to_string(),
         session.reasoning_effort.clone(),
         show_fast_status,
         config.cwd.to_path_buf(),
+        CODEX_CLI_VERSION,
     )
     .with_yolo_mode(has_yolo_permissions(
         session.approval_policy,
@@ -214,7 +223,9 @@ pub(crate) fn new_session_info_with_identity(
     } else {
         if local_settings.tui.show_tooltips
             && let Some(tooltips) = tooltip_override
-                .or_else(|| tooltips::get_tooltip(auth_plan, show_fast_status))
+                .or_else(|| {
+                    tooltips::get_tooltip(auth_plan, show_fast_status, &local_settings.tui.keymap)
+                })
                 .map(|tip| TooltipHistoryCell::new(tip, &config.cwd))
         {
             parts.push(Box::new(tooltips));
@@ -253,9 +264,9 @@ pub(crate) fn has_yolo_permissions(
                 }
         )
 }
+/// Session banner with a model label already resolved for presentation by its caller.
 #[derive(Debug)]
 pub(crate) struct SessionHeaderHistoryCell {
-    product_name: &'static str,
     version: &'static str,
     model: String,
     model_style: Style,
@@ -266,7 +277,6 @@ pub(crate) struct SessionHeaderHistoryCell {
 }
 
 impl SessionHeaderHistoryCell {
-    #[cfg(test)]
     pub(crate) fn new(
         model: String,
         reasoning_effort: Option<ReasoningEffortConfig>,
@@ -284,24 +294,6 @@ impl SessionHeaderHistoryCell {
         )
     }
 
-    pub(crate) fn new_with_identity(
-        product_identity: codex_version::ProductIdentity,
-        model: String,
-        reasoning_effort: Option<ReasoningEffortConfig>,
-        show_fast_status: bool,
-        directory: PathBuf,
-    ) -> Self {
-        Self::new_with_identity_and_style(
-            product_identity,
-            model,
-            Style::default(),
-            reasoning_effort,
-            show_fast_status,
-            directory,
-        )
-    }
-
-    #[cfg(test)]
     pub(crate) fn new_with_style(
         model: String,
         model_style: Style,
@@ -311,28 +303,7 @@ impl SessionHeaderHistoryCell {
         version: &'static str,
     ) -> Self {
         Self {
-            product_name: codex_version::ProductIdentity::Codex.display_name(),
             version,
-            model: crate::model_catalog::model_display_name(&model).to_string(),
-            model_style,
-            reasoning_effort,
-            show_fast_status,
-            directory,
-            yolo_mode: false,
-        }
-    }
-
-    pub(crate) fn new_with_identity_and_style(
-        product_identity: codex_version::ProductIdentity,
-        model: String,
-        model_style: Style,
-        reasoning_effort: Option<ReasoningEffortConfig>,
-        show_fast_status: bool,
-        directory: PathBuf,
-    ) -> Self {
-        Self {
-            product_name: product_identity.display_name(),
-            version: product_identity.version(),
             model,
             model_style,
             reasoning_effort,
@@ -392,7 +363,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         // Title line rendered inside the box: ">_ OpenAI Codex (vX)"
         let title_spans: Vec<Span<'static>> = vec![
             Span::from(">_ ").dim(),
-            Span::from(self.product_name).bold(),
+            Span::from("OpenAI Codex").bold(),
             Span::from(" ").dim(),
             Span::from(format!("(v{})", self.version)).dim(),
         ];
@@ -427,7 +398,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
                 spans.push(Span::styled("fast", self.model_style.magenta()));
             }
             spans.push("   ".dim());
-            spans.push(CHANGE_MODEL_HINT_COMMAND.cyan());
+            spans.push(CHANGE_MODEL_HINT_COMMAND.fg(accent_color()));
             spans.push(CHANGE_MODEL_HINT_EXPLANATION.dim());
             spans
         };
@@ -463,7 +434,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
         let mut lines = vec![
-            Line::from(format!("{} (v{})", self.product_name, self.version)),
+            Line::from(format!("OpenAI Codex (v{})", self.version)),
             Line::from(format!(
                 "model: {}{}",
                 self.model,
@@ -482,3 +453,7 @@ impl HistoryCell for SessionHeaderHistoryCell {
         lines
     }
 }
+
+#[cfg(test)]
+#[path = "session_transcript_tests.rs"]
+mod transcript_tests;

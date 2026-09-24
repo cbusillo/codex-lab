@@ -1,14 +1,5 @@
-use super::multi_agents_bounded_worker_spec::bounded_worker_input_schema;
-use super::multi_agents_bounded_worker_spec::bounded_worker_output_schema;
-use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
-use super::multi_agents_common::model_supports_multi_agent_backend;
-use super::multi_agents_routing_spec::create_agent_task_kind_schema;
-use super::multi_agents_routing_spec::create_agent_task_size_schema;
-use super::multi_agents_routing_spec::external_agent_failure_output_schema;
-use super::multi_agents_routing_spec::external_agent_provider_output_schema;
-use super::multi_agents_routing_spec::external_agent_quota_diagnostic_output_schema;
-use super::multi_agents_routing_spec::provider_routing_guidance;
-use super::multi_agents_routing_spec::provider_routing_output_schema;
+use crate::agent::child_config::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
+use crate::agent::child_config::model_supports_multi_agent_backend;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -106,7 +97,10 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
     })
 }
 
-pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
+pub fn create_spawn_agent_tool_v2(
+    options: SpawnAgentToolOptions,
+    description_override: Option<&str>,
+) -> ToolSpec {
     let available_models_description = options.expose_spawn_agent_model_overrides.then(|| {
         spawn_agent_models_description(&options.available_models, options.multi_agent_version)
     });
@@ -135,17 +129,13 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
             available_models_description.as_deref(),
             inherited_model_guidance,
             options.usage_hint_text,
+            description_override,
         ),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
             properties,
-            Some(vec![
-                "task_name".to_string(),
-                "message".to_string(),
-                "task_kind".to_string(),
-                "task_size".to_string(),
-            ]),
+            Some(vec!["task_name".to_string(), "message".to_string()]),
             Some(false.into()),
         ),
         output_schema: Some(
@@ -182,7 +172,7 @@ pub fn create_send_input_tool_v1() -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "send_input".to_string(),
-            description: "Send a message to an existing agent that reports supports_followup_messages=true. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
+            description: "Send a message to an existing agent. Use interrupt=true to redirect work immediately. You should reuse the agent by send_input if you believe your assigned task is highly dependent on the context of a previous task."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -211,7 +201,7 @@ pub fn create_send_message_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "send_message".to_string(),
-        description: "Send a message to an existing agent that reports supports_followup_messages=true. The message will be delivered promptly. Does not trigger a new turn."
+        description: "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -244,7 +234,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "followup_task".to_string(),
-        description: "Send a follow-up task to an existing non-root target agent that reports supports_followup_messages=true and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
+        description: "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -414,40 +404,28 @@ fn spawn_agent_output_schema_v1() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
-            },
-            "supports_followup_messages": {
-                "type": "boolean",
-                "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
             }
         },
-        "required": ["agent_id", "nickname", "supports_followup_messages"],
+        "required": ["agent_id", "nickname"],
         "additionalProperties": false
     })
 }
 
 fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
     if hide_agent_metadata {
-        let routing = provider_routing_output_schema();
         return json!({
             "type": "object",
             "properties": {
                 "task_name": {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
-                },
-                "supports_followup_messages": {
-                    "type": "boolean",
-                    "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
-                },
-                "routing": routing,
-                "bounded_worker": bounded_worker_output_schema()
+                }
             },
-            "required": ["task_name", "supports_followup_messages", "routing"],
+            "required": ["task_name"],
             "additionalProperties": false
         });
     }
 
-    let routing = provider_routing_output_schema();
     json!({
         "type": "object",
         "properties": {
@@ -458,19 +436,9 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
-            },
-            "agent_type": {
-                "type": "string",
-                "description": "Effective agent role selected for the spawned agent."
-            },
-            "supports_followup_messages": {
-                "type": "boolean",
-                "description": "Whether the spawned agent accepts messages after launch. followup_task also requires a non-root target."
-            },
-            "routing": routing,
-            "bounded_worker": bounded_worker_output_schema()
+            }
         },
-        "required": ["task_name", "nickname", "agent_type", "supports_followup_messages", "routing"],
+        "required": ["task_name", "nickname"],
         "additionalProperties": false
     })
 }
@@ -490,9 +458,6 @@ fn send_input_output_schema() -> Value {
 }
 
 fn list_agents_output_schema() -> Value {
-    let provider = external_agent_provider_output_schema();
-    let failure = external_agent_failure_output_schema();
-    let quota_diagnostic = external_agent_quota_diagnostic_output_schema();
     json!({
         "type": "object",
         "properties": {
@@ -508,21 +473,9 @@ fn list_agents_output_schema() -> Value {
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
-                        },
-                        "supports_followup_messages": {
-                            "type": "boolean",
-                            "description": "Whether the agent accepts messages after launch. followup_task also requires a non-root target."
-                        },
-                        "provider": provider,
-                        "failure": failure,
-                        "quota_diagnostic": quota_diagnostic,
-                        "duration_ms": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "description": "Elapsed external-agent runtime in milliseconds."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "supports_followup_messages"],
+                    "required": ["agent_name", "agent_status"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
@@ -676,17 +629,13 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
 
 fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
     BTreeMap::from([
-        ("bounded_worker".to_string(), bounded_worker_input_schema()),
         (
             "message".to_string(),
-            // Not `with_encrypted()`: any spawn can route to an external CLI, which receives the
-            // argument verbatim and cannot decrypt it.
             JsonSchema::string(Some(
                 "Initial plain-text task for the new agent.".to_string(),
-            )),
+            ))
+            .with_encrypted(),
         ),
-        ("task_kind".to_string(), create_agent_task_kind_schema()),
-        ("task_size".to_string(), create_agent_task_size_schema()),
         (
             "agent_type".to_string(),
             JsonSchema::string(Some(format!(
@@ -696,7 +645,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `none` when an external agent is selected and `all` otherwise. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
                     .to_string(),
             )),
         ),
@@ -793,26 +742,32 @@ fn spawn_agent_tool_description_v2(
     available_models_description: Option<&str>,
     inherited_model_guidance: Option<&str>,
     usage_hint_text: Option<String>,
+    description: Option<&str>,
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
-    let provider_routing_guidance =
-        provider_routing_guidance(available_models_description.is_some());
 
-    let tool_description = format!(
-        r#"
+    let tool_description = if let Some(description) = description {
+        format!(
+            r#"
+        {agent_role_guidance}
+        {description}
+{inherited_model_guidance}"#
+        )
+    } else {
+        format!(
+            r#"
         {agent_role_guidance}
         Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
 You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-Native child agents receive the same tools as you and can spawn subagents. Configured agent types may instead route to external CLIs with their own capabilities.
+The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 {inherited_model_guidance}
-{provider_routing_guidance}
-Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
 
 Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
-    );
+        )
+    };
 
     if let Some(usage_hint_text) = usage_hint_text {
         return format!(

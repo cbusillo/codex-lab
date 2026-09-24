@@ -8,7 +8,6 @@
 //! Exit is modelled explicitly via `AppEvent::Exit(ExitMode)` so callers can request shutdown-first
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
-use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -17,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
-use codex_app_server_protocol::AutoReviewSummaryReadResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::DynamicToolCallResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
@@ -53,6 +51,7 @@ use crate::app_server_session::AppServerStartedThread;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
+use crate::chatwidget::AstraModelPickerAction;
 use crate::chatwidget::ConnectorScopeGeneration;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::chatwidget::UserMessage;
@@ -67,6 +66,14 @@ use codex_protocol::models::ActivePermissionProfile;
 use codex_realtime_webrtc::StartedRealtimeWebrtcSession;
 
 use crate::history_cell::HistoryCell;
+
+/// Global voice controls always apply to the one call's owner.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum VoiceControl {
+    Toggle,
+    Stop,
+    Mute,
+}
 
 /// Confirmed server lifecycle operations available from the agents dashboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,44 +158,6 @@ pub(crate) enum HistoryLookupResponse {
         cursor: HistoryBatchCursor,
         log_id: u64,
     },
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SecretApiKey(String);
-
-impl SecretApiKey {
-    pub(crate) fn new(api_key: String) -> Self {
-        Self(api_key)
-    }
-
-    pub(crate) fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SecretApiKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SecretDeviceCode(String);
-
-impl SecretDeviceCode {
-    pub(crate) fn new(device_code: String) -> Self {
-        Self(device_code)
-    }
-
-    pub(crate) fn expose_secret(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SecretDeviceCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,8 +283,12 @@ pub(crate) enum AppEvent {
     ReviewMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     ContinueMisalignment(Arc<crate::chatwidget::MisalignmentReview>),
     CloseMisalignmentReview,
-    /// Open the daemon-wide overview of recent and locally retained root sessions.
+    /// Open the live command center for recent and locally retained root sessions.
     OpenAgentsOverview,
+    /// Create an empty thread from the command center.
+    NewAgentsOverviewSession {
+        cwd: Option<AbsolutePathBuf>,
+    },
     /// Update the daemon-wide overview after a background thread listing finishes.
     AgentsOverviewThreadsLoaded {
         request_id: Uuid,
@@ -324,10 +297,6 @@ pub(crate) enum AppEvent {
     /// Switch to a root session selected from the shared dashboard.
     SelectAgentsOverviewThread {
         thread_id: ThreadId,
-    },
-    /// Open an empty session in the selected checkout.
-    NewAgentsOverviewSession {
-        cwd: Option<AbsolutePathBuf>,
     },
     /// Create an empty session in a worktree from the selected project's default branch.
     NewAgentsOverviewWorktree {
@@ -463,13 +432,17 @@ pub(crate) enum AppEvent {
 
     /// Open the filename prompt for an on-demand Markdown transcript export.
     OpenTranscriptExportFilePrompt,
+    /// Open retained warnings without changing the draft or transcript position.
+    OpenWarnings,
+    /// Copy a diagnostic and acknowledge in the footer, without appending history.
+    CopyWarning(String),
 
     /// Export all current-thread history to the selected destination.
     ExportTranscript {
         destination: TranscriptExportDestination,
     },
 
-    /// Copy a picker selection while retaining its clipboard lease in the chat widget.
+    /// Copy text through the session clipboard worker.
     CopySelection {
         text: Arc<str>,
         label: String,
@@ -553,9 +526,9 @@ pub(crate) enum AppEvent {
         result: color_eyre::Result<AppServerStartedThread>,
     },
 
-    /// Register a dynamically created background thread before its first turn starts.
+    /// Register a tool-created or resumed background thread and its overview metadata.
     DynamicToolThreadStarted {
-        thread_id: ThreadId,
+        thread: Thread,
         task_tools_available: bool,
         registered: tokio::sync::oneshot::Sender<()>,
     },
@@ -613,10 +586,10 @@ pub(crate) enum AppEvent {
         name: Option<String>,
     },
 
-    /// Branch before a selected prompt and reopen it in the new thread's composer.
+    /// Revert before a selected prompt, retaining its identity across queued history pages.
     RevertSessionForPromptEdit {
         thread_id: ThreadId,
-        nth_user_message: usize,
+        selected_cell: Arc<dyn HistoryCell>,
         prompt: UserMessage,
     },
     FinishPromptRevert {
@@ -640,39 +613,6 @@ pub(crate) enum AppEvent {
 
     /// Request app-server account logout, then exit after it succeeds.
     Logout,
-
-    /// Show the interactive account manager for `/login`.
-    ShowLoginAccounts,
-
-    /// Show the add-account flow from the account manager.
-    ShowLoginAddAccount,
-
-    /// Start a ChatGPT browser login from the add-account flow.
-    LoginStartChatGpt,
-
-    /// Save an API key from the add-account flow.
-    LoginAddAccountApiKey {
-        api_key: SecretApiKey,
-    },
-
-    /// Start a ChatGPT device-code login from the add-account flow.
-    LoginStartDeviceCode,
-
-    /// The direct-store device-code request is ready to show to the user.
-    LoginAddAccountDeviceCodeReady {
-        attempt_id: u64,
-        verification_url: String,
-        user_code: SecretDeviceCode,
-    },
-
-    /// Cancel the active ChatGPT add-account login attempt.
-    LoginCancelChatGpt,
-
-    /// Direct default-store ChatGPT add-account login finished.
-    LoginAddAccountChatGptCompleted {
-        attempt_id: u64,
-        result: Result<(), String>,
-    },
 
     /// Request to exit the application due to a fatal error.
     #[allow(dead_code)]
@@ -1141,10 +1081,24 @@ pub(crate) enum AppEvent {
     /// resize-reflow tail renderer.
     BeginThreadSwitchHistoryReplayBuffer,
 
+    /// Resume following the transcript after an explicit local command submission.
+    /// Background output and later refreshes must preserve the user's reading position.
+    FollowTranscript,
+
     InsertHistoryCell(Box<dyn HistoryCell>),
 
     /// Move visible completed voice captions into history in one app event.
     CommitRealtimeTranscriptHistory,
+
+    VoiceControl {
+        thread_id: Option<ThreadId>,
+        control: VoiceControl,
+    },
+    RealtimeConversationStateChanged,
+    BackgroundVoiceError {
+        thread_id: ThreadId,
+        message: String,
+    },
 
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
@@ -1190,6 +1144,14 @@ pub(crate) enum AppEvent {
 
     /// Update the current model slug in the running app and widget.
     UpdateModel(String),
+
+    /// Apply a final Astra picker action and offer the flourish only if it changed the model on
+    /// its original task. Automatic model updates do not use this event.
+    AstraSelectedFromModelPicker {
+        thread_id: ThreadId,
+        model: String,
+        action: AstraModelPickerAction,
+    },
 
     /// Result of creating a TUI-owned WebRTC offer for an active thread.
     RealtimeWebrtcOfferCreated {
@@ -1412,63 +1374,6 @@ pub(crate) enum AppEvent {
     /// Open the skills list popup.
     OpenSkillsList,
 
-    /// Open third-party agent install/status settings from the general settings menu.
-    OpenAgentsSettings,
-
-    /// Refresh bounded local external-agent capabilities in the background.
-    RefreshAgentCapabilities,
-
-    /// Cancel the active external-agent capability refresh while keeping settings open.
-    CancelAgentCapabilitiesRefresh,
-
-    /// Cancel the active external-agent capability refresh and close Agents settings.
-    CloseAgentsSettings,
-
-    /// Open the provider-default model picker for an external selector.
-    OpenAgentSelectorModelPicker {
-        selector: String,
-        models: Vec<String>,
-        current: Option<String>,
-    },
-
-    /// Open the provider-default effort picker for an external selector.
-    OpenAgentSelectorEffortPicker {
-        selector: String,
-        efforts: Vec<String>,
-        current: Option<String>,
-    },
-
-    /// Persist an explicit enablement override for an agent selector.
-    SetAgentSelectorEnabled {
-        selector: String,
-        enabled: bool,
-    },
-
-    /// Persist or clear the provider-default model for an external selector.
-    SetAgentSelectorModel {
-        selector: String,
-        model: Option<String>,
-    },
-
-    /// Persist or clear the default effort for an external selector.
-    SetAgentSelectorEffort {
-        selector: String,
-        effort: Option<String>,
-    },
-
-    /// Fetch the persisted summary for a terminal background auto-review run.
-    FetchAutoReviewSummary {
-        thread_id: ThreadId,
-        run_id: String,
-    },
-
-    /// Persisted auto-review summary response routed back to its thread.
-    AutoReviewSummaryLoaded {
-        thread_id: ThreadId,
-        run_id: String,
-        result: Result<AutoReviewSummaryReadResponse, String>,
-    },
-
     /// Open the skills enable/disable picker.
     OpenManageSkillsPopup,
 
@@ -1605,6 +1510,11 @@ pub(crate) enum AppEvent {
     },
     /// Dismiss the terminal-title setup UI without changing config.
     TerminalTitleSetupCancelled,
+
+    /// Save the transcript renderer preference for the next launch only.
+    FullscreenTranscriptSelected {
+        enabled: bool,
+    },
 
     /// Apply a user-confirmed syntax theme selection.
     SyntaxThemeSelected {

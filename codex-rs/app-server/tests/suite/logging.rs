@@ -1,6 +1,5 @@
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::AppServerJsonInvocation;
 use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
@@ -60,11 +59,13 @@ async fn credentials_stay_out_of_persisted_and_feedback_logs() -> Result<()> {
     let initial_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("initial@example.com")
+            .chatgpt_user_id("logging-user")
             .chatgpt_account_id(account_id),
     )?;
     let refreshed_token = encode_id_token(
         &ChatGptIdTokenClaims::new()
             .email("refreshed@example.com")
+            .chatgpt_user_id("logging-user")
             .chatgpt_account_id(account_id),
     )?;
     let server = MockServer::start().await;
@@ -252,8 +253,7 @@ supports_websockets = false
 #[test]
 fn standalone_app_server_emits_json_info_events() -> Result<()> {
     let codex_home = TempDir::new()?;
-    let event =
-        app_server_json_shutdown_event(AppServerJsonInvocation::Standalone, codex_home.path())?;
+    let event = app_server_json_shutdown_event("codex-app-server", &[], codex_home.path())?;
 
     assert_eq!(
         event,

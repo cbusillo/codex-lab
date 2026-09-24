@@ -46,7 +46,6 @@ use crate::rmcp_client::ManagedClient;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::rmcp_client::prepare_codex_apps_tools_for_model;
 use crate::rmcp_client::prepare_regular_mcp_tools_for_model;
-use crate::runtime::CodexAppsExecutionAuth;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeInput;
 use crate::runtime::McpStartupPolicy;
@@ -204,9 +203,9 @@ impl McpConnectionSet {
         previous: Option<&Self>,
         publication_gate: McpPublicationGate,
         input: McpRuntimeInput,
-        codex_apps_execution_auth: Option<CodexAppsExecutionAuth>,
         elicitation_router: ElicitationRequestRouter,
     ) -> Self {
+        let trusted_access = TrustedAccessContext::from_runtime(&input);
         let McpRuntimeInput {
             startup_policy,
             config,
@@ -278,48 +277,19 @@ impl McpConnectionSet {
         let static_chatgpt_auth_provider = auth
             .filter(|auth| auth.uses_codex_backend())
             .map(codex_model_provider::auth_provider_from_auth);
-        let control_plane_codex_apps_auth_provider =
-            auth_manager.as_ref().and_then(|auth_manager| {
-                auth.filter(|auth| auth.uses_codex_backend()).map(|auth| {
-                    codex_model_provider::auth_provider_from_auth_manager(
-                        Arc::clone(auth_manager),
-                        auth,
-                    )
-                })
-            });
-        let (
-            codex_apps_auth_provider,
-            codex_apps_auth_manager,
-            codex_apps_identity_auth,
-            codex_apps_tools_cache_key,
-            codex_apps_execution_discriminator,
-        ) = match codex_apps_execution_auth {
-            Some(execution) => (
-                execution.auth_provider,
-                execution.auth_manager,
-                execution.auth,
-                execution.tools_cache_key,
-                Some(execution.connection_discriminator),
-            ),
-            None => (
-                control_plane_codex_apps_auth_provider
-                    .or_else(|| static_chatgpt_auth_provider.clone()),
-                auth_manager.clone(),
-                auth.cloned(),
-                Some(codex_apps_tools_cache_key),
-                None,
-            ),
-        };
-        let trusted_access = TrustedAccessContext::from_auth(
-            codex_apps_identity_auth.as_ref(),
-            codex_apps_auth_manager.clone(),
-            config.chatgpt_base_url.clone(),
-            runtime_context.local_http_client(),
-        );
+        let codex_apps_auth_provider = auth_manager.as_ref().and_then(|auth_manager| {
+            auth.filter(|auth| auth.uses_codex_backend()).map(|auth| {
+                codex_model_provider::auth_provider_from_auth_manager(
+                    Arc::clone(auth_manager),
+                    auth,
+                )
+            })
+        });
         for (server_name, server) in mcp_servers
             .into_iter()
             .filter(|(_, server)| server.enabled())
         {
+            let server = server.with_read_only_mcp_tools(config.requires_read_only_mcp_tools);
             let registration = config.mcp_server_catalog.server(&server_name);
             let client_mcp_extensions = crate::client_capabilities::server_mcp_extensions(
                 &client_mcp_extensions,
@@ -380,48 +350,43 @@ impl McpConnectionSet {
                 } => bearer_token_env_var.is_some(),
                 McpServerTransportConfig::Stdio { .. } => false,
             };
+            // Filtered catalogs must not read or populate an unrestricted shared cache.
             let shares_codex_apps_tools_cache = is_host_owned_codex_apps
+                && !server.requires_read_only_mcp_tools()
                 && should_share_codex_apps_tools_cache(&server_name, uses_env_bearer_token);
-            let codex_apps_tools_cache_context = codex_apps_tools_cache_key
-                .as_ref()
-                .filter(|_| shares_codex_apps_tools_cache)
-                .map(|tools_cache_key| {
-                    // Tools/list has no thread selection or UI capabilities. Only equivalent
-                    // transport/auth and listing settings may share executable Apps tools.
-                    let mut transport = configured_config.transport.clone();
-                    if let McpServerTransportConfig::StreamableHttp {
-                        http_headers: Some(headers),
-                        ..
-                    } = &mut transport
-                    {
-                        // mcp_server_config_for_url in codex-rs/codex-mcp/src/mcp/mod.rs
-                        // adds thread attribution that threadless discovery does not carry.
-                        headers.retain(|name, _| !name.eq_ignore_ascii_case("originator"));
-                    }
-                    let mut scope = serde_json::json!([
-                        transport,
-                        &configured_config.auth,
-                        protocol_mode.preferred_protocol_version().as_str(),
-                        catalog_item_limit,
-                    ]);
-                    scope.sort_all_objects();
-                    codex_apps_tools_cache
-                        .context(codex_home.clone(), tools_cache_key.clone())
-                        .with_live_scope(scope.to_string())
-                });
-            // The reserved Codex Apps registration follows its selected auth owner across
-            // refreshes. Thread runtimes select an execution account; threadless callers use
-            // the control-plane manager. User-configured registrations keep their configured
-            // auth path.
+            let codex_apps_tools_cache_context = shares_codex_apps_tools_cache.then(|| {
+                // Only equivalent discovery inputs may share executable Apps tools.
+                let mut transport = configured_config.transport.clone();
+                if let McpServerTransportConfig::StreamableHttp {
+                    http_headers: Some(headers),
+                    ..
+                } = &mut transport
+                {
+                    // mcp_server_config_for_url in codex-rs/codex-mcp/src/mcp/mod.rs
+                    // adds thread attribution that threadless discovery does not carry.
+                    headers.retain(|name, _| !name.eq_ignore_ascii_case("originator"));
+                }
+                let mut scope = serde_json::json!([
+                    transport,
+                    &configured_config.auth,
+                    protocol_mode.preferred_protocol_version().as_str(),
+                    catalog_item_limit,
+                ]);
+                scope.sort_all_objects();
+                codex_apps_tools_cache
+                    .context(codex_home.clone(), codex_apps_tools_cache_key.clone())
+                    .with_live_scope(scope.to_string())
+            });
+            // The reserved Codex Apps registration follows the shared
+            // AuthManager across refreshes. In the hosted-plugin path, this
+            // is the ChatGPT /ps/mcp connection. User-configured MCP
+            // registrations keep their existing configured auth path.
             let chatgpt_auth_provider = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                codex_apps_auth_provider.clone()
+                codex_apps_auth_provider
+                    .clone()
+                    .or_else(|| static_chatgpt_auth_provider.clone())
             } else {
                 static_chatgpt_auth_provider.clone()
-            };
-            let identity_auth = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                codex_apps_identity_auth.as_ref()
-            } else {
-                auth
             };
             // If Codex Apps has an env bearer token, that is its auth path. Do
             // not also attach the ambient CodexAuth provider.
@@ -440,24 +405,12 @@ impl McpConnectionSet {
                     runtime_context: runtime_context.clone(),
                     resolved_environment: resolved_environment.clone(),
                     auth_provider: runtime_auth_provider.clone(),
-                    auth_manager: codex_apps_auth_manager.clone(),
-                    auth: codex_apps_identity_auth.clone(),
+                    auth_manager: auth_manager.clone(),
+                    auth: auth.cloned(),
                     protocol_mode,
                     client_mcp_extensions: client_mcp_extensions.clone(),
                 }));
             }
-            let connection_cache_identity = if shares_codex_apps_tools_cache {
-                codex_apps_tools_cache_key
-                    .clone()
-                    .map(|key| (codex_home.clone(), key))
-            } else {
-                None
-            };
-            let connection_execution_discriminator = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                codex_apps_execution_discriminator.clone()
-            } else {
-                None
-            };
             let connection_identity = McpServerConnectionIdentity::new(
                 &server_name,
                 &server,
@@ -468,9 +421,9 @@ impl McpConnectionSet {
                 &resolved_environment,
                 &runtime_context,
                 runtime_auth_provider.as_ref(),
-                identity_auth,
-                connection_cache_identity,
-                connection_execution_discriminator,
+                auth,
+                shares_codex_apps_tools_cache
+                    .then(|| (codex_home.clone(), codex_apps_tools_cache_key.clone())),
                 client_elicitation_capability.clone(),
                 client_mcp_extensions.clone(),
                 previous
@@ -601,7 +554,9 @@ impl McpConnectionSet {
                 }
             }
             let cancel_token = startup_cancellation_token.child_token();
-            let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+            let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
+                || server.requires_read_only_mcp_tools()
+            {
                 None
             } else if let Ok(environment) = resolved_environment.as_ref() {
                 tool_catalog_cache.context(
@@ -620,11 +575,6 @@ impl McpConnectionSet {
                 None
             };
             let has_runtime_auth = runtime_auth_provider.is_some();
-            let auth_change_manager = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                codex_apps_auth_manager.as_ref()
-            } else {
-                auth_manager.as_ref()
-            };
             let async_managed_client = AsyncManagedClient::new(
                 server_name.clone(),
                 startup_submit_id.clone(),
@@ -642,7 +592,8 @@ impl McpConnectionSet {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 client_mcp_extensions.clone(),
-                auth_change_manager
+                auth_manager
+                    .as_ref()
                     .filter(|_| {
                         matches!(
                             &configured_config.transport,
@@ -789,9 +740,7 @@ impl McpConnectionSet {
                     outcome = Err(StartupOutcomeError::Cancelled);
                 }
 
-                if startup_policy != McpStartupPolicy::OneShot
-                    && matches!(&outcome, Err(StartupOutcomeError::Failed { .. }))
-                {
+                if matches!(&outcome, Err(StartupOutcomeError::Failed { .. })) {
                     async_managed_client.reconnect_failed_startup().await;
                 }
 

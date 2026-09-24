@@ -1,5 +1,9 @@
 # Codex Lab
 
+Read [DIRECTION.md](DIRECTION.md) first. Its purpose, stop boundaries, and
+milestone order govern this repository. When issues or other documents disagree,
+follow `DIRECTION.md`; `plan:active` does not override its milestone order.
+
 ## Execution and skill scope
 
 - Carry the user's authorized task through implementation and verification.
@@ -32,32 +36,23 @@
   repository and verified access requirements; this fork does not inherit an
   internal upstream approval flow merely because it shares source history.
 
-## Planning
+## Planning and historical references
 
-- Treat GitHub issues as the durable planning database. Use the GitHub planning
-  index and `plan` / `plan:active` state to discover the current roadmap and
-  workstream; do not hardcode a transient active issue as the recovery point.
+- Treat GitHub issues as the durable work list within `DIRECTION.md`. Use its
+  milestone order first, then the GitHub planning index and `plan` / `plan:active`
+  state to find work in that milestone. Do not hardcode a transient active issue
+  as the recovery point.
 - Do not rely on local handoff files or local plan drafts as the source of truth
   for GitHub-backed work.
-- For upstream refresh, fork synchronization, or convergence work, use the
-  `$upstream-convergence` skill. Treat `upstream/convergence-policy.json`,
-  `upstream/convergence-contracts.md`, and the repository-local convergence
-  command as the authority for this repository.
 - Treat `.github/github.json` as repository-owned workflow metadata. Preserve
-  its default-branch, readiness-gate, and JetBrains routing configuration during
-  upstream convergence even when the file is absent upstream.
+  its default-branch, readiness-gate, and JetBrains routing configuration when
+  updating upstream, even when the file is absent upstream.
 - New implementation work belongs in this repo unless the user explicitly says
   otherwise.
-- When sibling restored sources are present, use
-  `../code-prealign-new-skills/code-rs` as the first reference for Every Code
-  product behavior and UX. In particular, account/login/settings flows live in
-  that tree, including the TUI bottom-pane account views and core account
-  switching/auth-account code.
-- Treat `../code/code-rs` and `../code/codex-rs` as restored history and shared
-  lineage/reference material, not authoritative Every Code UX sources. Use them
-  only when cross-checking lower-level behavior that is not product-flow
-  specific.
-- Treat `../code/every-code-webui` as Every Code web UI reference material only.
+- The archived Lab main, `../code-prealign-new-skills`, and `../code` are
+  historical references only. Code comes back from them only for a kept need
+  listed in `DIRECTION.md`; their old product flows, plans, and convergence
+  machinery do not define current requirements. Never delete the archived main.
 
 # Rust/codex-rs
 
@@ -122,20 +117,13 @@ In the codex-rs folder where the rust code lives:
     trivial; prefer new modules/files and keep `chatwidget.rs` focused on orchestration.
 - When running Rust commands (e.g. `just fix` or `just test`) be patient with the command and never try to kill them using the PID. Rust lock can make the execution slow, this is expected.
 
-For Rust code changes, run `just fmt` in `codex-rs` automatically; do not ask
-for approval. For changes outside Rust, use the checks for the affected surface.
-Instruction-only changes need instruction/link/format validation, not a Rust
-build or test suite. From the repo root, use
-`pnpm exec prettier --check <changed-markdown-files>` and verify local links and
-referenced commands; validate edited skills with the shared skill validator
-when installed. The repo-wide Markdown format gate is `pnpm run format`.
-For Rust code changes, run the tests:
+Run `just fmt` (in the `codex-rs` directory) automatically after you have finished making code changes anywhere in this repository; do not ask for approval to run it. Additionally, run the tests:
 
 1. Do not run `cargo test` directly. Use `just test` so test execution follows the repo defaults.
 2. Run the test for the specific project that was changed. For example, if changes were made in `codex-rs/tui`, run `just test -p codex-tui`.
-3. Once those pass, if code changes affect common, core, or protocol, run the complete test suite with `just test`. Avoid `--all-features` for routine local runs because it expands the build matrix and can significantly increase `target/` disk usage; use it only when you specifically need full feature coverage. Project-specific or individual tests can run without asking. The complete suite requires user approval; reuse approval already given for that suite and task rather than asking again.
+3. Once those pass, if any changes were made in common, core, or protocol, run the complete test suite with `just test`. Avoid `--all-features` for routine local runs because it expands the build matrix and can significantly increase `target/` disk usage; use it only when you specifically need full feature coverage. project-specific or individual tests can be run without asking the user, but do ask the user before running the complete test suite.
 
-Before finalizing a large change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Do not re-run passing tests solely because `fix` or `fmt` ran. Inspect their diff; substantive changes or newly discovered concerns warrant the affected checks, subject to the same full-suite approval requirement.
+Before finalizing a large change to `codex-rs`, run `just fix -p <project>` (in `codex-rs` directory) to fix any linter issues in the code. Prefer scoping with `-p` to avoid slow workspace‑wide Clippy builds; only run `just fix` without `-p` if you changed shared crates. Do not re-run tests after running `fix` or `fmt`.
 
 ## The `codex-core` crate
 
@@ -209,7 +197,7 @@ See `codex-rs/tui/styles.md`.
   - Styled spans: use "text".red(), "text".green(), "text".magenta(), "text".dim(), etc.
   - Prefer these over constructing styles with `Span::styled` and `Style` directly.
   - Example: patch summary file lines
-    - Desired: `vec!["  └ ".into(), "M".red(), " ".dim(), "tui/src/app.rs".dim()]`
+    - Desired: vec!["  └ ".into(), "M".red(), " ".dim(), "tui/src/app.rs".dim()]
 
 ### TUI Styling (ratatui)
 
@@ -331,7 +319,6 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
 
 - `app-server-protocol/src/protocol/common.rs`
 - `app-server-protocol/src/protocol/v2.rs`
-- `app-server/README.md`
 
 ### Core Rules
 
@@ -365,7 +352,6 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
 
 ### Development Workflow
 
-- Update app-server docs/examples when API behavior changes (at minimum `app-server/README.md`).
 - Regenerate schema fixtures when API shapes change:
   `just write-app-server-schema`
   (and `just write-app-server-schema --experimental` when experimental API fixtures are affected).

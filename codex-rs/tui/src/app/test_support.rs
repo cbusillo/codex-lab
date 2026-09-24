@@ -9,22 +9,27 @@ use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 
-pub(super) async fn make_test_app() -> App {
-    make_test_app_with_event_rx().await.0
+pub(super) fn select_catalog_tip(app: &mut App, width: u16, expected: &str) {
+    for seed in 0..1024 {
+        app.composer_tips = super::composer_hints::ComposerTips::new(seed);
+        if app
+            .composer_hint(width)
+            .is_some_and(|tip| tip.line.to_string().starts_with(expected))
+        {
+            return;
+        }
+    }
+    panic!("catalog tip was never selected: {expected}");
 }
 
-/// Same fixture as [`make_test_app`], but keeps the `AppEvent` receiver alive so
-/// tests can assert on the events the app emits.
-pub(super) async fn make_test_app_with_event_rx()
--> (App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
-    let (chat_widget, app_event_tx, rx, _op_rx) = make_chatwidget_manual_with_sender().await;
+pub(crate) async fn make_test_app() -> App {
+    let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
     let model = get_model_offline_for_tests(config.model.as_deref());
     let session_telemetry = test_session_telemetry(&config, model.as_str());
 
-    let app = App {
-        product_identity: codex_version::ProductIdentity::Codex,
+    App {
         feature_write_lock: Arc::default(),
         model_catalog: chat_widget.model_catalog(),
         session_telemetry,
@@ -45,6 +50,9 @@ pub(super) async fn make_test_app_with_event_rx()
         pending_server_profiles: HashMap::new(),
         file_search,
         transcript_cells: Vec::new(),
+        composer_tips: super::composer_hints::ComposerTips::new(/*seed*/ 0),
+        native_history: Default::default(),
+        transcript_view: Default::default(),
         last_rendered_history_tail: None,
         last_thread_usage_status_cell: None,
         pending_thread_usage_history_refresh: false,
@@ -78,6 +86,8 @@ pub(super) async fn make_test_app_with_event_rx()
         pending_realtime_speech_replay: HashMap::new(),
         pending_realtime_transcript_replay: HashMap::new(),
         realtime_replay_order: VecDeque::new(),
+        background_voice: None,
+        background_voice_error: None,
         temporary_structured_requests: HashMap::new(),
         pending_thread_titles: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
@@ -92,7 +102,6 @@ pub(super) async fn make_test_app_with_event_rx()
         primary_session_configured: None,
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
-        pending_auto_review_summary_fetches: HashSet::new(),
         dynamic_tool_status_updates: tokio::sync::broadcast::channel(/*capacity*/ 64).0,
         dynamic_tool_tasks: HashMap::new(),
         pending_startup_thread_start: false,
@@ -110,14 +119,8 @@ pub(super) async fn make_test_app_with_event_rx()
         rate_limit_refresh_state: Default::default(),
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
-        pending_direct_login_add_account: None,
-        direct_login_add_account_attempt_id: 0,
-        pending_login_add_account_id: None,
-        completed_login_add_account_id: None,
-        agent_settings: Default::default(),
         recap: recap::RecapState::default(),
-    };
-    (app, rx)
+    }
 }
 
 fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {

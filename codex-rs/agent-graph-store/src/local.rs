@@ -5,8 +5,6 @@ use std::sync::Arc;
 use crate::AgentGraphStore;
 use crate::AgentGraphStoreError;
 use crate::AgentGraphStoreFuture;
-use crate::ExternalAgentRunOutcome;
-use crate::ExternalAgentRunStart;
 use crate::ThreadSpawnEdgeStatus;
 
 /// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
@@ -107,43 +105,6 @@ impl AgentGraphStore for LocalAgentGraphStore {
                     .await
                     .map_err(internal_error),
             }
-        })
-    }
-
-    fn insert_external_agent_run(
-        &self,
-        run: ExternalAgentRunStart,
-    ) -> AgentGraphStoreFuture<'_, ()> {
-        Box::pin(async move {
-            self.state_db
-                .insert_external_agent_run(run)
-                .await
-                .map_err(internal_error)
-        })
-    }
-
-    fn finish_external_agent_run(
-        &self,
-        child_thread_id: ThreadId,
-        outcome: ExternalAgentRunOutcome,
-    ) -> AgentGraphStoreFuture<'_, ()> {
-        Box::pin(async move {
-            self.state_db
-                .finish_external_agent_run(child_thread_id, outcome)
-                .await
-                .map_err(internal_error)
-        })
-    }
-
-    fn list_external_agent_runs(
-        &self,
-        parent_thread_id: ThreadId,
-    ) -> AgentGraphStoreFuture<'_, Vec<crate::ExternalAgentRun>> {
-        Box::pin(async move {
-            self.state_db
-                .list_external_agent_runs(parent_thread_id)
-                .await
-                .map_err(internal_error)
         })
     }
 }

@@ -41,38 +41,10 @@ def just_formatter_group(*, check: bool) -> FormatterGroup:
 
 
 def rust_formatter_group(*, check: bool) -> FormatterGroup:
-    rust_root = REPO_ROOT / "codex-rs"
-    repository_files = subprocess.check_output(
-        [
-            "git",
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.rs",
-        ],
-        cwd=REPO_ROOT,
-    ).split(b"\0")
-    rust_files = sorted(
-        os.path.relpath(REPO_ROOT / Path(os.fsdecode(encoded_path)), rust_root)
-        for encoded_path in repository_files
-        if encoded_path and (REPO_ROOT / Path(os.fsdecode(encoded_path))).is_file()
-    )
-    args = [
-        "rustfmt",
-        "--edition",
-        "2024",
-        "--config-path",
-        str(rust_root / "rustfmt.toml"),
-        "--config",
-        "imports_granularity=Item,skip_children=true",
-    ]
+    args = ["cargo", "fmt", "--", "--config", "imports_granularity=Item"]
     if check:
         args.append("--check")
-    args.extend(rust_files)
-    command = Command(tuple(args), rust_root)
+    command = Command(tuple(args), REPO_ROOT / "codex-rs")
     return FormatterGroup("Rust", (command,))
 
 

@@ -4,7 +4,6 @@ mod collaboration_mode;
 mod compact_permissions;
 mod context_window_guidance;
 mod environment;
-pub(crate) mod environment_limits;
 mod environments_instructions;
 mod managed_developer_instructions;
 mod model;
@@ -19,7 +18,6 @@ mod test_support;
 mod tools;
 
 use crate::context::ContextualUserFragment;
-use codex_extension_api::MAX_WORLD_STATE_SECTION_BYTES;
 use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateSectionContribution;
@@ -27,6 +25,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::ResponseItem;
 use indexmap::IndexMap;
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Map;
@@ -36,19 +35,11 @@ use sha1::Sha1;
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_WORLD_STATE_TOTAL_BYTES: usize = 64 * 1024;
-const MIN_WORLD_STATE_SECTION_BYTES: usize = 256;
-const MAX_WORLD_STATE_SECTION_COUNT: usize = 128;
-const MAX_EXTENSION_WORLD_STATE_SECTION_COUNT: usize = 64;
-const BOUNDED_WORLD_STATE_CLOSE_TAG: &str = "</bounded_world_state_section>";
-const WORLD_STATE_TRUNCATION_NOTICE: &str = "\n…world-state content truncated…\n";
-
 pub(crate) use agents_md::AgentsMdState;
 pub(crate) use apps_instructions::AppsInstructionsState;
 pub(crate) use collaboration_mode::CollaborationModeState;
 pub(crate) use compact_permissions::CompactPermissionsState;
 pub(crate) use context_window_guidance::ContextWindowGuidanceState;
-pub(crate) use environment::EnvironmentsSnapshot;
 pub(crate) use environment::EnvironmentsState;
 pub(crate) use environments_instructions::EnvironmentsInstructionsState;
 pub(crate) use managed_developer_instructions::ManagedDeveloperInstructions;
@@ -65,8 +56,6 @@ pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {
     fn snapshot(&self) -> Option<Value>;
-
-    fn max_rendered_bytes(&self) -> usize;
 
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool;
 
@@ -107,10 +96,6 @@ impl<S: WorldStateSection> ErasedWorldStateSection for S {
         Some(snapshot)
     }
 
-    fn max_rendered_bytes(&self) -> usize {
-        WorldStateSection::max_rendered_bytes(self)
-    }
-
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool {
         WorldStateSection::matches_current_legacy_fragment(self, role, text)
     }
@@ -130,7 +115,8 @@ impl<S: WorldStateSection> ErasedWorldStateSection for S {
         let typed_snapshot;
         let previous = match previous {
             PreviousSectionState::Known(previous) => {
-                match serde_json::from_value::<S::Snapshot>(previous.clone()) {
+                // Deserialize the borrowed snapshot without copying its JSON tree.
+                match S::Snapshot::deserialize(previous) {
                     Ok(previous) => {
                         typed_snapshot = previous;
                         PreviousSectionState::Known(&typed_snapshot)
@@ -159,10 +145,6 @@ impl ErasedWorldStateSection for ExtensionWorldStateSection {
         let mut snapshot = self.0.snapshot().clone();
         remove_null_object_fields(&mut snapshot);
         (!snapshot.is_null()).then_some(snapshot)
-    }
-
-    fn max_rendered_bytes(&self) -> usize {
-        MAX_WORLD_STATE_SECTION_BYTES
     }
 
     fn matches_legacy_fragment(&self, role: &str, text: &str) -> bool {
@@ -222,277 +204,6 @@ impl ContextualUserFragment for WorldStateContextFragment {
     }
 }
 
-struct PendingWorldStateFragment {
-    id: &'static str,
-    state_hash: String,
-    content_kind: ContentItemKind,
-    role: &'static str,
-    requires_separate_message: bool,
-    markers: (&'static str, &'static str),
-    body: String,
-    max_rendered_bytes: usize,
-}
-
-impl PendingWorldStateFragment {
-    fn new(
-        id: &'static str,
-        state_hash: Option<String>,
-        max_rendered_bytes: usize,
-        fragment: Box<dyn ContextualUserFragment>,
-    ) -> Self {
-        let content_kind = fragment.content_kind();
-        let role = fragment.role();
-        let requires_separate_message = fragment.requires_separate_message();
-        let markers = fragment.markers();
-        let body = fragment.body();
-        let rendered = format!("{}{body}{}", markers.0, markers.1);
-        Self {
-            id,
-            state_hash: state_hash
-                .unwrap_or_else(|| bounded_world_state_hash("rendered", &rendered)),
-            content_kind,
-            role,
-            requires_separate_message,
-            markers,
-            body,
-            max_rendered_bytes,
-        }
-    }
-
-    fn rendered_byte_count(&self) -> usize {
-        self.markers
-            .0
-            .len()
-            .saturating_add(self.body.len())
-            .saturating_add(self.markers.1.len())
-    }
-
-    fn render(&self) -> String {
-        format!("{}{}{}", self.markers.0, self.body, self.markers.1)
-    }
-}
-
-struct BoundedWorldStateFragment {
-    content_kind: ContentItemKind,
-    role: &'static str,
-    requires_separate_message: bool,
-    markers: (&'static str, &'static str),
-    body: String,
-    original_byte_count: usize,
-    rendered_byte_count: usize,
-}
-
-impl BoundedWorldStateFragment {
-    fn new(fragment: PendingWorldStateFragment, max_bytes: usize) -> Self {
-        let original_byte_count = fragment.rendered_byte_count();
-        if original_byte_count <= max_bytes {
-            return Self {
-                content_kind: fragment.content_kind,
-                role: fragment.role,
-                requires_separate_message: fragment.requires_separate_message,
-                markers: fragment.markers,
-                body: fragment.body,
-                original_byte_count,
-                rendered_byte_count: original_byte_count,
-            };
-        }
-
-        let rendered = fragment.render();
-        let open_tag =
-            bounded_world_state_open_tag(fragment.id, fragment.role, &fragment.state_hash);
-        let generic_envelope_byte_count = open_tag
-            .len()
-            .saturating_add(BOUNDED_WORLD_STATE_CLOSE_TAG.len());
-        assert!(
-            generic_envelope_byte_count < MIN_WORLD_STATE_SECTION_BYTES,
-            "bounded world-state envelope exceeds the minimum section budget"
-        );
-        let marked_envelope_byte_count = generic_envelope_byte_count
-            .saturating_add(fragment.markers.0.len())
-            .saturating_add(fragment.markers.1.len());
-        let (markers, content, content_byte_budget) = if marked_envelope_byte_count < max_bytes {
-            (
-                fragment.markers,
-                fragment.body.as_str(),
-                max_bytes.saturating_sub(marked_envelope_byte_count),
-            )
-        } else {
-            (
-                ("", ""),
-                rendered.as_str(),
-                max_bytes.saturating_sub(generic_envelope_byte_count),
-            )
-        };
-        let body = truncate_middle_to_byte_budget(content, content_byte_budget);
-        let body = format!("{open_tag}{body}{BOUNDED_WORLD_STATE_CLOSE_TAG}");
-        let rendered_byte_count = markers
-            .0
-            .len()
-            .saturating_add(body.len())
-            .saturating_add(markers.1.len());
-        debug_assert!(rendered_byte_count <= max_bytes);
-        Self {
-            content_kind: fragment.content_kind,
-            role: fragment.role,
-            requires_separate_message: fragment.requires_separate_message,
-            markers,
-            body,
-            original_byte_count,
-            rendered_byte_count,
-        }
-    }
-
-    fn was_truncated(&self) -> bool {
-        self.rendered_byte_count < self.original_byte_count
-    }
-}
-
-impl ContextualUserFragment for BoundedWorldStateFragment {
-    fn content_kind(&self) -> ContentItemKind {
-        self.content_kind.clone()
-    }
-
-    fn role(&self) -> &'static str {
-        self.role
-    }
-
-    fn requires_separate_message(&self) -> bool {
-        self.requires_separate_message
-    }
-
-    fn markers(&self) -> (&'static str, &'static str) {
-        self.markers
-    }
-
-    fn body(&self) -> String {
-        self.body.clone()
-    }
-
-    fn type_markers() -> (&'static str, &'static str) {
-        ("", "")
-    }
-}
-
-fn allocate_world_state_budgets(fragments: &[PendingWorldStateFragment]) -> Vec<usize> {
-    let capped_byte_counts = fragments
-        .iter()
-        .map(|fragment| {
-            fragment
-                .rendered_byte_count()
-                .min(fragment.max_rendered_bytes)
-        })
-        .collect::<Vec<_>>();
-    if capped_byte_counts.iter().sum::<usize>() <= MAX_WORLD_STATE_TOTAL_BYTES {
-        return capped_byte_counts;
-    }
-
-    let mut budgets = capped_byte_counts
-        .iter()
-        .map(|byte_count| (*byte_count).min(MIN_WORLD_STATE_SECTION_BYTES))
-        .collect::<Vec<_>>();
-    let mut remaining_bytes =
-        MAX_WORLD_STATE_TOTAL_BYTES.saturating_sub(budgets.iter().sum::<usize>());
-
-    while remaining_bytes > 0 {
-        let active_indices = budgets
-            .iter()
-            .zip(&capped_byte_counts)
-            .enumerate()
-            .filter_map(|(index, (budget, byte_count))| (budget < byte_count).then_some(index))
-            .collect::<Vec<_>>();
-        if active_indices.is_empty() {
-            break;
-        }
-        let share = (remaining_bytes / active_indices.len()).max(1);
-        let mut distributed_bytes = 0usize;
-        for index in active_indices {
-            let available_bytes = capped_byte_counts[index].saturating_sub(budgets[index]);
-            let allocated_bytes = available_bytes.min(share).min(remaining_bytes);
-            budgets[index] = budgets[index].saturating_add(allocated_bytes);
-            remaining_bytes = remaining_bytes.saturating_sub(allocated_bytes);
-            distributed_bytes = distributed_bytes.saturating_add(allocated_bytes);
-            if remaining_bytes == 0 {
-                break;
-            }
-        }
-        if distributed_bytes == 0 {
-            break;
-        }
-    }
-
-    budgets
-}
-
-fn truncate_middle_to_byte_budget(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    if max_bytes <= WORLD_STATE_TRUNCATION_NOTICE.len() {
-        let end = floor_char_boundary(WORLD_STATE_TRUNCATION_NOTICE, max_bytes);
-        return WORLD_STATE_TRUNCATION_NOTICE[..end].to_string();
-    }
-
-    let retained_byte_count = max_bytes.saturating_sub(WORLD_STATE_TRUNCATION_NOTICE.len());
-    let prefix_end = floor_char_boundary(text, retained_byte_count / 2);
-    let suffix_start = ceil_char_boundary(
-        text,
-        text.len()
-            .saturating_sub(retained_byte_count.saturating_sub(prefix_end)),
-    );
-    format!(
-        "{}{}{}",
-        &text[..prefix_end],
-        WORLD_STATE_TRUNCATION_NOTICE,
-        &text[suffix_start..]
-    )
-}
-
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while !text.is_char_boundary(index) {
-        index = index.saturating_sub(1);
-    }
-    index
-}
-
-fn ceil_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while index < text.len() && !text.is_char_boundary(index) {
-        index = index.saturating_add(1);
-    }
-    index
-}
-
-fn bounded_world_state_open_tag(section_id: &str, role: &str, state_hash: &str) -> String {
-    let section_hash = bounded_world_state_hash("section", section_id);
-    format!(
-        "<bounded_world_state_section section=\"{section_hash}\" role=\"{role}\" state=\"{state_hash}\">"
-    )
-}
-
-fn bounded_world_state_hash(domain: &str, value: &str) -> String {
-    let mut hasher = Sha1::new();
-    hasher.update(b"codex-bounded-world-state-v1\0");
-    hash_component(&mut hasher, domain);
-    hash_component(&mut hasher, value);
-    format!("{:x}", hasher.finalize())
-}
-
-fn bounded_world_state_state_hash(state: &Value) -> String {
-    bounded_world_state_hash("state", &state.to_string())
-}
-
-fn matches_bounded_world_state_fragment(
-    section_id: &str,
-    state: &Value,
-    role: &str,
-    text: &str,
-) -> bool {
-    let state_hash = bounded_world_state_state_hash(state);
-    let open_tag = bounded_world_state_open_tag(section_id, role, &state_hash);
-    text.contains(&open_tag) && text.contains(BOUNDED_WORLD_STATE_CLOSE_TAG)
-}
-
 /// What is known about a section's previously model-visible state.
 pub(crate) enum PreviousSectionState<'a, T> {
     /// No persisted snapshot or matching fragment exists in retained history.
@@ -521,11 +232,6 @@ pub(crate) trait WorldStateSection: Send + Sync + 'static {
     /// Whether the section contributes comparison state to persisted rollouts.
     fn should_persist(&self) -> bool {
         true
-    }
-
-    /// Maximum rendered size for this section before bounded truncation.
-    fn max_rendered_bytes(&self) -> usize {
-        MAX_WORLD_STATE_SECTION_BYTES
     }
 
     fn matches_legacy_fragment(_role: &str, _text: &str) -> bool {
@@ -560,33 +266,11 @@ pub(crate) struct WorldStateHash(String);
 
 impl WorldStateHash {
     pub(crate) fn from_fragment(fragment: &(impl ContextualUserFragment + ?Sized)) -> Self {
-        Self::from_role_and_text(fragment.role(), &fragment.render())
-    }
-
-    fn from_role_and_text(role: &str, text: &str) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(b"codex-world-state-fragment-v1\0");
-        hash_component(&mut hasher, role);
-        hash_component(&mut hasher, text);
+        hash_component(&mut hasher, fragment.role());
+        hash_component(&mut hasher, &fragment.render());
         Self(format!("{:x}", hasher.finalize()))
-    }
-}
-
-/// Persisted identity for one model-visible world-state fragment.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct WorldStateFragmentIdentity {
-    role: String,
-    fragment_hash: Option<WorldStateHash>,
-    bounded_open_tag: String,
-}
-
-impl WorldStateFragmentIdentity {
-    pub(crate) fn matches(&self, role: &str, text: &str) -> bool {
-        role == self.role
-            && (self.fragment_hash.as_ref()
-                == Some(&WorldStateHash::from_role_and_text(role, text))
-                || (text.contains(&self.bounded_open_tag)
-                    && text.contains(BOUNDED_WORLD_STATE_CLOSE_TAG)))
     }
 }
 
@@ -600,7 +284,6 @@ fn hash_component(hasher: &mut Sha1, value: &str) {
 #[derive(Default)]
 pub(crate) struct WorldState {
     sections: IndexMap<&'static str, Box<dyn ErasedWorldStateSection>>,
-    extension_section_count: usize,
 }
 
 /// Compact comparison state for each model-visible world-state section.
@@ -610,59 +293,56 @@ pub(crate) struct WorldStateSnapshot {
     sections: BTreeMap<String, Value>,
 }
 
+impl From<&Map<String, Value>> for WorldStateSnapshot {
+    fn from(state: &Map<String, Value>) -> Self {
+        Self {
+            sections: state
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
 impl WorldStateSnapshot {
-    pub(crate) fn fragment_identity(
-        &self,
-        section_id: &str,
-        role: &str,
-    ) -> Option<WorldStateFragmentIdentity> {
-        let state = self.sections.get(section_id)?;
-        Some(WorldStateFragmentIdentity {
-            role: role.to_string(),
-            fragment_hash: serde_json::from_value(state.clone()).ok(),
-            bounded_open_tag: bounded_world_state_open_tag(
-                section_id,
-                role,
-                &bounded_world_state_state_hash(state),
-            ),
-        })
-    }
-
-    /// Seed a baseline from a rollout `TurnContextItem` for rollouts recorded
-    /// before world-state items were persisted.
-    ///
-    /// Only the sections that the turn context durably recorded are seeded; the
-    /// rest keep the history-based fallback used when no baseline is available.
-    pub(crate) fn from_legacy_turn_context_item(
-        turn_context_item: &codex_protocol::protocol::TurnContextItem,
-    ) -> Option<Self> {
-        let environments = EnvironmentsSnapshot::from_turn_context_item(turn_context_item)?;
-        let environments = serde_json::to_value(environments).ok()?;
-        Some(Self {
-            sections: BTreeMap::from([(EnvironmentsState::ID.to_string(), environments)]),
-        })
-    }
-
-    pub(crate) fn into_value(self) -> Value {
-        Value::Object(self.sections.into_iter().collect())
-    }
-
-    pub(crate) fn into_object(self) -> serde_json::Map<String, Value> {
+    pub(crate) fn into_object(self) -> Map<String, Value> {
         self.sections.into_iter().collect()
     }
 
     /// Returns the RFC 7386 merge patch that advances `previous` to `self`.
-    pub(crate) fn merge_patch_from(&self, previous: &Self) -> Option<Value> {
-        let previous = Value::Object(previous.sections.clone().into_iter().collect());
-        let current = Value::Object(self.sections.clone().into_iter().collect());
-        create_merge_patch(&previous, &current)
+    pub(crate) fn merge_patch_from(&self, previous: &Self) -> Option<Map<String, Value>> {
+        let mut patch = Map::new();
+        // Emit removals first to preserve insertion-ordered JSON patch output.
+        for key in previous.sections.keys() {
+            if !self.sections.contains_key(key) {
+                patch.insert(key.clone(), Value::Null);
+            }
+        }
+        for (key, current) in &self.sections {
+            if let Some(previous) = previous.sections.get(key) {
+                if let Some(value) = create_merge_patch(previous, current) {
+                    patch.insert(key.clone(), value);
+                }
+            } else {
+                patch.insert(key.clone(), current.clone());
+            }
+        }
+        (!patch.is_empty()).then_some(patch)
     }
 
-    pub(crate) fn apply_merge_patch(&mut self, patch: &Value) -> serde_json::Result<()> {
-        let mut current = self.clone().into_value();
-        apply_merge_patch_value(&mut current, patch);
-        *self = serde_json::from_value(current)?;
-        Ok(())
+    pub(crate) fn apply_merge_patch(&mut self, patch: &Map<String, Value>) {
+        // Borrow existing keys; only newly inserted sections need owned keys.
+        for (key, value) in patch {
+            if value.is_null() {
+                self.sections.remove(key);
+            } else if let Some(current) = self.sections.get_mut(key) {
+                apply_merge_patch_value(current, value);
+            } else {
+                let mut current = Value::Null;
+                apply_merge_patch_value(&mut current, value);
+                self.sections.insert(key.clone(), current);
+            }
+        }
     }
 }
 
@@ -670,7 +350,6 @@ impl fmt::Debug for WorldState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WorldState")
             .field("section_count", &self.sections.len())
-            .field("extension_section_count", &self.extension_section_count)
             .finish()
     }
 }
@@ -682,10 +361,6 @@ impl WorldState {
             !self.sections.contains_key(id),
             "duplicate world-state section ID: {id}"
         );
-        assert!(
-            self.sections.len() < MAX_WORLD_STATE_SECTION_COUNT,
-            "world-state section count exceeds {MAX_WORLD_STATE_SECTION_COUNT}"
-        );
         self.sections.insert(id, Box::new(section));
     }
 
@@ -695,16 +370,6 @@ impl WorldState {
             !self.sections.contains_key(id),
             "duplicate world-state section ID: {id}"
         );
-        if self.extension_section_count >= MAX_EXTENSION_WORLD_STATE_SECTION_COUNT
-            || self.sections.len() >= MAX_WORLD_STATE_SECTION_COUNT
-        {
-            tracing::warn!(
-                section_id = id,
-                extension_section_count = self.extension_section_count,
-                "ignored extension world-state section after reaching the section-count limit"
-            );
-            return;
-        }
         let section = Box::new(ExtensionWorldStateSection(section));
         if id == "host_skills"
             && let Some(index) = self.sections.get_index_of(PermissionsState::ID)
@@ -713,7 +378,6 @@ impl WorldState {
         } else {
             self.sections.insert(id, section);
         }
-        self.extension_section_count = self.extension_section_count.saturating_add(1);
     }
 
     pub(crate) fn snapshot(&self) -> WorldStateSnapshot {
@@ -747,21 +411,21 @@ impl WorldState {
     }
 
     /// Falls back to retained model history when no exact persisted snapshot is available.
-    pub(crate) fn render_history_diff(
+    pub(crate) fn render_history_diff<'a>(
         &self,
         previous: Option<&WorldStateSnapshot>,
-        items: &[ResponseItem],
+        items: impl IntoIterator<Item = &'a ResponseItem> + Clone,
     ) -> Vec<Box<dyn ContextualUserFragment>> {
         self.render_with(|id, section| {
             if let Some(previous) = previous.and_then(|previous| previous.sections.get(id)) {
                 if section.has_retained_fragment_matcher()
-                    && !has_retained_fragment(items, id, previous, section)
+                    && !has_retained_fragment(items.clone(), section)
                 {
                     PreviousSectionState::Absent
                 } else {
                     PreviousSectionState::Known(previous)
                 }
-            } else if has_legacy_fragment(items, section) {
+            } else if has_legacy_fragment(items.clone(), section) {
                 PreviousSectionState::Unknown
             } else {
                 PreviousSectionState::Absent
@@ -773,58 +437,18 @@ impl WorldState {
         &self,
         mut previous: impl FnMut(&str, &dyn ErasedWorldStateSection) -> PreviousSectionState<'a, Value>,
     ) -> Vec<Box<dyn ContextualUserFragment>> {
-        let fragments = self
-            .sections
+        self.sections
             .iter()
-            .filter_map(|(id, section)| {
-                let previous = previous(id, section.as_ref());
-                section.render_diff(previous).map(|fragment| {
-                    PendingWorldStateFragment::new(
-                        id,
-                        section
-                            .snapshot()
-                            .as_ref()
-                            .map(bounded_world_state_state_hash),
-                        section.max_rendered_bytes(),
-                        fragment,
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            fragments.len() <= MAX_WORLD_STATE_SECTION_COUNT,
-            "rendered world-state section count exceeds {MAX_WORLD_STATE_SECTION_COUNT}"
-        );
-        let budgets = allocate_world_state_budgets(&fragments);
-
-        fragments
-            .into_iter()
-            .zip(budgets)
-            .map(|(fragment, section_byte_budget)| {
-                let section_id = fragment.id;
-                let fragment = BoundedWorldStateFragment::new(fragment, section_byte_budget);
-                if fragment.was_truncated() {
-                    tracing::warn!(
-                        section_id,
-                        original_byte_count = fragment.original_byte_count,
-                        rendered_byte_count = fragment.rendered_byte_count,
-                        section_byte_budget,
-                        "truncated world-state section to its model-context budget"
-                    );
-                }
-                Box::new(fragment) as Box<dyn ContextualUserFragment>
-            })
+            .filter_map(|(id, section)| section.render_diff(previous(id, section.as_ref())))
             .collect()
     }
 }
 
-fn has_retained_fragment(
-    items: &[ResponseItem],
-    section_id: &str,
-    state: &Value,
+fn has_retained_fragment<'a>(
+    items: impl IntoIterator<Item = &'a ResponseItem>,
     section: &dyn ErasedWorldStateSection,
 ) -> bool {
-    items.iter().any(|item| {
+    items.into_iter().any(|item| {
         matches!(
             item,
             ResponseItem::Message { role, content, .. }
@@ -832,16 +456,18 @@ fn has_retained_fragment(
                     matches!(
                         content,
                         ContentItem::InputText { text }
-                            if matches_bounded_world_state_fragment(section_id, state, role, text)
-                                || section.matches_retained_fragment(role, text)
+                            if section.matches_retained_fragment(role, text)
                     )
                 })
         )
     })
 }
 
-fn has_legacy_fragment(items: &[ResponseItem], section: &dyn ErasedWorldStateSection) -> bool {
-    items.iter().any(|item| {
+fn has_legacy_fragment<'a>(
+    items: impl IntoIterator<Item = &'a ResponseItem>,
+    section: &dyn ErasedWorldStateSection,
+) -> bool {
+    items.into_iter().any(|item| {
         matches!(
             item,
             ResponseItem::Message { role, content, .. }
@@ -901,10 +527,12 @@ fn create_merge_patch(previous: &Value, current: &Value) -> Option<Value> {
 }
 
 fn apply_merge_patch_value(target: &mut Value, patch: &Value) {
+    // Nested patches can replace objects with scalars or arrays.
     let Value::Object(patch) = patch else {
         target.clone_from(patch);
         return;
     };
+    // RFC 7386 replaces non-object values with an object before merging.
     if !target.is_object() {
         *target = Value::Object(Map::new());
     }
@@ -912,8 +540,12 @@ fn apply_merge_patch_value(target: &mut Value, patch: &Value) {
         for (key, value) in patch {
             if value.is_null() {
                 target.remove(key);
+            } else if let Some(current) = target.get_mut(key) {
+                apply_merge_patch_value(current, value);
             } else {
-                apply_merge_patch_value(target.entry(key.clone()).or_insert(Value::Null), value);
+                let mut current = Value::Null;
+                apply_merge_patch_value(&mut current, value);
+                target.insert(key.clone(), current);
             }
         }
     }

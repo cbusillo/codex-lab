@@ -5,8 +5,10 @@ use crate::history_cell::plain_lines;
 use crate::history_cell::with_border_with_inner_width;
 use crate::legacy_core::config::Config;
 use crate::line_truncation::line_width;
+use crate::style::accent_color;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
+use crate::version::CODEX_CLI_VERSION;
 use crate::width::display_width;
 use chrono::DateTime;
 use chrono::Local;
@@ -126,7 +128,6 @@ impl StatusHistoryHandle {
 
 #[derive(Debug)]
 struct StatusHistoryCell {
-    product_identity: codex_version::ProductIdentity,
     model_name: String,
     model_details: Vec<String>,
     directory: PathBuf,
@@ -222,7 +223,6 @@ pub(crate) fn new_status_output_with_rate_limits(
     .0
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn new_status_output_with_rate_limits_handle(
     config: &Config,
@@ -244,54 +244,8 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     agents_summary: String,
     refreshing_rate_limits: bool,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
-    new_status_output_with_identity_and_rate_limits_handle(
-        codex_version::ProductIdentity::Codex,
-        config,
-        requires_openai_auth,
-        model_provider_id,
-        remote_connection,
-        account_display,
-        token_info,
-        total_usage,
-        session_id,
-        thread_name,
-        forked_from,
-        rate_limits,
-        _plan_type,
-        now,
-        model_name,
-        collaboration_mode,
-        reasoning_effort_override,
-        agents_summary,
-        refreshing_rate_limits,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn new_status_output_with_identity_and_rate_limits_handle(
-    product_identity: codex_version::ProductIdentity,
-    config: &Config,
-    requires_openai_auth: bool,
-    model_provider_id: Option<&str>,
-    remote_connection: Option<&RemoteConnectionStatus>,
-    account_display: Option<&StatusAccountDisplay>,
-    token_info: Option<&TokenUsageInfo>,
-    total_usage: &TokenUsage,
-    session_id: &Option<ThreadId>,
-    thread_name: Option<String>,
-    forked_from: Option<ThreadId>,
-    rate_limits: &[RateLimitSnapshotDisplay],
-    _plan_type: Option<PlanType>,
-    now: DateTime<Local>,
-    model_name: &str,
-    collaboration_mode: Option<&str>,
-    reasoning_effort_override: Option<Option<ReasoningEffort>>,
-    agents_summary: String,
-    refreshing_rate_limits: bool,
-) -> (CompositeHistoryCell, StatusHistoryHandle) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let card = Arc::new(StatusHistoryCell::new(
-        product_identity,
         config,
         requires_openai_auth,
         model_provider_id,
@@ -324,7 +278,6 @@ pub(crate) fn new_status_output_with_identity_and_rate_limits_handle(
 impl StatusHistoryCell {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        product_identity: codex_version::ProductIdentity,
         config: &Config,
         requires_openai_auth: bool,
         model_provider_id: Option<&str>,
@@ -432,7 +385,6 @@ impl StatusHistoryCell {
         let thread_usage = StatusThreadUsage::default();
 
         Self {
-            product_identity,
             model_name,
             model_details,
             directory: config.cwd.to_path_buf(),
@@ -782,7 +734,12 @@ fn status_approval_label(
 impl StatusHistoryCell {
     fn content_lines(&self, width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        lines.push(status_title_line(self.product_identity));
+        lines.push(Line::from(vec![
+            Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
+            Span::from("OpenAI Codex").bold(),
+            Span::from(" ").dim(),
+            Span::from(format!("(v{CODEX_CLI_VERSION})")).dim(),
+        ]));
 
         let available_inner_width = usize::from(width.saturating_sub(4));
         if available_inner_width == 0 {
@@ -848,12 +805,12 @@ impl StatusHistoryCell {
         let value_width = formatter.value_width(available_inner_width);
 
         let note_first_line = Line::from(vec![
-            Span::from("Visit ").cyan(),
-            CHATGPT_USAGE_URL.cyan().underlined(),
-            Span::from(" for up-to-date").cyan(),
+            Span::from("Visit ").fg(accent_color()),
+            CHATGPT_USAGE_URL.fg(accent_color()).underlined(),
+            Span::from(" for up-to-date").fg(accent_color()),
         ]);
         let note_second_line = Line::from(vec![
-            Span::from("information on rate limits and credits").cyan(),
+            Span::from("information on rate limits and credits").fg(accent_color()),
         ]);
         let note_lines = adaptive_wrap_lines(
             [note_first_line, note_second_line],
@@ -867,18 +824,20 @@ impl StatusHistoryCell {
             lines.push(Line::from(Vec::<Span<'static>>::new()));
         }
         if let Some(remote_connection) = self.remote_connection.as_ref() {
-            let wrapped_remote = word_wrap_lines(
-                [Line::from(vec![
+            let value = if remote_connection.is_local_daemon {
+                Line::from("Local background server")
+            } else {
+                Line::from(vec![
                     Span::from(remote_connection.address.clone()),
                     Span::from(" (").dim(),
                     Span::from(remote_connection.version.clone()).dim(),
                     Span::from(")").dim(),
-                ])],
-                RtOptions::new(value_width.max(1)),
-            );
+                ])
+            };
+            let wrapped_remote = word_wrap_lines([value], RtOptions::new(value_width.max(1)));
             let mut wrapped_remote = wrapped_remote.into_iter();
             if let Some(first) = wrapped_remote.next() {
-                lines.push(formatter.line("Remote", first.spans));
+                lines.push(formatter.line("Server", first.spans));
                 lines.extend(wrapped_remote.map(|line| formatter.continuation(line.spans)));
             }
             lines.push(Line::from(Vec::<Span<'static>>::new()));
@@ -993,14 +952,4 @@ impl HistoryCell for Arc<StatusHistoryCell> {
     ) -> Vec<crate::terminal_hyperlinks::HyperlinkLine> {
         self.display_hyperlink_lines(width)
     }
-}
-
-pub(crate) fn status_title_line(product_identity: codex_version::ProductIdentity) -> Line<'static> {
-    vec![
-        Span::from(format!("{}>_ ", FieldFormatter::INDENT)).dim(),
-        Span::from(product_identity.display_name()).bold(),
-        Span::from(" ").dim(),
-        Span::from(format!("(v{})", product_identity.version())).dim(),
-    ]
-    .into()
 }

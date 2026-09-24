@@ -13,9 +13,9 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::WebSearchAction as ApiWebSearchAction;
 use codex_core::config::Config;
 use codex_protocol::models::WebSearchAction;
-use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use serde_json::json;
 
@@ -306,12 +306,18 @@ impl EventProcessorWithJsonOutput {
                     id: item.id,
                     query: item.query,
                     action: match item.action {
-                        Some(action) => serde_json::from_value(
-                            serde_json::to_value(action).unwrap_or_else(|_| json!("other")),
-                        )
-                        .unwrap_or(WebSearchAction::Other),
-                        None => WebSearchAction::Other,
+                        Some(ApiWebSearchAction::Search { query, queries }) => {
+                            WebSearchAction::Search { query, queries }
+                        }
+                        Some(ApiWebSearchAction::OpenPage { url }) => {
+                            WebSearchAction::OpenPage { url }
+                        }
+                        Some(ApiWebSearchAction::FindInPage { url, pattern }) => {
+                            WebSearchAction::FindInPage { url, pattern }
+                        }
+                        Some(ApiWebSearchAction::Other) | None => WebSearchAction::Other,
                     },
+                    results: item.results,
                 }),
             }),
             _ => None,
@@ -559,27 +565,6 @@ impl EventProcessorWithJsonOutput {
                 }
             }
             ServerNotification::TurnDiffUpdated(_) => CodexStatus::Running,
-            ServerNotification::ProjectValidationCompleted(notification) => {
-                events.push(ThreadEvent::ProjectValidationCompleted(
-                    ProjectValidationCompletedEvent {
-                        turn_id: notification.turn_id,
-                        item_id: notification.item_id,
-                        command: notification.command,
-                        command_truncated: notification.command_truncated,
-                        cwd: notification.cwd,
-                        status: notification.status.to_core(),
-                        skip_reason: notification
-                            .skip_reason
-                            .map(codex_app_server_protocol::ProjectValidationSkipReason::to_core),
-                        changed_file_count: notification.changed_file_count,
-                        exit_code: notification.exit_code,
-                        output: notification.output,
-                        output_truncated: notification.output_truncated,
-                        duration_ms: notification.duration_ms,
-                    },
-                ));
-                CodexStatus::Running
-            }
             ServerNotification::TurnPlanUpdated(notification) => {
                 let items = Self::map_todo_items(&notification.plan);
                 if let Some(running) = self.running_todo_list.as_mut() {

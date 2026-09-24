@@ -12,13 +12,11 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
-use codex_app_server_protocol::ProjectValidationStatus;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
-use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -56,18 +54,13 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[test_case::test_case(false; "live_reload")]
 #[test_case::test_case(true; "cold_resume")]
 #[tokio::test]
-async fn thread_revert_preserves_resolved_multi_agent_version(restart: bool) -> Result<()> {
+async fn thread_revert_preserves_model_selected_multi_agent_version(restart: bool) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     let config = load_default_config_for_test(&codex_home).await;
-    let expected_namespace = config
-        .multi_agent_v2
-        .tool_namespace
-        .clone()
-        .expect("enabled multi-agent v2 namespace");
     let mut model = codex_core::test_support::construct_model_info_offline("mock-model", &config);
     model.multi_agent_version = Some(MultiAgentVersion::V2);
     write_models_cache_with_models(codex_home.path(), vec![model]).await?;
@@ -143,17 +136,14 @@ async fn thread_revert_preserves_resolved_multi_agent_version(restart: bool) -> 
                 .expect("tools")
                 .iter()
                 .filter_map(|tool| tool["name"].as_str())
-                .filter(|name| *name == expected_namespace.as_str() || *name == "multi_agent_v1")
+                .filter(|name| matches!(*name, "collaboration" | "multi_agent_v1"))
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
         );
     }
     assert_eq!(
         multi_agent_namespaces,
-        vec![
-            vec![expected_namespace.clone()],
-            vec![expected_namespace.clone()]
-        ]
+        vec![vec!["collaboration"], vec!["collaboration"]]
     );
     Ok(())
 }
@@ -394,16 +384,6 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
     assert_eq!(reverted.thread_id, thread.id);
 
     assert_eq!(reverted_thread.id, thread.id);
-    let reverted_thread_json = serde_json::to_value(&reverted_thread)?;
-    assert_eq!(reverted_thread.name, None);
-    assert_eq!(reverted_thread.session_id, thread.session_id);
-    assert_eq!(reverted_thread_json.get("name"), Some(&Value::Null));
-    assert_eq!(
-        reverted_thread_json
-            .get("sessionId")
-            .and_then(Value::as_str),
-        Some(thread.session_id.as_str())
-    );
     assert!(reverted_thread.turns.is_empty());
     assert!(items_backwards_cursor.is_some());
     assert_eq!(
@@ -437,13 +417,6 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
             .iter()
             .all(|item| item.turn_id == turn_ids[0])
     );
-    assert!(reverted_items.iter().any(|item| matches!(
-        &item.item,
-        ThreadItem::ProjectValidation {
-            status: ProjectValidationStatus::Skipped,
-            ..
-        }
-    )));
 
     mcp.shutdown_gracefully().await?;
     let mut mcp = TestAppServer::builder()
@@ -468,7 +441,7 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
             && stale_resume_error
                 .error
                 .message
-                .contains("omit path and retry by thread id"),
+                .contains("omit path and resume by thread id"),
         "unexpected resume error: {}",
         stale_resume_error.error.message,
     );
@@ -517,18 +490,10 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
         .expect("third turn response request")
         .body_json::<serde_json::Value>()?["input"]
         .clone();
-    let turn_inputs = model_input
-        .as_array()
-        .expect("model input array")
-        .iter()
-        .filter(|item| item["role"] == "user")
-        .filter_map(|item| item["content"].as_array())
-        .flatten()
-        .filter(|content| content["type"] == "input_text")
-        .filter_map(|content| content["text"].as_str())
-        .filter(|text| ["first", "second", "third"].contains(text))
-        .collect::<Vec<_>>();
-    assert_eq!(turn_inputs, vec!["first", "third"]);
+    let model_input = serde_json::to_string(&model_input)?;
+    assert!(model_input.contains("first"));
+    assert!(!model_input.contains("second"));
+    assert!(model_input.contains("third"));
     assert_eq!(
         turn_ids_from_cursor(
             &mut mcp,
@@ -539,72 +504,6 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
         .await?,
         vec![turn_ids[0].clone(), third_turn.turn.id]
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn thread_resume_accepts_current_paginated_relative_path() -> Result<()> {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    initialize_experimental(&mut mcp).await?;
-
-    let ThreadStartResponse { thread, .. } = mcp
-        .start_thread(ThreadStartParams {
-            history_mode: Some(ThreadHistoryMode::Paginated),
-            ..Default::default()
-        })
-        .await?;
-    mcp.start_turn_and_wait_for_completion(TurnStartParams {
-        thread_id: thread.id.clone(),
-        input: vec![UserInput::Text {
-            text: "materialize".to_string(),
-            text_elements: Vec::new(),
-        }],
-        ..Default::default()
-    })
-    .await?;
-    let relative_path = thread
-        .path
-        .as_ref()
-        .expect("thread rollout path")
-        .strip_prefix(std::fs::canonicalize(codex_home.path())?)?
-        .to_path_buf();
-
-    mcp.shutdown_gracefully().await?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build()
-        .await?;
-    initialize_experimental(&mut mcp).await?;
-    let resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread.id.clone(),
-            path: Some(relative_path.clone()),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadResumeResponse {
-        thread: resumed, ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-    assert_eq!(resumed.id, thread.id);
-
-    let running_resume_id = mcp
-        .send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread.id.clone(),
-            path: Some(relative_path),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadResumeResponse {
-        thread: resumed, ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(running_resume_id)).await??;
-    assert_eq!(resumed.id, thread.id);
-
     Ok(())
 }
 
@@ -756,6 +655,7 @@ async fn initialize_experimental(mcp: &mut TestAppServer) -> Result<()> {
                 version: "0.1.0".to_string(),
             },
             Some(InitializeCapabilities {
+                explicit_gateway_oauth: false,
                 experimental_api: true,
                 request_attestation: false,
                 opt_out_notification_methods: None,

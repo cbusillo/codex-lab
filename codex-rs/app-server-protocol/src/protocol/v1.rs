@@ -23,7 +23,6 @@ use serde::Serialize;
 
 use crate::protocol::common::AuthMode;
 use crate::protocol::v2::ForcedChatgptWorkspaceIds;
-use crate::protocol::v2::ServerBuildInfo;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +44,10 @@ pub struct ClientInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeCapabilities {
+    /// Use explicit gateway OAuth login instead of automatic browser authorization.
+    /// Applies to this app-server's gateway runtime; later connections cannot undo it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub explicit_gateway_oauth: bool,
     /// Opt into receiving experimental API methods and fields.
     #[serde(default)]
     pub experimental_api: bool,
@@ -70,9 +73,7 @@ pub struct InitializeCapabilities {
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResponse {
     pub user_agent: String,
-    /// Actual compiled identity for the running app-server binary.
-    pub server_build: Option<ServerBuildInfo>,
-    /// Absolute path to the server's $CODEX_LAB_HOME directory.
+    /// Absolute path to the server's $CODEX_HOME directory.
     pub codex_home: AbsolutePathBuf,
     /// Platform family for the running app-server target, for example
     /// `"unix"` or `"windows"`.

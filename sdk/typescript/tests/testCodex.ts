@@ -76,38 +76,15 @@ function mergeTestConfig(
           },
         };
   const featureOverrides = mergedConfig?.features;
-  const validationOverrides = mergedConfig?.validation;
-  const validationGroupOverrides =
-    validationOverrides &&
-    typeof validationOverrides === "object" &&
-    !Array.isArray(validationOverrides)
-      ? validationOverrides.groups
-      : undefined;
 
   return {
     ...mergedConfig,
     // Disable plugins in SDK integration tests so background curated-plugin
-    // sync does not race temp CODEX_LAB_HOME cleanup.
+    // sync does not race temp CODEX_HOME cleanup.
     features:
       featureOverrides && typeof featureOverrides === "object" && !Array.isArray(featureOverrides)
         ? { ...featureOverrides, plugins: false }
         : { plugins: false },
-    // Keep SDK integration tests deterministic and prevent incidental Cargo
-    // validation unless a test explicitly enables the functional group.
-    validation:
-      validationOverrides &&
-      typeof validationOverrides === "object" &&
-      !Array.isArray(validationOverrides)
-        ? {
-            ...validationOverrides,
-            groups:
-              validationGroupOverrides &&
-              typeof validationGroupOverrides === "object" &&
-              !Array.isArray(validationGroupOverrides)
-                ? { functional: false, ...validationGroupOverrides }
-                : { functional: false },
-          }
-        : (validationOverrides ?? { groups: { functional: false } }),
   };
 }
 

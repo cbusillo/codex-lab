@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "contracts": {
-    "AGENT-1": {
-      "maxWaivers": 0
-    }
-  }
-}

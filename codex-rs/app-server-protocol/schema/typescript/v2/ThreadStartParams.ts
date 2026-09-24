@@ -6,7 +6,6 @@ import type { JsonValue } from "../serde_json/JsonValue";
 import type { ApprovalsReviewer } from "./ApprovalsReviewer";
 import type { AskForApproval } from "./AskForApproval";
 import type { SandboxMode } from "./SandboxMode";
-import type { SessionProvenanceParams } from "./SessionProvenanceParams";
 import type { ThreadSource } from "./ThreadSource";
 import type { ThreadStartSource } from "./ThreadStartSource";
 
@@ -20,8 +19,4 @@ approvalsReviewer?: ApprovalsReviewer | null, sandbox?: SandboxMode | null, conf
 personality?: Personality | null, ephemeral?: boolean | null, sessionStartSource?: ThreadStartSource | null, /**
  * Optional client-supplied analytics source classification for this thread.
  */
-threadSource?: ThreadSource | null, /**
- * Optional client-supplied launch provenance for externally orchestrated
- * sessions. This is descriptive metadata only.
- */
-sessionProvenance?: SessionProvenanceParams | null};
+threadSource?: ThreadSource | null};

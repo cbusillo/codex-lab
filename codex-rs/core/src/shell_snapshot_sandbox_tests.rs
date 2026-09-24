@@ -22,7 +22,6 @@ enum SnapshotFailure {
 async fn snapshot_failure_omits_credentials_and_stops_descendants(
     failure: SnapshotFailure,
 ) -> Result<()> {
-    let credential = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let cancellation = match failure {
         SnapshotFailure::NetworkDenial | SnapshotFailure::CallerDropWithNetworkToken => {
             Some(CancellationToken::new())
@@ -45,8 +44,8 @@ async fn snapshot_failure_omits_credentials_and_stops_descendants(
         workspace_roots: std::slice::from_ref(&cwd_uri),
         sandbox_exe: None,
         use_legacy_landlock: false,
+        windows_sandbox_type: SandboxType::None,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
-        windows_sandbox_private_desktop: false,
         network_denial_cancellation_token: cancellation.clone(),
         network_proxy: None,
     };
@@ -73,7 +72,7 @@ async fn snapshot_failure_omits_credentials_and_stops_descendants(
         vec![
             "/bin/sh".to_string(),
             "-c".to_string(),
-            format!("set -x; export GH_TOKEN={credential}; {script}"),
+            format!("set -x; export GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789; {script}"),
         ],
         &cwd,
         std::env::vars().collect(),
@@ -134,8 +133,7 @@ async fn snapshot_failure_omits_credentials_and_stops_descendants(
                 unreachable!("dropped captures have no result")
             }
         };
-        assert_eq!(format!("{error:#}"), expected);
-        assert!(!format!("{error:?}").contains(credential));
+        assert_eq!(format!("{error:?}"), expected);
     }
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     assert!(

@@ -5,11 +5,8 @@ use super::McpToolCallResult;
 use super::NetworkApprovalContext;
 use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
-use super::ProjectValidationSkipReason;
-use super::ProjectValidationStatus;
 use super::RequestPermissionProfile;
 use super::UserInput;
-use super::command_output::command_output_text;
 use super::shared::v2_enum_from_core;
 use crate::JsonSchema;
 use crate::TS;
@@ -91,13 +88,15 @@ impl From<CoreReviewDecision> for CommandExecutionApprovalDecision {
     fn from(value: CoreReviewDecision) -> Self {
         match value {
             CoreReviewDecision::Approved => Self::Accept,
+            // MCP approvals are handled through elicitations, so an MCP policy amendment should
+            // never appear in a command execution approval. To be cautious here, we fail closed.
+            CoreReviewDecision::ApprovedMcpPolicyAmendment => Self::Decline,
             CoreReviewDecision::ApprovedExecpolicyAmendment {
                 proposed_execpolicy_amendment,
             } => Self::AcceptWithExecpolicyAmendment {
                 execpolicy_amendment: proposed_execpolicy_amendment.into(),
             },
             CoreReviewDecision::ApprovedForSession => Self::AcceptForSession,
-            CoreReviewDecision::ApprovedMcpPolicyAmendment => Self::Accept,
             CoreReviewDecision::NetworkPolicyAmendment {
                 network_policy_amendment,
             } => Self::ApplyNetworkPolicyAmendment {
@@ -293,6 +292,10 @@ pub enum ThreadItem {
         #[serde(skip)]
         #[schemars(skip)]
         #[ts(skip)]
+        sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
+        #[serde(skip)]
+        #[schemars(skip)]
+        #[ts(skip)]
         model_context: Option<codex_protocol::items::ModelInvocationContext>,
         id: String,
         /// Trusted first-party plugin id when this command resolves to one plugin script.
@@ -362,9 +365,6 @@ pub enum ThreadItem {
         status: DynamicToolCallStatus,
         content_items: Option<Vec<DynamicToolCallOutputContentItem>>,
         success: Option<bool>,
-        /// Failure detail persisted with the call, when the tool reported one.
-        #[serde(default)]
-        error: Option<String>,
         /// The duration of the dynamic tool call in milliseconds.
         #[ts(type = "number | null")]
         duration_ms: Option<i64>,
@@ -426,21 +426,6 @@ pub enum ThreadItem {
     ContextCompaction {
         id: String,
     },
-    #[serde(rename_all = "camelCase")]
-    #[ts(rename_all = "camelCase")]
-    ProjectValidation {
-        id: String,
-        command: Vec<String>,
-        command_truncated: bool,
-        cwd: Option<AbsolutePathBuf>,
-        status: ProjectValidationStatus,
-        skip_reason: Option<ProjectValidationSkipReason>,
-        changed_file_count: Option<u32>,
-        exit_code: Option<i32>,
-        output: String,
-        output_truncated: bool,
-        duration_ms: u64,
-    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -480,8 +465,7 @@ impl ThreadItem {
             | ThreadItem::ImageView { id, .. }
             | ThreadItem::EnteredReviewMode { id, .. }
             | ThreadItem::ExitedReviewMode { id, .. }
-            | ThreadItem::ContextCompaction { id, .. }
-            | ThreadItem::ProjectValidation { id, .. } => id,
+            | ThreadItem::ContextCompaction { id, .. } => id,
             ThreadItem::WebSearch(item) => &item.id,
             ThreadItem::Sleep(item) => &item.id,
             ThreadItem::ImageGeneration(item) => &item.id,
@@ -939,6 +923,7 @@ impl From<CoreTurnItem> for ThreadItem {
                 ThreadItem::CommandExecution {
                     id: command.id,
                     model_context: command.model_context,
+                    sandbox_type: command.sandbox_type,
                     plugin_id: command.plugin_id,
                     script_path: command.script_path,
                     command: presentation.command,
@@ -947,12 +932,9 @@ impl From<CoreTurnItem> for ThreadItem {
                     source: command.source.into(),
                     status: command.status.into(),
                     command_actions: presentation.command_actions,
-                    aggregated_output: command_output_text(
-                        command.aggregated_output,
-                        command.stdout,
-                        command.stderr,
-                        command.formatted_output,
-                    ),
+                    aggregated_output: command
+                        .aggregated_output
+                        .filter(|output| !output.is_empty()),
                     exit_code: command.exit_code,
                     duration_ms: command
                         .duration
@@ -972,7 +954,6 @@ impl From<CoreTurnItem> for ThreadItem {
                         .collect()
                 }),
                 success: call.success,
-                error: call.error,
                 duration_ms: call
                     .duration
                     .and_then(|duration| i64::try_from(duration.as_millis()).ok()),

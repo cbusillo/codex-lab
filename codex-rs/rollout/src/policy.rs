@@ -116,7 +116,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
-        | EventMsg::ProjectValidationCompleted(_)
         | EventMsg::ThreadSettingsApplied(_) => true,
 
         // Only persist these legacy events when the thread's history mode is Legacy.
@@ -202,11 +201,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::CollabAgentInteractionBegin(_)
         | EventMsg::CollabWaitingBegin(_)
         | EventMsg::CollabCloseBegin(_)
-        | EventMsg::CollabResumeBegin(_)
-        | EventMsg::BackgroundAutoReviewStatus(_) => false,
+        | EventMsg::CollabResumeBegin(_) => false,
     }
 }
-
-#[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;

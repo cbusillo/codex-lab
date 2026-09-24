@@ -8,13 +8,6 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 
-from local_build_resources import LocalBuildResources
-from local_build_resources import REMOTE_EXECUTION_CONFIGS
-from local_build_resources import ResourceProfileError
-from local_build_resources import bazel_resource_args
-from local_build_resources import bazel_uses_remote_execution
-from local_build_resources import run_with_optional_lock
-
 
 OPENAI_REPOSITORY = "openai/codex"
 # Remote configurations select cache/BES/download endpoints. Their -rbe forms
@@ -23,6 +16,12 @@ GENERIC_REMOTE_CONFIG = "buildbuddy-generic"
 OPENAI_REMOTE_CONFIG = "buildbuddy-openai"
 # These CI configurations require remote build execution. The wrapper supplies
 # an RBE configuration, which also includes the common `remote` settings.
+REMOTE_EXECUTION_CONFIGS = {
+    "--config=ci-linux",
+    "--config=ci-macos",
+    "--config=ci-v8",
+    "--config=ci-windows-cross",
+}
 # Honor either explicit setting so the wrapper never overrides the caller's
 # choice when it supplies the CI default below.
 REMOTE_REPO_CONTENTS_CACHE_STARTUP_OPTIONS = {
@@ -99,7 +98,11 @@ def uses_openai_host(env: Mapping[str, str]) -> bool:
 
 
 def uses_remote_execution(args: Sequence[str]) -> bool:
-    return bazel_uses_remote_execution(args, {"BUILDBUDDY_API_KEY": "configured"})
+    try:
+        separator_idx = args.index("--")
+    except ValueError:
+        separator_idx = len(args)
+    return any(arg in REMOTE_EXECUTION_CONFIGS for arg in args[:separator_idx])
 
 
 def remote_config(args: Sequence[str], env: Mapping[str, str]) -> str | None:
@@ -160,31 +163,20 @@ def bazel_args_with_remote_config(
     except ValueError:
         separator_idx = len(configured_args)
 
-    cache_options = [
-        ("BAZEL_REPO_CONTENTS_CACHE", "--repo_contents_cache="),
-        ("BAZEL_REPOSITORY_CACHE", "--repository_cache="),
-        ("BAZEL_DISK_CACHE", "--disk_cache="),
-    ]
-    if env.get("BAZEL_DISK_CACHE"):
-        cache_options.append(
-            (
-                "BAZEL_DISK_CACHE_GC_MAX_SIZE",
-                "--experimental_disk_cache_gc_max_size=",
-            )
-        )
     cache_args = [
         f"{option_prefix}{env[env_name]}"
-        for env_name, option_prefix in cache_options
+        for env_name, option_prefix in (
+            ("BAZEL_REPO_CONTENTS_CACHE", "--repo_contents_cache="),
+            ("BAZEL_REPOSITORY_CACHE", "--repository_cache="),
+        )
         if env.get(env_name)
         and not any(
             arg.startswith(option_prefix) for arg in configured_args[:separator_idx]
         )
     ]
-    resource_args = bazel_resource_args(args, env)
     return [
         *configured_args[:separator_idx],
         *cache_args,
-        *resource_args,
         *configured_args[separator_idx:],
     ]
 
@@ -196,10 +188,6 @@ def bazel_command(*args: str, env: Mapping[str, str] | None = None) -> list[str]
 
 
 def main() -> None:
-    # Validate an opted-in profile even when this invocation will use RBE. A
-    # malformed runner contract should fail visibly instead of being dormant
-    # until a keyless local fallback happens.
-    LocalBuildResources.from_env(os.environ)
     config = remote_config(sys.argv[1:], os.environ)
     if config is None:
         print(
@@ -222,17 +210,8 @@ def main() -> None:
         result = subprocess.run(command, check=False)
         raise SystemExit(result.returncode)
 
-    raise SystemExit(
-        run_with_optional_lock(
-            command,
-            use_lock=not bazel_uses_remote_execution(sys.argv[1:], os.environ),
-        )
-    )
+    os.execvp(command[0], command)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except ResourceProfileError as error:
-        print(f"Invalid local build resource profile: {error}", file=sys.stderr)
-        raise SystemExit(2) from error
+    main()

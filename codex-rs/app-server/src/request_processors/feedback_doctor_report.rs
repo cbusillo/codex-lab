@@ -20,7 +20,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::warn;
 
-const DOCTOR_FEEDBACK_REPORT_TIMEOUT: Duration = Duration::from_secs(25);
+// Keep the existing 25-second diagnostic allowance plus the filesystem
+// probe budget (eight seconds) and a small amount of process overhead.
+const DOCTOR_FEEDBACK_REPORT_TIMEOUT: Duration = Duration::from_secs(35);
 const MAX_DOCTOR_TAG_VALUE_LEN: usize = 256;
 
 /// Redacted doctor report data that can be merged into a feedback upload.
@@ -112,7 +114,7 @@ fn doctor_command(executable: &Path, cwd: &Path, codex_home: &Path) -> Command {
         .arg("--json")
         .arg("--feedback")
         .current_dir(codex_home)
-        .env("CODEX_LAB_HOME", codex_home);
+        .env("CODEX_HOME", codex_home);
     command
 }
 
@@ -218,10 +220,7 @@ mod tests {
         );
         assert_eq!(
             command.get_envs().collect::<Vec<_>>(),
-            [(
-                "CODEX_LAB_HOME".as_ref(),
-                Some(codex_home.path().as_os_str())
-            )]
+            [("CODEX_HOME".as_ref(), Some(codex_home.path().as_os_str()))]
         );
     }
 

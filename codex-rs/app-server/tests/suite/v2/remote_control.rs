@@ -15,7 +15,6 @@ use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server::AppServerRuntimeOptions;
 use codex_app_server::AppServerTransport;
-use codex_app_server::AppServerWebsocketAuthSettings;
 use codex_app_server::PluginStartupTasks;
 use codex_app_server::RemoteControlStartupMode;
 use codex_app_server::run_main_with_transport_options;
@@ -35,7 +34,6 @@ use codex_app_server_protocol::RemoteControlPairingStartParams;
 use codex_app_server_protocol::RemoteControlPairingStartResponse;
 use codex_app_server_protocol::RemoteControlPairingStatusParams;
 use codex_app_server_protocol::RemoteControlPairingStatusResponse;
-use codex_app_server_protocol::RemoteControlReconnectResponse;
 use codex_app_server_protocol::RemoteControlStatusChangedNotification;
 use codex_app_server_protocol::RemoteControlStatusReadResponse;
 use codex_app_server_protocol::RequestId;
@@ -48,6 +46,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_state::RemoteControlEnrollmentRecord;
 use codex_state::StateRuntime;
 use codex_utils_cli::CliConfigOverrides;
+use codex_websocket_auth::WebsocketAuthSettings;
 use futures::SinkExt;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -64,11 +63,6 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use wiremock::Mock;
-use wiremock::MockServer;
-use wiremock::ResponseTemplate;
-use wiremock::matchers::method;
-use wiremock::matchers::path;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -231,7 +225,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
         .join("app-server.sock");
     let transport =
         AppServerTransport::from_listen_url(&format!("unix://{}", socket_path.display()))?;
-    let _codex_home_guard = EnvVarGuard::set("CODEX_LAB_HOME", codex_home.path().as_os_str());
+    let _codex_home_guard = EnvVarGuard::set("CODEX_HOME", codex_home.path().as_os_str());
 
     let result = timeout(
         STARTUP_TIMEOUT,
@@ -247,7 +241,7 @@ async fn explicit_remote_control_startup_fails_when_disabled_by_requirements() -
             /*default_analytics_enabled*/ false,
             transport,
             SessionSource::VSCode,
-            AppServerWebsocketAuthSettings::default(),
+            WebsocketAuthSettings::default(),
             AppServerRuntimeOptions {
                 plugin_startup_tasks: PluginStartupTasks::Skip,
                 remote_control_startup_mode: RemoteControlStartupMode::EnabledEphemeral,
@@ -449,30 +443,6 @@ async fn remote_control_status_read_returns_disabled_status() -> Result<()> {
     assert!(!received.server_name.is_empty());
     assert_eq!(received.environment_id, None);
     assert!(!received.installation_id.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn remote_control_reconnect_rejects_disabled_remote_control() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build_initialized()
-        .await?;
-
-    let request_id = mcp.send_remote_control_reconnect_request().await?;
-    let error = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    assert_eq!(error.error.code, -32600);
-    assert_eq!(
-        error.error.message,
-        "remote control cannot reconnect while disabled"
-    );
     Ok(())
 }
 
@@ -747,36 +717,6 @@ async fn rpc_updates_durable_preference_but_ephemeral_does_not() -> Result<()> {
 }
 
 #[tokio::test]
-async fn remote_control_reconnect_returns_connecting_while_connecting() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    let _backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build_initialized()
-        .await?;
-
-    let enable_request_id = mcp.send_remote_control_ephemeral_enable_request().await?;
-    let enabled: RemoteControlEnableResponse =
-        timeout(DEFAULT_TIMEOUT, mcp.read_response(enable_request_id)).await??;
-    assert_eq!(enabled.status, RemoteControlConnectionStatus::Connecting);
-
-    let request_id = mcp.send_remote_control_reconnect_request().await?;
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-    let received: RemoteControlReconnectResponse = to_response(response)?;
-
-    assert_eq!(received.status, RemoteControlConnectionStatus::Connecting);
-    assert!(!received.server_name.is_empty());
-    assert_eq!(received.environment_id, None);
-    assert!(!received.installation_id.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
 async fn remote_control_status_read_returns_connecting_status_after_enable() -> Result<()> {
     let codex_home = TempDir::new()?;
     let mut backend = BlockingRemoteControlBackend::start(codex_home.path()).await?;
@@ -1014,9 +954,9 @@ struct BlockingRemoteControlBackend {
 }
 
 struct ConnectedRemoteControlBackend {
-    _models_server: MockServer,
     initialized_rx: Option<oneshot::Receiver<std::result::Result<(), String>>>,
     server_task: JoinHandle<Result<()>>,
+    _models_server: wiremock::MockServer,
 }
 
 struct ClientManagementRemoteControlBackend {
@@ -1027,13 +967,13 @@ struct ClientManagementRemoteControlBackend {
 impl ConnectedRemoteControlBackend {
     async fn start(codex_home: &std::path::Path) -> Result<Self> {
         let listener = configured_remote_control_listener(codex_home).await?;
-        // Model refresh runs independently of enrollment and must not be accepted
-        // as the WebSocket connection on the remote-control listener.
-        let models_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/models"))
+        // Model refreshes can arrive after enrollment, when this listener expects a WebSocket.
+        let models_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/models"))
             .respond_with(
-                ResponseTemplate::new(/*s*/ 200).set_body_json(serde_json::json!({ "models": [] })),
+                wiremock::ResponseTemplate::new(/*s*/ 200)
+                    .set_body_json(serde_json::json!({ "models": [] })),
             )
             .mount(&models_server)
             .await;
@@ -1134,9 +1074,9 @@ impl ConnectedRemoteControlBackend {
         });
 
         Ok(Self {
-            _models_server: models_server,
             initialized_rx: Some(initialized_rx),
             server_task,
+            _models_server: models_server,
         })
     }
 
@@ -1311,11 +1251,14 @@ impl PairingRemoteControlBackend {
                 )
                 .await?;
 
-                let request_after_enroll = read_http_request(&listener).await?;
-                let pair_http_request = if request_after_enroll.request_line.starts_with("GET ") {
-                    read_http_request(&listener).await?
-                } else {
-                    request_after_enroll
+                let mut websocket_connections = Vec::new();
+                let pair_http_request = loop {
+                    let request = read_http_request(&listener).await?;
+                    if request.request_line.starts_with("GET ") {
+                        websocket_connections.push(request);
+                    } else {
+                        break request;
+                    }
                 };
                 respond_with_json(
                     pair_http_request.reader.into_inner(),
@@ -1332,7 +1275,14 @@ impl PairingRemoteControlBackend {
                     serde_json::json!({ "pairing_code": "pairing-code" }),
                     serde_json::json!({ "manual_pairing_code": "ABCD-EFGH" }),
                 ] {
-                    let status_http_request = read_http_request(&listener).await?;
+                    let status_http_request = loop {
+                        let request = read_http_request(&listener).await?;
+                        if request.request_line.starts_with("GET ") {
+                            websocket_connections.push(request);
+                        } else {
+                            break request;
+                        }
+                    };
                     assert_eq!(
                         status_http_request.request_line,
                         "POST /backend-api/wham/remote/control/server/pair/status HTTP/1.1"

@@ -133,6 +133,7 @@ async fn plan_implementation_popup_yes_emits_submit_message_event() {
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
+    assert_matches!(rx.try_recv(), Ok(AppEvent::FollowTranscript));
     let event = rx.try_recv().expect("expected AppEvent");
     let AppEvent::SubmitUserMessageWithMode {
         text,
@@ -218,7 +219,7 @@ async fn plan_implementation_clear_context_requires_default_mode_and_plan() {
 
     assert_eq!(
         params.items[1].description.as_deref(),
-        Some("Fresh thread with this plan.")
+        Some("Fresh thread with this plan")
     );
 
     let params = plan_implementation::selection_view_params(
@@ -228,7 +229,7 @@ async fn plan_implementation_clear_context_requires_default_mode_and_plan() {
     );
     assert_eq!(
         params.items[1].description.as_deref(),
-        Some("Fresh thread. Context: 89% used.")
+        Some("Start a fresh thread (current context: 89% used)")
     );
 }
 
@@ -664,10 +665,15 @@ async fn plan_reasoning_scope_popup_mentions_selected_reasoning() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(popup.contains("Choose where to apply medium reasoning."));
-    assert!(popup.contains("Always use medium reasoning in Plan mode."));
+    assert!(popup.contains("Always use medium reasoning in Plan mode"));
     assert!(popup.contains("Apply to Plan mode override"));
     assert!(popup.contains("Apply to global default and Plan mode override"));
-    assert!(popup.contains("user-chosen Plan override (low)"));
+    assert!(
+        popup
+            .split_whitespace()
+            .collect::<String>()
+            .contains("user-chosenPlanoverride(low)")
+    );
 }
 
 #[tokio::test]
@@ -679,7 +685,12 @@ async fn plan_reasoning_scope_popup_mentions_built_in_plan_default_when_no_overr
     );
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
-    assert!(popup.contains("built-in Plan default (medium)"));
+    assert!(
+        popup
+            .split_whitespace()
+            .collect::<String>()
+            .contains("built-inPlandefault(medium)")
+    );
 }
 
 #[tokio::test]
@@ -1629,7 +1640,6 @@ async fn make_startup_chat_with_cli_overrides(
     let resolved_model = get_model_offline_for_tests(cfg.model.as_deref());
     let session_telemetry = test_session_telemetry(&cfg, resolved_model.as_str());
     let init = ChatWidgetInit {
-        product_identity: codex_version::ProductIdentity::Codex,
         requires_openai_auth: true,
         local_settings: crate::local_settings::LocalSettings::from(&cfg),
         config: cfg.clone(),

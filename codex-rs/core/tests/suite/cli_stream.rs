@@ -74,18 +74,13 @@ fn personal_access_token_exec_command(server: &MockServer, home: &TempDir) -> Co
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg("model_provider=\"pat_mock\"")
-        .arg("-c")
-        .arg(format!(
-            "model_providers.pat_mock={{ name = \"pat_mock\", base_url = \"{}/api/codex\", wire_api = \"responses\", requires_openai_auth = true, supports_websockets = false }}",
-            server.uri()
-        ))
+        .arg(format!("openai_base_url=\"{}/api/codex\"", server.uri()))
         .arg("-c")
         .arg(format!("chatgpt_base_url=\"{}/backend-api\"", server.uri()))
         .arg("-C")
         .arg(repo_root())
         .arg("hello?");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env(CODEX_ACCESS_TOKEN_ENV_VAR, PERSONAL_ACCESS_TOKEN)
         .env("CODEX_AUTHAPI_BASE_URL", server.uri())
         .env_remove(CODEX_API_KEY_ENV_VAR)
@@ -244,7 +239,7 @@ async fn responses_mode_stream_cli() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
@@ -284,7 +279,7 @@ async fn responses_mode_stream_cli_supports_openai_base_url_config_override() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
@@ -342,7 +337,7 @@ async fn exec_cli_applies_model_instructions_file() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?\n");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
@@ -414,7 +409,7 @@ async fn exec_cli_profile_applies_model_instructions_file() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?\n");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
@@ -455,7 +450,7 @@ async fn responses_api_stream_cli() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_LAB_HOME", home.path())
+    cmd.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
@@ -492,17 +487,12 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg("model_provider=\"mock\"")
-        .arg("-c")
-        .arg(format!(
-            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"OPENAI_API_KEY\", wire_api = \"responses\", supports_websockets = false }}",
-            server.uri()
-        ))
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt);
-    cmd.env("CODEX_LAB_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy");
+    cmd.env("CODEX_HOME", home.path())
+        .env(CODEX_API_KEY_ENV_VAR, "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
     assert!(
@@ -613,18 +603,13 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
-        .arg("model_provider=\"mock\"")
-        .arg("-c")
-        .arg(format!(
-            "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"OPENAI_API_KEY\", wire_api = \"responses\", supports_websockets = false }}",
-            server.uri()
-        ))
+        .arg(format!("openai_base_url=\"{}/v1\"", server.uri()))
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");
-    cmd2.env("CODEX_LAB_HOME", home.path())
+    cmd2.env("CODEX_HOME", home.path())
         .env("OPENAI_API_KEY", "dummy");
 
     let output2 = run_cli_command(&mut cmd2).unwrap();

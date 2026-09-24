@@ -1,11 +1,5 @@
 pub(crate) mod apply_patch;
 pub(crate) mod apply_patch_spec;
-mod auto_review_disposition;
-pub(crate) mod auto_review_disposition_spec;
-mod browser;
-pub(crate) mod browser_spec;
-mod code_bridge;
-pub(crate) mod code_bridge_spec;
 mod current_time;
 mod dynamic;
 pub(crate) mod extension_tools;
@@ -17,9 +11,7 @@ mod mcp;
 mod mcp_resource;
 pub(crate) mod mcp_resource_spec;
 pub(crate) mod multi_agents;
-mod multi_agents_bounded_worker_spec;
 pub(crate) mod multi_agents_common;
-mod multi_agents_routing_spec;
 pub(crate) mod multi_agents_spec;
 pub(crate) mod multi_agents_v2;
 mod new_context_window;
@@ -63,9 +55,6 @@ use crate::session::turn_context::TurnEnvironment;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
 pub use apply_patch::ApplyPatchHandler;
-pub(crate) use auto_review_disposition::AutoReviewDispositionHandler;
-pub use browser::BrowserHandler;
-pub use code_bridge::CodeBridgeHandler;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 pub use current_time::CurrentTimeHandler;
@@ -78,6 +67,7 @@ pub use mcp_resource::ListMcpResourcesHandler;
 pub use mcp_resource::ReadMcpResourceHandler;
 pub use new_context_window::NewContextWindowHandler;
 pub use plan::PlanHandler;
+pub(crate) use request_permissions::RequestPermissionsEnvironmentArgs;
 pub use request_permissions::RequestPermissionsHandler;
 pub use request_plugin_install::RequestPluginInstallHandler;
 pub use request_user_input::RequestUserInputHandler;
@@ -254,10 +244,10 @@ pub(super) struct EffectiveAdditionalPermissions {
 pub(super) fn file_system_sandbox_policy_context_for_cwd<'a>(
     sandbox_context: &'a FileSystemSandboxContext,
     cwd: &'a PathUri,
-) -> Option<codex_protocol::permissions::FileSystemSandboxPolicyContext<'a>> {
-    let mut context = sandbox_context.policy_context()?;
+) -> codex_protocol::permissions::FileSystemSandboxPolicyContext<'a> {
+    let mut context = sandbox_context.policy_context();
     context.cwd = cwd;
-    Some(context)
+    context
 }
 
 pub(super) fn implicit_granted_permissions(
@@ -309,9 +299,9 @@ pub(super) async fn apply_granted_turn_permissions(
         if additional_permissions.is_none() {
             Some(granted.clone())
         } else {
-            effective_permissions.as_ref().and_then(|effective| {
-                preapproved_permission_profile(effective, granted, context.as_ref()?)
-            })
+            effective_permissions
+                .as_ref()
+                .and_then(|effective| preapproved_permission_profile(effective, granted, &context))
         }
     });
     let permissions_preapproved = preapproved_permissions.is_some();

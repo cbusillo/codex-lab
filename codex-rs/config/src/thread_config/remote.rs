@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use codex_model_provider_info::ModelProviderCapabilities;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::ModelProviderAuthInfo;
@@ -174,6 +173,7 @@ fn model_provider_from_proto(
     let info = ModelProviderInfo {
         name: provider.name,
         base_url: provider.base_url,
+        model_catalog_url: provider.model_catalog_url.map(Into::into),
         env_key: provider.env_key,
         env_key_instructions: provider.env_key_instructions,
         experimental_bearer_token: provider.experimental_bearer_token.map(Into::into),
@@ -181,6 +181,7 @@ fn model_provider_from_proto(
             .auth
             .map(model_provider_auth_from_proto)
             .transpose()?,
+        gateway_oauth: None,
         aws: None,
         wire_api,
         query_params: provider.query_params.map(redacted_string_map),
@@ -193,22 +194,6 @@ fn model_provider_from_proto(
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
         supports_standalone_web_search: provider.supports_standalone_web_search,
-        capabilities: provider
-            .capabilities
-            .map(|capabilities| {
-                let proto::ModelProviderCapabilities {
-                    namespace_tools,
-                    custom_tools,
-                    web_search,
-                } = capabilities;
-                ModelProviderCapabilities {
-                    // Absent fields preserve the full tool surface.
-                    namespace_tools: namespace_tools.unwrap_or(true),
-                    custom_tools: custom_tools.unwrap_or(true),
-                    web_search: web_search.unwrap_or(true),
-                }
-            })
-            .unwrap_or_default(),
     };
     Ok((id, info))
 }
@@ -221,10 +206,12 @@ fn model_provider_to_proto(
     let ModelProviderInfo {
         name,
         base_url,
+        model_catalog_url,
         env_key,
         env_key_instructions,
         experimental_bearer_token,
         auth,
+        gateway_oauth: _,
         aws: _,
         wire_api,
         query_params,
@@ -237,13 +224,13 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
-        capabilities,
     } = provider;
 
     proto::ModelProvider {
         id: id.into(),
         name,
         base_url,
+        model_catalog_url: model_catalog_url.map(RedactedString::into_inner),
         env_key,
         env_key_instructions,
         experimental_bearer_token: experimental_bearer_token.map(RedactedString::into_inner),
@@ -259,11 +246,6 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
-        capabilities: Some(proto::ModelProviderCapabilities {
-            namespace_tools: Some(capabilities.namespace_tools),
-            custom_tools: Some(capabilities.custom_tools),
-            web_search: Some(capabilities.web_search),
-        }),
     }
 }
 
@@ -461,21 +443,8 @@ mod tests {
         let mut expected = expected_provider();
         expected.auth = None;
         expected.experimental_bearer_token = Some("synthetic-provider-token".into());
-        expected.capabilities = codex_model_provider_info::ModelProviderCapabilities {
-            namespace_tools: false,
-            custom_tools: false,
-            web_search: true,
-        };
         let proto = model_provider_to_proto("local", expected.clone());
         assert!(proto.supports_standalone_web_search);
-        assert_eq!(
-            proto.capabilities.as_ref().expect("capabilities in proto"),
-            &proto::ModelProviderCapabilities {
-                namespace_tools: Some(false),
-                custom_tools: Some(false),
-                web_search: Some(true),
-            }
-        );
         let (id, actual) = model_provider_from_proto(proto).expect("model provider from proto");
 
         assert_eq!(id, "local");
@@ -507,6 +476,9 @@ mod tests {
                             id: "local".to_string(),
                             name: "Local".to_string(),
                             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+                            model_catalog_url: Some(
+                                "http://127.0.0.1:8061/api/codex/models".to_string(),
+                            ),
                             env_key: None,
                             env_key_instructions: None,
                             experimental_bearer_token: None,
@@ -543,7 +515,6 @@ mod tests {
                             requires_openai_auth: false,
                             supports_websockets: true,
                             supports_standalone_web_search: true,
-                            capabilities: None,
                         }],
                         features: HashMap::from([
                             ("plugins".to_string(), false),
@@ -578,6 +549,7 @@ mod tests {
         ModelProviderInfo {
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+            model_catalog_url: Some("http://127.0.0.1:8061/api/codex/models".into()),
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
@@ -605,8 +577,8 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            gateway_oauth: None,
             aws: None,
-            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         }
     }
 

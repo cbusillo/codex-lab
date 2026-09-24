@@ -13,7 +13,6 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
-use codex_app_server_protocol::ThreadExtra;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
@@ -22,6 +21,7 @@ use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
+use codex_config::types::WindowsSandboxModeToml;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
 use codex_protocol::SanitizedGitUrl;
@@ -267,52 +267,6 @@ fn normalize_thread_list_cwd_filters(
     }
 
     Ok(Some(normalized_cwds))
-}
-
-/// Resolve the `thread/list` relationship filter from the mutually exclusive
-/// relationship parameters.
-///
-/// `descendantOfThreadId` is the stable spelling of `ancestorThreadId`: both
-/// return spawned descendants at any depth, excluding the root thread itself.
-/// It is kept as a separate parameter so clients that shipped against the
-/// stable name keep working without opting into the experimental API.
-fn thread_list_relation_filter(
-    descendant_of_thread_id: Option<String>,
-    parent_thread_id: Option<String>,
-    ancestor_thread_id: Option<String>,
-) -> Result<Option<StoreThreadRelationFilter>, JSONRPCErrorError> {
-    if descendant_of_thread_id.is_some() && parent_thread_id.is_some() {
-        return Err(invalid_request(
-            "descendantOfThreadId and parentThreadId are mutually exclusive",
-        ));
-    }
-    if descendant_of_thread_id.is_some() && ancestor_thread_id.is_some() {
-        return Err(invalid_request(
-            "descendantOfThreadId and ancestorThreadId are mutually exclusive",
-        ));
-    }
-    if parent_thread_id.is_some() && ancestor_thread_id.is_some() {
-        return Err(invalid_request(
-            "parentThreadId and ancestorThreadId are mutually exclusive",
-        ));
-    }
-
-    if let Some(descendant_of_thread_id) = descendant_of_thread_id {
-        let thread_id = ThreadId::from_string(&descendant_of_thread_id)
-            .map_err(|err| invalid_request(format!("invalid descendantOfThreadId: {err}")))?;
-        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
-    }
-    if let Some(parent_thread_id) = parent_thread_id {
-        let thread_id = ThreadId::from_string(&parent_thread_id)
-            .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?;
-        return Ok(Some(StoreThreadRelationFilter::DirectChildrenOf(thread_id)));
-    }
-    if let Some(ancestor_thread_id) = ancestor_thread_id {
-        let thread_id = ThreadId::from_string(&ancestor_thread_id)
-            .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
-        return Ok(Some(StoreThreadRelationFilter::DescendantsOf(thread_id)));
-    }
-    Ok(None)
 }
 
 fn has_model_resume_override(
@@ -943,18 +897,6 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
-    /// Compatibility route for older clients that pin a `turnId` in the method
-    /// name. It reuses `thread/items/list` and flattens the per-item turn ids
-    /// back out, since the turn is already fixed by the request.
-    pub(crate) async fn thread_turns_items_list(
-        &self,
-        params: ThreadTurnsItemsListParams,
-    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_items_list_response_inner(params.into())
-            .await
-            .map(|response| Some(ThreadTurnsItemsListResponse::from(response).into()))
-    }
-
     pub(crate) async fn thread_timeline_list(
         &self,
         params: ThreadTimelineListParams,
@@ -1214,7 +1156,6 @@ impl ThreadRequestProcessor {
             history_mode,
             session_start_source,
             thread_source,
-            session_provenance,
             project_id,
             daybreak_enabled,
             environments,
@@ -1302,7 +1243,6 @@ impl ThreadRequestProcessor {
                 history_mode.map(Into::into),
                 session_start_source,
                 thread_source.map(Into::into),
-                session_provenance.map(Into::into),
                 project_id,
                 daybreak_enabled,
                 environments,
@@ -1385,7 +1325,6 @@ impl ThreadRequestProcessor {
         history_mode: Option<ThreadHistoryMode>,
         session_start_source: Option<codex_app_server_protocol::ThreadStartSource>,
         thread_source: Option<codex_protocol::protocol::ThreadSource>,
-        session_provenance: Option<codex_protocol::protocol::SessionProvenance>,
         project_id: Option<String>,
         daybreak_enabled: Option<bool>,
         environment_selections: Option<Vec<TurnEnvironmentSelection>>,
@@ -1421,6 +1360,7 @@ impl ThreadRequestProcessor {
 
         if requested_cwd.is_some()
             && config.active_project.trust_level.is_none()
+            && !config.config_layer_stack.is_projectless()
             && effective_permissions_trust_project
         {
             let trust_target = resolve_root_git_project_for_trust(LOCAL_FS.as_ref(), &config.cwd)
@@ -1555,7 +1495,6 @@ impl ThreadRequestProcessor {
                 },
                 history_mode,
                 thread_source,
-                session_provenance,
                 dynamic_tools,
                 metrics_service_name: service_name,
                 parent_trace: request_trace,
@@ -1970,7 +1909,6 @@ impl ThreadRequestProcessor {
             git_info,
             daybreak_enabled,
         } = params;
-
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
 
@@ -2098,7 +2036,7 @@ impl ThreadRequestProcessor {
             &self.config.cwd,
         );
         if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await {
-            thread.session_id = loaded_thread.session_configured().session_id.to_string();
+            thread.session_id = loaded_thread.startup_metadata().session_id.to_string();
             let config_snapshot = loaded_thread.config_snapshot().await;
             apply_live_thread_settings(&mut thread, &config_snapshot);
         }
@@ -2571,7 +2509,6 @@ impl ThreadRequestProcessor {
             cwd,
             use_state_db_only,
             search_term,
-            descendant_of_thread_id,
             parent_thread_id,
             ancestor_thread_id,
         } = params;
@@ -2604,11 +2541,22 @@ impl ThreadRequestProcessor {
             }
         }
         let cwd_filters = normalize_thread_list_cwd_filters(cwd)?;
-        let relation_filter = thread_list_relation_filter(
-            descendant_of_thread_id,
-            parent_thread_id,
-            ancestor_thread_id,
-        )?;
+        let relation_filter = match (parent_thread_id, ancestor_thread_id) {
+            (Some(_), Some(_)) => {
+                return Err(invalid_request(
+                    "parentThreadId and ancestorThreadId are mutually exclusive",
+                ));
+            }
+            (Some(parent_thread_id), None) => Some(StoreThreadRelationFilter::DirectChildrenOf(
+                ThreadId::from_string(&parent_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid parent thread id: {err}")))?,
+            )),
+            (None, Some(ancestor_thread_id)) => Some(StoreThreadRelationFilter::DescendantsOf(
+                ThreadId::from_string(&ancestor_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?,
+            )),
+            (None, None) => None,
+        };
 
         let requested_page_size = limit
             .map(|value| value as usize)
@@ -3041,7 +2989,6 @@ impl ThreadRequestProcessor {
         }
         let fallback_thread =
             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
-        let extra = fallback_thread.extra.clone();
         let mut thread = if let Some(mut thread) = persisted_thread {
             if thread.path.is_none() {
                 thread.path = fallback_thread.path.clone();
@@ -3053,7 +3000,6 @@ impl ThreadRequestProcessor {
         } else {
             fallback_thread
         };
-        thread.extra = extra;
         apply_live_thread_settings(&mut thread, &config_snapshot);
         self.apply_thread_read_store_fields(thread_id, &mut thread, include_turns, loaded_thread)
             .await?;
@@ -3406,7 +3352,7 @@ impl ThreadRequestProcessor {
         // durable next cursor still starts after the last returned stored turn.
         let page_size = thread_turns_page_size(params.limit);
         if page_size == 1 {
-            // ThreadStore does not accept an empty page. Use its head cursor as
+            // ThreadStore does not accept an empty page. Use its backwards cursor as
             // the next cursor so the omitted durable row is returned next.
             let mut page = self
                 .paginated_resume_initial_turns_page(thread_id, params)
@@ -3501,8 +3447,15 @@ impl ThreadRequestProcessor {
             .into_iter()
             .map(|stored_item| {
                 let turn_id = stored_item.turn_id.clone();
+                let started_at_ms = stored_item.started_at_ms;
+                let completed_at_ms = stored_item.completed_at_ms;
                 let item = deserialize_stored_thread_item(stored_item)?;
-                Ok(ThreadItemEntry { turn_id, item })
+                Ok(ThreadItemEntry {
+                    turn_id,
+                    item,
+                    started_at_ms,
+                    completed_at_ms,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -4108,7 +4061,6 @@ impl ThreadRequestProcessor {
                     /*has_live_in_progress_turn*/ false,
                 );
                 let config_snapshot = codex_thread.config_snapshot().await;
-                thread.extra = Some(thread_extra_from_snapshot(&config_snapshot));
                 let (turns_backwards_cursor, items_backwards_cursor) =
                     if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
                         match Self::paginated_resume_backwards_cursors(
@@ -4296,7 +4248,7 @@ impl ThreadRequestProcessor {
             let source_thread = self
                 .read_stored_thread_for_resume(
                     &params.thread_id,
-                    params.path.as_ref(),
+                    /*path*/ None,
                     /*include_history*/ false,
                 )
                 .await?;
@@ -4324,34 +4276,17 @@ impl ThreadRequestProcessor {
             let paginated_resume =
                 matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
             let existing_thread_rollout_path = existing_thread.rollout_path();
-            if let Some(requested_path) = params.path.as_ref() {
-                if source_thread.thread_id != existing_thread_id {
-                    return Err(invalid_request(format!(
-                        "cannot resume running thread {existing_thread_id} with stale path: requested `{}` resolves to thread {}",
-                        requested_path.display(),
-                        source_thread.thread_id
-                    )));
-                }
-                let resolved_requested_path =
-                    source_thread.rollout_path.as_ref().ok_or_else(|| {
-                        internal_error(format!(
-                            "thread {} resolved from rollout path has no rollout path",
-                            source_thread.thread_id
-                        ))
-                    })?;
-                let active_path = existing_thread_rollout_path
-                    .as_ref()
-                    .unwrap_or(resolved_requested_path);
-                if !path_utils::paths_match_after_normalization(
-                    resolved_requested_path,
-                    active_path,
-                ) {
-                    return Err(invalid_request(format!(
-                        "cannot resume running thread {existing_thread_id} with stale path: requested `{}`, active `{}`",
-                        requested_path.display(),
-                        active_path.display()
-                    )));
-                }
+            let active_path = existing_thread_rollout_path
+                .as_ref()
+                .or(source_thread.rollout_path.as_ref());
+            if let (Some(requested_path), Some(active_path)) = (params.path.as_ref(), active_path)
+                && !path_utils::paths_match_after_normalization(requested_path, active_path)
+            {
+                return Err(invalid_request(format!(
+                    "cannot resume running thread {existing_thread_id} with stale path: requested `{}`, active `{}`",
+                    requested_path.display(),
+                    active_path.display()
+                )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
@@ -4469,7 +4404,7 @@ impl ThreadRequestProcessor {
                 config_snapshot.model_provider_id.as_str(),
                 /*include_turns*/ false,
             );
-            thread_summary.session_id = existing_thread.session_configured().session_id.to_string();
+            thread_summary.session_id = existing_thread.startup_metadata().session_id.to_string();
             thread_summary.thread_source = config_snapshot.thread_source.clone().map(Into::into);
             apply_live_thread_settings(&mut thread_summary, &config_snapshot);
             thread_summary.can_accept_direct_input = Some(can_accept_direct_input(
@@ -4658,21 +4593,9 @@ impl ThreadRequestProcessor {
         };
 
         let stored_thread = result.map_err(thread_store_resume_read_error)?;
-        if stored_thread.archived_at.is_some() {
-            let thread_id = stored_thread.thread_id;
-            return Err(invalid_request(format!(
-                "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
-            )));
-        }
         if let Some(requested_path) = path
             && matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated)
         {
-            let resolved_requested_path = stored_thread.rollout_path.as_ref().ok_or_else(|| {
-                internal_error(format!(
-                    "paginated thread {} has no rollout path",
-                    stored_thread.thread_id
-                ))
-            })?;
             let current_thread = self
                 .thread_store
                 .read_thread(StoreReadThreadParams {
@@ -4682,21 +4605,27 @@ impl ThreadRequestProcessor {
                 })
                 .await
                 .map_err(thread_store_resume_read_error)?;
-            let current_path = current_thread.rollout_path.as_ref().ok_or_else(|| {
-                internal_error(format!(
-                    "paginated thread {} has no current rollout path",
-                    stored_thread.thread_id
-                ))
-            })?;
-            if !path_utils::paths_match_after_normalization(resolved_requested_path, current_path) {
+            if let Some(current_path) = current_thread.rollout_path.as_ref()
+                && !path_utils::paths_match_after_normalization(
+                    codex_rollout::plain_rollout_path(requested_path).as_path(),
+                    codex_rollout::plain_rollout_path(current_path).as_path(),
+                )
+            {
                 return Err(invalid_request(format!(
-                    "cannot use stale path for paginated thread {}: requested {}, current {}; omit path and retry by thread id",
+                    "cannot resume paginated thread {} with stale path: requested {}, current {}; omit path and resume by thread id",
                     stored_thread.thread_id,
                     requested_path.display(),
                     current_path.display()
                 )));
             }
         }
+        if stored_thread.archived_at.is_some() {
+            let thread_id = stored_thread.thread_id;
+            return Err(invalid_request(format!(
+                "session {thread_id} is archived. Run `codex unarchive {thread_id}` to unarchive it first."
+            )));
+        }
+
         Ok(stored_thread)
     }
 
@@ -4765,7 +4694,7 @@ impl ThreadRequestProcessor {
         include_turns: bool,
     ) -> std::result::Result<Thread, String> {
         let config_snapshot = thread.config_snapshot().await;
-        let session_id = thread.session_configured().session_id.to_string();
+        let session_id = thread.startup_metadata().session_id.to_string();
         let can_accept_direct_input = can_accept_direct_input(
             thread.multi_agent_version(),
             &config_snapshot.session_source,
@@ -5011,18 +4940,17 @@ impl ThreadRequestProcessor {
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
         if cfg!(windows) {
-            match WindowsSandboxLevel::from_config(&self.config) {
-                WindowsSandboxLevel::Elevated => {
-                    cli_overrides
-                        .insert("windows.sandbox".to_string(), serde_json::json!("elevated"));
+            let mode = self.config.permissions.windows_sandbox_mode.or_else(|| {
+                match WindowsSandboxLevel::from_config(&self.config) {
+                    WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+                    WindowsSandboxLevel::RestrictedToken => {
+                        Some(WindowsSandboxModeToml::Unelevated)
+                    }
+                    WindowsSandboxLevel::Disabled => None,
                 }
-                WindowsSandboxLevel::RestrictedToken => {
-                    cli_overrides.insert(
-                        "windows.sandbox".to_string(),
-                        serde_json::json!("unelevated"),
-                    );
-                }
-                WindowsSandboxLevel::Disabled => {}
+            });
+            if let Some(mode) = mode {
+                cli_overrides.insert("windows.sandbox".to_string(), serde_json::json!(mode));
             }
         }
         let request_overrides = if cli_overrides.is_empty() {
@@ -5371,7 +5299,6 @@ impl ThreadRequestProcessor {
         ));
         thread.session_id = session_configured.session_id.to_string();
         thread.thread_source = config_snapshot.thread_source.clone().map(Into::into);
-        thread.extra = Some(thread_extra_from_snapshot(&config_snapshot));
         apply_live_thread_settings(&mut thread, &config_snapshot);
         if thread.path.is_none() {
             thread.project_id = inherited_project_id.clone();
@@ -5391,7 +5318,6 @@ impl ThreadRequestProcessor {
         let active_permission_profile =
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
         let thread_originator = config_snapshot.originator.clone();
-
         let response = ThreadForkResponse {
             thread: thread.clone(),
             disabled_plugin_ids: config_snapshot.disabled_plugin_ids,
@@ -5812,39 +5738,10 @@ pub(super) fn build_thread_resume_initial_turns_page(
 
 pub(super) fn apply_thread_turns_items_view(turns: &mut [Turn], items_view: TurnItemsView) {
     for turn in turns {
-        match items_view {
-            TurnItemsView::NotLoaded => {
-                turn.items.clear();
-                turn.items_view = TurnItemsView::NotLoaded;
-            }
-            TurnItemsView::Summary => {
-                let first_user_message = turn
-                    .items
-                    .iter()
-                    .find(|item| matches!(item, ThreadItem::UserMessage { .. }))
-                    .cloned();
-                let final_agent_message = turn
-                    .items
-                    .iter()
-                    .rev()
-                    .find(|item| matches!(item, ThreadItem::AgentMessage { .. }))
-                    .cloned();
-                turn.items = match (first_user_message, final_agent_message) {
-                    (Some(user_message), Some(agent_message))
-                        if user_message.id() != agent_message.id() =>
-                    {
-                        vec![user_message, agent_message]
-                    }
-                    (Some(user_message), _) => vec![user_message],
-                    (None, Some(agent_message)) => vec![agent_message],
-                    (None, None) => Vec::new(),
-                };
-                turn.items_view = TurnItemsView::Summary;
-            }
-            TurnItemsView::Full => {
-                turn.items_view = TurnItemsView::Full;
-            }
+        if !matches!(items_view, TurnItemsView::Full) && turn.items_view != items_view {
+            turn.items = items_view.project_items(&turn.items);
         }
+        turn.items_view = items_view;
     }
 }
 
@@ -6177,7 +6074,6 @@ pub(crate) fn thread_from_stored_thread(
         source: source.into(),
         can_accept_direct_input: None,
         thread_source: thread.thread_source.map(Into::into),
-        session_provenance: thread.session_provenance.map(Into::into),
         git_info,
         name: thread.name,
         daybreak_enabled: thread.daybreak_enabled,
@@ -6334,7 +6230,7 @@ fn build_thread_from_snapshot(
                 .map(Into::into)
                 .collect(),
         ),
-        extra: Some(thread_extra_from_snapshot(config_snapshot)),
+        extra: None,
         session_id,
         forked_from_id: None,
         parent_thread_id: config_snapshot.parent_thread_id.map(|id| id.to_string()),
@@ -6353,7 +6249,7 @@ fn build_thread_from_snapshot(
         status: ThreadStatus::NotLoaded,
         path,
         cwd: config_snapshot.cwd().clone(),
-        cli_version: codex_version::CODE_VERSION.to_string(),
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
         originator: (!config_snapshot.originator.is_empty())
             .then(|| config_snapshot.originator.clone()),
         agent_nickname: config_snapshot.session_source.get_nickname(),
@@ -6364,17 +6260,10 @@ fn build_thread_from_snapshot(
             &config_snapshot.session_source,
         )),
         thread_source: config_snapshot.thread_source.clone().map(Into::into),
-        session_provenance: config_snapshot.session_provenance.clone().map(Into::into),
         git_info: None,
         name: None,
         daybreak_enabled: None,
         turns: Vec::new(),
-    }
-}
-
-pub(super) fn thread_extra_from_snapshot(config_snapshot: &ThreadConfigSnapshot) -> ThreadExtra {
-    ThreadExtra {
-        automatic_validation_enabled: config_snapshot.automatic_validation_enabled,
     }
 }
 
@@ -6413,7 +6302,7 @@ fn build_thread_from_loaded_snapshot(
 ) -> Thread {
     build_thread_from_snapshot(
         thread_id,
-        loaded_thread.session_configured().session_id.to_string(),
+        loaded_thread.startup_metadata().session_id.to_string(),
         loaded_thread.multi_agent_version(),
         config_snapshot,
         loaded_thread.rollout_path(),

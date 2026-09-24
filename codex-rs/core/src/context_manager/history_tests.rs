@@ -1,10 +1,6 @@
 use super::*;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
-use crate::context::ContextualUserFragment;
-use crate::context::MultiAgentRoleInstructions;
-use crate::context::ProjectValidationCorrectionConsumed;
 use crate::context::UserInstructions;
-use crate::context::world_state::MultiAgentUsageHintState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
 use base64::Engine;
@@ -174,10 +170,7 @@ fn conversation_history_snapshot_binds_review_mode_and_hash_to_the_latest_item(
             ..Default::default()
         }),
     };
-    let mut history = ContextManager::with_guardian_context_mode(
-        GuardianContextMode::ThreadOwned,
-        &codex_protocol::protocol::SessionSource::Cli,
-    );
+    let mut history = ContextManager::for_session(&codex_protocol::protocol::SessionSource::Cli);
     history.replace_annotated(vec![checkpoint.clone()]);
     history.restore_review_context(
         /*retained_context*/ None,
@@ -209,11 +202,14 @@ fn conversation_history_snapshot_binds_review_mode_and_hash_to_the_latest_item(
     assert_eq!(
         history
             .conversation_history_snapshot()
-            .latest_compaction_model_hash(),
+            .latest_compaction()
+            .and_then(|checkpoint| checkpoint.model_hash),
         latest_hash
     );
     assert_eq!(
-        snapshot.latest_compaction_model_hash(),
+        snapshot
+            .latest_compaction()
+            .and_then(|checkpoint| checkpoint.model_hash),
         Some("producer-hash")
     );
     assert_eq!(
@@ -234,7 +230,8 @@ fn conversation_history_snapshot_binds_review_mode_and_hash_to_the_latest_item(
     assert_eq!(
         history
             .conversation_history_snapshot()
-            .latest_compaction_model_hash(),
+            .latest_compaction()
+            .and_then(|checkpoint| checkpoint.model_hash),
         Some("producer-hash")
     );
 }
@@ -249,11 +246,15 @@ fn conversation_history_snapshot_binds_review_mode_and_hash_to_the_latest_item(
         "text": "Only publish to a private repository.", "complete": true
     }]
 }); "retained instructions")]
+#[test_case(serde_json::json!({
+    "verified_answers": [], "incomplete": false, "next_order": 1,
+    "assistant_messages": [{
+        "turn_id": "turn", "message_id": "question",
+        "text": "May I publish to the private repository?", "complete": true
+    }]
+}); "retained assistant context")]
 fn checkpoint_retained_evidence_survives_legacy_review(saved_context: serde_json::Value) {
-    let mut history = ContextManager::with_guardian_context_mode(
-        GuardianContextMode::ThreadOwned,
-        &codex_protocol::protocol::SessionSource::Cli,
-    );
+    let mut history = ContextManager::for_session(&codex_protocol::protocol::SessionSource::Cli);
     history.replace_annotated(vec![ResponseItemEnvelope::new(
         serde_json::from_value(serde_json::json!({
             "type": "compaction", "id": "unknown", "encrypted_content": "opaque checkpoint"
@@ -278,16 +279,18 @@ fn checkpoint_retained_evidence_survives_legacy_review(saved_context: serde_json
             expected_mode
         );
         assert_eq!(snapshot.retained_context(), Some(&retained));
-        assert_eq!(snapshot.latest_compaction_model_hash(), None);
+        assert_eq!(
+            snapshot
+                .latest_compaction()
+                .and_then(|checkpoint| checkpoint.model_hash),
+            None
+        );
     }
 }
 
 #[test]
-fn checkpoint_replayed_instructions_keep_legacy_review_when_the_source_survives() {
-    let mut history = ContextManager::with_guardian_context_mode(
-        GuardianContextMode::ThreadOwned,
-        &codex_protocol::protocol::SessionSource::Cli,
-    );
+fn checkpoint_replayed_messages_keep_legacy_review_when_the_source_survives() {
+    let mut history = ContextManager::for_session(&codex_protocol::protocol::SessionSource::Cli);
     history.replace_annotated(vec![ResponseItemEnvelope::new(
         serde_json::from_value(serde_json::json!({
             "type": "compaction", "id": "unknown", "encrypted_content": "opaque checkpoint"
@@ -299,7 +302,10 @@ fn checkpoint_replayed_instructions_keep_legacy_review_when_the_source_survives(
         /*reviewer_compaction_hash*/ None,
     );
     history.record_items(
-        &[user_input_text_msg("Only publish privately.")],
+        &[
+            user_input_text_msg("Only publish privately."),
+            assistant_msg("May I publish to the private repository?"),
+        ],
         TruncationPolicy::Bytes(10_000),
     );
     let retained = history.retained_context().clone();
@@ -314,6 +320,120 @@ fn checkpoint_replayed_instructions_keep_legacy_review_when_the_source_survives(
         GuardianContextMode::Legacy,
     );
     assert_eq!(history.retained_context(), &retained);
+}
+
+#[test_case(None; "no retained checkpoint")]
+#[test_case(Some(serde_json::json!({
+    "verified_answers": [], "incomplete": false
+})); "legacy retained checkpoint without instructions")]
+fn plaintext_checkpoint_without_backup_preserves_root_instructions(
+    saved_context: Option<serde_json::Value>,
+) {
+    let instruction = serde_json::from_value(serde_json::json!({
+        "type": "message", "id": "original-restriction", "role": "user",
+        "content": [{"type": "input_text", "text": "Only publish privately."}]
+    }))
+    .expect("old instruction without ordering metadata");
+    let saved_context: Option<RetainedContext> =
+        saved_context.map(|value| serde_json::from_value(value).expect("legacy retained context"));
+    let mut history = ContextManager::for_session(&SessionSource::Cli);
+    history.replace(vec![instruction]);
+    history.restore_review_context(
+        saved_context.as_ref(),
+        /*checkpoint*/ None,
+        Some("reviewer"),
+    );
+
+    // Compaction removes the only plaintext copy. Resume must keep it available
+    // to worker authorization without adding it back to the reviewer's model window.
+    let compacted = vec![ResponseItemEnvelope {
+        item: serde_json::from_value(serde_json::json!({
+            "type": "compaction", "id": "new-checkpoint", "encrypted_content": "opaque"
+        }))
+        .expect("new checkpoint"),
+        metadata: Some(CodexHarnessMetadata {
+            compaction_model_hash: Some("reviewer".to_owned()),
+            ..Default::default()
+        }),
+    }];
+    history.replace_compacted(compacted.clone(), Some("reviewer"));
+    let mut resumed = ContextManager::for_session(&SessionSource::Cli);
+    resumed.replace_annotated(compacted.clone());
+    resumed.restore_review_context(
+        Some(history.retained_context()),
+        history.guardian_history_checkpoint().as_ref(),
+        Some("reviewer"),
+    );
+    let snapshot = resumed.conversation_history_snapshot();
+    assert_eq!(
+        (
+            GuardianContextMode::from_history(snapshot.as_ref()),
+            snapshot.review_items().cloned().collect::<Vec<_>>(),
+            resumed
+                .legacy_user_messages()
+                .map(|message| message.text)
+                .collect::<Vec<_>>(),
+        ),
+        (
+            GuardianContextMode::ThreadOwned,
+            compacted
+                .into_iter()
+                .map(|envelope| envelope.item)
+                .collect::<Vec<_>>(),
+            vec!["Only publish privately.".to_owned()],
+        ),
+    );
+}
+
+#[test]
+fn legacy_checkpoint_rollback_keeps_answers_before_a_same_turn_steer() {
+    let mut checkpoint: codex_history::CompactedItem = serde_json::from_value(serde_json::json!({
+        "message": "Legacy checkpoint without accepted-input metadata.",
+        "replacement_history": [
+            {"type": "message", "id": "initial", "role": "user",
+             "content": [{"type": "input_text", "text": "Inspect the release."}]},
+            {"type": "function_call", "call_id": "before", "name": "request_user_input", "arguments": "{}"},
+            {"type": "message", "id": "steer", "role": "user",
+             "content": [{"type": "input_text", "text": "Inspect the README too."}]},
+            {"type": "function_call", "call_id": "after", "name": "request_user_input", "arguments": "{}"}
+        ],
+        "retained_context": {"verified_answers": [
+            {"turn_id": "shared-turn", "call_id": "before",
+             "questions": [{"question": "Publish?", "answer": "Only privately."}]},
+            {"turn_id": "shared-turn", "call_id": "after",
+             "questions": [{"question": "Publish the README?", "answer": "Never."}]}
+        ], "incomplete": false}
+    })).expect("legacy checkpoint");
+    for envelope in checkpoint.replacement_history.as_mut().unwrap() {
+        envelope.item.set_turn_id_if_missing("shared-turn");
+    }
+    let expected = checkpoint
+        .retained_context
+        .as_ref()
+        .unwrap()
+        .verified_answers()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut history = ContextManager::for_session(&SessionSource::Cli);
+    history.replace_annotated(checkpoint.replacement_history.take().unwrap());
+    history.restore_review_context(
+        checkpoint.retained_context.as_ref(),
+        /*checkpoint*/ None,
+        /*reviewer_compaction_hash*/ None,
+    );
+    // The old checkpoint has no acceptance order; use the surviving source calls
+    // to remove only the answer belonging to each rolled-back input.
+    for remaining in [1, 0] {
+        history.drop_last_n_user_turns(/*num_turns*/ 1);
+        assert_eq!(
+            history
+                .retained_context()
+                .verified_answers()
+                .cloned()
+                .collect::<Vec<_>>(),
+            expected[..remaining],
+        );
+    }
 }
 
 #[test]
@@ -340,6 +460,7 @@ fn conversation_history_snapshot_excludes_contextual_user_messages() {
         vec![user_message, assistant_message, developer_message],
     );
 }
+
 struct TestWorldStateSection;
 
 impl WorldStateSection for TestWorldStateSection {
@@ -486,7 +607,6 @@ fn reference_context_item() -> TurnContextItem {
                 .join("reference-cwd"),
         )
         .expect("absolute reference cwd"),
-        environments: None,
         workspace_roots: None,
         current_date: Some("2026-03-23".to_string()),
         timezone: Some("America/Los_Angeles".to_string()),
@@ -654,16 +774,10 @@ fn drop_last_n_user_turns_removes_post_input_configuration_update_with_its_turn(
     ]);
     history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
 
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(history.annotated_items(), surviving);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
     assert!(history.annotated_items().is_empty());
 }
 
@@ -766,9 +880,8 @@ fn cloned_history_shares_items_until_mutated() {
 
 #[test]
 fn annotated_history_apis_preserve_envelopes() {
-    let first_item = assistant_msg("first");
     let first_envelope = ResponseItemEnvelope {
-        item: first_item.clone(),
+        item: assistant_msg("first"),
         metadata: Some(CodexHarnessMetadata::default()),
     };
     let mut history = ContextManager::new();
@@ -779,7 +892,10 @@ fn annotated_history_apis_preserve_envelopes() {
         history.annotated_items(),
         std::slice::from_ref(&first_envelope)
     );
-    assert_eq!(history.into_raw_items(), vec![first_item]);
+    assert_eq!(
+        history.into_shared_annotated_items().as_slice(),
+        &[first_envelope]
+    );
 }
 
 #[test_case(None, 100, 5, true; "model policy")]
@@ -876,10 +992,7 @@ fn drop_last_n_user_turns_treats_inter_agent_assistant_messages_as_instruction_t
         inter_agent_reply,
     ]);
 
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(raw_items(&history), vec![first_turn, first_reply]);
 }
@@ -1201,7 +1314,7 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
                     text: "hi".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
             }
         ]
     );
@@ -1238,7 +1351,7 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
                     text: "generate a lobster".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(unknown_content_metadata()),
             },
             ResponseItem::ImageGenerationCall {
                 id: Some(ResponseItemId::with_suffix("ig", "123")),
@@ -1369,10 +1482,7 @@ fn drop_last_n_user_turns_preserves_prefix() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
     assert_eq!(
         history.for_prompt(&modalities),
         vec![
@@ -1389,10 +1499,7 @@ fn drop_last_n_user_turns_preserves_prefix() {
         user_msg("u2"),
         assistant_msg("a2"),
     ]);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 99,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 99);
     assert_eq!(
         history.clone().for_prompt(&modalities),
         vec![assistant_msg("session prefix item")]
@@ -1411,18 +1518,12 @@ fn drop_last_n_user_turns_preserves_prefix() {
         acceptance_order: None,
     });
     let retained = history.retained_context().clone();
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
     assert_eq!(history.retained_context(), &retained);
 
     // A steered message shares its source turn, but rollback must keep the earlier
     // instruction and answer as complete evidence, including after the next compaction.
-    let mut history = ContextManager::with_guardian_context_mode(
-        GuardianContextMode::ThreadOwned,
-        &codex_protocol::protocol::SessionSource::Exec,
-    );
+    let mut history = ContextManager::for_session(&codex_protocol::protocol::SessionSource::Exec);
     let mut expected = None;
     for (id, text) in [
         ("restriction", "Never publish publicly."),
@@ -1459,10 +1560,7 @@ fn drop_last_n_user_turns_preserves_prefix() {
             expected = Some(history.retained_context().clone());
         }
     }
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
     history.replace_compacted(Vec::new(), /*reviewer_compaction_hash*/ None);
     let retained = history.retained_context();
     assert!(retained.user_messages_complete());
@@ -1471,6 +1569,38 @@ fn drop_last_n_user_turns_preserves_prefix() {
     // Rollback removes evidence, but does not reuse its arrival-order sequence numbers.
     expected["next_order"] = serde_json::json!(3);
     assert_eq!(serde_json::to_value(retained).unwrap(), expected);
+}
+
+#[test]
+fn rollback_removes_assistant_sources_recorded_ahead_of_queued_input() {
+    let mut history = ContextManager::for_session(&codex_protocol::protocol::SessionSource::Exec);
+    let original = user_msg("Staging only.");
+    let items = [
+        (original.clone(), 0),
+        (assistant_msg("Deploy staging?"), 2),
+        (user_msg("Also run tests."), 1),
+    ]
+    .map(|(item, order)| ResponseItemEnvelope {
+        item,
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(order),
+            ..Default::default()
+        }),
+    });
+    history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert_eq!(raw_items(&history), vec![original]);
+    assert!(
+        !history
+            .retained_context()
+            .ordered_entries()
+            .any(|(_, entry)| {
+                matches!(
+                    entry,
+                    codex_history::RetainedContextEntry::AssistantMessage(_)
+                )
+            })
+    );
 }
 
 #[test]
@@ -1495,10 +1625,7 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     let expected_prefix_and_first_turn = vec![
         user_input_text_msg("<environment_context>ctx</environment_context>"),
@@ -1552,10 +1679,7 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
         user_input_text_msg("turn 2 user"),
         assistant_msg("turn 2 assistant"),
     ]);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 2,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 2);
     assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
 
     let mut history = create_history_with_items(vec![
@@ -1575,10 +1699,7 @@ fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
         user_input_text_msg("turn 2 user"),
         assistant_msg("turn 2 assistant"),
     ]);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 3,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 3);
     assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
 }
 
@@ -1588,6 +1709,9 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
         assistant_msg("session prefix item"),
         user_input_text_msg("turn 1 user"),
         assistant_msg("turn 1 assistant"),
+        developer_msg(
+            "<managed_developer_instructions>\nROLLED_BACK_MANAGED_INSTRUCTIONS\n</managed_developer_instructions>",
+        ),
         developer_msg(&format!(
             "{APPS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_APPS_INSTRUCTIONS"
         )),
@@ -1598,7 +1722,7 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
             "{ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_ENVIRONMENT_INSTRUCTIONS"
         )),
         developer_msg("<collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>"),
-        developer_msg("Custom root usage hint."),
+        developer_msg("<multi_agent_role>ROLLED_BACK_MULTI_AGENT_ROLE</multi_agent_role>"),
         developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
         user_input_text_msg(
             "<environment_context><cwd>PRETURN_CONTEXT_DIFF_CWD</cwd></environment_context>",
@@ -1611,15 +1735,7 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
     let mut history = create_history_with_items(items);
     let reference_context_item = reference_context_item();
     history.set_reference_context_item(Some(reference_context_item.clone()));
-    let mut world_state = WorldState::default();
-    world_state.add_section(MultiAgentUsageHintState::new(
-        MultiAgentRoleInstructions::unmarked("Custom root usage hint."),
-    ));
-    let usage_hint_identity = world_state
-        .snapshot()
-        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
-        .expect("usage hint identity");
-    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(
         history.clone().for_prompt(&modalities),
@@ -1634,109 +1750,6 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
             .expect("serialize retained reference context item"),
         serde_json::to_value(Some(reference_context_item))
             .expect("serialize expected reference context item")
-    );
-}
-
-#[test]
-fn drop_last_n_user_turns_preserves_unpaired_developer_text_matching_usage_hint() {
-    let items = vec![
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        developer_msg("Custom root usage hint."),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ];
-
-    let mut world_state = WorldState::default();
-    world_state.add_section(MultiAgentUsageHintState::new(
-        MultiAgentRoleInstructions::unmarked("Custom root usage hint."),
-    ));
-    let usage_hint_identity = world_state
-        .snapshot()
-        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
-        .expect("usage hint identity");
-    let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
-
-    assert_eq!(
-        history.for_prompt(&default_input_modalities()),
-        vec![
-            user_input_text_msg("turn 1 user"),
-            assistant_msg("turn 1 assistant"),
-            developer_msg("Custom root usage hint."),
-        ]
-    );
-}
-
-#[test]
-fn drop_last_n_user_turns_preserves_client_authored_text_matching_usage_hint() {
-    let mut items = vec![
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        developer_msg("Custom root usage hint."),
-        developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ]
-    .into_iter()
-    .map(ResponseItemEnvelope::new)
-    .collect::<Vec<_>>();
-    items[2].metadata = Some(CodexHarnessMetadata {
-        client_authored: true,
-        ..Default::default()
-    });
-    let mut world_state = WorldState::default();
-    world_state.add_section(MultiAgentUsageHintState::new(
-        MultiAgentRoleInstructions::unmarked("Custom root usage hint."),
-    ));
-    let usage_hint_identity = world_state
-        .snapshot()
-        .fragment_identity(MultiAgentUsageHintState::ID, "developer")
-        .expect("usage hint identity");
-    let mut history = ContextManager::new();
-    history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
-    history.drop_last_n_user_turns(/*num_turns*/ 1, &[usage_hint_identity]);
-
-    assert_eq!(
-        history.for_prompt(&default_input_modalities()),
-        vec![
-            user_input_text_msg("turn 1 user"),
-            assistant_msg("turn 1 assistant"),
-            developer_msg("Custom root usage hint."),
-        ]
-    );
-}
-
-#[test]
-fn drop_last_n_user_turns_trims_durably_tagged_usage_hint_without_world_state_identity() {
-    let mut items = vec![
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        developer_msg("Custom root usage hint."),
-        developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ]
-    .into_iter()
-    .map(ResponseItemEnvelope::new)
-    .collect::<Vec<_>>();
-    items[2].metadata = Some(CodexHarnessMetadata {
-        context_fragment: Some(ContextFragmentKind::MultiAgentUsageHint),
-        ..Default::default()
-    });
-    let mut history = ContextManager::new();
-    history.record_annotated_items(&items, TruncationPolicy::Tokens(10_000));
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
-
-    assert_eq!(
-        history.for_prompt(&default_input_modalities()),
-        vec![
-            user_input_text_msg("turn 1 user"),
-            assistant_msg("turn 1 assistant"),
-        ]
     );
 }
 
@@ -1776,10 +1789,7 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
     user_message.set_turn_id_if_missing(turn_id);
     let mut history = create_history_with_items(vec![developer_message, user_message]);
 
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(
         raw_items(&history),
@@ -1824,10 +1834,7 @@ fn drop_last_n_user_turns_trims_saved_prefix_update_above_rolled_back_turn() {
 
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(
         history.for_prompt(&modalities),
@@ -1858,10 +1865,7 @@ fn drop_last_n_user_turns_clears_reference_context_for_mixed_developer_context_b
     let modalities = default_input_modalities();
     let mut history = create_history_with_items(items);
     history.set_reference_context_item(Some(reference_context_item()));
-    history.drop_last_n_user_turns(
-        /*num_turns*/ 1,
-        /*multi_agent_usage_hint_identities*/ &[],
-    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
 
     assert_eq!(
         history.clone().for_prompt(&modalities),
@@ -2135,46 +2139,6 @@ fn format_exec_output_prefers_line_marker_when_both_limits_exceeded() {
 
 #[cfg(not(debug_assertions))]
 #[test]
-fn normalize_adds_missing_output_for_function_call() {
-    let items = vec![ResponseItem::FunctionCall {
-        id: None,
-        name: "do_it".to_string(),
-        namespace: None,
-        arguments: "{}".to_string(),
-        call_id: "call-x".to_string(),
-        encrypted_function_args: None,
-        internal_chat_message_metadata_passthrough: None,
-    }];
-    let mut h = create_history_with_items(items);
-
-    h.normalize_history(&default_input_modalities());
-
-    assert_eq!(
-        raw_items(&h),
-        vec![
-            ResponseItem::FunctionCall {
-                id: None,
-                name: "do_it".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: "call-x".to_string(),
-                encrypted_function_args: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::FunctionCallOutput {
-                id: None,
-                call_id: Some("call-x".to_string()),
-                name: None,
-                namespace: None,
-                output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                internal_chat_message_metadata_passthrough: None,
-            },
-        ]
-    );
-}
-
-#[cfg(not(debug_assertions))]
-#[test]
 fn normalize_adds_missing_output_for_custom_tool_call() {
     let items = vec![ResponseItem::CustomToolCall {
         id: None,
@@ -2443,6 +2407,21 @@ fn normalize_adds_missing_output_for_function_call_inserts_output() {
             },
         ]
     );
+}
+
+#[test]
+fn normalize_preserves_named_function_call_output_without_call_id() {
+    let item = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: None,
+        name: Some("send_message_to_thread".to_string()),
+        namespace: Some("codex_app".to_string()),
+        output: FunctionCallOutputPayload::from_text("cross-thread message".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let history = create_history_with_items(vec![item.clone()]);
+
+    assert_eq!(history.for_prompt(&default_input_modalities()), vec![item]);
 }
 
 #[test]
@@ -2744,8 +2723,39 @@ fn image_data_url_payload_does_not_dominate_message_estimate() {
     assert!(estimated > text_only_estimated);
 }
 
+/// File images use the fixed estimate for normal detail and the maximum patch count for original.
 #[test]
-fn image_data_url_payload_does_not_dominate_function_call_output_estimate() {
+fn file_images_use_detail_appropriate_estimates() {
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputImage {
+                image: ImageReference::File {
+                    file_id: "file_high".to_string(),
+                },
+                detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputImage {
+                image: ImageReference::File {
+                    file_id: "file_original".to_string(),
+                },
+                detail: Some(ImageDetail::Original),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let estimated = estimate_response_item_model_visible_bytes(&item);
+    let expected = RESIZED_IMAGE_BYTES_ESTIMATE
+        .saturating_add(approx_bytes_for_tokens(/*tokens*/ 10_000) as i64);
+
+    assert_eq!(estimated, expected);
+}
+
+#[test]
+fn function_call_output_estimates_inline_and_file_images() {
     let payload = "B".repeat(50_000);
     let image_url = format!("data:image/png;base64,{payload}");
     let item = ResponseItem::FunctionCallOutput {
@@ -2761,14 +2771,22 @@ fn image_data_url_payload_does_not_dominate_function_call_output_estimate() {
                 image: ImageReference::Inline { image_url },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
+            FunctionCallOutputContentItem::InputImage {
+                image: ImageReference::File {
+                    file_id: "file_original".to_string(),
+                },
+                detail: Some(ImageDetail::Original),
+            },
         ]),
         internal_chat_message_metadata_passthrough: None,
     };
 
     let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
     let estimated = estimate_response_item_model_visible_bytes(&item);
-    let expected =
-        "call-abc".len() as i64 + "Screenshot captured".len() as i64 + RESIZED_IMAGE_BYTES_ESTIMATE;
+    let expected = "call-abc".len() as i64
+        + "Screenshot captured".len() as i64
+        + RESIZED_IMAGE_BYTES_ESTIMATE
+        + approx_bytes_for_tokens(/*tokens*/ 10_000) as i64;
 
     assert_eq!(estimated, expected);
     assert!(estimated < raw_len);
@@ -3269,224 +3287,4 @@ fn text_only_items_count_decoded_content() {
     let estimated = estimate_response_item_model_visible_bytes(&item);
 
     assert_eq!(estimated, "Hello, \"world\"!\nこんにちは".len() as i64);
-}
-
-fn tool_image_item(base64: &str) -> FunctionCallOutputContentItem {
-    FunctionCallOutputContentItem::InputImage {
-        image: ImageReference::Inline {
-            image_url: format!("data:image/png;base64,{base64}"),
-        },
-        detail: Some(DEFAULT_IMAGE_DETAIL),
-    }
-}
-
-fn function_call_output_item(content: Vec<FunctionCallOutputContentItem>) -> ResponseItem {
-    ResponseItem::FunctionCallOutput {
-        id: None,
-        call_id: Some("call-1".to_string()),
-        name: None,
-        namespace: None,
-        output: FunctionCallOutputPayload::from_content_items(content),
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn custom_tool_call_output_item(content: Vec<FunctionCallOutputContentItem>) -> ResponseItem {
-    ResponseItem::CustomToolCallOutput {
-        id: None,
-        call_id: "call-1".to_string(),
-        name: Some("tool".to_string()),
-        output: FunctionCallOutputPayload::from_content_items(content),
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn user_image_item(base64: &str) -> ContentItem {
-    ContentItem::InputImage {
-        image: ImageReference::Inline {
-            image_url: format!("data:image/png;base64,{base64}"),
-        },
-        detail: Some(DEFAULT_IMAGE_DETAIL),
-    }
-}
-
-fn user_image_msg(content: Vec<ContentItem>) -> ResponseItem {
-    ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content,
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    }
-}
-
-fn sanitized_texts(item: &ResponseItem) -> Vec<&str> {
-    match item {
-        ResponseItem::Message { content, .. } => content
-            .iter()
-            .map(|content_item| match content_item {
-                ContentItem::InputText { text } => text.as_str(),
-                other => panic!("expected sanitized message text, got {other:?}"),
-            })
-            .collect(),
-        ResponseItem::FunctionCallOutput { output, .. }
-        | ResponseItem::CustomToolCallOutput { output, .. } => output
-            .content_items()
-            .expect("expected content-item tool output")
-            .iter()
-            .map(|content_item| match content_item {
-                FunctionCallOutputContentItem::InputText { text } => text.as_str(),
-                other => panic!("expected sanitized tool output text, got {other:?}"),
-            })
-            .collect(),
-        other => panic!("expected an image-bearing item, got {other:?}"),
-    }
-}
-
-#[test]
-fn replace_all_images_reports_no_images_to_sanitize() {
-    let mut history = create_history_with_items(vec![user_input_text_msg("hi")]);
-
-    assert_eq!(history.replace_all_images("Image omitted"), None);
-}
-
-#[test]
-fn replace_all_images_replaces_tool_output_images() {
-    for tool_output in [
-        function_call_output_item(vec![
-            FunctionCallOutputContentItem::InputText {
-                text: "before".to_string(),
-            },
-            tool_image_item("AAA"),
-        ]),
-        custom_tool_call_output_item(vec![
-            FunctionCallOutputContentItem::InputText {
-                text: "before".to_string(),
-            },
-            tool_image_item("AAA"),
-        ]),
-    ] {
-        let mut history = create_history_with_items(vec![user_input_text_msg("hi"), tool_output]);
-        let version_before = history.history_version();
-
-        assert_eq!(
-            history.replace_all_images("Image omitted"),
-            Some(ImageSanitizationSource::Tool)
-        );
-        assert_eq!(
-            sanitized_texts(
-                history
-                    .raw_items()
-                    .nth(1)
-                    .expect("tool output should be present")
-            ),
-            vec!["before", "Image omitted"]
-        );
-        assert!(history.history_version() > version_before);
-    }
-}
-
-#[test]
-fn replace_all_images_replaces_user_images() {
-    let mut history = create_history_with_items(vec![user_image_msg(vec![
-        ContentItem::InputText {
-            text: "look".to_string(),
-        },
-        user_image_item("AAA"),
-    ])]);
-
-    assert_eq!(
-        history.replace_all_images("Image omitted"),
-        Some(ImageSanitizationSource::User)
-    );
-    assert_eq!(
-        sanitized_texts(
-            history
-                .raw_items()
-                .next()
-                .expect("user image should be present")
-        ),
-        vec!["look", "Image omitted"]
-    );
-}
-
-#[test]
-fn replace_all_images_clears_every_candidate_image_in_one_pass() {
-    let mut history = create_history_with_items(vec![
-        user_image_msg(vec![user_image_item("user")]),
-        function_call_output_item(vec![tool_image_item("tool")]),
-        user_image_msg(vec![user_image_item("newer-user")]),
-    ]);
-
-    // The API never says which image it could not read, so every image is a candidate and all of
-    // them are cleared in a single pass rather than one per failed turn.
-    assert_eq!(
-        history.replace_all_images("Image omitted"),
-        Some(ImageSanitizationSource::User)
-    );
-
-    let raw_items = history.raw_items().collect::<Vec<_>>();
-    assert_eq!(sanitized_texts(raw_items[0]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(raw_items[1]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(raw_items[2]), vec!["Image omitted"]);
-}
-
-#[test]
-fn replace_all_images_reports_tool_source_when_no_user_image_is_cleared() {
-    let mut history = create_history_with_items(vec![
-        user_input_text_msg("hi"),
-        function_call_output_item(vec![tool_image_item("tool")]),
-        custom_tool_call_output_item(vec![tool_image_item("other-tool")]),
-    ]);
-
-    assert_eq!(
-        history.replace_all_images("Image omitted"),
-        Some(ImageSanitizationSource::Tool)
-    );
-
-    let raw_items = history.raw_items().collect::<Vec<_>>();
-    assert_eq!(sanitized_texts(raw_items[1]), vec!["Image omitted"]);
-    assert_eq!(sanitized_texts(raw_items[2]), vec!["Image omitted"]);
-}
-
-#[test]
-fn replace_all_images_reports_user_source_when_a_user_image_precedes_tool_images() {
-    let mut history = create_history_with_items(vec![
-        user_image_msg(vec![user_image_item("user")]),
-        function_call_output_item(vec![tool_image_item("tool")]),
-    ]);
-
-    // A user-attached image anywhere in the candidate set wins: the user has to be told, so the
-    // turn must not be retried transparently.
-    assert_eq!(
-        history.replace_all_images("Image omitted"),
-        Some(ImageSanitizationSource::User)
-    );
-}
-
-#[test]
-fn correction_history_mode_hides_only_the_active_consumed_marker() {
-    let old_failure =
-        user_input_text_msg("<project_validation_failure>old</project_validation_failure>");
-    let old_consumed = ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
-    let active_failure =
-        user_input_text_msg("<project_validation_failure>active</project_validation_failure>");
-    let active_consumed = ContextualUserFragment::into(ProjectValidationCorrectionConsumed);
-    let mut history = create_history_with_items(vec![
-        old_failure.clone(),
-        old_consumed.clone(),
-        active_failure.clone(),
-        active_consumed.clone(),
-    ]);
-
-    let pair = history
-        .apply_model_request_history_mode(ModelRequestHistoryMode::ProjectValidationCorrection)
-        .expect("active correction pair");
-
-    assert_eq!(pair.failure.item, active_failure);
-    assert_eq!(pair.consumed.item, active_consumed);
-    assert_eq!(
-        history.raw_items().cloned().collect::<Vec<_>>(),
-        vec![old_failure, old_consumed, active_failure]
-    );
 }

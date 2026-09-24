@@ -77,7 +77,6 @@ fn configure_priority_role(config: &mut Config) {
     config.agent_roles.insert(
         PRIORITY_ROLE.to_string(),
         AgentRoleConfig {
-            backend: None,
             description: Some("Role with a configured priority tier".to_string()),
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
@@ -105,7 +104,7 @@ async fn mount_root_collaboration_call(
             ev_response_created(&response_id),
             ev_function_call_with_namespace(
                 call_id,
-                "agents",
+                "collaboration",
                 "spawn_agent",
                 &arguments.to_string(),
             ),
@@ -194,7 +193,7 @@ async fn root_service_tier_change_updates_existing_subagent(
             ev_response_created("child-paused"),
             ev_function_call_with_namespace(
                 PAUSE_CALL_ID,
-                "agents",
+                "collaboration",
                 "wait_agent",
                 &json!({ "timeout_ms": 30_000 }).to_string(),
             ),

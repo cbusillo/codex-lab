@@ -67,7 +67,6 @@ fn turn_context_item(
         root_turn_id: None,
         disabled_plugin_ids: None,
         cwd: cwd(),
-        environments: None,
         workspace_roots: Some(vec![cwd()]),
         current_date: None,
         timezone: None,

@@ -94,8 +94,6 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 
 #[derive(Debug)]
 struct TestModelsEndpoint {
-    has_configured_credentials: bool,
-    supports_api_key_models: bool,
     has_command_auth: bool,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
@@ -198,8 +196,6 @@ impl ModelsCache for TestModelsCache {
 impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
-            has_configured_credentials: false,
-            supports_api_key_models: true,
             has_command_auth: false,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
@@ -211,8 +207,6 @@ impl TestModelsEndpoint {
 
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
-            has_configured_credentials: false,
-            supports_api_key_models: true,
             has_command_auth: false,
             uses_codex_backend: false,
             responses: Mutex::new(responses.into()),
@@ -282,12 +276,8 @@ impl ExternalAuth for TestUnresolvedExternalApiKeyAuth {
 }
 
 impl ModelsEndpointClient for TestModelsEndpoint {
-    fn has_configured_credentials(&self) -> bool {
-        self.has_configured_credentials
-    }
-
     fn supports_api_key_models(&self) -> bool {
-        self.supports_api_key_models
+        true
     }
 
     fn identity(&self) -> Option<String> {
@@ -1052,46 +1042,6 @@ async fn refresh_available_models_merges_hidden_only_chatgpt_remote_with_bundled
 }
 
 #[tokio::test]
-async fn refresh_available_models_uses_configured_credentials_without_command_auth() {
-    let remote_models = vec![remote_model(
-        "api-auth-visible-remote",
-        "API Auth Visible",
-        /*priority*/ 0,
-    )];
-    let codex_home = tempdir().expect("temp dir");
-    let endpoint = Arc::new(TestModelsEndpoint {
-        has_configured_credentials: true,
-        supports_api_key_models: false,
-        has_command_auth: false,
-        uses_codex_backend: false,
-        responses: Mutex::new(vec![remote_models.clone()].into()),
-        etag: None,
-        fetch_count: AtomicUsize::new(0),
-        observed_proxy_policy: Mutex::new(None),
-    });
-    let manager = openai_manager_for_tests_with_auth(
-        codex_home.path().to_path_buf(),
-        endpoint.clone(),
-        Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
-            "test-api-key",
-        ))),
-    );
-    let mut expected = load_remote_models_from_file().expect("bundled models should parse");
-    expected.extend(remote_models);
-
-    manager
-        .refresh_available_models(
-            RefreshStrategy::OnlineIfUncached,
-            &DEFAULT_HTTP_CLIENT_FACTORY,
-        )
-        .await
-        .expect("refresh succeeds");
-
-    assert_eq!(manager.get_remote_models().await, expected);
-    assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
-}
-
-#[tokio::test]
 async fn refresh_available_models_keeps_merging_for_custom_api_auth() {
     let remote_models = vec![remote_model(
         "api-auth-visible-remote",
@@ -1100,8 +1050,6 @@ async fn refresh_available_models_keeps_merging_for_custom_api_auth() {
     )];
     let codex_home = tempdir().expect("temp dir");
     let endpoint = Arc::new(TestModelsEndpoint {
-        has_configured_credentials: false,
-        supports_api_key_models: true,
         has_command_auth: true,
         uses_codex_backend: false,
         responses: Mutex::new(vec![remote_models.clone()].into()),
@@ -1181,8 +1129,6 @@ async fn online_refresh_updates_access_programs_with_unchanged_etag() {
     };
     let responses = vec![vec![granted_model.clone()], vec![revoked_model.clone()]];
     let endpoint = Arc::new(TestModelsEndpoint {
-        has_configured_credentials: false,
-        supports_api_key_models: true,
         has_command_auth: false,
         uses_codex_backend: true,
         responses: Mutex::new(responses.into()),
@@ -1444,11 +1390,6 @@ impl TestAuthAwareModelsEndpoint {
 }
 
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
-    fn has_configured_credentials(&self) -> bool {
-        // Account auth is independent of provider-configured credentials.
-        false
-    }
-
     fn supports_api_key_models(&self) -> bool {
         true
     }

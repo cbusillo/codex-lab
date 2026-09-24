@@ -68,7 +68,6 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
-use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -107,9 +106,10 @@ pub enum RolloutRecorderParams {
         forked_from_ordinal_exclusive: Option<u64>,
         parent_thread_id: Option<ThreadId>,
         source: Box<SessionSource>,
-        session_provenance: Option<SessionProvenance>,
         thread_source: Option<ThreadSource>,
         originator: String,
+        creator_user_id: Option<String>,
+        creator_account_id: Option<String>,
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
@@ -212,9 +212,10 @@ impl RolloutRecorderParams {
             forked_from_ordinal_exclusive: None,
             parent_thread_id,
             source: Box::new(source),
-            session_provenance: None,
             thread_source,
             originator,
+            creator_user_id: None,
+            creator_account_id: None,
             base_instructions,
             dynamic_tools,
             selected_capability_roots: Vec::new(),
@@ -227,16 +228,16 @@ impl RolloutRecorderParams {
         }
     }
 
-    pub fn with_session_provenance(
-        mut self,
-        session_provenance: Option<SessionProvenance>,
-    ) -> Self {
+    /// Record the authenticated identity at thread creation, or preserve it on revert.
+    pub fn with_creator(mut self, user_id: Option<String>, account_id: Option<String>) -> Self {
         if let Self::Create {
-            session_provenance: provenance,
+            creator_user_id,
+            creator_account_id,
             ..
         } = &mut self
         {
-            *provenance = session_provenance;
+            *creator_user_id = user_id;
+            *creator_account_id = account_id;
         }
         self
     }
@@ -904,9 +905,10 @@ impl RolloutRecorder {
                 forked_from_ordinal_exclusive,
                 parent_thread_id,
                 source,
-                session_provenance,
                 thread_source,
                 originator,
+                creator_user_id,
+                creator_account_id,
                 base_instructions,
                 dynamic_tools,
                 selected_capability_roots,
@@ -941,13 +943,14 @@ impl RolloutRecorder {
                     cwd: cwd.clone(),
                     runtime_workspace_roots,
                     originator,
+                    creator_user_id,
+                    creator_account_id,
                     cli_version: env!("CARGO_PKG_VERSION").to_string(),
                     agent_nickname: source.get_nickname(),
                     agent_role: source.get_agent_role(),
                     agent_path: source.get_agent_path().map(Into::into),
                     source: *source,
                     thread_source,
-                    session_provenance,
                     model_provider: Some(config.model_provider_id().to_string()),
                     base_instructions: Some(base_instructions),
                     dynamic_tools: if dynamic_tools.is_empty() {
@@ -1379,7 +1382,6 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
         git_sha,
         git_origin_url,
         source,
-        session_provenance,
         history_mode: _,
         parent_thread_id,
         agent_nickname,
@@ -1422,9 +1424,6 @@ fn fill_missing_thread_item_metadata(item: &mut ThreadItem, state_item: ThreadIt
     }
     if item.source.is_none() {
         item.source = source;
-    }
-    if item.session_provenance.is_none() {
-        item.session_provenance = session_provenance;
     }
     if item.parent_thread_id.is_none() {
         item.parent_thread_id = parent_thread_id;
@@ -2143,7 +2142,6 @@ fn thread_item_from_state_metadata(
                 .or_else(|_| serde_json::from_value(Value::String(item.source)))
                 .unwrap_or(SessionSource::Unknown),
         ),
-        session_provenance: item.session_provenance,
         history_mode: item.history_mode,
         parent_thread_id,
         agent_nickname: item.agent_nickname,

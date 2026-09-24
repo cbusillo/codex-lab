@@ -41,6 +41,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
@@ -70,6 +71,41 @@ fn rollout_line_decoder_preserves_canonical_json_compatibility() -> Result<()> {
         assert_eq!(serde_json::to_value(decoded)?, expected);
     }
 
+    Ok(())
+}
+
+#[test]
+fn rollout_line_decoder_preserves_terminal_records_with_unknown_errors() -> Result<()> {
+    let expected = serde_json::json!({
+        "timestamp": "2025-01-03T12:00:00.000Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "task_complete",
+            "turn_id": "turn-1",
+            "last_agent_message": null,
+            "error": {
+                "message": "The request was blocked.",
+                "codex_error_info": "other"
+            },
+            "started_at": 10,
+            "completed_at": 20,
+            "duration_ms": 10000
+        }
+    });
+    for error_info in [
+        serde_json::json!("future_error"),
+        serde_json::json!({"future_error": {"detail": "new payload"}}),
+    ] {
+        let mut encoded = expected.clone();
+        encoded["payload"]["error"]["codex_error_info"] = error_info;
+        let decoded = crate::decode_rollout_line(encoded)?;
+        assert_eq!(serde_json::to_value(decoded)?, expected);
+    }
+
+    let mut malformed = expected;
+    malformed["payload"]["error"]["codex_error_info"] =
+        serde_json::json!({"active_turn_not_steerable": {"turn_kind": "unknown"}});
+    assert!(crate::decode_rollout_line(malformed).is_err());
     Ok(())
 }
 
@@ -732,7 +768,6 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -759,7 +794,6 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -786,7 +820,6 @@ async fn test_list_conversations_latest_first() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -906,7 +939,6 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -933,7 +965,6 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -996,7 +1027,6 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1023,7 +1053,6 @@ async fn test_pagination_cursor() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1078,7 +1107,6 @@ async fn test_pagination_cursor() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
-            session_provenance: None,
             history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
@@ -1160,6 +1188,36 @@ async fn test_list_threads_uses_goal_objective_as_preview() {
     let item = &page.items[0];
     assert_eq!(item.thread_id, Some(thread_id_from_uuid(uuid)));
     assert_eq!(item.preview.as_deref(), Some("optimize the benchmark"));
+    assert_eq!(item.first_user_message, None);
+}
+
+#[tokio::test]
+async fn test_guardian_rollout_uses_compact_preview() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+
+    let uuid = Uuid::from_u128(/*v*/ 102);
+    let ts = "2025-05-03T10-30-00";
+    write_session_file(
+        home,
+        ts,
+        uuid,
+        /*num_records*/ 1,
+        Some(SessionSource::SubAgent(SubAgentSource::Other(
+            "guardian".to_string(),
+        ))),
+    )
+    .unwrap();
+
+    let path = home.join(format!("sessions/2025/05/03/rollout-{ts}-{uuid}.jsonl"));
+    let item = crate::read_thread_item_from_rollout(path)
+        .await
+        .expect("guardian rollout should produce a thread item");
+
+    assert_eq!(
+        item.preview.as_deref(),
+        Some(codex_state::GUARDIAN_THREAD_PREVIEW)
+    );
     assert_eq!(item.first_user_message, None);
 }
 
@@ -1258,7 +1316,6 @@ async fn test_get_thread_contents() {
             git_sha: None,
             git_origin_url: None,
             source: Some(SessionSource::VSCode),
-            session_provenance: None,
             history_mode: Default::default(),
             parent_thread_id: None,
             agent_nickname: None,
@@ -1496,6 +1553,8 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
         ordinal: None,
         item: RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
+                creator_user_id: None,
+                creator_account_id: None,
                 session_id: conversation_id.into(),
                 id: conversation_id,
                 forked_from_id: None,
@@ -1508,7 +1567,6 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
                 thread_source: None,
-                session_provenance: None,
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
@@ -1668,7 +1726,6 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,
@@ -1695,7 +1752,6 @@ async fn test_timestamp_only_cursor_skips_same_second_filesystem_ties() {
                 git_sha: None,
                 git_origin_url: None,
                 source: Some(SessionSource::VSCode),
-                session_provenance: None,
                 history_mode: Default::default(),
                 parent_thread_id: None,
                 agent_nickname: None,

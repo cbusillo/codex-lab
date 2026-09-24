@@ -141,10 +141,6 @@ impl TestModelsEndpoint {
 }
 
 impl ModelsEndpointClient for TestModelsEndpoint {
-    fn has_configured_credentials(&self) -> bool {
-        false
-    }
-
     fn identity(&self) -> Option<String> {
         Some("test-provider".to_string())
     }

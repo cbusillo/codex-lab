@@ -77,17 +77,8 @@ pub struct ModelProvider {
     pub supports_websockets: bool,
     #[prost(bool, tag = "18")]
     pub supports_standalone_web_search: bool,
-    #[prost(message, optional, tag = "19")]
-    pub capabilities: ::core::option::Option<ModelProviderCapabilities>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ModelProviderCapabilities {
-    #[prost(bool, optional, tag = "1")]
-    pub namespace_tools: ::core::option::Option<bool>,
-    #[prost(bool, optional, tag = "2")]
-    pub custom_tools: ::core::option::Option<bool>,
-    #[prost(bool, optional, tag = "3")]
-    pub web_search: ::core::option::Option<bool>,
+    #[prost(string, optional, tag = "19")]
+    pub model_catalog_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StringMap {

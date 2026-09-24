@@ -31,7 +31,7 @@ pub fn rollout_path(codex_home: &Path, filename_ts: &str, thread_id: &str) -> Pa
         .join(format!("rollout-{filename_ts}-{thread_id}.jsonl"))
 }
 
-/// Create a minimal rollout file under `CODEX_LAB_HOME/sessions/YYYY/MM/DD/`.
+/// Create a minimal rollout file under `CODEX_HOME/sessions/YYYY/MM/DD/`.
 ///
 /// - `filename_ts` is the filename timestamp component in `YYYY-MM-DDThh-mm-ss` format.
 /// - `meta_rfc3339` is the envelope timestamp used in JSON lines.
@@ -253,6 +253,8 @@ fn create_fake_rollout_with_source_and_parent_thread_id(
 
     // Build JSONL lines
     let meta = SessionMeta {
+        creator_user_id: None,
+        creator_account_id: None,
         session_id,
         id: conversation_id,
         forked_from_id: None,
@@ -264,7 +266,6 @@ fn create_fake_rollout_with_source_and_parent_thread_id(
         originator: "codex".to_string(),
         cli_version: "0.0.0".to_string(),
         source,
-        session_provenance: None,
         thread_source,
         agent_path: None,
         agent_nickname: None,
@@ -348,6 +349,8 @@ pub fn create_fake_rollout_with_text_elements(
 
     // Build JSONL lines
     let meta = SessionMeta {
+        creator_user_id: None,
+        creator_account_id: None,
         session_id: conversation_id.into(),
         id: conversation_id,
         forked_from_id: None,
@@ -359,7 +362,6 @@ pub fn create_fake_rollout_with_text_elements(
         originator: "codex".to_string(),
         cli_version: "0.0.0".to_string(),
         source: SessionSource::Cli,
-        session_provenance: None,
         thread_source: None,
         agent_path: None,
         agent_nickname: None,

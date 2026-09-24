@@ -45,28 +45,21 @@ use tokio::time::timeout;
 const READ_TIMEOUT: Duration = Duration::from_secs(25);
 #[cfg(not(windows))]
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-const NAMESPACE: &str = "agents";
+const NAMESPACE: &str = "collaboration";
 const PARENT_INSTRUCTIONS: &str = "parent-only developer instructions";
 const CHILD_INSTRUCTIONS: &str = "child-only developer instructions";
 const ROLE_INSTRUCTIONS: &str = "configured role developer instructions";
-const CAPABILITY_ROLE_INSTRUCTIONS: &str = "capability restriction role instructions";
-const PARENT_HISTORY_PROMPT: &str = "remember this parent-only conversation turn";
-const PARENT_HISTORY_RESPONSE: &str = "parent-only conversation response";
 
-/// V2 fork modes, history isolation, roles, and overrides expose their agreed precedence.
+/// V2 fork modes, roles, and unset/blank overrides expose their agreed instruction precedence.
 #[test_case("no history"; "no history")]
 #[test_case("full history"; "full history")]
 #[test_case("bounded history"; "bounded history")]
 #[test_case("configured role without instructions"; "configured role without instructions")]
-#[test_case("no history configured role without instructions"; "no history configured role without instructions")]
-#[test_case("bounded history configured role without instructions"; "bounded history configured role without instructions")]
 #[test_case("unset override"; "unset override")]
 #[test_case("blank override"; "blank override")]
 #[test_case("parent has no instructions"; "parent has no instructions")]
 #[test_case("explicit configured role"; "explicit configured role")]
-#[test_case("role cannot re-enable parent shell"; "role cannot re-enable parent shell")]
 #[test_case("full history configured role"; "full history configured role")]
-#[test_case("full history explicit default role"; "full history explicit default role")]
 #[test_case("implicit configured default"; "implicit configured default")]
 #[test_case("bounded implicit configured default"; "bounded implicit configured default")]
 #[test_case("full fork skips default role"; "full fork skips default role")]
@@ -75,32 +68,19 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     case: &str,
 ) -> Result<()> {
     let fork_turns = match case {
-        "bounded history"
-        | "bounded history configured role without instructions"
-        | "bounded implicit configured default" => Some("1"),
-        "no history"
-        | "no history configured role without instructions"
-        | "explicit configured role"
-        | "role cannot re-enable parent shell"
-        | "implicit configured default" => Some("none"),
+        "bounded history" | "bounded implicit configured default" => Some("1"),
+        "no history" | "explicit configured role" | "implicit configured default" => Some("none"),
         _ => None,
     };
     let agent_type = match case {
         "configured role without instructions"
-        | "no history configured role without instructions"
-        | "bounded history configured role without instructions"
         | "explicit configured role"
-        | "role cannot re-enable parent shell"
         | "full history configured role" => Some("custom"),
-        "full history explicit default role" => Some("default"),
         _ => None,
     };
     let configured_override = match case {
         "unset override"
         | "full history configured role"
-        | "full history explicit default role"
-        | "no history configured role without instructions"
-        | "bounded history configured role without instructions"
         | "configured role without instructions"
         | "bounded implicit configured default" => None,
         "blank override" => Some("   "),
@@ -115,12 +95,8 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let configured_roles = matches!(
         case,
         "configured role without instructions"
-            | "no history configured role without instructions"
-            | "bounded history configured role without instructions"
             | "explicit configured role"
-            | "role cannot re-enable parent shell"
             | "full history configured role"
-            | "full history explicit default role"
             | "implicit configured default"
             | "bounded implicit configured default"
             | "full fork skips default role"
@@ -128,23 +104,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let role_has_instructions = matches!(
         case,
         "explicit configured role"
-            | "role cannot re-enable parent shell"
             | "full history configured role"
-            | "full history explicit default role"
             | "implicit configured default"
             | "bounded implicit configured default"
             | "full fork skips default role"
     );
     let expected = match case {
-        "unset override"
-        | "configured role without instructions"
-        | "no history configured role without instructions"
-        | "bounded history configured role without instructions" => Some(PARENT_INSTRUCTIONS),
+        "unset override" | "configured role without instructions" => Some(PARENT_INSTRUCTIONS),
         "blank override" => None,
-        "role cannot re-enable parent shell" => Some(CAPABILITY_ROLE_INSTRUCTIONS),
         "explicit configured role"
         | "full history configured role"
-        | "full history explicit default role"
         | "implicit configured default"
         | "bounded implicit configured default" => Some(ROLE_INSTRUCTIONS),
         _ => Some(CHILD_INSTRUCTIONS),
@@ -154,20 +123,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     const SPAWN_CALL_ID: &str = "spawn-instruction-override-worker";
 
     let server = responses::start_mock_server().await;
-    let is_no_history = fork_turns == Some("none");
-    responses::mount_sse_once_match_recording_matches(
-        &server,
-        |request: &wiremock::Request| {
-            let body = String::from_utf8_lossy(&request.body);
-            body.contains(PARENT_HISTORY_PROMPT) && !body.contains(PARENT_PROMPT)
-        },
-        responses::sse(vec![
-            responses::ev_response_created("parent-history"),
-            responses::ev_assistant_message("parent-history-message", PARENT_HISTORY_RESPONSE),
-            responses::ev_completed("parent-history"),
-        ]),
-    )
-    .await;
     let mut spawn_args = json!({"message": CHILD_PROMPT, "task_name": "worker"});
     if let Some(fork_turns) = fork_turns {
         spawn_args["fork_turns"] = json!(fork_turns);
@@ -192,16 +147,11 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         ]),
     )
     .await;
-    let child_request = responses::mount_sse_once_match_recording_matches(
+    let child_request = responses::mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             let body = String::from_utf8_lossy(&request.body);
-            body.contains(CHILD_PROMPT)
-                && request
-                    .headers
-                    .get("x-openai-subagent")
-                    .and_then(|value| value.to_str().ok())
-                    == Some("collab_spawn")
+            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL_ID)
         },
         responses::sse(vec![
             responses::ev_response_created("child-work"),
@@ -248,21 +198,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     config
         .with_extra_config(&feature_config)
         .write(codex_home.path())?;
-    let parent_config = if case == "role cannot re-enable parent shell" {
-        let role_path = codex_home.path().join("capabilities-role.toml");
-        std::fs::write(
-            &role_path,
-            format!(
-                "developer_instructions = {CAPABILITY_ROLE_INSTRUCTIONS:?}\nfeatures.shell_tool = true\n"
-            ),
-        )?;
-        Some(HashMap::from([
-            ("features.shell_tool".to_string(), json!(false)),
-            ("agents.custom.config_file".to_string(), json!(role_path)),
-        ]))
-    } else {
-        None
-    };
     write_models_cache(codex_home.path()).await?;
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -272,22 +207,9 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         .start_thread(ThreadStartParams {
             model: Some("gpt-5.4".to_string()),
             developer_instructions: parent.map(str::to_string),
-            config: parent_config,
             ..Default::default()
         })
         .await?;
-    timeout(
-        READ_TIMEOUT,
-        app_server.start_turn_and_wait_for_completion(TurnStartParams {
-            thread_id: thread.id.clone(),
-            input: vec![UserInput::Text {
-                text: PARENT_HISTORY_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }],
-            ..Default::default()
-        }),
-    )
-    .await??;
     let _: TurnStartResponse = app_server
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
@@ -301,125 +223,36 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             },
         })
         .await?;
-    timeout(READ_TIMEOUT, async {
+    let child_request = timeout(READ_TIMEOUT, async {
         loop {
-            if !child_request.requests().is_empty() {
-                break;
+            if let Some(request) = child_request
+                .requests()
+                .into_iter()
+                .find(|request| !request.inputs_of_type("agent_message").is_empty())
+            {
+                break request;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await?;
-    let child_request = child_request.single_request();
 
-    let parent_spawn_request = parent_request.single_request();
-    if matches!(
-        case,
-        "role cannot re-enable parent shell" | "explicit configured role"
-    ) {
-        for (phase, request) in [("parent", &parent_spawn_request), ("child", &child_request)] {
-            let body = request.body_json();
-            let tools = body["tools"].as_array().expect("model-visible tools");
-            let shell_tools = ["exec_command", "shell_command"]
-                .into_iter()
-                .filter(|name| {
-                    tools.iter().any(|tool| tool["name"] == *name)
-                        || responses::namespace_child_tool(&body, "functions", name).is_some()
-                })
-                .collect::<Vec<_>>();
-            if case == "role cannot re-enable parent shell" {
-                assert_eq!(
-                    shell_tools,
-                    Vec::<&str>::new(),
-                    "{phase}: a role must not re-enable the parent's disabled shell tools"
-                );
-            } else {
-                assert!(
-                    !shell_tools.is_empty(),
-                    "{phase}: the control must expose the shell tools checked by the restricted case"
-                );
-            }
-        }
-    }
-    let parent_texts = parent_spawn_request.message_input_texts("developer");
+    let parent_texts = parent_request
+        .single_request()
+        .message_input_texts("developer");
     if let Some(parent) = parent {
         assert!(
             parent_texts.iter().any(|text| text == parent),
             "{case}: parent developer instructions unexpectedly changed: {parent_texts:?}"
         );
     }
-    for parent_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
-        assert!(
-            parent_spawn_request.body_contains_text(parent_text),
-            "{case}: parent history did not contain seeded item {parent_text:?}"
-        );
-    }
-    if is_no_history {
-        for parent_text in [
-            PARENT_HISTORY_PROMPT,
-            PARENT_HISTORY_RESPONSE,
-            PARENT_PROMPT,
-            SPAWN_CALL_ID,
-        ] {
-            assert!(
-                !child_request.body_contains_text(parent_text),
-                "{case}: the no-history child inherited parent item {parent_text:?}"
-            );
-        }
-        let assistant_messages = child_request
-            .inputs_of_type("message")
-            .into_iter()
-            .filter(|item| {
-                item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            assistant_messages,
-            Vec::<serde_json::Value>::new(),
-            "{case}: the no-history child should not inherit parent assistant messages"
-        );
-        for forbidden_type in [
-            "function_call",
-            "function_call_output",
-            "custom_tool_call",
-            "custom_tool_call_output",
-            "reasoning",
-            "tool_search_call",
-            "tool_search_output",
-        ] {
-            assert_eq!(
-                child_request.inputs_of_type(forbidden_type),
-                Vec::<serde_json::Value>::new(),
-                "{case}: the no-history child should not inherit parent {forbidden_type} items"
-            );
-        }
-    } else if fork_turns == Some("1") {
-        assert!(
-            child_request.body_contains_text(PARENT_PROMPT),
-            "{case}: the bounded-history child lost the spawn turn"
-        );
-        for omitted_text in [PARENT_HISTORY_PROMPT, PARENT_HISTORY_RESPONSE] {
-            assert!(
-                !child_request.body_contains_text(omitted_text),
-                "{case}: the bounded-history child inherited older parent item {omitted_text:?}"
-            );
-        }
-    } else {
-        for inherited_text in [PARENT_HISTORY_PROMPT, PARENT_PROMPT] {
-            assert!(
-                child_request.body_contains_text(inherited_text),
-                "{case}: the full-history child lost parent item {inherited_text:?}"
-            );
-        }
-    }
     let child_texts = child_request.message_input_texts("developer");
-    assert_eq!(
-        child_request.inputs_of_type("agent_message").len(),
-        1,
-        "{case}: the child should receive its task exactly once"
-    );
     if case == "full history configured role" {
         assert_eq!(child_request.body_json()["model"], json!("gpt-5.5"));
+        assert!(
+            child_request.body_contains_text(PARENT_PROMPT),
+            "the child should inherit the parent's conversation history"
+        );
         assert!(
             child_texts
                 .iter()
@@ -433,10 +266,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
         .filter(|text| {
             matches!(
                 *text,
-                PARENT_INSTRUCTIONS
-                    | CHILD_INSTRUCTIONS
-                    | ROLE_INSTRUCTIONS
-                    | CAPABILITY_ROLE_INSTRUCTIONS
+                PARENT_INSTRUCTIONS | CHILD_INSTRUCTIONS | ROLE_INSTRUCTIONS
             )
         })
         .collect::<Vec<_>>();

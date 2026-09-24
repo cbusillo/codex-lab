@@ -66,20 +66,15 @@ async fn apply_role_returns_error_for_unknown_role() {
         .await
         .expect_err("unknown role should fail");
 
-    assert_eq!(
-        err,
-        "unknown agent_type 'missing-role'; use a selector exactly as listed in the spawn_agent description"
-    );
+    assert_eq!(err, "unknown agent_type 'missing-role'");
 }
 
 #[tokio::test]
 async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let auth_home = TempDir::new().expect("create temporary auth home");
     let before_layers = session_flags_layer_count(&config);
     config.model = Some("gpt-5.4-mini".to_string());
     config.model_reasoning_effort = Some(ReasoningEffort::High);
-    config.auth_home = auth_home.path().abs();
 
     apply_role_to_config(&mut config, Some("explorer"))
         .await
@@ -87,7 +82,6 @@ async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort(
 
     assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
-    assert_eq!(config.auth_home.as_path(), auth_home.path());
     assert_eq!(session_flags_layer_count(&config), before_layers);
 }
 
@@ -100,7 +94,6 @@ async fn apply_role_returns_unavailable_for_missing_user_role_file() {
             description: None,
             config_file: Some(PathBuf::from("/path/does/not/exist.toml")),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -124,7 +117,6 @@ async fn apply_role_rejects_symlinked_role_file() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -145,7 +137,6 @@ async fn apply_role_returns_unavailable_for_invalid_user_role_toml() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -177,7 +168,6 @@ model = "role-model"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -209,7 +199,6 @@ async fn apply_role_preserves_unspecified_keys() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -315,7 +304,6 @@ async fn apply_role_refreshes_model_instructions_only_when_personality_opt_out_c
                 description: None,
                 config_file: Some(role_path),
                 nickname_candidates: None,
-                backend: None,
             },
         );
         config.base_instructions = Some("inherited instructions".to_string());
@@ -357,7 +345,6 @@ service_tier = "priority"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -388,7 +375,6 @@ async fn apply_role_preserves_existing_service_tier_without_override() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -432,7 +418,6 @@ writable_roots = ["./sandbox-root"]
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
     let parent_permissions = config.permissions.clone();
@@ -487,7 +472,6 @@ command = "attacker-command"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
     let parent = config.clone();
@@ -595,7 +579,6 @@ async fn apply_role_takes_precedence_over_existing_session_flags_for_same_key() 
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -639,7 +622,6 @@ enabled = false
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     );
 
@@ -684,7 +666,6 @@ fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
                 description: Some("user override".to_string()),
                 config_file: None,
                 nickname_candidates: None,
-                backend: None,
             },
         ),
         ("researcher".to_string(), AgentRoleConfig::default()),
@@ -706,7 +687,6 @@ fn spawn_tool_spec_lists_user_defined_roles_before_built_ins() {
             description: Some("first".to_string()),
             config_file: None,
             nickname_candidates: None,
-            backend: None,
         },
     )]);
 
@@ -734,7 +714,6 @@ fn spawn_tool_spec_marks_role_locked_model_and_reasoning_effort() {
             description: Some("Research carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     )]);
 
@@ -760,7 +739,6 @@ fn spawn_tool_spec_marks_role_locked_reasoning_effort_only() {
             description: Some("Review carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     )]);
 
@@ -786,262 +764,12 @@ fn spawn_tool_spec_omits_role_service_tier() {
             description: Some("Stay fast.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
-            backend: None,
         },
     )]);
 
     let spec = spawn_tool_spec::build(&user_defined_roles);
 
     assert!(spec.contains("tiered: {\nStay fast.\n}"));
-}
-
-#[tokio::test]
-async fn dynamic_antigravity_role_carries_model_and_effort_flags() {
-    let (_home, config) = test_config_with_cli_overrides(Vec::new()).await;
-    let role = super::dynamic_antigravity_role_config(
-        &config,
-        "antigravity-gemini-3.6-flash-high",
-        Some("high"),
-    )
-    .expect("dynamic selector should resolve");
-    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
-        panic!("dynamic selector should use external command");
-    };
-    assert!(
-        backend
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "gemini-3.6-flash-high"])
-    );
-    assert!(
-        backend
-            .args
-            .windows(2)
-            .any(|args| args == ["--effort", "high"])
-    );
-}
-
-#[tokio::test]
-async fn dynamic_antigravity_role_preserves_configured_backend() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let mut backend = ExternalCommandAgentBackendConfig {
-        command: "custom-agy".to_string(),
-        args: ["--custom", "--model=old-model", "--effort", "low"]
-            .map(str::to_string)
-            .to_vec(),
-        ..Default::default()
-    };
-    backend
-        .env
-        .insert("CUSTOM_AGY".to_string(), "enabled".to_string());
-    config.agent_roles.insert(
-        "antigravity".to_string(),
-        AgentRoleConfig {
-            description: Some("Custom Antigravity backend.".to_string()),
-            config_file: None,
-            nickname_candidates: None,
-            backend: Some(AgentRoleBackendConfig::ExternalCommand(backend)),
-        },
-    );
-
-    let role = super::dynamic_antigravity_role_config(
-        &config,
-        "antigravity-gemini-3.6-flash-high",
-        Some("high"),
-    )
-    .expect("dynamic selector should resolve from configured backend");
-    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
-        panic!("dynamic selector should use external command");
-    };
-
-    assert_eq!(backend.command, "custom-agy");
-    assert_eq!(
-        backend.env.get("CUSTOM_AGY").map(String::as_str),
-        Some("enabled")
-    );
-    assert_eq!(
-        backend.args,
-        [
-            "--custom",
-            "--model",
-            "gemini-3.6-flash-high",
-            "--effort",
-            "high",
-        ]
-        .map(str::to_string)
-    );
-}
-
-#[tokio::test]
-async fn installed_dynamic_antigravity_role_is_resolvable_before_routing() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let selector = "antigravity-gemini-3.6-flash-high";
-    config.agent_selector_overrides.insert(
-        selector.to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(true),
-            ..Default::default()
-        },
-    );
-
-    super::install_dynamic_antigravity_role(&mut config, selector, Some("high"))
-        .expect("dynamic selector should install");
-
-    let role = super::resolve_role_config_owned(&config, selector)
-        .expect("installed dynamic selector should resolve");
-    let Some(AgentRoleBackendConfig::ExternalCommand(backend)) = role.backend else {
-        panic!("installed dynamic selector should use the external backend");
-    };
-    assert!(
-        backend
-            .args
-            .windows(2)
-            .any(|args| args == ["--model", "gemini-3.6-flash-high"])
-    );
-    assert!(
-        backend
-            .args
-            .windows(2)
-            .any(|args| args == ["--effort", "high"])
-    );
-}
-
-#[tokio::test]
-async fn discovered_antigravity_selectors_enable_from_the_active_catalog() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    let selector = "antigravity-gemini-3.6-flash-high";
-
-    assert!(super::agent_selector_enabled(&config, "antigravity"));
-    assert!(!super::agent_selector_enabled(&config, selector));
-
-    let backend = super::external_agent_backend_for_selector(&config, "antigravity")
-        .expect("Antigravity backend");
-    crate::agent::external_capabilities::record_active_capability_catalog(
-        &backend,
-        config.cwd.as_path(),
-        &crate::agent::external_capabilities::ExternalAgentCapabilities {
-            cli_family: "antigravity".to_string(),
-            cli_version: None,
-            supports_model_selection: true,
-            supports_effort_selection: false,
-            supported_flags: Default::default(),
-            models: vec![
-                crate::agent::external_capabilities::ExternalAgentModelCapability {
-                    selector: selector.to_string(),
-                    model: "gemini-3.6-flash-high".to_string(),
-                    explicit_only: false,
-                },
-            ],
-            effort_levels: Vec::new(),
-            source: crate::agent::external_capabilities::ExternalAgentCapabilitySource::LocalCli,
-            freshness: crate::agent::external_capabilities::ExternalAgentCapabilityFreshness::Fresh,
-            observed_at_unix_seconds: 0,
-            failure: None,
-        },
-    );
-    assert!(super::agent_selector_enabled(&config, selector));
-
-    config.agent_selector_overrides.insert(
-        "antigravity".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(false),
-            ..Default::default()
-        },
-    );
-    assert!(!super::agent_selector_enabled(&config, selector));
-    assert_eq!(
-        super::antigravity_selector_rejection(&config, selector),
-        None
-    );
-
-    config.agent_selector_overrides.insert(
-        selector.to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(true),
-            ..Default::default()
-        },
-    );
-    assert!(super::agent_selector_enabled(&config, selector));
-}
-
-#[tokio::test]
-async fn configured_antigravity_provider_model_remains_enabled() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    config.agent_selector_overrides.insert(
-        "antigravity".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(true),
-            model: Some("gemini-3.6-flash-high".to_string()),
-            effort: None,
-        },
-    );
-
-    assert!(super::agent_selector_enabled(
-        &config,
-        "antigravity-gemini-3.6-flash-high"
-    ));
-}
-
-#[tokio::test]
-async fn selector_overrides_disable_static_and_discovered_external_agents() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    config.agent_selector_overrides.insert(
-        "claude-sonnet-4.6".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(false),
-            ..Default::default()
-        },
-    );
-    config.agent_selector_overrides.insert(
-        "antigravity".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(false),
-            ..Default::default()
-        },
-    );
-
-    assert!(super::resolve_role_config_owned(&config, "claude-sonnet-4.6").is_none());
-    assert!(
-        super::resolve_role_config_owned(&config, "antigravity-gemini-3.6-flash-high").is_none()
-    );
-    let description = spawn_tool_spec::build_for_config_with_external_selectors(
-        &config,
-        &["antigravity-gemini-3.6-flash-high".to_string()],
-    );
-    assert!(!description.contains("claude-sonnet-4.6"));
-    assert!(!description.contains("antigravity-gemini-3.6-flash-high"));
-}
-
-#[tokio::test]
-async fn selector_overrides_can_enable_a_gated_external_agent() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    config.agent_selector_overrides.insert(
-        "cloud-gpt-5.1-codex-max".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(true),
-            ..Default::default()
-        },
-    );
-
-    assert!(super::resolve_role_config_owned(&config, "cloud-gpt-5.1-codex-max").is_some());
-    let description = spawn_tool_spec::build_for_config_with_external_selectors(&config, &[]);
-    assert!(description.contains("cloud-gpt-5.1-codex-max"));
-}
-
-#[tokio::test]
-async fn selector_overrides_do_not_disable_native_roles() {
-    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
-    config.agent_selector_overrides.insert(
-        "explorer".to_string(),
-        codex_config::config_toml::AgentSelectorToml {
-            enabled: Some(false),
-            ..Default::default()
-        },
-    );
-
-    assert!(super::resolve_role_config_owned(&config, "explorer").is_some());
-    let description = spawn_tool_spec::build_for_config_with_external_selectors(&config, &[]);
-    assert!(description.contains("explorer"));
 }
 
 #[test]

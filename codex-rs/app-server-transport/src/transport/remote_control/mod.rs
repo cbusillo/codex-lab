@@ -53,12 +53,9 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -90,8 +87,6 @@ pub enum RemoteControlStartupMode {
 pub const REMOTE_CONTROL_DISABLED_ENV_VAR: &str =
     "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED";
 
-const RECONNECT_CHANNEL_CAPACITY: usize = 1;
-
 /// Reads and removes the daemon's internal disabled-start marker before worker threads start.
 pub fn take_remote_control_disabled_env() -> bool {
     let disabled =
@@ -115,8 +110,6 @@ struct RemoteControlSession {
     desired_state_tx: Arc<watch::Sender<RemoteControlDesiredState>>,
     desired_state_rpc_lock: Arc<Semaphore>,
     persistence: RemoteControlPersistence,
-    reconnect_tx: mpsc::Sender<u64>,
-    next_reconnect_generation: Arc<AtomicU64>,
     status_tx: Arc<watch::Sender<RemoteControlStatusChangedNotification>>,
     state_db: Option<Arc<StateRuntime>>,
     remote_control_url: String,
@@ -284,29 +277,6 @@ impl fmt::Display for RemoteControlEnableError {
 
 impl Error for RemoteControlEnableError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RemoteControlReconnectUnavailable {
-    StateDbUnavailable,
-    Disabled,
-    WorkerUnavailable,
-}
-
-impl fmt::Display for RemoteControlReconnectUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StateDbUnavailable => f.write_str(
-                "remote control cannot reconnect because sqlite state db is unavailable",
-            ),
-            Self::Disabled => f.write_str("remote control cannot reconnect while disabled"),
-            Self::WorkerUnavailable => {
-                f.write_str("remote control cannot reconnect because its worker is unavailable")
-            }
-        }
-    }
-}
-
-impl Error for RemoteControlReconnectUnavailable {}
-
 impl RemoteControlSession {
     pub fn ensure_remote_control_allowed(&self) -> Result<(), RemoteControlDisabledByRequirements> {
         match self.policy {
@@ -408,28 +378,6 @@ impl RemoteControlSession {
             .unwrap_or_else(|_| unreachable!());
         let _persistence = self.persistence.lock().await;
         self.transition_disabled()
-    }
-
-    fn reconnect(
-        &self,
-    ) -> Result<RemoteControlStatusChangedNotification, RemoteControlReconnectUnavailable> {
-        if self.state_db.is_none() {
-            return Err(RemoteControlReconnectUnavailable::StateDbUnavailable);
-        }
-        if !self.desired_state_tx.borrow().is_enabled() {
-            return Err(RemoteControlReconnectUnavailable::Disabled);
-        }
-        let generation = self
-            .next_reconnect_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        match self.reconnect_tx.try_send(generation) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Closed(_)) => {
-                return Err(RemoteControlReconnectUnavailable::WorkerUnavailable);
-            }
-        }
-        Ok(self.publish_status(RemoteControlConnectionStatus::Connecting))
     }
 
     fn transition_disabled(&self) -> RemoteControlStatusChangedNotification {
@@ -540,8 +488,11 @@ impl RemoteControlSession {
             manual_code: params.manual_code,
         };
         self.current_enrollment.check_retry_after()?;
-        let pairing_response = match enrollment.start_pairing(pairing_request()).await {
-            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+        let pairing_response = match enrollment
+            .start_pairing(&auth.http_client_factory, pairing_request())
+            .await
+        {
+            Err(err) if auth::is_auth_error(&err) => {
                 clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
                 refresh_pairing_enrollment(
                     &mut current_enrollment,
@@ -552,7 +503,9 @@ impl RemoteControlSession {
                 )
                 .await?;
                 self.current_enrollment.check_retry_after()?;
-                enrollment.start_pairing(pairing_request()).await
+                enrollment
+                    .start_pairing(&auth.http_client_factory, pairing_request())
+                    .await
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 enrollment = self
@@ -566,7 +519,9 @@ impl RemoteControlSession {
                     )
                     .await?;
                 self.current_enrollment.check_retry_after()?;
-                enrollment.start_pairing(pairing_request()).await
+                enrollment
+                    .start_pairing(&auth.http_client_factory, pairing_request())
+                    .await
             }
             pairing_response => pairing_response,
         };
@@ -587,7 +542,7 @@ impl RemoteControlSession {
                     .await?;
                     return Err(pairing_unavailable_error());
                 }
-                io::ErrorKind::PermissionDenied => {
+                io::ErrorKind::PermissionDenied if auth::is_auth_error(err) => {
                     clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
                     return Err(pairing_unavailable_error());
                 }
@@ -776,23 +731,27 @@ impl RemoteControlSession {
         let pairing_status_request =
             || protocol::RemoteControlPairingStatusRequest::from(status_code.clone());
         self.current_enrollment.check_retry_after()?;
-        let pairing_status_response =
-            match enrollment.pairing_status(pairing_status_request()).await {
-                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
-                    clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
-                    refresh_pairing_enrollment(
-                        &mut current_enrollment,
-                        &self.auth_manager,
-                        &mut auth,
-                        &installation_id,
-                        &mut enrollment,
-                    )
-                    .await?;
-                    self.current_enrollment.check_retry_after()?;
-                    enrollment.pairing_status(pairing_status_request()).await
-                }
-                pairing_status_response => pairing_status_response,
-            };
+        let pairing_status_response = match enrollment
+            .pairing_status(&auth.http_client_factory, pairing_status_request())
+            .await
+        {
+            Err(err) if auth::is_auth_error(&err) => {
+                clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
+                refresh_pairing_enrollment(
+                    &mut current_enrollment,
+                    &self.auth_manager,
+                    &mut auth,
+                    &installation_id,
+                    &mut enrollment,
+                )
+                .await?;
+                self.current_enrollment.check_retry_after()?;
+                enrollment
+                    .pairing_status(&auth.http_client_factory, pairing_status_request())
+                    .await
+            }
+            pairing_status_response => pairing_status_response,
+        };
         if let Err(err) = &pairing_status_response {
             if server_api::remote_control_retry_at(err).is_some() {
                 return self
@@ -812,7 +771,7 @@ impl RemoteControlSession {
                     .await?;
                     return Err(pairing_unavailable_error());
                 }
-                io::ErrorKind::PermissionDenied => {
+                io::ErrorKind::PermissionDenied if auth::is_auth_error(err) => {
                     clear_pairing_server_token(&mut current_enrollment, &mut enrollment)?;
                     return Err(pairing_unavailable_error());
                 }
@@ -899,7 +858,7 @@ async fn enroll_pairing_server(
         .await
     {
         Ok(enrollment) => return Ok(enrollment),
-        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+        Err(err) if auth::is_auth_error(&err) => {
             let mut auth_recovery = auth_manager.unauthorized_recovery();
             let mut auth_change_rx = auth_manager.auth_change_receiver();
             if !recover_remote_control_auth(&mut auth_recovery, &mut auth_change_rx).await {
@@ -945,10 +904,7 @@ async fn refresh_pairing_enrollment(
 ) -> io::Result<()> {
     current_enrollment.state.check_retry_after()?;
     let mut refresh_result = refresh_remote_control_server(auth, installation_id, enrollment).await;
-    if refresh_result
-        .as_ref()
-        .is_err_and(|err| err.kind() == io::ErrorKind::PermissionDenied)
-    {
+    if refresh_result.as_ref().is_err_and(auth::is_auth_error) {
         let mut auth_recovery = auth_manager.unauthorized_recovery();
         let mut auth_change_rx = auth_manager.auth_change_receiver();
         if recover_remote_control_auth(&mut auth_recovery, &mut auth_change_rx).await {
@@ -968,10 +924,7 @@ async fn refresh_pairing_enrollment(
             enrollment.clear_server_token();
         }
     }
-    if refresh_result
-        .as_ref()
-        .is_err_and(|err| err.kind() == io::ErrorKind::PermissionDenied)
-    {
+    if refresh_result.as_ref().is_err_and(auth::is_auth_error) {
         enrollment.clear_server_token();
     }
     if !replace_current_enrollment(current_enrollment, enrollment) {

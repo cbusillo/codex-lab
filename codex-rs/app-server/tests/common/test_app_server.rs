@@ -18,7 +18,6 @@ use anyhow::ensure;
 use codex_app_server_protocol::AppsInstalledParams;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsReadParams;
-use codex_app_server_protocol::BackgroundAutoReviewControlParams;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientNotification;
@@ -114,7 +113,6 @@ use codex_app_server_protocol::ThreadShellCommandParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadTimelineListParams;
-use codex_app_server_protocol::ThreadTurnsItemsListParams;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
@@ -130,10 +128,6 @@ use codex_exec_server::CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ENV_VAR;
 use codex_exec_server::CODEX_EXEC_SERVER_URL_ENV_VAR;
-#[cfg(debug_assertions)]
-use codex_keyring_store::TEST_KEYRING_DIR_ENV_VAR;
-#[cfg(debug_assertions)]
-use codex_keyring_store::tests::shared_test_keyring_root;
 use codex_login::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
 use core_test_support::is_remote_test_environment;
 use core_test_support::test_codex::TestEnv;
@@ -160,12 +154,11 @@ pub struct TestAppServer {
     process: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
-    stdout_line_buffer: Vec<u8>,
     pending_messages: VecDeque<JSONRPCMessage>,
     auto_env: Option<TestEnv>,
     json_logs: JsonLogCapture,
     // Fields drop in declaration order. Tear down the delayed child before
-    // removing an owned CODEX_LAB_HOME that may still be its cwd on Windows.
+    // removing an owned CODEX_HOME that may still be its cwd on Windows.
     _delayed_exec_server: Option<(LocalWebsocketExecServer, WebsocketDelayInterposer)>,
     _attribution_settings_server: Option<MockServer>,
     _owned_install_dir: Option<TempDir>,
@@ -174,8 +167,6 @@ pub struct TestAppServer {
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
-#[cfg(debug_assertions)]
-pub const USE_TEST_KEYRING_STORE_ARG: &str = "--use-test-keyring-store";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
 #[cfg(windows)]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
@@ -183,12 +174,11 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl TestAppServer {
-    /// Starts building a server with a temporary CODEX_LAB_HOME and the standard
+    /// Starts building a server with a temporary CODEX_HOME and the standard
     /// automatic test environment.
     pub fn builder() -> TestAppServerBuilder {
         TestAppServerBuilder {
             codex_home: None,
-            cwd: None,
             environment: TestAppServerEnvironment::Auto,
             program: None,
             env_overrides: Vec::new(),
@@ -263,7 +253,6 @@ impl TestAppServer {
 
     async fn new_with_program_env_and_args(
         codex_home: &Path,
-        cwd: &Path,
         program: &Path,
         env_overrides: &[(&str, Option<&str>)],
         args: &[&str],
@@ -273,8 +262,8 @@ impl TestAppServer {
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.current_dir(cwd);
-        cmd.env("CODEX_LAB_HOME", codex_home);
+        cmd.current_dir(codex_home);
+        cmd.env("CODEX_HOME", codex_home);
         cmd.env("RUST_LOG", "warn");
         // Keep integration tests isolated from host managed configuration.
         cmd.env(
@@ -283,8 +272,6 @@ impl TestAppServer {
         );
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
         cmd.args(args);
-        #[cfg(debug_assertions)]
-        configure_test_keyring_for_tokio_command(&mut cmd, shared_test_keyring_root());
 
         for (k, v) in env_overrides {
             match v {
@@ -339,7 +326,6 @@ impl TestAppServer {
             process,
             stdin: Some(stdin),
             stdout,
-            stdout_line_buffer: Vec::new(),
             pending_messages: VecDeque::new(),
             auto_env: None,
             json_logs,
@@ -736,15 +722,6 @@ impl TestAppServer {
         self.send_request("thread/items/list", params).await
     }
 
-    /// Send a legacy `thread/turns/items/list` JSON-RPC request.
-    pub async fn send_thread_turns_items_list_request(
-        &mut self,
-        params: ThreadTurnsItemsListParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("thread/turns/items/list", params).await
-    }
-
     /// Send a `model/list` JSON-RPC request.
     pub async fn send_list_models_request(
         &mut self,
@@ -820,12 +797,6 @@ impl TestAppServer {
             Some(serde_json::json!({ "ephemeral": true })),
         )
         .await
-    }
-
-    /// Send a `remoteControl/reconnect` JSON-RPC request.
-    pub async fn send_remote_control_reconnect_request(&mut self) -> anyhow::Result<i64> {
-        self.send_request("remoteControl/reconnect", /*params*/ None)
-            .await
     }
 
     /// Send a `remoteControl/status/read` JSON-RPC request.
@@ -1328,15 +1299,6 @@ impl TestAppServer {
         self.send_request("review/start", params).await
     }
 
-    /// Send a `review/background/control` JSON-RPC request (v2).
-    pub async fn send_background_auto_review_control_request(
-        &mut self,
-        params: BackgroundAutoReviewControlParams,
-    ) -> anyhow::Result<i64> {
-        let params = Some(serde_json::to_value(params)?);
-        self.send_request("review/background/control", params).await
-    }
-
     pub async fn send_windows_sandbox_setup_start_request(
         &mut self,
         params: WindowsSandboxSetupStartParams,
@@ -1674,19 +1636,9 @@ impl TestAppServer {
     }
 
     async fn read_jsonrpc_message(&mut self) -> anyhow::Result<JSONRPCMessage> {
-        // Keep the buffer on the client so a cancelled `read_until` retains partial bytes and the
-        // next read can finish the same JSON line.
-        if let Err(error) = self
-            .stdout
-            .read_until(b'\n', &mut self.stdout_line_buffer)
-            .await
-        {
-            self.stdout_line_buffer.clear();
-            return Err(error.into());
-        }
-        let message = serde_json::from_slice::<JSONRPCMessage>(&self.stdout_line_buffer);
-        self.stdout_line_buffer.clear();
-        let message = message?;
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).await?;
+        let message = serde_json::from_str::<JSONRPCMessage>(&line)?;
         eprintln!("read message from stdout: {message:?}");
         Ok(message)
     }
@@ -1897,24 +1849,9 @@ impl TestAppServer {
     }
 }
 
-#[cfg(debug_assertions)]
-pub fn configure_test_keyring_for_std_command(command: &mut std::process::Command, root: &Path) {
-    command
-        .arg(USE_TEST_KEYRING_STORE_ARG)
-        .env(TEST_KEYRING_DIR_ENV_VAR, root);
-}
-
-#[cfg(debug_assertions)]
-pub fn configure_test_keyring_for_tokio_command(command: &mut Command, root: &Path) {
-    command
-        .arg(USE_TEST_KEYRING_STORE_ARG)
-        .env(TEST_KEYRING_DIR_ENV_VAR, root);
-}
-
 /// Builder for TestAppServer.
 pub struct TestAppServerBuilder {
     codex_home: Option<PathBuf>,
-    cwd: Option<PathBuf>,
     environment: TestAppServerEnvironment,
     program: Option<PathBuf>,
     env_overrides: Vec<(String, Option<String>)>,
@@ -1934,15 +1871,9 @@ impl TestAppServerBuilder {
         self
     }
 
-    /// Uses this existing CODEX_LAB_HOME instead of a temporary one.
+    /// Uses this existing CODEX_HOME instead of a temporary one.
     pub fn with_codex_home(mut self, codex_home: &Path) -> Self {
         self.codex_home = Some(codex_home.to_path_buf());
-        self
-    }
-
-    /// Uses this working directory for the app-server child process.
-    pub fn with_cwd(mut self, cwd: &Path) -> Self {
-        self.cwd = Some(cwd.to_path_buf());
         self
     }
 
@@ -2024,12 +1955,11 @@ impl TestAppServerBuilder {
         Ok(server)
     }
 
-    /// Builds a server with a temporary CODEX_LAB_HOME and automatic environment
+    /// Builds a server with a temporary CODEX_HOME and automatic environment
     /// by default.
     pub async fn build(self) -> anyhow::Result<TestAppServer> {
         let Self {
             codex_home,
-            cwd,
             environment,
             program,
             mut env_overrides,
@@ -2164,14 +2094,14 @@ impl TestAppServerBuilder {
         };
         let mut owned_install_dir = None;
         if !custom_program
+            && codex_utils_cargo_bin::runfiles_available()
             && let Ok(code_mode_host_program) =
                 codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")
-            && program.parent() != code_mode_host_program.parent()
         {
-            // Test runners can keep binary targets in separate directories.
+            // Bazel keeps binary targets in separate package directories.
             // Recreate the installed sibling layout without a path override.
-            // Prefer Bazel's TEST_TMPDIR to keep staging on the test runner's
-            // filesystem.
+            // Prefer Bazel's TEST_TMPDIR so staging can share a filesystem with
+            // the binaries and avoid expensive cross-filesystem copies.
             let install_dir = match std::env::var_os("TEST_TMPDIR") {
                 Some(test_tmpdir) => TempDir::new_in(test_tmpdir)?,
                 None => TempDir::new()?,
@@ -2190,9 +2120,8 @@ impl TestAppServerBuilder {
                 (&program, &staged_program),
                 (&code_mode_host_program, &staged_host),
             ] {
-                // Use independent copies to avoid macOS code signature
-                // interactions between staged installations.
-                std::fs::copy(source, destination)
+                std::fs::hard_link(source, destination)
+                    .or_else(|_| std::fs::copy(source, destination).map(|_| ()))
                     .with_context(|| format!("stage executable {}", source.display()))?;
             }
             program = staged_program;
@@ -2205,7 +2134,6 @@ impl TestAppServerBuilder {
         let args = args.iter().map(String::as_str).collect::<Vec<_>>();
         let mut app_server = TestAppServer::new_with_program_env_and_args(
             &codex_home,
-            cwd.as_deref().unwrap_or(&codex_home),
             &program,
             &env_overrides,
             &args,

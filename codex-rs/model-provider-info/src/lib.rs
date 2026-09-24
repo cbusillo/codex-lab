@@ -4,12 +4,12 @@
 //!   1. Built-in defaults compiled into the binary so Codex works out-of-the-box.
 //!   2. User-defined entries inside `~/.codex/config.toml` under the `model_providers`
 //!      key. These override or extend the defaults at runtime.
+//!
+//! API provider construction applies the process-wide managed residency policy also
+//! used by default HTTP headers.
 
-mod capabilities;
-pub use capabilities::ModelProviderCapabilities;
-
-use codex_api::Provider as ApiProvider;
-use codex_api::RetryConfig as ApiRetryConfig;
+use codex_client::Provider as ApiProvider;
+use codex_client::RetryConfig as ApiRetryConfig;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::error::CodexErr;
@@ -22,15 +22,43 @@ use http::header::HeaderValue;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::Digest;
-use sha2::Sha256;
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::path::Component;
 use std::path::Path;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 use std::time::Duration;
+
+mod gateway_oauth;
+pub use gateway_oauth::GatewayOAuthConfig;
+pub use gateway_oauth::GatewayOAuthDelivery;
+
+pub const RESIDENCY_HEADER_NAME: &str = "x-openai-internal-codex-residency";
+
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ResidencyRequirement {
+    Us,
+}
+
+static REQUIREMENTS_RESIDENCY: RwLock<Option<ResidencyRequirement>> = RwLock::new(None);
+
+/// Sets the process-wide residency requirement loaded from managed configuration.
+pub fn set_managed_residency_requirement(enforce_residency: Option<ResidencyRequirement>) {
+    // Recover the stored policy if the lock is poisoned rather than silently disabling it.
+    *REQUIREMENTS_RESIDENCY
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = enforce_residency;
+}
+
+/// Returns the current process-wide managed residency requirement.
+pub fn read_managed_residency_requirement() -> Option<ResidencyRequirement> {
+    *REQUIREMENTS_RESIDENCY
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
 const DEFAULT_STREAM_MAX_RETRIES: u64 = 5;
@@ -54,6 +82,8 @@ pub const AMAZON_BEDROCK_RUNTIME_PROVIDER_ID: &str = "amazon-bedrock-runtime";
 pub const AMAZON_BEDROCK_GPT_5_5_MODEL_ID: &str = "openai.gpt-5.5";
 pub const AMAZON_BEDROCK_GPT_5_4_MODEL_ID: &str = "openai.gpt-5.4";
 pub const AMAZON_BEDROCK_GPT_5_6_SOL_MODEL_ID: &str = "openai.gpt-5.6-sol";
+pub const AMAZON_BEDROCK_GPT_6_SOL_MODEL_ID: &str = "openai.gpt-6-sol";
+pub const AMAZON_BEDROCK_GPT_6_LUNA_MODEL_ID: &str = "openai.gpt-6-luna";
 pub const AMAZON_BEDROCK_GPT_6_ASTRA_MODEL_ID: &str = "openai.gpt-6-astra";
 pub const AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID: &str = "openai.gpt-5.6-terra";
 pub const AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID: &str = "openai.gpt-5.6-luna";
@@ -109,6 +139,9 @@ pub struct ModelProviderInfo {
     pub name: String,
     /// Base URL for the provider's OpenAI-compatible API.
     pub base_url: Option<String>,
+    /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
+    /// uses the Codex backend unless `base_url` overrides the inference endpoint.
+    pub model_catalog_url: Option<RedactedString>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
 
@@ -121,6 +154,8 @@ pub struct ModelProviderInfo {
     pub experimental_bearer_token: Option<RedactedString>,
     /// Command-backed bearer-token configuration for this provider.
     pub auth: Option<ModelProviderAuthInfo>,
+    /// Secondary OAuth credentials required by the provider's gateway.
+    pub gateway_oauth: Option<GatewayOAuthConfig>,
     /// AWS SigV4 auth configuration for this provider.
     pub aws: Option<ModelProviderAwsAuthInfo>,
     /// Which wire protocol this provider expects.
@@ -158,29 +193,6 @@ pub struct ModelProviderInfo {
     /// Whether this provider supports the standalone web-search endpoint.
     #[serde(default)]
     pub supports_standalone_web_search: bool,
-    /// Tool-surface capabilities the provider's API accepts.
-    #[serde(default)]
-    pub capabilities: ModelProviderCapabilities,
-}
-
-/// One-way identity for canonical provider configuration and credential fields.
-///
-/// The identity includes request-shaping fields and resolved environment-backed credentials so
-/// provider configurations or accounts that can expose different model catalogs do not share a
-/// cache. Its debug representation is deliberately redacted even though the digest is one-way.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ModelProviderCacheIdentity([u8; 32]);
-
-impl AsRef<[u8]> for ModelProviderCacheIdentity {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ModelProviderCacheIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("ModelProviderCacheIdentity([redacted])")
-    }
 }
 
 /// AWS SigV4 auth configuration for a model provider.
@@ -252,36 +264,6 @@ fn default_aws_auth_refresh_timeout_ms() -> NonZeroU64 {
 }
 
 impl ModelProviderInfo {
-    pub fn cache_identity(&self) -> ModelProviderCacheIdentity {
-        let provider = serde_json::to_value(self)
-            .unwrap_or_else(|error| serde_json::Value::String(error.to_string()));
-        let resolved_env_key = self
-            .env_key
-            .as_deref()
-            .and_then(std::env::var_os)
-            .map(|value| value.to_string_lossy().into_owned());
-        let resolved_env_headers = self
-            .env_http_headers
-            .iter()
-            .flat_map(|headers| headers.iter())
-            .map(|(header, env_var)| {
-                (
-                    header.clone(),
-                    std::env::var_os(env_var).map(|value| value.to_string_lossy().into_owned()),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let identity = serde_json::json!({
-            "schema": "model-provider-cache-v1",
-            "provider": provider,
-            "resolvedEnvKey": resolved_env_key,
-            "resolvedEnvHeaders": resolved_env_headers,
-        });
-        let mut digest = Sha256::new();
-        hash_canonical_json(&mut digest, &identity);
-        ModelProviderCacheIdentity(digest.finalize().into())
-    }
-
     /// Checks that a configured Bedrock entry only customizes supported fields.
     /// Call this on the override before merging it with the built-in provider.
     pub fn validate_bedrock_override(&self) -> Result<(), String> {
@@ -303,6 +285,9 @@ other non-default provider fields are not supported"
     }
 
     pub fn validate(&self) -> std::result::Result<(), String> {
+        if let Some(gateway) = &self.gateway_oauth {
+            gateway.validate(self)?;
+        }
         if let Some(aws) = self.aws.as_ref() {
             if self.supports_websockets {
                 // TODO(celia-oai): Support AWS SigV4 signing for WebSocket
@@ -426,6 +411,7 @@ other non-default provider fields are not supported"
         Ok(headers)
     }
 
+    /// Builds an API provider with managed residency taking precedence over configured headers.
     pub fn to_api_provider(&self, auth_mode: Option<AuthMode>) -> CodexResult<ApiProvider> {
         let default_base_url = if matches!(
             auth_mode,
@@ -446,7 +432,13 @@ other non-default provider fields are not supported"
             .clone()
             .unwrap_or_else(|| default_base_url.to_string());
 
-        let headers = self.build_header_map()?;
+        let mut headers = self.build_header_map()?;
+        if let Some(requirement) = read_managed_residency_requirement() {
+            let value = match requirement {
+                ResidencyRequirement::Us => HeaderValue::from_static("us"),
+            };
+            headers.insert(RESIDENCY_HEADER_NAME, value);
+        }
         let retry = ApiRetryConfig {
             max_attempts: self.request_max_retries(),
             base_delay: Duration::from_millis(200),
@@ -523,10 +515,12 @@ other non-default provider fields are not supported"
         ModelProviderInfo {
             name: OPENAI_PROVIDER_NAME.into(),
             base_url,
+            model_catalog_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
+            gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
             query_params: None,
@@ -554,7 +548,6 @@ other non-default provider fields are not supported"
             requires_openai_auth: true,
             supports_websockets: true,
             supports_standalone_web_search: true,
-            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -567,10 +560,12 @@ other non-default provider fields are not supported"
             // this is unset. A configured value is therefore unambiguously an
             // endpoint override.
             base_url: None,
+            model_catalog_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
+            gateway_oauth: None,
             aws: Some(aws.unwrap_or(ModelProviderAwsAuthInfo {
                 profile: None,
                 region: None,
@@ -591,7 +586,6 @@ other non-default provider fields are not supported"
             requires_openai_auth: false,
             supports_websockets: false,
             supports_standalone_web_search: false,
-            capabilities: ModelProviderCapabilities::default(),
         }
     }
 
@@ -639,53 +633,6 @@ other non-default provider fields are not supported"
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
-
-    pub fn has_configured_credentials(&self) -> bool {
-        self.has_command_auth()
-            || self.env_key.is_some()
-            || self.experimental_bearer_token.is_some()
-    }
-}
-
-fn hash_canonical_json(digest: &mut Sha256, value: &serde_json::Value) {
-    match value {
-        serde_json::Value::Null => digest.update(b"n"),
-        serde_json::Value::Bool(value) => {
-            digest.update(b"b");
-            digest.update(if *value { &b"true"[..] } else { &b"false"[..] });
-        }
-        serde_json::Value::Number(value) => {
-            digest.update(b"d");
-            digest.update(value.to_string().as_bytes());
-        }
-        serde_json::Value::String(value) => {
-            digest.update(b"s");
-            hash_canonical_len(digest, value.len());
-            digest.update(value.as_bytes());
-        }
-        serde_json::Value::Array(values) => {
-            digest.update(b"a");
-            hash_canonical_len(digest, values.len());
-            for value in values {
-                hash_canonical_json(digest, value);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            digest.update(b"o");
-            hash_canonical_len(digest, values.len());
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by_key(|(left, _)| *left);
-            for (key, value) in entries {
-                hash_canonical_len(digest, key.len());
-                digest.update(key.as_bytes());
-                hash_canonical_json(digest, value);
-            }
-        }
-    }
-}
-
-fn hash_canonical_len(digest: &mut Sha256, len: usize) {
-    digest.update(u64::try_from(len).unwrap_or(u64::MAX).to_be_bytes());
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;
@@ -794,10 +741,12 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
     ModelProviderInfo {
         name: "gpt-oss".into(),
         base_url: Some(base_url.into()),
+        model_catalog_url: None,
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
         auth: None,
+        gateway_oauth: None,
         aws: None,
         wire_api,
         query_params: None,
@@ -810,15 +759,6 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
-        // Local OpenAI-compatible servers do not accept the OpenAI-specific
-        // `namespace` or freeform `custom` tool types or the hosted
-        // `web_search` tool, so the bundled local providers default to the
-        // flat function-tool surface.
-        capabilities: ModelProviderCapabilities {
-            namespace_tools: false,
-            custom_tools: false,
-            web_search: false,
-        },
     }
 }
 

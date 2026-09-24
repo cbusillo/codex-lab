@@ -13,21 +13,17 @@ use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::TurnStartAdmission;
+use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
-use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
-use codex_protocol::dynamic_tools::DynamicToolSpec;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::user_input::UserInput;
@@ -62,98 +58,6 @@ impl TurnStartAdmission for TestAdmission {
             Some(Box::new(()))
         }
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn initial_input_is_persisted_before_the_model_request() -> anyhow::Result<()> {
-    let (release_response, response_gate) = oneshot::channel();
-    let (server, _completions) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
-        gate: Some(response_gate),
-        body: responses::sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    }]])
-    .await;
-    let test = test_codex()
-        .with_model("gpt-5.4")
-        .with_history_mode(ThreadHistoryMode::Paginated)
-        .build_with_streaming_server(&server)
-        .await?;
-    test.codex
-        .inject_response_items(vec![ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "turn-start developer instructions".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }])
-        .await?;
-    submit_user_message(&test.codex, "turn-start user input").await?;
-
-    timeout(
-        Duration::from_secs(5),
-        server.wait_for_request_count(/*count*/ 1),
-    )
-    .await
-    .expect("turn should reach the model request");
-    let rollout_path = test.codex.rollout_path().expect("local rollout path");
-    let rollout = tokio::fs::read_to_string(rollout_path).await?;
-    assert!(rollout.contains("turn-start developer instructions"));
-    assert!(rollout.contains("turn-start user input"));
-
-    release_response.send(()).expect("release model response");
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn tool_collision_persists_input_and_emits_error() -> anyhow::Result<()> {
-    let server = responses::start_mock_server().await;
-    let response = responses::mount_sse_once(&server, responses::sse_completed("unused")).await;
-    let base = test_codex()
-        .with_history_mode(ThreadHistoryMode::Paginated)
-        .with_config(|config| {
-            config.tool_registry.error_on_tool_collisions = true;
-            config.update_plan_enabled = true;
-        })
-        .build_with_auto_env(&server)
-        .await?;
-    let started = base
-        .thread_manager
-        .start_thread(StartThreadOptions {
-            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
-                name: "update_plan".to_string(),
-                description: "Duplicates the built-in plan tool.".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-                defer_loading: false,
-            })],
-            ..StartThreadOptions::new(base.config.clone())
-        })
-        .await?;
-    let thread = started.thread;
-
-    submit_user_message(&thread, "persist this input despite the tool collision").await?;
-    let EventMsg::Error(error) = wait_for_event(
-        &thread,
-        |event| matches!(event, EventMsg::Error(error) if error.message.contains("duplicate tool")),
-    )
-    .await
-    else {
-        unreachable!("event guard requires the tool-collision error");
-    };
-    assert!(
-        error
-            .message
-            .contains("duplicate tool: functions.update_plan")
-    );
-    let rollout =
-        tokio::fs::read_to_string(thread.rollout_path().expect("local rollout path")).await?;
-    assert!(rollout.contains("persist this input despite the tool collision"));
-    assert!(response.requests().is_empty());
-    Ok(())
 }
 
 #[tokio::test]
@@ -305,7 +209,6 @@ async fn host_drain_allows_running_review_to_finish_its_delegate() -> anyhow::Re
                 },
                 user_facing_hint: None,
             },
-            persistence: None,
         })
         .await?;
     let event = wait_for_event(&test.codex, |event| {
@@ -366,6 +269,7 @@ async fn host_drain_closes_realtime_after_handoff_error() -> anyhow::Result<()> 
             codex_response_item_prefix: None,
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             model: None,
             output_modality: codex_protocol::protocol::RealtimeOutputModality::Audio,
@@ -1097,6 +1001,88 @@ async fn sampling_is_ready_for_daemon_recovery(
         (executor == "local").then_some(turn_id)
     );
     release.send(()).expect("sampling is waiting");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daemon_recovery_includes_local_environment_that_finished_starting() -> anyhow::Result<()> {
+    let (release, gate) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                ev_response_created("wait"),
+                responses::ev_function_call(
+                    "wait-local",
+                    "wait_for_environment",
+                    r#"{"environment_id":"local"}"#,
+                ),
+                ev_completed("wait"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(gate),
+            body: responses::sse_completed("done"),
+        }],
+    ])
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.features.enable(Feature::DeferredExecutor).unwrap();
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    let cwd = test.config.cwd.join("new-workspace");
+    std::fs::create_dir(&cwd)?;
+    let selection = local(cwd.clone());
+    // A different workspace starts a new attachment. On this single-threaded runtime,
+    // turn startup captures it before the spawned setup task can run.
+    let started = test
+        .codex
+        .start_turn_if_idle(
+            user_message_request("wait for the environment").with_thread_settings(
+                ThreadSettingsOverrides {
+                    environments: Some(TurnEnvironmentSelections::new(
+                        cwd,
+                        vec![selection.clone()],
+                    )),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await?;
+    let StartIfIdleSubmission::Started { turn_id } = started else {
+        anyhow::bail!("turn should start");
+    };
+
+    timeout(
+        Duration::from_secs(5),
+        server.wait_for_request_count(/*count*/ 2),
+    )
+    .await?;
+    let request: Value = serde_json::from_slice(&server.requests().await[1])?;
+    let output = request["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "wait-local")
+        .expect("the second request should contain the wait result");
+    assert_eq!(
+        serde_json::from_str::<Value>(output["output"].as_str().unwrap())?,
+        serde_json::json!({"environment_id": "local", "status": "ready"}),
+    );
+    assert_eq!(
+        test.codex
+            .interrupted_turn()
+            .await
+            .map(|(id, _, environment)| (id, environment)),
+        Some((turn_id, selection)),
+    );
+    release.send(()).expect("the model response is waiting");
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })

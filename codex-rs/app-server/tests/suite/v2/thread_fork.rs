@@ -55,6 +55,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -67,8 +68,6 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
-use codex_rollout::ResponseItemEnvelope;
-use codex_rollout::RolloutItem as ProtocolRolloutItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::append_rollout_item_to_path;
@@ -114,7 +113,6 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
             cwd: None,
             use_state_db_only: false,
             search_term: None,
-            descendant_of_thread_id: None,
             parent_thread_id: None,
             ancestor_thread_id: None,
         })
@@ -954,7 +952,14 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .await??;
         turn_ids.push(completed.turn.id);
     }
-    mcp.clear_message_buffer();
+    // Stop the source before its active goal exists so a late idle hook cannot continue it.
+    timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
+    drop(mcp);
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .build_initialized()
+        .await?;
 
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
@@ -985,24 +990,6 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         .get_thread_goal(source_thread_id)
         .await?
         .expect("source goal");
-
-    let ordinary_fork_id = mcp
-        .send_thread_fork_request(ThreadForkParams {
-            thread_id: source_thread.id.clone(),
-            ..Default::default()
-        })
-        .await?;
-    let ThreadForkResponse {
-        thread: ordinary_fork,
-        ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(ordinary_fork_id)).await??;
-    assert_eq!(
-        state_db
-            .thread_goals()
-            .get_thread_goal(ThreadId::from_string(&ordinary_fork.id)?)
-            .await?,
-        None
-    );
 
     let mut forked_threads = Vec::new();
     for (last_turn_id, before_turn_id, expected_turn_count) in [
@@ -1586,7 +1573,7 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
-            thread_id: forked_thread_id,
+            thread_id: forked_thread_id.clone(),
             input: vec![UserInput::Text {
                 text: "Continue from the fork".to_string(),
                 text_elements: Vec::new(),
@@ -1642,6 +1629,33 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
     let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
     assert_eq!(excluded_turns_meta.meta.history_base, Some(history_base));
+
+    let ThreadForkResponse {
+        thread: nested_thread,
+        ..
+    } = mcp
+        .request(|request_id| ClientRequest::ThreadFork {
+            request_id,
+            params: ThreadForkParams {
+                thread_id: forked_thread_id.clone(),
+                exclude_turns: true,
+                ..ThreadForkParams::default()
+            },
+        })
+        .await?;
+    assert_eq!(nested_thread.forked_from_id, Some(forked_thread_id.clone()));
+    assert_eq!(nested_thread.history_mode, ThreadHistoryMode::Paginated);
+    assert!(nested_thread.turns.is_empty());
+    let nested_path = nested_thread.path.expect("nested fork rollout path");
+    let nested_meta = read_session_meta_line(nested_path.as_path()).await?;
+    assert_eq!(
+        nested_meta
+            .meta
+            .history_base
+            .expect("nested fork history base")
+            .thread_id,
+        ThreadId::from_string(forked_thread_id.as_str())?
+    );
     Ok(())
 }
 
@@ -1772,30 +1786,30 @@ async fn thread_fork_warns_for_paginated_full_history_hydration() -> Result<()> 
 }
 
 #[tokio::test]
-async fn thread_fork_persists_developer_interruption_marker_for_root_thread_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ false)
-        .await
+async fn thread_fork_freezes_active_paginated_turn_as_interrupted() -> Result<()> {
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V1).await
 }
 
 #[tokio::test]
 async fn thread_fork_persists_developer_interruption_marker_for_multi_agent_v2() -> Result<()> {
-    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(/*fork_as_subagent*/ true).await
+    assert_thread_fork_freezes_active_paginated_turn_as_interrupted(MultiAgentVersion::V2).await
 }
 
 async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
-    fork_as_subagent: bool,
+    multi_agent_version: MultiAgentVersion,
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    // MultiAgentV2 is the mandatory default whenever agents are enabled. The source distinguishes
-    // the root-thread and subagent cases; it no longer selects between V1 and V2 implementations.
     let config = MockResponsesConfig::new(&server.uri());
-    let thread_source = if fork_as_subagent {
-        Some(ThreadSource::Subagent)
-    } else {
-        None
+    let (config, expected_marker_role, thread_source) = match multi_agent_version {
+        MultiAgentVersion::V2 => (
+            config.enable_feature(Feature::MultiAgentV2),
+            "developer",
+            Some(ThreadSource::Subagent),
+        ),
+        MultiAgentVersion::V1 => (config, "user", None),
+        MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
     };
-    const EXPECTED_MARKER_ROLE: &str = "developer";
     config.write(codex_home.path())?;
     let source_thread_id = create_fake_paginated_rollout(
         codex_home.path(),
@@ -1918,59 +1932,28 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .lines()
         .map(codex_rollout::parse_rollout_line)
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(child_rollout.len(), 4);
     assert!(matches!(
-        child_rollout.first(),
-        Some(RolloutLine {
-            item: ProtocolRolloutItem::SessionMeta(_),
-            ..
-        })
+        child_rollout.as_slice(),
+        [
+            RolloutLine { item: RolloutItem::SessionMeta(_), .. },
+            RolloutLine {
+                item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+                ..
+            },
+            RolloutLine {
+                item: RolloutItem::ResponseItem(response_item),
+                ..
+            },
+            RolloutLine {
+                item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
+                ..
+            },
+        ] if matches!(
+            &response_item.item,
+            codex_protocol::models::ResponseItem::Message { role, .. }
+                if role == expected_marker_role
+        ) && aborted.turn_id.as_deref() == Some("active-turn")
     ));
-    assert!(matches!(
-        child_rollout.get(1),
-        Some(RolloutLine {
-            item: ProtocolRolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
-            ..
-        })
-    ));
-    let interruption_marker_index = child_rollout
-        .iter()
-        .position(|line| {
-            matches!(
-                line,
-                RolloutLine {
-                    item: ProtocolRolloutItem::ResponseItem(
-                        ResponseItemEnvelope {
-                            item: ResponseItem::Message {
-                                role,
-                                content,
-                                ..
-                            },
-                            ..
-                        }
-                    ),
-                    ..
-                } if role == EXPECTED_MARKER_ROLE
-                    && content.iter().any(|item| matches!(
-                        item,
-                        ContentItem::InputText { text } if text.contains("<turn_aborted>")
-                    ))
-            )
-        })
-        .expect("forked rollout should persist the interruption marker");
-    let turn_aborted_index = child_rollout
-        .iter()
-        .position(|line| {
-            matches!(
-                line,
-                RolloutLine {
-                    item: ProtocolRolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
-                    ..
-                } if aborted.turn_id.as_deref() == Some("active-turn")
-            )
-        })
-        .expect("forked rollout should persist the active turn abort event");
-    assert!(interruption_marker_index < turn_aborted_index);
 
     append_rollout_item_to_path(source_path.as_path(), &user_response_item("after-fork")).await?;
     append_rollout_item_to_path(
@@ -2023,7 +2006,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(!serialized_input.contains("after-fork model input"));
     assert!(input.as_array().is_some_and(|items| {
         items.iter().any(|item| {
-            item["role"] == EXPECTED_MARKER_ROLE
+            item["role"] == expected_marker_role
                 && item["content"].as_array().is_some_and(|content| {
                     content.iter().any(|fragment| {
                         fragment["text"]
@@ -2191,7 +2174,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     );
     let model_input = request_body["input"].as_array().expect("model input");
     assert!(model_input.iter().any(|item| {
-        item["role"] == EXPECTED_MARKER_ROLE
+        item["role"] == expected_marker_role
             && item["content"].as_array().is_some_and(|content| {
                 content.iter().any(|fragment| {
                     fragment["text"]

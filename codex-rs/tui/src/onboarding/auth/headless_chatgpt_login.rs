@@ -34,9 +34,7 @@ pub(super) fn start_headless_chatgpt_login(widget: &mut AuthModeWidget) {
         match request_handle
             .request_typed::<LoginAccountResponse>(ClientRequest::LoginAccount {
                 request_id: onboarding_request_id(),
-                params: LoginAccountParams::ChatgptDeviceCode {
-                    preserve_existing_account: false,
-                },
+                params: LoginAccountParams::ChatgptDeviceCode,
             })
             .await
         {

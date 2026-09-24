@@ -72,7 +72,6 @@ impl HookHandlerSource<'_> {
 }
 
 struct NormalizedHandler {
-    id: Option<String>,
     config: HookHandlerConfig,
     kind: ConfiguredHandlerKind,
     timeout_sec: u64,
@@ -485,7 +484,6 @@ fn append_matcher_groups(
     event_name: codex_protocol::protocol::HookEventName,
     groups: Vec<MatcherGroup>,
 ) {
-    let mut seen_keys = HashSet::new();
     for (group_index, group) in groups.into_iter().enumerate() {
         let matcher = matcher_pattern_for_event(event_name, group.matcher.as_deref());
         if let Some(matcher) = matcher
@@ -505,7 +503,6 @@ fn append_matcher_groups(
         for (handler_index, handler) in group.hooks.iter().cloned().enumerate() {
             let normalized = match handler {
                 HookHandlerConfig::Command {
-                    id,
                     command,
                     command_windows,
                     timeout_sec,
@@ -559,11 +556,7 @@ fn append_matcher_groups(
                     };
                     let normalized_additional_context_limit = additional_context_limit
                         .filter(|limit| *limit != DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT);
-                    // `id` is deliberately excluded from the trust hash: adding
-                    // or changing an id must not invalidate an existing
-                    // `trusted_hash` for an otherwise unchanged command.
                     let config = HookHandlerConfig::Command {
-                        id: None,
                         command: command.clone(),
                         command_windows: None,
                         timeout_sec: Some(timeout_sec),
@@ -575,7 +568,6 @@ fn append_matcher_groups(
                         command.replace(&format!("${{{key}}}"), value)
                     });
                     NormalizedHandler {
-                        id,
                         config,
                         kind: ConfiguredHandlerKind::Command {
                             command,
@@ -629,7 +621,6 @@ fn append_matcher_groups(
                         status_message: status_message.clone(),
                     };
                     NormalizedHandler {
-                        id: None,
                         config,
                         kind: ConfiguredHandlerKind::McpTool {
                             server,
@@ -664,7 +655,6 @@ fn append_matcher_groups(
             };
 
             let NormalizedHandler {
-                id,
                 config,
                 kind,
                 timeout_sec,
@@ -672,29 +662,7 @@ fn append_matcher_groups(
                 additional_context_limit,
             } = normalized;
             let current_hash = hook_hash(event_name, matcher, &group, &config);
-            let requested_key = crate::hook_key(
-                &source.key_source,
-                event_name,
-                group_index,
-                handler_index,
-                id.as_deref(),
-            );
-            let key = if seen_keys.insert(requested_key.clone()) {
-                requested_key
-            } else {
-                warnings.push(format!(
-                    "duplicate hook id {:?} in {}; using positional hook key instead",
-                    id.as_deref().unwrap_or_default(),
-                    source.path.display()
-                ));
-                crate::hook_key(
-                    &source.key_source,
-                    event_name,
-                    group_index,
-                    handler_index,
-                    /*id*/ None,
-                )
-            };
+            let key = crate::hook_key(&source.key_source, event_name, group_index, handler_index);
             let state = source.hook_states.get(&key);
             let builtin = source.plugin_id.as_deref().is_some_and(|plugin_id| {
                 is_allowlisted_bundled_cleanup_hook(
@@ -854,9 +822,8 @@ fn hook_trusted_hash(is_managed: bool, state: Option<&HookStateToml>) -> Option<
 
 fn hook_metadata_for_config_layer_source(source: &ConfigLayerSource) -> (HookSource, bool) {
     match source {
-        ConfigLayerSource::PackagedDefaults { .. } | ConfigLayerSource::System { .. } => {
-            (HookSource::System, true)
-        }
+        ConfigLayerSource::PackagedDefaults { .. } => (HookSource::Unknown, false),
+        ConfigLayerSource::System { .. } => (HookSource::System, true),
         ConfigLayerSource::User { .. } => (HookSource::User, false),
         ConfigLayerSource::Project { .. } => (HookSource::Project, false),
         ConfigLayerSource::Mdm { .. } => (HookSource::Mdm, true),
@@ -1003,7 +970,6 @@ mod tests {
         MatcherGroup {
             matcher: matcher.map(str::to_string),
             hooks: vec![HookHandlerConfig::Command {
-                id: None,
                 command: "echo hello".to_string(),
                 command_windows: None,
                 timeout_sec: None,
@@ -1020,7 +986,6 @@ mod tests {
         MatcherGroup {
             matcher: None,
             hooks: vec![HookHandlerConfig::Command {
-                id: None,
                 command: "echo hello".to_string(),
                 command_windows: None,
                 timeout_sec: None,
@@ -1367,7 +1332,6 @@ mod tests {
                 matcher: Some("other".to_string()),
                 hooks: vec![
                     HookHandlerConfig::Command {
-                        id: None,
                         command: "echo default".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -1376,7 +1340,6 @@ mod tests {
                         additional_context_limit: None,
                     },
                     HookHandlerConfig::Command {
-                        id: None,
                         command: "echo clamped".to_string(),
                         command_windows: None,
                         timeout_sec: Some(600),
@@ -1459,7 +1422,6 @@ mod tests {
             vec![MatcherGroup {
                 matcher: Some("ignored".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
-                    id: None,
                     command: "echo interrupt".to_string(),
                     command_windows: None,
                     timeout_sec: Some(600),
@@ -1644,7 +1606,6 @@ mod tests {
                 session_start: vec![MatcherGroup {
                     matcher: None,
                     hooks: vec![HookHandlerConfig::Command {
-                        id: None,
                         command: "echo hello".to_string(),
                         command_windows: None,
                         timeout_sec: None,
@@ -1676,7 +1637,6 @@ mod tests {
             vec![MatcherGroup {
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
-                    id: None,
                     command: "echo unix".to_string(),
                     command_windows: Some("echo windows".to_string()),
                     timeout_sec: None,
@@ -1728,12 +1688,6 @@ mod tests {
         let config_file = test_path_buf("/tmp/.codex/config.toml").abs();
         let dot_codex_folder = test_path_buf("/tmp/worktree/.codex").abs();
 
-        assert_eq!(
-            super::hook_metadata_for_config_layer_source(&ConfigLayerSource::PackagedDefaults {
-                file: config_file.clone(),
-            }),
-            (HookSource::System, true),
-        );
         assert_eq!(
             super::hook_metadata_for_config_layer_source(&ConfigLayerSource::System {
                 file: config_file.clone(),

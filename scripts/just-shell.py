@@ -11,15 +11,6 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
-from pathlib import Path
-
-# `just` loads this file from the Cargo working directory, so the
-# scripts directory is not necessarily on `sys.path`.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from local.target_lease import subprocess_lease_kwargs
-from local import managed_targets
 
 
 ARGS_TOKEN = "{args}"
@@ -28,33 +19,6 @@ POWERSHELL_ARGS = "@($args | Select-Object -Skip 1)"
 POWERSHELL_STDERR_NULL = "2>$null; exit $LASTEXITCODE"
 SH_ARGS = '"$@"'
 SH_STDERR_NULL = "2>/dev/null"
-CARGO_ENV_RECIPES = {
-    "app-server-test-client",
-    "bench",
-    "bench-smoke",
-    "clippy",
-    "code-mode-host",
-    "codex",
-    "exec",
-    "file-search",
-    "fix",
-    "install",
-    "log",
-    "mcp-server-run",
-    "test",
-    "tui-with-exec-server",
-    "write-config-schema",
-    "write-hooks-schema",
-}
-V8_ENV_RECIPES = {"bench", "bench-smoke", "clippy", "code-mode-host", "fix", "test"}
-CODEX_CORE_TEST_BINARIES = (
-    ("codex-cli", "codex"),
-    ("codex-code-mode-host", "codex-code-mode-host"),
-    ("codex-exec", "codex-exec"),
-    ("codex-rmcp-client", "test_stdio_server"),
-    ("codex-rmcp-client", "test_streamable_http_server"),
-    ("codex-shell-escalation", "codex-execve-wrapper"),
-)
 
 
 def main() -> int:
@@ -73,156 +37,9 @@ def main() -> int:
 
 
 def run_sh(command: str, recipe_name: str, recipe_args: list[str]) -> int:
-    try:
-        managed_result = run_managed_recipe(recipe_name, recipe_args, os.environ)
-    except managed_targets.ManagedTargetsError as error:
-        print(f"managed-targets: {error}", file=sys.stderr)
-        return 2
-    if managed_result is not None:
-        return managed_result
-    os.environ.update(resolve_cargo_environment(recipe_name, os.environ))
-    os.environ.update(resolve_rusty_v8_environment(recipe_name, os.environ))
-    build_test_prerequisites(recipe_name, recipe_args, os.environ)
     command = command.replace(ARGS_TOKEN, SH_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, SH_STDERR_NULL)
     os.execvp("sh", ["sh", "-cu", command, recipe_name, *recipe_args])
-
-
-def run_managed_recipe(
-    recipe_name: str, recipe_args: list[str], environment: Mapping[str, str]
-) -> int | None:
-    source = dict(environment)
-    # A managed engine invocation already owns the lease.  Let its child
-    # recipe continue through the ordinary shell path without re-enrollment.
-    if (
-        managed_targets.LEASE_ENV in source
-        or recipe_name not in managed_targets.AUTO_ENROLL_RECIPES
-    ):
-        return None
-    config = managed_targets.existing_config_path(
-        source.get(managed_targets.CONFIG_ENV)
-    )
-    if config is None:
-        return None
-    config_data, _ = managed_targets.load_config(str(config))
-    managed_targets.reject_managed_override(config_data, recipe_args, source)
-    if not managed_targets.managed_recipe_available(recipe_name, recipe_args, source):
-        return None
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve().with_name("local") / "managed_targets.py"),
-        "--config",
-        str(config),
-        "run",
-        "--recipe",
-        recipe_name,
-        "--",
-        *recipe_args,
-    ]
-    try:
-        completed = subprocess.run(
-            command,
-            check=False,
-            env=source,
-            **subprocess_lease_kwargs(source),
-        )
-    except KeyboardInterrupt:
-        return 130
-    return (
-        128 - completed.returncode if completed.returncode < 0 else completed.returncode
-    )
-
-
-def resolve_cargo_environment(
-    recipe_name: str, environment: Mapping[str, str]
-) -> dict[str, str]:
-    if recipe_name not in CARGO_ENV_RECIPES:
-        return {}
-    repo_root = environment.get("CODEX_REPO_ROOT")
-    if not repo_root:
-        return {}
-    resolver = Path(repo_root) / "scripts" / "local" / "cargo-build-env.sh"
-    completed = subprocess.run(
-        [str(resolver)],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=None,
-        env=dict(environment),
-        **subprocess_lease_kwargs(environment),
-    )
-    if completed.returncode != 0:
-        raise SystemExit(completed.returncode)
-    return {"CARGO_TARGET_DIR": completed.stdout.strip()}
-
-
-def resolve_rusty_v8_environment(
-    recipe_name: str, environment: Mapping[str, str]
-) -> dict[str, str]:
-    if recipe_name not in V8_ENV_RECIPES:
-        return {}
-    archive = environment.get("RUSTY_V8_ARCHIVE")
-    binding = environment.get("RUSTY_V8_SRC_BINDING_PATH")
-    if bool(archive) != bool(binding):
-        print(
-            "both RUSTY_V8_ARCHIVE and RUSTY_V8_SRC_BINDING_PATH must be set together",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    if archive and binding:
-        return {}
-    repo_root = environment.get("CODEX_REPO_ROOT")
-    if not repo_root:
-        return {}
-    helper = Path(repo_root) / "scripts" / "local" / "rusty_v8_env.py"
-    completed = subprocess.run(
-        [sys.executable, str(helper), "resolve"],
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=None,
-        env=dict(environment),
-        **subprocess_lease_kwargs(environment),
-    )
-    if completed.returncode != 0:
-        raise SystemExit(completed.returncode)
-    exports: dict[str, str] = {}
-    for line in completed.stdout.splitlines():
-        key, separator, value = line.partition("=")
-        if separator and key in {"RUSTY_V8_ARCHIVE", "RUSTY_V8_SRC_BINDING_PATH"}:
-            exports[key] = value
-    return exports
-
-
-def build_test_prerequisites(
-    recipe_name: str, recipe_args: list[str], environment: Mapping[str, str]
-) -> None:
-    if recipe_name != "test" or "--lib" in recipe_args:
-        return
-    selected_packages = {
-        recipe_args[index + 1]
-        for index, argument in enumerate(recipe_args[:-1])
-        if argument in {"-p", "--package"}
-    }
-    selected_packages.update(
-        argument.partition("=")[2]
-        for argument in recipe_args
-        if argument.startswith("--package=")
-    )
-    if "codex-core" not in selected_packages:
-        return
-
-    command = ["cargo", "build"]
-    for package, binary in CODEX_CORE_TEST_BINARIES:
-        command.extend(["-p", package, "--bin", binary])
-    completed = subprocess.run(
-        command,
-        check=False,
-        env=dict(environment),
-        **subprocess_lease_kwargs(environment),
-    )
-    if completed.returncode != 0:
-        raise SystemExit(completed.returncode)
 
 
 def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> int:
@@ -235,7 +52,6 @@ def run_powershell(command: str, recipe_name: str, recipe_args: list[str]) -> in
         )
         return 1
 
-    build_test_prerequisites(recipe_name, recipe_args, os.environ)
     command = command.replace(ARGS_TOKEN, POWERSHELL_ARGS)
     command = command.replace(STDERR_NULL_TOKEN, POWERSHELL_STDERR_NULL)
     return subprocess.run(

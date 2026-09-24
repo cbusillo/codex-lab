@@ -1,6 +1,5 @@
 use crate::AgentRoleConfig;
 use crate::ResolvedAgentRoleFile;
-use crate::agent_role_config::normalize_agent_role_backend;
 use crate::agent_role_config::normalize_agent_role_description;
 use crate::agent_role_config::normalize_agent_role_nickname_candidates;
 use crate::discovery::collect_agent_role_files;
@@ -159,7 +158,6 @@ async fn read_declared_role(
         role_name = parsed_file.role_name;
         role.description = parsed_file.description.or(role.description);
         role.nickname_candidates = parsed_file.nickname_candidates.or(role.nickname_candidates);
-        role.backend = parsed_file.backend.or(role.backend);
     }
 
     Ok((role_name, role))
@@ -172,7 +170,6 @@ fn merge_missing_role_fields(role: &mut AgentRoleConfig, fallback: &AgentRoleCon
         .nickname_candidates
         .clone()
         .or(fallback.nickname_candidates.clone());
-    role.backend = role.backend.clone().or(fallback.backend.clone());
 }
 
 fn agents_toml_from_layer(
@@ -211,17 +208,11 @@ async fn agent_role_config_from_toml(
         &format!("agents.{role_name}.nickname_candidates"),
         role.nickname_candidates.as_deref(),
     )?;
-    let backend = role
-        .backend
-        .clone()
-        .map(normalize_agent_role_backend)
-        .transpose()?;
 
     Ok(AgentRoleConfig {
         description,
         config_file: config_file.map(AbsolutePathBuf::into_path_buf),
         nickname_candidates,
-        backend,
     })
 }
 
@@ -336,7 +327,6 @@ async fn discover_agent_roles_in_dir(
                 description: parsed_file.description,
                 config_file: Some(agent_file.to_path_buf()),
                 nickname_candidates: parsed_file.nickname_candidates,
-                backend: parsed_file.backend,
             },
         );
     }

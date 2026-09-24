@@ -13,7 +13,6 @@ from .v2_all import AccountUpdatedNotification
 from .v2_all import AgentMessageDeltaNotification
 from .v2_all import AppListUpdatedNotification
 from .v2_all import AuthRecoveryNotification
-from .v2_all import BackgroundAutoReviewStatusChangedNotification
 from .v2_all import CommandExecOutputDeltaNotification
 from .v2_all import CommandExecutionOutputDeltaNotification
 from .v2_all import ConfigWarningNotification
@@ -21,7 +20,6 @@ from .v2_all import ContextCompactedNotification
 from .v2_all import DeprecationNoticeNotification
 from .v2_all import EnvironmentConnectionNotification
 from .v2_all import ErrorNotification
-from .v2_all import ExternalAgentCapabilitiesUpdatedNotification
 from .v2_all import ExternalAgentConfigImportCompletedNotification
 from .v2_all import ExternalAgentConfigImportProgressNotification
 from .v2_all import FileChangeOutputDeltaNotification
@@ -29,6 +27,7 @@ from .v2_all import FileChangePatchUpdatedNotification
 from .v2_all import FsChangedNotification
 from .v2_all import FuzzyFileSearchSessionCompletedNotification
 from .v2_all import FuzzyFileSearchSessionUpdatedNotification
+from .v2_all import GatewayOAuthChangedNotification
 from .v2_all import GuardianWarningNotification
 from .v2_all import HookCompletedNotification
 from .v2_all import HookStartedNotification
@@ -47,7 +46,6 @@ from .v2_all import PlanDeltaNotification
 from .v2_all import ProcessExitedNotification
 from .v2_all import ProcessOutputDeltaNotification
 from .v2_all import ProjectChangedNotification
-from .v2_all import ProjectValidationCompletedNotification
 from .v2_all import ReasoningSummaryPartAddedNotification
 from .v2_all import ReasoningSummaryTextDeltaNotification
 from .v2_all import ReasoningTextDeltaNotification
@@ -98,7 +96,6 @@ KnownNotificationPayload: TypeAlias = (
     | AgentMessageDeltaNotification
     | AppListUpdatedNotification
     | AuthRecoveryNotification
-    | BackgroundAutoReviewStatusChangedNotification
     | CommandExecOutputDeltaNotification
     | CommandExecutionOutputDeltaNotification
     | ConfigWarningNotification
@@ -106,7 +103,6 @@ KnownNotificationPayload: TypeAlias = (
     | DeprecationNoticeNotification
     | EnvironmentConnectionNotification
     | ErrorNotification
-    | ExternalAgentCapabilitiesUpdatedNotification
     | ExternalAgentConfigImportCompletedNotification
     | ExternalAgentConfigImportProgressNotification
     | FileChangeOutputDeltaNotification
@@ -114,6 +110,7 @@ KnownNotificationPayload: TypeAlias = (
     | FsChangedNotification
     | FuzzyFileSearchSessionCompletedNotification
     | FuzzyFileSearchSessionUpdatedNotification
+    | GatewayOAuthChangedNotification
     | GuardianWarningNotification
     | HookCompletedNotification
     | HookStartedNotification
@@ -132,7 +129,6 @@ KnownNotificationPayload: TypeAlias = (
     | ProcessExitedNotification
     | ProcessOutputDeltaNotification
     | ProjectChangedNotification
-    | ProjectValidationCompletedNotification
     | ReasoningSummaryPartAddedNotification
     | ReasoningSummaryTextDeltaNotification
     | ReasoningTextDeltaNotification
@@ -178,6 +174,7 @@ KnownNotificationPayload: TypeAlias = (
 )
 
 NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
+    "account/gatewayOAuth/changed": GatewayOAuthChangedNotification,
     "account/login/completed": AccountLoginCompletedNotification,
     "account/rateLimits/updated": AccountRateLimitsUpdatedNotification,
     "account/updated": AccountUpdatedNotification,
@@ -187,7 +184,6 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "configWarning": ConfigWarningNotification,
     "deprecationNotice": DeprecationNoticeNotification,
     "error": ErrorNotification,
-    "externalAgentCapability/updated": ExternalAgentCapabilitiesUpdatedNotification,
     "externalAgentConfig/import/completed": ExternalAgentConfigImportCompletedNotification,
     "externalAgentConfig/import/progress": ExternalAgentConfigImportProgressNotification,
     "fs/changed": FsChangedNotification,
@@ -222,7 +218,6 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "process/outputDelta": ProcessOutputDeltaNotification,
     "project/changed": ProjectChangedNotification,
     "remoteControl/status/changed": RemoteControlStatusChangedNotification,
-    "review/backgroundStatus/changed": BackgroundAutoReviewStatusChangedNotification,
     "serverRequest/resolved": ServerRequestResolvedNotification,
     "skills/changed": SkillsChangedNotification,
     "thread/archived": ThreadArchivedNotification,
@@ -259,7 +254,6 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "turn/moderationMetadata": TurnModerationMetadataNotification,
     "turn/plan/updated": TurnPlanUpdatedNotification,
     "turn/started": TurnStartedNotification,
-    "validation/completed": ProjectValidationCompletedNotification,
     "warning": WarningNotification,
     "windows/worldWritableWarning": WindowsWorldWritableWarningNotification,
     "windowsSandbox/setupCompleted": WindowsSandboxSetupCompletedNotification,
@@ -284,7 +278,6 @@ DIRECT_TURN_ID_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (
     ModelSafetyBufferingUpdatedNotification,
     ModelVerificationNotification,
     PlanDeltaNotification,
-    ProjectValidationCompletedNotification,
     ReasoningSummaryPartAddedNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,

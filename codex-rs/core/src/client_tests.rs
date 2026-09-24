@@ -12,6 +12,8 @@ use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use crate::responses_metadata::CodexResponsesMetadata;
+use crate::responses_metadata::MAX_MCP_ATTRIBUTION_BYTES;
+use crate::responses_metadata::MCP_ATTRIBUTION_CLIENT_METADATA_KEY;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
 use base64::Engine;
@@ -42,6 +44,9 @@ use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::mcp::McpAttribution;
+use codex_protocol::mcp::McpAttributionSource;
+use codex_protocol::mcp::McpAttributionStatus;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ExecutedToolCall;
@@ -115,6 +120,7 @@ fn test_model_client_with_thread_id(
         "test_originator".to_string(),
         /*model_verbosity*/ None,
         /*content_item_kinds_enabled*/ true,
+        /*reasoning_effort_override_enabled*/ false,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -124,6 +130,7 @@ fn test_model_client_with_thread_id(
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        Vec::new(),
     )
 }
 
@@ -208,6 +215,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
                 matches!(
                     result,
                     Err(TransportError::Http {
+                        retry_after: None,
                         status: http::StatusCode::TEMPORARY_REDIRECT,
                         ..
                     })
@@ -262,27 +270,25 @@ impl ModelProvider for SetupRefreshProvider {
         &self,
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<codex_api::Provider>> {
         Box::pin(async move {
-            let first_setup = self.setup_calls.fetch_add(1, Ordering::SeqCst) == 0;
+            self.setup_calls.fetch_add(1, Ordering::SeqCst);
             let manager = self.inner.auth_manager().expect("auth manager");
-            if first_setup {
-                match &self.refresh {
-                    SetupRefresh::Command(token_path) => {
-                        std::fs::write(token_path, "refreshed-token")?;
-                        manager
-                            .refresh_token_from_authority()
-                            .await
-                            .expect("refresh command token");
-                    }
-                    SetupRefresh::ChatGpt {
-                        home,
-                        token,
-                        workspace,
-                    } => {
-                        codex_login::auth::login_with_chatgpt_auth_tokens(
-                            home, token, workspace, /*chatgpt_plan_type*/ None,
-                        )?;
-                        manager.reload().await;
-                    }
+            match &self.refresh {
+                SetupRefresh::Command(token_path) => {
+                    std::fs::write(token_path, "refreshed-token")?;
+                    manager
+                        .refresh_token_from_authority()
+                        .await
+                        .expect("refresh command token");
+                }
+                SetupRefresh::ChatGpt {
+                    home,
+                    token,
+                    workspace,
+                } => {
+                    codex_login::auth::login_with_chatgpt_auth_tokens(
+                        home, token, workspace, /*chatgpt_plan_type*/ None,
+                    )?;
+                    manager.reload().await;
                 }
             }
             self.inner.api_provider().await
@@ -349,10 +355,7 @@ async fn client_setup_accepts_command_credential_refresh() {
                 refreshed_revision
             ),
         );
-        assert_ne!(
-            setup.auth_owner_generation,
-            ModelClient::auth_owner_generation(&client.request_provider())
-        );
+        assert_ne!(setup.auth_owner_generation, client.auth_owner_generation());
     }
 }
 
@@ -483,7 +486,7 @@ fn output_with_tool_result_metadata(metadata: ToolResultMetadata) -> ResponseIte
 }
 
 #[test]
-fn responses_request_limits_raw_tool_metadata_to_resolved_first_party_https_endpoint()
+fn responses_request_limits_internal_metadata_to_resolved_first_party_https_endpoint()
 -> anyhow::Result<()> {
     let provider =
         ModelProviderInfo::create_openai_provider(Some("https://api.openai.com/v1".to_string()));
@@ -496,17 +499,28 @@ fn responses_request_limits_raw_tool_metadata_to_resolved_first_party_https_endp
         "private": { "resource": "raw-result-metadata" },
     })));
     let without_raw_metadata = output_with_tool_result_metadata(ToolResultMetadata::default());
+    let attribution = McpAttribution {
+        status: McpAttributionStatus::Complete,
+        sources: vec![McpAttributionSource {
+            connector_id: Some("connector_example".to_string()),
+            plugin_id: Some("example@openai-bundled".to_string()),
+            server_name: "codex_apps".to_string(),
+            tool_name: "search".to_string(),
+            first_turn_id: "turn_123".to_string(),
+        }],
+    };
     let prompt = Prompt {
         input: vec![output.clone()],
         ..Default::default()
     };
-    let responses_metadata = test_responses_metadata_for_client(
+    let mut responses_metadata = test_responses_metadata_for_client(
         &client,
         /*turn_id*/ None,
         format!("{}:0", client.state.thread_id),
         /*parent_thread_id*/ None,
         TestCodexResponsesRequestKind::Turn,
     );
+    responses_metadata.mcp_attribution = Some(attribution.clone());
     for (base_url, allowed) in [
         ("https://api.openai.com/v1", true),
         ("https://chatgpt.com/backend-api/codex", true),
@@ -519,18 +533,19 @@ fn responses_request_limits_raw_tool_metadata_to_resolved_first_party_https_endp
         ("not a URL", false),
     ] {
         api_provider.base_url = base_url.to_string();
+        let include_internal = super::is_internal_metadata_destination(&api_provider);
         for responses_lite in [false, true] {
             let mut model = test_model_info();
             model.use_responses_lite = responses_lite;
-            let mut request = client.build_responses_request(
+            let request = client.build_responses_request(
                 &prompt,
                 &model,
                 /*effort*/ None,
                 codex_protocol::config_types::ReasoningSummary::None,
                 /*service_tier*/ None,
                 &responses_metadata,
+                include_internal,
             )?;
-            ModelClient::filter_tool_result_metadata(&mut request.input, &api_provider);
             assert_eq!(
                 request.input.last(),
                 Some(if allowed {
@@ -540,8 +555,269 @@ fn responses_request_limits_raw_tool_metadata_to_resolved_first_party_https_endp
                 }),
                 "resolved endpoint: {base_url}, responses_lite: {responses_lite}",
             );
+            let expected_json = allowed
+                .then(|| serde_json::to_string(&attribution).map(serde_json::Value::String))
+                .transpose()?;
+            assert_eq!(
+                serde_json::to_value(&request)?
+                    .get("client_metadata")
+                    .and_then(|metadata| metadata.get(MCP_ATTRIBUTION_CLIENT_METADATA_KEY)),
+                expected_json.as_ref(),
+            );
+            let ws_client_metadata = client.build_ws_client_metadata(
+                &responses_metadata,
+                include_internal,
+                responses_lite,
+            );
+            let ws_request = codex_api::ResponseCreateWsRequest {
+                client_metadata: Some(ws_client_metadata),
+                ..codex_api::ResponseCreateWsRequest::from(&request)
+            };
+            assert_eq!(
+                serde_json::to_value(ws_request)?
+                    .get("client_metadata")
+                    .and_then(|metadata| metadata.get(MCP_ATTRIBUTION_CLIENT_METADATA_KEY)),
+                expected_json.as_ref(),
+            );
+            assert!(
+                serde_json::to_value(&request)?
+                    .get("mcp_attribution")
+                    .is_none()
+            );
             assert_eq!(prompt.input, vec![output.clone()]);
         }
+    }
+    let mut oversized_attribution = attribution;
+    oversized_attribution.sources[0].tool_name = "a".repeat(MAX_MCP_ATTRIBUTION_BYTES);
+    responses_metadata.mcp_attribution = Some(oversized_attribution);
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        codex_protocol::config_types::ReasoningSummary::None,
+        /*service_tier*/ None,
+        &responses_metadata,
+        /*include_internal*/ true,
+    )?;
+    assert_eq!(
+        request.client_metadata.as_ref().and_then(|metadata| {
+            metadata
+                .get(MCP_ATTRIBUTION_CLIENT_METADATA_KEY)
+                .map(String::as_str)
+        }),
+        Some(r#"{"status":"attribution_error"}"#),
+    );
+    Ok(())
+}
+
+#[test]
+fn responses_request_preserves_result_metadata_above_previous_aggregate_budget()
+-> anyhow::Result<()> {
+    let result_metadata = [
+        json!({ "payload": "l".repeat(31 * 1024) }),
+        json!({ "payload": "m".repeat(20 * 1024) }),
+        json!({ "payload": "m".repeat(20 * 1024) }),
+        json!({ "payload": "m".repeat(20 * 1024) }),
+        json!({ "payload": "m".repeat(20 * 1024) }),
+        json!({ "payload": "m".repeat(20 * 1024) }),
+        json!({ "status": "ok" }),
+    ];
+    let sizes = result_metadata
+        .iter()
+        .map(|metadata| serde_json::to_vec(metadata).unwrap().len())
+        .collect::<Vec<_>>();
+    assert!(sizes.iter().all(|bytes| *bytes < 32 * 1024));
+    assert!(sizes.iter().sum::<usize>() > 128 * 1024);
+    let mut history = Vec::new();
+    for (index, metadata) in result_metadata.iter().enumerate() {
+        let id = format!("tool-call-{index}");
+        history.push(serde_json::from_value(json!({
+            "type": "function_call", "call_id": id, "name": "test_tool",
+            "arguments": json!({ "query": "keep" }).to_string(),
+        }))?);
+        let mut output = output_with_tool_result_metadata(ToolResultMetadata::new(metadata));
+        let ResponseItem::FunctionCallOutput { call_id, .. } = &mut output else {
+            unreachable!("helper returns a function call output");
+        };
+        *call_id = Some(id);
+        history.push(output);
+    }
+    let original_history = serde_json::to_value(&history)?;
+
+    let mut features = codex_features::Features::default();
+    features.enable(codex_features::Feature::ExecutedToolCallMetadata);
+    let recorder =
+        crate::tools::ExecutedToolCalls::new(&features, &codex_history::InitialHistory::New);
+    let mut prompt = Prompt {
+        input: history.clone(),
+        ..Default::default()
+    };
+    // Follow the sampling path: budget the request copy before client serialization.
+    recorder.attach_to_prompt(&mut prompt.input, &mut Default::default());
+    let provider =
+        ModelProviderInfo::create_openai_provider(Some("https://api.openai.com/v1".to_string()));
+    let api_provider = provider.to_api_provider(/*auth_mode*/ None)?;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let request = client.build_responses_request(
+        &prompt,
+        &test_model_info(),
+        /*effort*/ None,
+        codex_protocol::config_types::ReasoningSummary::None,
+        /*service_tier*/ None,
+        &responses_metadata,
+        super::is_internal_metadata_destination(&api_provider),
+    )?;
+    let body = serde_json::to_value(&request)?;
+    // Whole-input equality covers bindings, arguments, results, sources and completion too.
+    assert_eq!(body["input"], original_history);
+    let mut without_metadata = body.clone();
+    for item in without_metadata["input"].as_array_mut().unwrap() {
+        item.as_object_mut()
+            .unwrap()
+            .remove("internal_chat_message_metadata_passthrough");
+    }
+    let metadata_bytes =
+        serde_json::to_vec(&body)?.len() - serde_json::to_vec(&without_metadata)?.len();
+    assert!(metadata_bytes > 128 * 1024);
+    assert!(metadata_bytes <= 2 * 1024 * 1024);
+    assert_eq!(serde_json::to_value(&history)?, original_history);
+    Ok(())
+}
+
+#[test]
+fn websocket_incremental_reuse_tracks_raw_result_metadata() -> anyhow::Result<()> {
+    let provider =
+        ModelProviderInfo::create_openai_provider(Some("https://api.openai.com/v1".to_string()));
+    let mut api_provider = provider.to_api_provider(/*auth_mode*/ None)?;
+    let mut client = test_model_client(SessionSource::Cli);
+    Arc::get_mut(&mut client.state)
+        .expect("test client should have unique session state")
+        .provider = create_model_provider(provider, /*auth_manager*/ None);
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    for (scenario, base_url, previous_metadata, current_metadata, expect_incremental) in [
+        (
+            "late_result",
+            "https://api.openai.com/v1",
+            None,
+            Some("first"),
+            false,
+        ),
+        (
+            "unchanged_result",
+            "https://api.openai.com/v1",
+            Some("first"),
+            Some("first"),
+            true,
+        ),
+        (
+            "changed_result",
+            "https://api.openai.com/v1",
+            Some("first"),
+            Some("second"),
+            false,
+        ),
+        (
+            "ordinary_metadata_only",
+            "https://api.openai.com/v1",
+            None,
+            None,
+            true,
+        ),
+        (
+            "filtered_result",
+            "https://proxy.example.com/v1",
+            None,
+            Some("first"),
+            true,
+        ),
+    ] {
+        let [mut previous_output, mut current_output] =
+            [previous_metadata, current_metadata].map(|metadata| {
+                let mut call =
+                    ExecutedToolCall::new("apps_tool".to_string(), json!({ "query": "same" }));
+                if let Some(id) = metadata {
+                    call.set_tool_result_metadata(ToolResultMetadata::new(&json!({ "id": id })));
+                }
+                let mut output = ResponseItem::from(ResponseInputItem::CustomToolCallOutput {
+                    call_id: "exec-call".to_string(),
+                    name: None,
+                    output: FunctionCallOutputPayload::from_text(
+                        "Script running with cell ID cell".to_string(),
+                    ),
+                });
+                output.append_executed_tool_calls(vec![call]);
+                output.set_tool_call_cell_id("exec-call");
+                output
+            });
+        previous_output.set_turn_id_if_missing("previous-turn");
+        current_output.set_turn_id_if_missing("current-turn");
+        api_provider.base_url = base_url.to_string();
+        let include_internal = super::is_internal_metadata_destination(&api_provider);
+        let previous = client.build_responses_request(
+            &Prompt {
+                input: vec![previous_output],
+                ..Default::default()
+            },
+            &test_model_info(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            include_internal,
+        )?;
+        let follow_up = ResponseItem::from(ResponseInputItem::FunctionCallOutput {
+            call_id: "wait-call".to_string(),
+            output: FunctionCallOutputPayload::from_text("done".to_string()),
+        });
+        let current = client.build_responses_request(
+            &Prompt {
+                input: vec![current_output, follow_up.clone()],
+                ..Default::default()
+            },
+            &test_model_info(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            include_internal,
+        )?;
+
+        let mut session = client.new_session();
+        session.websocket_session.last_request = Some(previous);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        sender
+            .send(super::LastResponse {
+                response_id: "previous-response".to_string(),
+                items_added: Vec::new(),
+            })
+            .unwrap();
+        session.websocket_session.last_response_rx = Some(receiver);
+        let continuation = session.prepare_websocket_request(&current);
+        assert_eq!(
+            continuation.map(|continuation| (
+                continuation.response_id,
+                continuation.items,
+                continuation.from_untraced_warmup,
+            )),
+            expect_incremental.then_some(("previous-response".to_string(), vec![follow_up], false)),
+            "{scenario}",
+        );
     }
     Ok(())
 }
@@ -646,6 +922,7 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
                 /*parent_thread_id*/ None,
                 TestCodexResponsesRequestKind::Turn,
             ),
+            /*include_internal*/ true,
         )
     };
 
@@ -654,7 +931,8 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
 
     prompt.base_instructions.text.push_str(" with an update");
     let changed_instructions = build(&client, &prompt)?;
-    assert_ne!(changed_instructions.input[0].id(), original.input[0].id());
+    assert_eq!(changed_instructions.input[0], original.input[0]);
+    assert_ne!(changed_instructions.input[1].id(), original.input[1].id());
 
     prompt.tools = vec![codex_tools::ToolSpec::Freeform(codex_tools::FreeformTool {
         name: "exec".to_string(),
@@ -670,9 +948,9 @@ fn responses_lite_prefix_ids_track_thread_and_payload() -> anyhow::Result<()> {
     let changed_tools = build(&client, &prompt)?;
     assert_ne!(
         changed_tools.input[0].id(),
-        changed_instructions.input[0].id(),
+        changed_instructions.input[0].id()
     );
-    assert_eq!(changed_tools.input[1], changed_instructions.input[0]);
+    assert_eq!(changed_tools.input[1], changed_instructions.input[1]);
 
     let independent = build(
         &test_model_client_with_thread_id(ThreadId::new(), SessionSource::Cli),
@@ -696,6 +974,44 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+#[test]
+fn websocket_continuation_reset_reason_survives_failed_reconnect_and_turn_boundary() {
+    for (reason, later_reason) in [
+        ("connection_closed", "other"),
+        ("other", "connection_closed"),
+    ] {
+        let client = test_model_client(SessionSource::Cli);
+        let request = client
+            .build_responses_request(
+                &Prompt::default(),
+                &test_model_info(),
+                /*effort*/ None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                /*service_tier*/ None,
+                &test_responses_metadata_for_client(
+                    &client,
+                    /*turn_id*/ None,
+                    format!("{}:0", client.state.thread_id),
+                    /*parent_thread_id*/ None,
+                    TestCodexResponsesRequestKind::Turn,
+                ),
+                /*include_internal*/ true,
+            )
+            .expect("build continuation request");
+        let mut session = client.new_session();
+        session.websocket_session.last_request = Some(request);
+        session.websocket_session.reset(Some(reason));
+        session.websocket_session.reset(/*reason*/ None);
+        session.websocket_session.reset(Some(later_reason));
+        drop(session);
+        let session = client.new_session();
+        assert_eq!(
+            session.websocket_session.continuation_reset_reason,
+            Some(reason)
+        );
+    }
 }
 
 fn spawned_session_source() -> SessionSource {
@@ -728,6 +1044,7 @@ fn reasoning_effort_in_request(
                 /*parent_thread_id*/ None,
                 TestCodexResponsesRequestKind::Turn,
             ),
+            /*include_internal*/ true,
         )
         .expect("build responses request")
         .reasoning
@@ -1021,8 +1338,11 @@ fn build_ws_client_metadata_includes_window_lineage_and_turn_metadata() {
         Some(parent_thread_id),
         TestCodexResponsesRequestKind::Turn,
     );
-    let client_metadata =
-        client.build_ws_client_metadata(&responses_metadata, /*use_responses_lite*/ false);
+    let client_metadata = client.build_ws_client_metadata(
+        &responses_metadata,
+        /*include_internal*/ true,
+        /*use_responses_lite*/ false,
+    );
     let parent_thread_id = parent_thread_id.to_string();
     let turn_metadata: serde_json::Value = serde_json::from_str(
         client_metadata
@@ -1177,6 +1497,7 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
     let url = "https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses";
     let error = super::handle_unauthorized(
         TransportError::Http {
+            retry_after: None,
             status: http::StatusCode::UNAUTHORIZED,
             url: Some(url.to_string()),
             headers: None,
@@ -1270,6 +1591,7 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
         assert!(provider.auth_manager().is_none());
 
         let unauthorized = || TransportError::Http {
+            retry_after: None,
             status: http::StatusCode::UNAUTHORIZED,
             url: Some("https://example.com/v1/responses".to_string()),
             headers: None,
@@ -1480,6 +1802,7 @@ fn model_client_with_counting_attestation(
         "test_originator".to_string(),
         /*model_verbosity*/ None,
         /*content_item_kinds_enabled*/ true,
+        /*reasoning_effort_override_enabled*/ false,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -1491,6 +1814,7 @@ fn model_client_with_counting_attestation(
         codex_model_provider::WorkspaceRoutingContext::new(
             "https://chatgpt.com/backend-api".into(),
         ),
+        Vec::new(),
     );
     (model_client, attestation_calls)
 }
@@ -1552,7 +1876,7 @@ async fn websocket_handshake_includes_attestation_for_chatgpt_codex_responses(
 
     model_client.prompt_cache_key_override = cache_key.map(str::to_string);
     let headers = model_client
-        .build_websocket_headers("gpt-6-astra", &responses_metadata)
+        .build_websocket_headers(&responses_metadata)
         .await;
 
     assert_eq!(
@@ -1619,4 +1943,70 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn intercepted_output_reaches_trace_and_websocket_bookkeeping() -> anyhow::Result<()> {
+    struct ReplaceOutput;
+    impl codex_extension_api::ModelResponseInterceptor for ReplaceOutput {
+        fn intercept(
+            self: Box<Self>,
+            stream: codex_extension_api::ModelResponseStream,
+        ) -> codex_extension_api::ModelResponseStream {
+            Box::pin(stream.map(|event| {
+                event.map(|event| match event {
+                    ResponseEvent::OutputItemDone(_) => {
+                        ResponseEvent::OutputItemDone(output_message("1", "transformed"))
+                    }
+                    other => other,
+                })
+            }))
+        }
+    }
+
+    let temp = TempDir::new()?;
+    let attempt = started_inference_attempt(&temp)?;
+    let (tx_event, rx_event) = tokio::sync::mpsc::channel(2);
+    tx_event
+        .send(Ok(ResponseEvent::OutputItemDone(output_message(
+            "1", "original",
+        ))))
+        .await?;
+    tx_event
+        .send(Ok(ResponseEvent::Completed {
+            response_id: "response".into(),
+            token_usage: None,
+            usage_metadata: None,
+            end_turn: None,
+        }))
+        .await?;
+    drop(tx_event);
+    let (mut stream, last_response) = super::map_response_stream(
+        codex_api::ResponseStream {
+            rx_event,
+            upstream_request_id: None,
+        },
+        test_session_telemetry(),
+        attempt,
+        test_model_provider(),
+        vec![Box::new(ReplaceOutput)],
+    );
+    let mut delivered = Vec::new();
+    while let Some(event) = stream.next().await {
+        if let ResponseEvent::OutputItemDone(item) = event? {
+            delivered.push(item);
+        }
+    }
+    assert_eq!(delivered, vec![output_message("1", "transformed")]);
+    assert_eq!(last_response.await?.items_added, delivered);
+    let rollout = replay_bundle(temp.path())?;
+    let payload = rollout
+        .raw_payloads
+        .values()
+        .find(|payload| payload.kind == codex_rollout_trace::RawPayloadKind::InferenceResponse)
+        .expect("response trace payload");
+    let recorded: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp.path().join(&payload.path))?)?;
+    assert_eq!(recorded["output_items"], serde_json::to_value(&delivered)?);
+    Ok(())
 }

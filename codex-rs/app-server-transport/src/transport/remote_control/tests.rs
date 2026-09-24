@@ -104,7 +104,7 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
         "https://api.openai.com/auth": {
             "chatgpt_user_id": "user-12345",
             "user_id": "user-12345",
-            "chatgpt_account_id": account_id
+            "chatgpt_account_id": "account_id"
         }
     });
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
@@ -225,7 +225,6 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
     });
     let (desired_state_tx, _desired_state_rx) = watch::channel(RemoteControlDesiredState::Unknown);
     let desired_state_tx = Arc::new(desired_state_tx);
-    let (_reconnect_tx, reconnect_rx) = mpsc::channel(RECONNECT_CHANNEL_CAPACITY);
     let mut websocket = RemoteControlWebsocket::new(
         RemoteControlWebsocketConfig {
             remote_control_url: TEST_REMOTE_CONTROL_URL.to_string(),
@@ -246,7 +245,6 @@ async fn plain_start_resolves_persisted_remote_control_preference() {
         },
         CancellationToken::new(),
         desired_state_tx.clone(),
-        reconnect_rx,
     );
 
     for (name, stored_preference) in cases {
@@ -468,8 +466,6 @@ pub(super) fn remote_control_handle_with_current_enrollment(
         desired_state_tx: Arc::new(desired_state_tx),
         desired_state_rpc_lock: Arc::new(Semaphore::new(1)),
         persistence: RemoteControlPersistence::default(),
-        reconnect_tx: mpsc::channel(RECONNECT_CHANNEL_CAPACITY).0,
-        next_reconnect_generation: Arc::new(AtomicU64::new(0)),
         status_tx: Arc::new(status_tx),
         state_db: None,
         remote_control_url: remote_control_url.to_string(),
@@ -1890,7 +1886,6 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                     codex_app_server_protocol::ClientResponsePayload::Initialize(
                         codex_app_server_protocol::InitializeResponse {
                             user_agent: "codex-test-agent".to_string(),
-                            server_build: None,
                             codex_home: codex_home.path().abs(),
                             platform_family: "test-family".to_string(),
                             platform_os: "test-os".to_string(),
@@ -1911,7 +1906,6 @@ async fn remote_control_http_mode_enrolls_before_connecting() {
                 "id": 11,
                 "result": {
                     "userAgent": "codex-test-agent",
-                    "serverBuild": null,
                     "codexHome": codex_home.path(),
                     "platformFamily": "test-family",
                     "platformOs": "test-os",

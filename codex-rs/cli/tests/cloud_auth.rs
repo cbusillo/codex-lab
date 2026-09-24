@@ -36,12 +36,10 @@ async fn cloud_list_only_allows_trusted_credential_destinations() -> Result<()> 
         let mut command = assert_cmd::Command::new(codex_utils_cargo_bin::cargo_bin("codex")?);
         command
             .current_dir(codex_home.path())
-            .env("CODEX_LAB_HOME", codex_home.path())
+            .env("CODEX_HOME", codex_home.path())
             .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_CLOUD_TASKS_MODE")
-            .env("RUST_BACKTRACE", "0")
-            .env("RUST_LIB_BACKTRACE", "0")
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .timeout(std::time::Duration::from_secs(15));

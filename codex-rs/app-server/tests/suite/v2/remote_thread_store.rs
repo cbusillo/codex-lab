@@ -27,7 +27,6 @@ use codex_app_server::in_process::InProcessServerEvent;
 use codex_app_server::in_process::InProcessStartArgs;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
-use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
@@ -167,11 +166,7 @@ async fn thread_section_operations_without_sqlite_return_method_not_found() -> R
     }
 
     client.shutdown().await?;
-    let expected_execution_account_lease_files = BTreeSet::new();
-    assert_no_local_persistence_artifacts(
-        codex_home.path(),
-        &expected_execution_account_lease_files,
-    )?;
+    assert_no_local_persistence_artifacts(codex_home.path())?;
 
     Ok(())
 }
@@ -243,11 +238,7 @@ async fn thread_attachment_operations_without_sqlite_return_method_not_found() -
     }
 
     client.shutdown().await?;
-    let expected_execution_account_lease_files = BTreeSet::new();
-    assert_no_local_persistence_artifacts(
-        codex_home.path(),
-        &expected_execution_account_lease_files,
-    )?;
+    assert_no_local_persistence_artifacts(codex_home.path())?;
     Ok(())
 }
 
@@ -311,10 +302,7 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
-            params: ThreadStartParams {
-                environments: Some(Vec::new()),
-                ..ThreadStartParams::default()
-            },
+            params: ThreadStartParams::default(),
         })
         .await?
         .expect("thread/start should succeed");
@@ -370,7 +358,6 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
-                descendant_of_thread_id: None,
                 parent_thread_id: None,
                 ancestor_thread_id: None,
             },
@@ -387,13 +374,14 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
     let unloaded_thread_id = ThreadId::from_string(&Uuid::new_v4().to_string())?;
     thread_store
         .create_thread(StoreCreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: unloaded_thread_id.into(),
             thread_id: unloaded_thread_id,
             extra_config: None,
             forked_from_id: None,
             parent_thread_id: None,
             source: SessionSource::Cli,
-            session_provenance: None,
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
@@ -434,67 +422,72 @@ async fn thread_delete_with_non_local_thread_store_does_not_create_local_persist
         "turn completion should flush through the injected store"
     );
 
-    // Execution-account leases are durable routing metadata owned outside the
-    // thread store, so thread/delete does not remove the loaded thread's lease.
-    let expected_execution_account_lease_files = BTreeSet::from([format!("{}.json", thread.id)]);
-    assert_no_local_persistence_artifacts(
-        codex_home.path(),
-        &expected_execution_account_lease_files,
-    )?;
+    assert_no_local_persistence_artifacts(codex_home.path())?;
 
     Ok(())
 }
 
-#[test]
-fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .thread_stack_size(16 * 1024 * 1024)
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        tokio::spawn(run_cold_thread_resume_rechecks_non_local_history_after_config_load())
-            .await??;
-        Ok::<(), anyhow::Error>(())
-    })
-}
-
-async fn run_cold_thread_resume_rechecks_non_local_history_after_config_load() -> Result<()> {
+#[tokio::test]
+async fn cold_thread_resume_rechecks_non_local_history_after_config_load() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     let store_id = Uuid::new_v4().to_string();
     create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
 
+    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+    let config = Arc::new(
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .fallback_cwd(Some(codex_home.path().to_path_buf()))
+            .loader_overrides(loader_overrides.clone())
+            .build()
+            .await?,
+    );
     let thread_store = InMemoryThreadStore::for_id(store_id.clone());
     let _in_memory_store = InMemoryThreadStoreId { store_id };
 
-    let thread_id = start_pathless_thread_for_cold_resume(codex_home.path()).await?;
-    assert_cold_resume_reuses_history_probe(codex_home.path(), &thread_store, thread_id).await
-}
-
-async fn start_pathless_thread_for_cold_resume(codex_home: &Path) -> Result<String> {
-    let client = start_in_process_server(codex_home).await?;
+    let mut client = start_in_process_client(config.clone(), loader_overrides.clone()).await?;
     let response = client
         .request(ClientRequest::ThreadStart {
             request_id: RequestId::Integer(1),
-            params: ThreadStartParams {
-                environments: Some(Vec::new()),
-                ..ThreadStartParams::default()
-            },
+            params: ThreadStartParams::default(),
         })
         .await?
         .expect("thread/start should succeed");
     let ThreadStartResponse { thread, .. } = serde_json::from_value(response)?;
-    client.shutdown().await?;
-    Ok(thread.id)
-}
 
-async fn assert_cold_resume_reuses_history_probe(
-    codex_home: &Path,
-    thread_store: &InMemoryThreadStore,
-    thread_id: String,
-) -> Result<()> {
-    let client = start_in_process_server(codex_home).await?;
+    client
+        .request(ClientRequest::TurnStart {
+            request_id: RequestId::Integer(2),
+            params: TurnStartParams {
+                thread_id: thread.id.clone(),
+                client_user_message_id: None,
+                input: vec![V2UserInput::Text {
+                    text: "Materialize the thread".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?
+        .expect("turn/start should succeed");
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(event) = client.next_event().await else {
+                anyhow::bail!("in-process app-server stopped before turn/completed");
+            };
+            if let InProcessServerEvent::ServerNotification(notification) = event
+                && let ServerNotification::TurnCompleted(completed) = notification.as_ref()
+                && completed.thread_id == thread.id
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    client.shutdown().await?;
+
+    let client = start_in_process_client(config, loader_overrides).await?;
     let reads_before_resume = thread_store.calls().await.read_thread_with_history;
     // The in-memory store is pathless, so resume currently fails later while
     // assembling the response. Reuse the probe within each attempt, but read it
@@ -503,7 +496,7 @@ async fn assert_cold_resume_reuses_history_probe(
         .request(ClientRequest::ThreadResume {
             request_id: RequestId::Integer(3),
             params: ThreadResumeParams {
-                thread_id,
+                thread_id: thread.id.clone(),
                 ..Default::default()
             },
         })
@@ -533,15 +526,14 @@ async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
 ) -> std::io::Result<InProcessClientHandle> {
-    let mut config = config.as_ref().clone();
-    config.analytics_enabled = Some(false);
     in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
-        config: Arc::new(config),
+        config,
         cli_overrides: Vec::new(),
         loader_overrides,
         strict_config: false,
         cloud_config_bundle: CloudConfigBundleLoader::default(),
+        embedded_network_policy: Default::default(),
         thread_config_loader: Arc::new(NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
@@ -549,7 +541,6 @@ async fn start_in_process_client(
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
-        session_provenance: None,
         enable_codex_api_key_env: false,
         initialize: InitializeParams {
             client_info: ClientInfo {
@@ -557,10 +548,7 @@ async fn start_in_process_client(
                 title: None,
                 version: "0.1.0".to_string(),
             },
-            capabilities: Some(InitializeCapabilities {
-                experimental_api: true,
-                ..Default::default()
-            }),
+            capabilities: None,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
@@ -583,15 +571,11 @@ async fn delete_thread(
     Ok(())
 }
 
-fn assert_no_local_persistence_artifacts(
-    codex_home: &Path,
-    expected_execution_account_lease_files: &BTreeSet<String>,
-) -> Result<()> {
+fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
     // These are the observable tripwires for accidental local persistence. If a
     // future code path constructs a local rollout/session store or opens the
     // local thread sqlite database, it should leave one of these artifacts in
-    // the isolated test codex_home. Durable execution-account routing metadata
-    // is checked separately against the exact caller-provided lease filenames.
+    // the isolated test codex_home.
     assert!(
         !codex_home.join("sessions").exists(),
         "non-local thread persistence should not create local rollout sessions"
@@ -625,23 +609,10 @@ fn assert_no_local_persistence_artifacts(
         sqlite_artifacts.is_empty(),
         "non-local thread persistence should not create sqlite artifacts: {sqlite_artifacts:?}"
     );
-    let execution_account_lease_dir = codex_home.join("execution-account-leases");
-    let execution_account_lease_files = if execution_account_lease_dir.exists() {
-        codex_home_entries(&execution_account_lease_dir)?
-    } else {
-        BTreeSet::new()
-    };
-    assert_eq!(
-        &execution_account_lease_files, expected_execution_account_lease_files,
-        "non-local thread persistence should not create unexpected execution account leases"
-    );
     let mut entries = codex_home_entries(codex_home)?;
     // Host startup may leave sandbox migration markers, and Bazel test runs may
-    // initialize shell snapshot storage. Execution account initialization also
-    // creates its lease directory, whose exact contents were verified above.
-    // None of these are thread persistence.
+    // initialize shell snapshot storage. Neither is thread persistence.
     entries.remove(".sandbox_migration");
-    entries.remove("execution-account-leases");
     entries.remove("shell_snapshots");
     assert_eq!(
         entries,

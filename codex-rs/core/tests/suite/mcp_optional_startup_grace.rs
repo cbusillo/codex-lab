@@ -46,10 +46,10 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
         | StartupGraceScenario::DisabledGraceRespectsStartupTimeout => Duration::ZERO,
     };
     let startup_timeout = match scenario {
-        StartupGraceScenario::DisabledGraceRespectsStartupTimeout => Duration::from_secs(10),
+        StartupGraceScenario::DisabledGraceRespectsStartupTimeout => Duration::from_millis(250),
         StartupGraceScenario::ShortGraceOmitsPending
         | StartupGraceScenario::CustomGraceIncludesReady
-        | StartupGraceScenario::DisabledGraceWaitsForStartup => Duration::from_secs(10),
+        | StartupGraceScenario::DisabledGraceWaitsForStartup => Duration::from_secs(1),
     };
     let responses_server = responses::start_mock_server().await;
     let mcp_server = responses::start_mock_server().await;
@@ -90,7 +90,7 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
         .build_with_auto_env(&responses_server)
         .await?;
 
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         while startup_control.initialize_attempts() == 0 {
             tokio::task::yield_now().await;
         }
@@ -101,7 +101,7 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
     let mut turn = Box::pin(fixture.submit_turn("show optional MCP tools"));
     match scenario {
         StartupGraceScenario::ShortGraceOmitsPending => {
-            tokio::time::timeout(Duration::from_secs(5), &mut turn)
+            tokio::time::timeout(Duration::from_millis(500), &mut turn)
                 .await
                 .context("the configured grace should omit the pending server")??;
             release_startup
@@ -118,7 +118,7 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
             release_startup
                 .send(())
                 .expect("optional MCP startup should remain in flight");
-            tokio::time::timeout(Duration::from_secs(10), &mut turn)
+            tokio::time::timeout(Duration::from_secs(2), &mut turn)
                 .await
                 .context("a server ready within the configured grace should reach the model")??;
         }
@@ -132,7 +132,7 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
             release_startup
                 .send(())
                 .expect("zero-grace optional MCP startup should remain in flight");
-            tokio::time::timeout(Duration::from_secs(10), &mut turn)
+            tokio::time::timeout(Duration::from_secs(2), &mut turn)
                 .await
                 .context("zero grace should include a server ready before its startup timeout")??;
         }
@@ -143,7 +143,7 @@ async fn optional_mcp_startup_grace_controls_initial_turn_tool_catalog(
                     .is_err(),
                 "zero grace should keep waiting until the server-specific startup timeout"
             );
-            tokio::time::timeout(Duration::from_secs(12), &mut turn)
+            tokio::time::timeout(Duration::from_secs(1), &mut turn)
                 .await
                 .context("zero grace should stop waiting once the server startup times out")??;
             release_startup
@@ -206,7 +206,7 @@ async fn running_thread_uses_refreshed_optional_mcp_startup_grace(
                     "url": server_url,
                     "http_headers": { "Authorization": "Bearer synthetic-test-token" },
                     "enabled_tools": [TOOL_NAME],
-                    "startup_timeout_sec": 15,
+                    "startup_timeout_sec": 5,
                 }))
                 .expect("synthetic optional MCP server configuration"),
             );
@@ -218,7 +218,7 @@ async fn running_thread_uses_refreshed_optional_mcp_startup_grace(
         .build_with_auto_env(&responses_server)
         .await?;
 
-    tokio::time::timeout(Duration::from_secs(15), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         while startup_control.initialize_attempts() == 0 {
             tokio::task::yield_now().await;
         }
@@ -227,7 +227,7 @@ async fn running_thread_uses_refreshed_optional_mcp_startup_grace(
     .context("optional MCP initialization should begin before the initial turn")?;
 
     tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_millis(500),
         fixture.submit_turn("show initial optional MCP tools"),
     )
     .await
@@ -278,7 +278,7 @@ async fn running_thread_uses_refreshed_optional_mcp_startup_grace(
     release_startup
         .send(())
         .expect("the existing optional MCP startup should remain in flight");
-    tokio::time::timeout(Duration::from_secs(10), &mut refreshed_turn)
+    tokio::time::timeout(Duration::from_secs(2), &mut refreshed_turn)
         .await
         .context("an optional MCP ready within the refreshed grace should reach the model")??;
     assert!(

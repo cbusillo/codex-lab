@@ -5,8 +5,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use codex_core::TurnInputRequest;
-use codex_core::config::Config;
-use codex_features::Feature;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookOutputEntry;
@@ -88,25 +86,7 @@ fn read_interrupt_hook_inputs(home: &Path) -> Result<Vec<Value>> {
         .collect()
 }
 
-fn cache_mock_responses_proxy_route(server: &MockServer) {
-    codex_http_client::cache_direct_system_proxy_route_for_test(&format!(
-        "{}/v1/responses",
-        server.uri()
-    ));
-}
-
-fn configure_interrupt_test(config: &mut Config) {
-    trust_discovered_hooks(config);
-    config.agent_interrupt_message_enabled = false;
-    config.respect_system_proxy = true;
-    config
-        .features
-        .disable(Feature::Plugins)
-        .expect("plugins should be disabled for interrupt hook tests");
-}
-
 async fn build_test(server: &MockServer, system_message: Option<&str>) -> Result<TestCodex> {
-    cache_mock_responses_proxy_route(server);
     let system_message = system_message.map(str::to_string);
     test_codex()
         .with_model("gpt-5.4")
@@ -114,7 +94,10 @@ async fn build_test(server: &MockServer, system_message: Option<&str>) -> Result
             write_interrupt_hook(home, system_message.as_deref())
                 .unwrap_or_else(|error| panic!("failed to write interrupt hook fixture: {error}"));
         })
-        .with_config(configure_interrupt_test)
+        .with_config(|config| {
+            trust_discovered_hooks(config);
+            config.agent_interrupt_message_enabled = false;
+        })
         .build_with_auto_env(server)
         .await
 }
@@ -304,9 +287,7 @@ async fn async_interrupt_hook_runs_without_delaying_turn_aborted() -> Result<()>
     );
 
     let server = start_mock_server().await;
-    cache_mock_responses_proxy_route(&server);
     let test = test_codex()
-        .with_model("gpt-5.4")
         .with_pre_build_hook(|home| {
             write_interrupt_hook(home, Some("async interrupt completed"))
                 .expect("write interrupt hook fixture");
@@ -330,7 +311,7 @@ async fn async_interrupt_hook_runs_without_delaying_turn_aborted() -> Result<()>
             );
             fs::write(script_path, gated_script).expect("write gated async interrupt script");
         })
-        .with_config(configure_interrupt_test)
+        .with_config(trust_discovered_hooks)
         .build_with_auto_env(&server)
         .await?;
     start_interruptible_turn(&test, &server).await?;

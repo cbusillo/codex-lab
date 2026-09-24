@@ -17,7 +17,6 @@ use std::collections::HashSet;
 
 /// Existing maximum rendered text size, including markers and omission notices.
 const MAX_RENDERED_BYTES: usize = 32_000;
-const MAX_RENDERED_IMAGES: usize = 4;
 const MAX_RENDERED_OMISSION_BYTES: usize = 160;
 
 /// Which retained REPL evidence the synchronous reviewer may receive.
@@ -135,30 +134,10 @@ impl NodeReplContext<'_> {
         }
 
         let mut seen_images = HashSet::new();
-        let mut retained_images = HashSet::new();
-        let mut omitted_images = 0_usize;
-        for (response, _) in &selected {
-            for item in response.items.iter().rev() {
-                if let Image {
-                    image: ImageReference::Inline { image_url },
-                    ..
-                } = item
-                    && seen_images.insert(image_url.as_str())
-                {
-                    if retained_images.len() < MAX_RENDERED_IMAGES {
-                        retained_images.insert(image_url.as_str());
-                    } else {
-                        omitted_images = omitted_images.saturating_add(1);
-                    }
-                }
-            }
-        }
-
-        let mut rendered_images = HashSet::new();
         let mut inputs = vec![text_input(intro)];
 
-        for (response, header) in selected.iter().rev() {
-            inputs.push(text_input(header.clone()));
+        for (response, header) in selected.into_iter().rev() {
+            inputs.push(text_input(header));
             if response.items.is_empty() {
                 inputs.push(text_input("<completed without visible text>\n".to_string()));
             }
@@ -168,11 +147,7 @@ impl NodeReplContext<'_> {
                     Image {
                         image: ImageReference::Inline { image_url },
                         ..
-                    } if retained_images.contains(image_url.as_str())
-                        && rendered_images.insert(image_url.as_str()) =>
-                    {
-                        inputs.push(item.clone());
-                    }
+                    } if seen_images.insert(image_url) => inputs.push(item.clone()),
                     _ => {}
                 }
             }
@@ -183,19 +158,10 @@ impl NodeReplContext<'_> {
                 "<omitted node_repl_responses=\"{omitted_responses}\" reason=\"resource_bounds\" />\n"
             )));
         }
-        if omitted_images > 0 {
-            inputs.push(text_input(format!(
-                "<omitted node_repl_images=\"{omitted_images}\" reason=\"resource_bounds\" />\n"
-            )));
-        }
         inputs.push(text_input(closing.to_string()));
         inputs
     }
 }
-
-#[cfg(test)]
-#[path = "node_repl_tests.rs"]
-mod tests;
 
 impl ContextualUserFragment for NodeReplContext<'_> {
     fn content_kind(&self) -> ContentItemKind {

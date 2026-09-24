@@ -105,7 +105,6 @@ mod thread_processor_behavior_tests {
     }
 
     use super::super::*;
-    use crate::config_manager::ConfigManagerArgs;
     use crate::outgoing_message::OutgoingEnvelope;
     use crate::outgoing_message::OutgoingMessage;
     use anyhow::Result;
@@ -483,7 +482,6 @@ mod thread_processor_behavior_tests {
             cwd: PathBuf::from("/tmp"),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
-            session_provenance: None,
             history_mode: Default::default(),
             thread_source: Some(codex_protocol::protocol::ThreadSource::User),
             agent_nickname: None,
@@ -596,10 +594,12 @@ mod thread_processor_behavior_tests {
         let session_provider = ModelProviderInfo {
             name: "session".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
+            model_catalog_url: None,
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
             auth: None,
+            gateway_oauth: None,
             aws: None,
             wire_api: WireApi::Responses,
             query_params: None,
@@ -612,17 +612,15 @@ mod thread_processor_behavior_tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: false,
-            capabilities: codex_model_provider_info::ModelProviderCapabilities::default(),
         };
-        let config_manager = ConfigManager::new(ConfigManagerArgs {
-            auth_home: temp_dir.path().to_path_buf(),
-            codex_home: temp_dir.path().to_path_buf(),
-            cli_overrides: Vec::new(),
-            loader_overrides: LoaderOverrides::default(),
-            strict_config: false,
-            cloud_config_bundle: CloudConfigBundleLoader::default(),
-            arg0_paths: Arg0DispatchPaths::default(),
-            thread_config_loader: Arc::new(StaticThreadConfigLoader::new(vec![
+        let config_manager = ConfigManager::new(
+            temp_dir.path().to_path_buf(),
+            Vec::new(),
+            LoaderOverrides::default(),
+            /*strict_config*/ false,
+            CloudConfigBundleLoader::default(),
+            Arg0DispatchPaths::default(),
+            Arc::new(StaticThreadConfigLoader::new(vec![
                 ThreadConfigSource::Session(SessionThreadConfig {
                     model_provider: Some("session".to_string()),
                     model_providers: HashMap::from([(
@@ -632,7 +630,7 @@ mod thread_processor_behavior_tests {
                     features: BTreeMap::from([("plugins".to_string(), false)]),
                 }),
             ])),
-        });
+        );
         let config = config_manager
             .load_with_overrides(
                 Some(HashMap::from([
@@ -707,9 +705,7 @@ mod thread_processor_behavior_tests {
                     developer_instructions: None,
                 },
             },
-            automatic_validation_enabled: false,
             session_source: SessionSource::Cli,
-            session_provenance: None,
             history_mode: Default::default(),
             forked_from_thread_id: None,
             parent_thread_id: None,

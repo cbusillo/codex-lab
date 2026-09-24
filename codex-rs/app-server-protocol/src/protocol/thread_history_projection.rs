@@ -9,7 +9,7 @@ use codex_rollout::RolloutLine;
 
 use crate::protocol::thread_history::ThreadHistoryChangeSet;
 use crate::protocol::thread_history::ThreadHistoryItemChange;
-use crate::protocol::thread_history::ThreadHistoryTurnChange;
+use crate::protocol::thread_history::ThreadHistoryTurnMetadata;
 use crate::protocol::v2::ThreadItem;
 use crate::protocol::v2::TurnError;
 use crate::protocol::v2::TurnStatus;
@@ -21,7 +21,7 @@ use crate::protocol::v2::TurnStatus;
 pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
     match &line.item {
         RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: event.turn_id.clone(),
                 root_turn_id: event.root_turn_id.clone(),
                 status: TurnStatus::InProgress,
@@ -33,7 +33,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             ..Default::default()
         },
         RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => ThreadHistoryChangeSet {
-            changed_turns: vec![ThreadHistoryTurnChange {
+            changed_turns: vec![ThreadHistoryTurnMetadata {
                 turn_id: event.turn_id.clone(),
                 root_turn_id: None,
                 status: if event.error.is_some() {
@@ -58,7 +58,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
                 return ThreadHistoryChangeSet::default();
             };
             ThreadHistoryChangeSet {
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: turn_id.clone(),
                     root_turn_id: None,
                     status: TurnStatus::Interrupted,
@@ -79,38 +79,6 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
             }],
             ..Default::default()
         },
-        RolloutItem::EventMsg(EventMsg::ProjectValidationCompleted(event)) => {
-            let id = match event.item_id.clone() {
-                Some(item_id) => item_id,
-                None => {
-                    let Some(ordinal) = line.ordinal else {
-                        return ThreadHistoryChangeSet::default();
-                    };
-                    format!("project-validation-{ordinal}")
-                }
-            };
-            ThreadHistoryChangeSet {
-                changed_items: vec![ThreadHistoryItemChange {
-                    turn_id: event.turn_id.clone(),
-                    item: ThreadItem::ProjectValidation {
-                        id,
-                        command: event.command.clone(),
-                        command_truncated: event.command_truncated,
-                        cwd: event.cwd.clone(),
-                        status: event.status.into(),
-                        skip_reason: event.skip_reason.map(Into::into),
-                        changed_file_count: event.changed_file_count,
-                        exit_code: event.exit_code,
-                        output: event.output.clone(),
-                        output_truncated: event.output_truncated,
-                        duration_ms: event.duration_ms,
-                    },
-                    started_at_ms: None,
-                    completed_at_ms: None,
-                }],
-                ..Default::default()
-            }
-        }
         RolloutItem::SessionMeta(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)

@@ -25,6 +25,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
@@ -160,7 +161,10 @@ impl McpServerContributor<Config> for AppsMcpServerContributor {
                     .expect("test Apps MCP server config should be valid"),
             );
             let contribution = if self.id == "hosted_plugin_runtime" {
-                McpServerContribution::HostedApps { config }
+                McpServerContribution::HostedApps {
+                    config,
+                    protocol_mode: None,
+                }
             } else {
                 McpServerContribution::Set {
                     name: CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -269,7 +273,7 @@ fn config_with_mcp_marker(base: &Config, marker: &str) -> Config {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn root_and_resident_subagent_reuse_root_mcp_session_source() -> Result<()> {
+async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const PARENT_PROMPT: &str = "spawn an agent to verify its MCP session source";
@@ -348,15 +352,14 @@ async fn root_and_resident_subagent_reuse_root_mcp_session_source() -> Result<()
     let observed_sources = observed_sources
         .lock()
         .expect("observed sources lock should not be poisoned");
-    assert!(
-        observed_sources.len() >= 2,
-        "expected root and resident-child MCP projections: {observed_sources:?}"
-    );
-    assert!(
-        observed_sources
-            .iter()
-            .all(|source| source == &SessionSource::Exec)
-    );
+    assert!(observed_sources.contains(&SessionSource::Exec));
+    assert!(observed_sources.iter().any(|source| matches!(
+        source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            ..
+        }) if *parent_thread_id == test.session_configured.thread_id
+    )));
 
     Ok(())
 }
@@ -494,10 +497,7 @@ async fn root_reconciliation_reuses_pending_apps_startup() -> Result<()> {
                 ),
                 shell_environment_policy: Default::default(),
                 windows_sandbox_level: WindowsSandboxLevel::from_config(&test.config),
-                windows_sandbox_private_desktop: test
-                    .config
-                    .permissions
-                    .windows_sandbox_private_desktop,
+                windows_sandbox_type: test.config.permissions.windows_sandbox_type,
                 use_legacy_landlock: test.config.features.use_legacy_landlock(),
                 exec_policy: None,
                 mcp_policy: None,
@@ -1339,12 +1339,14 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
             .count(),
         0
     );
+    let initial_tools_state = initial_request
+        .message_input_texts("developer")
+        .into_iter()
+        .find(|text| text.contains("<tools>"))
+        .expect("initial request should contain tools world state");
     assert!(
-        initial_request
-            .message_input_texts("developer")
-            .iter()
-            .all(|text| !text.contains("<tools>")),
-        "empty deferred tool world state should not render before recovery"
+        !initial_tools_state.contains(SEARCH_CALENDAR_NAMESPACE),
+        "Calendar namespace should not be advertised before recovery: {initial_tools_state}"
     );
 
     release_apps_recovery
@@ -1391,13 +1393,13 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
     let recovered_tools_state = requests[1]
         .message_input_texts("developer")
         .into_iter()
-        .find(|text| text.contains("<tools>"))
-        .expect("recovered request should contain deferred tools world state");
+        .find(|text| text.contains("Added deferred tool namespaces:"))
+        .expect("recovered request should contain a tools world-state delta");
     assert!(
         recovered_tools_state.contains(&format!(
             "- {SEARCH_CALENDAR_NAMESPACE}: Plan events and manage your calendar."
         )),
-        "Calendar namespace and description should be available after recovery: {recovered_tools_state}"
+        "Calendar namespace and description should be added after recovery: {recovered_tools_state}"
     );
     let recovered_body = requests[1].body_json();
     assert!(

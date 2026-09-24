@@ -6,25 +6,21 @@
 
 use super::session::SessionConfiguration;
 use super::*;
-use crate::execution_account::ExecutionAccountSnapshot;
 use crate::mcp::McpRuntimeProjection;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ElicitationReviewerHandle;
-use codex_mcp::McpEnvironmentAuthority;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::McpServerSource;
 use codex_mcp::McpStartupPolicy;
 use codex_mcp::PreparedMcpCall;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
-use codex_protocol::protocol::EnvironmentConfigState;
 use std::collections::HashSet;
 
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
     pub(super) auth: Option<CodexAuth>,
-    pub(super) execution_snapshot: ExecutionAccountSnapshot,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) session_source: SessionSource,
@@ -34,38 +30,10 @@ pub(super) struct McpDesiredState {
 }
 
 impl Session {
-    pub(super) fn codex_apps_execution_auth(
-        desired: &McpDesiredState,
-    ) -> codex_mcp::CodexAppsExecutionAuth {
-        let auth = desired
-            .execution_snapshot
-            .auth
-            .clone()
-            .filter(CodexAuth::uses_codex_backend);
-        codex_mcp::CodexAppsExecutionAuth {
-            tools_cache_key: auth
-                .as_ref()
-                .map(|auth| connector_runtime_context_key(Some(auth))),
-            auth_provider: auth
-                .as_ref()
-                .map(|_| Arc::clone(&desired.execution_snapshot.auth_provider)),
-            auth_manager: auth
-                .as_ref()
-                .map(|_| Arc::clone(&desired.execution_snapshot.auth_manager)),
-            auth,
-            connection_discriminator: desired
-                .execution_snapshot
-                .cache_identity
-                .connection_discriminator(),
-            revision: desired.execution_snapshot.revision,
-        }
-    }
-
     pub(super) fn mcp_inputs_differ(
         &self,
         current: &SessionConfiguration,
         next: &SessionConfiguration,
-        updates: &SessionSettingsUpdate,
     ) -> bool {
         current.cwd() != next.cwd()
             || current.step_settings.approval_policy.value()
@@ -73,9 +41,6 @@ impl Session {
             || current.step_settings.approvals_reviewer != next.step_settings.approvals_reviewer
             || current.permission_profile() != next.permission_profile()
             || current.windows_sandbox_level != next.windows_sandbox_level
-            || updates.environments.as_ref().is_some_and(|environments| {
-                environments.environments != self.services.turn_environments.selections()
-            })
     }
 
     /// Waits on this session's refreshed server before tool execution is admitted.
@@ -104,6 +69,7 @@ impl Session {
     pub(super) async fn latest_mcp_desired_state(
         &self,
         auth: Option<CodexAuth>,
+        environments: TurnEnvironmentSnapshot,
     ) -> McpDesiredState {
         let (session_configuration, disabled_plugin_ids) = {
             let state = self.state.lock().await;
@@ -112,13 +78,15 @@ impl Session {
                 state.active_disabled_plugin_ids.clone(),
             )
         };
-        let environments = self.services.turn_environments.snapshot().await;
         let cwd = environments
             .primary()
             .and_then(|environment| environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
-        let config = self.build_per_turn_config(&session_configuration, cwd);
-        let execution_snapshot = self.services.execution_account.snapshot().await;
+        let config = self.build_per_turn_config(
+            &session_configuration,
+            cwd,
+            environments.primary_workspace_roots(),
+        );
         let local_process_cwd = environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
@@ -127,10 +95,9 @@ impl Session {
         McpDesiredState {
             config: Arc::new(config),
             auth,
-            execution_snapshot,
             submit_id: self.next_internal_sub_id(),
-            originator: session_configuration.originator.clone(),
-            session_source: session_configuration.session_source.clone(),
+            originator: session_configuration.originator,
+            session_source: session_configuration.session_source,
             environments,
             local_process_cwd,
             disabled_plugin_ids,
@@ -147,16 +114,18 @@ impl Session {
     ) -> anyhow::Result<()> {
         let cwd = AbsolutePathBuf::from_absolute_path(mcp_runtime_cwd)
             .unwrap_or_else(|_| session_configuration.cwd().clone());
-        let config = self.build_per_turn_config(session_configuration, cwd);
+        let config = self.build_per_turn_config(
+            session_configuration,
+            cwd,
+            resolved_environments.primary_workspace_roots(),
+        );
         let local_process_cwd = resolved_environments
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
             .to_path_buf();
-        let execution_snapshot = self.services.execution_account.snapshot().await;
         let desired = McpDesiredState {
             config: Arc::new(config),
             auth,
-            execution_snapshot,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -299,35 +268,11 @@ impl Session {
             }
 
             if let Some(catalog) = catalog {
-                let selections = self.services.turn_environments.selections();
+                let selections = environments.all_selections();
+                let environment_scope = McpEnvironmentScope::Selected(&selections);
                 projection.config.mcp_server_catalog =
                     catalog.build_with_environment_authority(|environment_id| {
-                        let Some(selection) = selections
-                            .iter()
-                            .find(|selection| selection.environment_id == environment_id)
-                        else {
-                            return if environment_id
-                                == codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID
-                            {
-                                McpEnvironmentAuthority::Unrestricted
-                            } else {
-                                McpEnvironmentAuthority::SelectedPluginsOnly
-                            };
-                        };
-                        match &selection.config {
-                            EnvironmentConfigState::FromThread => {
-                                McpEnvironmentAuthority::Unrestricted
-                            }
-                            EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => {
-                                McpEnvironmentAuthority::Unavailable
-                            }
-                            EnvironmentConfigState::Ready(config) => config
-                                .mcp_policy
-                                .as_ref()
-                                .map_or(McpEnvironmentAuthority::Unrestricted, |policy| {
-                                    McpEnvironmentAuthority::Restricted(policy)
-                                }),
-                        }
+                        environment_scope.authority_for(environment_id)
                     });
             }
             projection
@@ -356,10 +301,7 @@ impl Session {
             ready_selected_capability_roots,
             elicitation_reviewer,
         );
-        self.services
-            .mcp_runtime
-            .replace_with_codex_apps_execution_auth(input, Self::codex_apps_execution_auth(desired))
-            .await;
+        self.services.mcp_runtime.replace(input).await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
 
@@ -409,16 +351,8 @@ impl Session {
             desired.local_process_cwd.clone(),
         )
         .with_selected_environments(
-            desired
-                .environments
-                .turn_environments()
-                .map(|environment| {
-                    (
-                        environment.selection.environment_id.clone(),
-                        Arc::clone(&environment.environment),
-                    )
-                })
-                .collect(),
+            desired.environments.all_selections().into(),
+            desired.environments.ready_environment_handles(),
         );
         McpRuntimeInput {
             startup_policy: if matches!(desired.session_source, SessionSource::SubAgent(_)) {

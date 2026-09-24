@@ -74,9 +74,6 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::EnvironmentDisconnected(_)
         | ServerNotification::ThreadSettingsUpdated(_)
         | ServerNotification::ThreadTokenUsageUpdated(_)
-        | ServerNotification::ProjectValidationCompleted(_)
-        | ServerNotification::BackgroundAutoReviewStatusChanged(_)
-        | ServerNotification::ExternalAgentCapabilitiesUpdated(_)
         | ServerNotification::TurnStarted(_)
         | ServerNotification::HookStarted(_)
         | ServerNotification::TurnCompleted(_)
@@ -137,7 +134,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::ThreadRealtimeClosed(_)
         | ServerNotification::WindowsWorldWritableWarning(_)
         | ServerNotification::WindowsSandboxSetupCompleted(_)
-        | ServerNotification::AccountLoginCompleted(_) => notification,
+        | ServerNotification::AccountLoginCompleted(_)
+        | ServerNotification::GatewayOAuthChanged(_) => notification,
     }
 }
 
@@ -213,7 +211,6 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
         | ThreadItem::Sleep(_)
         | ThreadItem::EnteredReviewMode { .. }
         | ThreadItem::ExitedReviewMode { .. }
-        | ThreadItem::ProjectValidation { .. }
         | ThreadItem::ContextCompaction { .. } => {}
     }
     item

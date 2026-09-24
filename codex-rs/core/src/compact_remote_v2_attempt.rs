@@ -6,8 +6,6 @@ use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact_remote_history::trim_function_call_history_to_fit_context_window;
-use crate::context_manager::ModelRequestHistoryMode;
-use crate::context_manager::ProjectValidationCorrectionPair;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -23,7 +21,6 @@ pub(super) struct RemoteCompactV2Attempt {
     pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) prompt_input_metadata: Vec<Option<CodexHarnessMetadata>>,
     pub(super) compaction_output: ResponseItem,
-    pub(super) correction_pair: Option<ProjectValidationCorrectionPair>,
     pub(super) compaction_response_id: String,
     pub(super) token_usage: Option<TokenUsage>,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
@@ -34,14 +31,12 @@ pub(super) async fn run_remote_compact_v2_attempt(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     client_session: Option<&mut ModelClientSession>,
-    model_request_history_mode: ModelRequestHistoryMode,
     compaction_trace: &CompactionTraceContext,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactV2Attempt> {
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
-    let correction_pair = history.apply_model_request_history_mode(model_request_history_mode);
     let base_instructions = sess.get_prompt_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
@@ -78,7 +73,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         .unzip();
     sess.services
         .executed_tool_calls
-        .strip_disabled_direct_metadata(&mut input);
+        .attach_to_compaction_prompt(&mut input);
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
@@ -88,7 +83,6 @@ pub(super) async fn run_remote_compact_v2_attempt(
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
-        max_output_tokens: None,
         cyber_access_program: turn_context.cyber_access_program,
     };
 
@@ -132,7 +126,6 @@ pub(super) async fn run_remote_compact_v2_attempt(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
-        correction_pair,
         compaction_response_id: response_id,
         token_usage,
         owned_client_session,

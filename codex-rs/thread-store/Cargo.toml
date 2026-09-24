@@ -12,11 +12,6 @@ doctest = false
 [lints]
 workspace = true
 
-[package.metadata.cargo-shear]
-# Retained reference implementation for the removed retention CLI surface; it
-# is intentionally not wired into the current downstream thread-store module.
-ignored-paths = ["src/local/retention_preview.rs"]
-
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
 codex-app-server-protocol = { workspace = true }
@@ -35,6 +30,7 @@ pulldown-cmark = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
+sqlx-macros = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

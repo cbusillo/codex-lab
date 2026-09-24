@@ -56,7 +56,6 @@ async fn codex_delegate_ignores_legacy_deltas() {
     // Kick off review (delegated).
     test.codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Please review".to_string(),
@@ -115,7 +114,6 @@ async fn codex_delegate_rejects_escalation_requests_when_parent_can_prompt() {
 
     test.codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review without requesting approval".to_string(),
@@ -213,7 +211,6 @@ default_tools_approval_mode = "prompt"
 
     test.codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review the [$calendar](app://calendar) integration".to_string(),
@@ -311,7 +308,6 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
 
     test.codex
         .submit(Op::Review {
-            persistence: None,
             review_request: ReviewRequest {
                 target: ReviewTarget::Custom {
                     instructions: "Review with $dependency-skill".to_string(),

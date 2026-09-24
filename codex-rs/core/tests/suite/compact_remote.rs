@@ -6,6 +6,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::InitialHistory;
@@ -28,6 +29,7 @@ use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::RealtimeOutputModality;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
+use core_test_support::ThreadIdle;
 use core_test_support::responses;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
@@ -44,6 +46,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use test_case::test_case;
 use tokio::time::Duration;
 use wiremock::ResponseTemplate;
@@ -104,6 +107,7 @@ async fn start_realtime_conversation(codex: &codex_core::CodexThread) -> Result<
             codex_response_item_prefix: None,
             codex_response_handoff_mode:
                 codex_protocol::protocol::CodexResponseHandoffMode::Thinking,
+            backend_reasoning_status: false,
             codex_response_handoff_channel_prefixes: None,
             model: None,
             output_modality: RealtimeOutputModality::Audio,
@@ -605,11 +609,14 @@ async fn amazon_bedrock_automatic_compaction_uses_v2_responses_endpoint() -> Res
     Ok(())
 }
 
-#[test_case(None; "default_trims_images")]
-#[test_case(Some(false); "disabled_preserves_images")]
+#[test_case(None, "image_url"; "default_trims_images")]
+#[test_case(Some(false), "image_url"; "disabled_preserves_images")]
+#[test_case(None, "file_id"; "default_trims_file_images")]
+#[test_case(Some(false), "file_id"; "disabled_preserves_file_images")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_compact_v2_charges_retained_images_to_token_budget(
     image_budget_enabled: Option<bool>,
+    image_field: &str,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -630,6 +637,14 @@ async fn remote_compact_v2_charges_retained_images_to_token_budget(
     // Each original-detail image costs 10,000 estimated patch tokens.
     let image_inputs = (1..=8)
         .map(|number| {
+            if image_field == "file_id" {
+                return Ok(UserInput::Image {
+                    image: ImageReference::File {
+                        file_id: format!("file_{number}"),
+                    },
+                    detail: Some(codex_protocol::models::ImageDetail::Original),
+                });
+            }
             let image = image::ImageBuffer::from_pixel(
                 /*width*/ 3200,
                 /*height*/ 3200,
@@ -666,7 +681,24 @@ async fn remote_compact_v2_charges_retained_images_to_token_budget(
         .await?;
     wait_for_turn_complete(codex).await;
     let initial_request = initial_mock.single_request();
-    let prepared_images = initial_request.message_input_image_urls("user");
+    let prepared_images = initial_request
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|item| item["role"] == "user")
+        .flat_map(|item| {
+            item["content"]
+                .as_array()
+                .expect("message content is an array")
+                .clone()
+        })
+        .filter(|item| item["type"] == "input_image")
+        .map(|item| {
+            item[image_field]
+                .as_str()
+                .expect("image input has a string reference")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
     assert_eq!(prepared_images.len(), 7);
 
     for cycle in 1..=2 {
@@ -717,16 +749,33 @@ async fn remote_compact_v2_charges_retained_images_to_token_budget(
         };
         let mut expected_images = prepared_images[dropped..].to_vec();
         if cycle == 2 {
-            let UserInput::Image {
-                image: ImageReference::Inline { image_url },
-                ..
-            } = &image_inputs[7]
-            else {
+            let UserInput::Image { image, .. } = &image_inputs[7] else {
                 unreachable!()
             };
-            expected_images.push(image_url.clone());
+            expected_images.push(match image {
+                ImageReference::Inline { image_url } => image_url.clone(),
+                ImageReference::File { file_id } => file_id.clone(),
+            });
         }
-        assert_eq!(follow_up.message_input_image_urls("user"), expected_images);
+        let retained_images = follow_up
+            .inputs_of_type("message")
+            .into_iter()
+            .filter(|item| item["role"] == "user")
+            .flat_map(|item| {
+                item["content"]
+                    .as_array()
+                    .expect("message content is an array")
+                    .clone()
+            })
+            .filter(|item| item["type"] == "input_image")
+            .map(|item| {
+                item[image_field]
+                    .as_str()
+                    .expect("image input has a string reference")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retained_images, expected_images);
         assert!(
             follow_up
                 .message_input_texts("user")
@@ -867,6 +916,19 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             start_options: Default::default(),
         })
         .await?;
+    let channel_progress = "Message Type: CHANNEL_POST\nSender: /root/child\nChannel: progress\nMessage ID: aaaabbbbcccc\nThread ID: aaaabbbbcccc\nPayload:\nchild channel progress";
+    codex
+        .submit(Op::InterAgentCommunication {
+            communication: InterAgentCommunication::new(
+                AgentPath::root().join("child").expect("valid child path"),
+                AgentPath::root(),
+                Vec::new(),
+                channel_progress.to_string(),
+                /*trigger_turn*/ false,
+            ),
+            start_options: Default::default(),
+        })
+        .await?;
     codex
         .submit(Op::InterAgentCommunication {
             communication: InterAgentCommunication::new(
@@ -971,6 +1033,12 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         compact_request
             .inputs_of_type("agent_message")
             .iter()
+            .any(|item| item["content"][0]["text"].as_str() == Some(channel_progress))
+    );
+    assert!(
+        compact_request
+            .inputs_of_type("agent_message")
+            .iter()
             .any(|item| item.to_string().contains("child completion")),
         "expected v2 compaction input to include the child completion"
     );
@@ -1060,6 +1128,12 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             .iter()
             .all(|item| !item.to_string().contains("child progress")),
         "expected v2 follow-up request to omit the child progress update"
+    );
+    assert!(
+        follow_up_request
+            .inputs_of_type("agent_message")
+            .iter()
+            .all(|item| item["content"][0]["text"].as_str() != Some(channel_progress))
     );
     assert!(
         follow_up_request
@@ -1224,8 +1298,11 @@ async fn remote_compact_v2_rewrites_multiple_trailing_function_call_outputs(
     let second_trimmed_call_id = "second-trimmed-call";
     let retained_output = "retained tool output";
 
+    let mut extensions = ExtensionRegistryBuilder::new();
+    extensions.thread_lifecycle_contributor(Arc::new(ThreadIdle));
     let harness = TestCodexHarness::with_builder(
         test_codex()
+            .with_extensions(Arc::new(extensions.build()))
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
             .with_config(|config| {
                 config.model_context_window = Some(2_000);
@@ -1245,6 +1322,8 @@ async fn remote_compact_v2_rewrites_multiple_trailing_function_call_outputs(
     .await;
     harness.test().submit_turn("initial turn").await?;
     let _ = initial_mock.single_request();
+    // Completion precedes active-turn cleanup; inject the fixture into idle history.
+    ThreadIdle::wait(&codex).await;
     let history = [
         json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": first_user_message}]}),
         json!({"type": "function_call", "call_id": retained_call_id, "name": "exec_command", "arguments": "{}"}),

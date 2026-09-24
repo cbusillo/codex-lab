@@ -38,10 +38,13 @@ pub use sqlite::SqliteConfig;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
+pub use extract::GUARDIAN_THREAD_PREVIEW;
+pub use extract::GUARDIAN_THREAD_TITLE;
 /// Low-level storage engine: useful for focused tests.
 ///
 /// Most consumers should prefer [`StateRuntime`].
 pub use extract::apply_rollout_item;
+pub use extract::is_guardian_review_source;
 pub use extract::rollout_item_affects_thread_metadata;
 pub use model::AddThreadAttachmentOutcome;
 pub use model::Anchor;
@@ -49,9 +52,6 @@ pub use model::BackfillState;
 pub use model::BackfillStats;
 pub use model::BackfillStatus;
 pub use model::DirectionalThreadSpawnEdgeStatus;
-pub use model::ExternalAgentRun;
-pub use model::ExternalAgentRunOutcome;
-pub use model::ExternalAgentRunStart;
 pub use model::ExtractionOutcome;
 pub use model::RemoveThreadAttachmentOutcome;
 pub use model::SortDirection;

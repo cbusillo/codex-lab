@@ -42,6 +42,7 @@ use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ToolsV2;
 use codex_app_server_protocol::WriteStatus;
 use codex_core::config::set_project_trust_level;
+use codex_protocol::config_types::ToolExposureSurface;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::WebSearchContextSize;
 use codex_protocol::config_types::WebSearchLocation;
@@ -176,7 +177,6 @@ async fn config_requirements_read_includes_remote_control_and_managed_hooks() ->
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-id = "managed-session-start"
 command = "echo managed"
 additionalContextLimit = 4096
 
@@ -210,7 +210,6 @@ statusMessage = "Scanning file"
             .hooks,
         vec![
             ConfiguredHookHandler::Command {
-                id: Some("managed-session-start".to_string()),
                 command: "echo managed".to_string(),
                 command_windows: None,
                 timeout_sec: None,
@@ -351,33 +350,6 @@ access = "deny"
                 }]),
             }),
         })
-    );
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_requirements_read_preserves_browser_auto_review_override() -> Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join("requirements.toml"),
-        "[browser_use]\ndisable_auto_review = true\n",
-    )?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_auto_env()
-        .build()
-        .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-
-    let request_id = mcp.send_config_requirements_read_request().await?;
-    let response: ConfigRequirementsReadResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
-    assert_eq!(
-        response
-            .requirements
-            .and_then(|requirements| requirements.browser_use)
-            .and_then(|browser_use| browser_use.disable_auto_review),
-        Some(true)
     );
     Ok(())
 }
@@ -1050,6 +1022,7 @@ default_tools_approval_mode = "writes"
 
 [apps.app1]
 enabled = false
+omit_tools_from = ["deferred"]
 approvals_reviewer = "user"
 destructive_enabled = false
 default_tools_approval_mode = "prompt"
@@ -1063,6 +1036,9 @@ default_tools_approval_mode = "writes"
 
 [apps.app_without_links]
 enabled = true
+
+[apps.app_with_empty_links]
+omit_tools_from = []
 
 [apps.app_with_empty_links.links]
 "#,
@@ -1113,6 +1089,7 @@ enabled = true
                     "app1".to_string(),
                     AppConfig {
                         enabled: false,
+                        omit_tools_from: Some(vec![ToolExposureSurface::Deferred]),
                         approvals_reviewer: Some(ApprovalsReviewer::User),
                         destructive_enabled: Some(false),
                         open_world_enabled: None,
@@ -1143,6 +1120,7 @@ enabled = true
                     "app_without_links".to_string(),
                     AppConfig {
                         enabled: true,
+                        omit_tools_from: None,
                         approvals_reviewer: None,
                         destructive_enabled: None,
                         open_world_enabled: None,
@@ -1156,6 +1134,7 @@ enabled = true
                     "app_with_empty_links".to_string(),
                     AppConfig {
                         enabled: true,
+                        omit_tools_from: Some(vec![]),
                         approvals_reviewer: None,
                         destructive_enabled: None,
                         open_world_enabled: None,

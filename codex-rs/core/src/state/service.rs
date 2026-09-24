@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent::AgentControl;
+use crate::agent::api::AgentControl;
+use crate::agent::control::LocalAgentRuntime;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::attestation::AttestationProvider;
 use crate::client::ModelClient;
@@ -11,11 +12,8 @@ use crate::current_time::TimeProvider;
 use crate::elicitation::ElicitationService;
 use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
-use crate::execution_account::ExecutionAccountLease;
 use crate::mcp::McpManager;
 use crate::mcp_tool_exposure::McpHandlerCache;
-use crate::session::project_validation_coordinator::ProjectValidationCoordinator;
-use crate::session::project_validation_coordinator::ProjectValidationSuccessCache;
 use crate::tools::ExecutedToolCalls;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -65,12 +63,8 @@ pub(crate) struct SessionServices {
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
     pub(crate) auth_manager: Arc<AuthManager>,
-    /// Account lease used for model-visible execution; control-plane auth remains separate.
-    pub(crate) execution_account: ExecutionAccountLease,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
-    /// Stable control-plane catalog used to scope child-session model managers.
-    pub(crate) control_models_manager: SharedModelsManager,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) git_root_discovery: Arc<GitRootDiscovery>,
     pub(crate) session_telemetry: SessionTelemetry,
@@ -89,7 +83,8 @@ pub(crate) struct SessionServices {
     /// current executor environments before using them.
     pub(crate) selected_capability_roots: Vec<SelectedCapabilityRoot>,
     pub(crate) mcp_thread_init: ExtensionDataInit,
-    pub(crate) agent_control: AgentControl,
+    pub(crate) agent_control: Arc<dyn AgentControl>,
+    pub(crate) local_agent_runtime: LocalAgentRuntime,
     pub(crate) network_proxy: ArcSwapOption<StartedNetworkProxy>,
     pub(crate) network_proxy_audit_metadata: NetworkProxyAuditMetadata,
     pub(crate) managed_network_requirements_configured: bool,
@@ -106,6 +101,4 @@ pub(crate) struct SessionServices {
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,
     pub(crate) turn_environments: Arc<ThreadEnvironments>,
-    pub(crate) project_validation_coordinator: Arc<ProjectValidationCoordinator>,
-    pub(crate) project_validation_success_cache: ProjectValidationSuccessCache,
 }

@@ -279,6 +279,8 @@ pub use hide_users::hide_current_user_profile_dir;
 #[cfg(target_os = "windows")]
 pub use hide_users::hide_newly_created_users;
 #[cfg(target_os = "windows")]
+pub use identity::SandboxAccountCredentialMismatch;
+#[cfg(target_os = "windows")]
 pub use identity::logon_existing_sandbox_account;
 #[cfg(target_os = "windows")]
 pub use identity::require_logon_sandbox_creds;
@@ -556,8 +558,6 @@ mod windows_impl {
     use std::path::Path;
     use std::ptr;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use std::time::Instant;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -565,9 +565,7 @@ mod windows_impl {
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Foundation::HANDLE_FLAG_INHERIT;
     use windows_sys::Win32::Foundation::SetHandleInformation;
-    use windows_sys::Win32::Storage::FileSystem::ReadFile;
     use windows_sys::Win32::System::Pipes::CreatePipe;
-    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -646,53 +644,6 @@ mod windows_impl {
         Ok(((in_r, in_w), (out_r, out_w), (err_r, err_w)))
     }
 
-    fn read_pipe_until_stopped(handle: HANDLE, stop: Arc<AtomicBool>) -> Vec<u8> {
-        let mut output = Vec::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            let mut available = 0u32;
-            let peek_ok = unsafe {
-                PeekNamedPipe(
-                    handle,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                    &mut available,
-                    ptr::null_mut(),
-                )
-            };
-            if peek_ok == 0 {
-                break;
-            }
-            if available == 0 {
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-                continue;
-            }
-
-            let mut read_bytes = 0u32;
-            let read_ok = unsafe {
-                ReadFile(
-                    handle,
-                    buffer.as_mut_ptr(),
-                    available.min(buffer.len() as u32),
-                    &mut read_bytes,
-                    ptr::null_mut(),
-                )
-            };
-            if read_ok == 0 || read_bytes == 0 {
-                break;
-            }
-            output.extend_from_slice(&buffer[..read_bytes as usize]);
-        }
-        unsafe {
-            CloseHandle(handle);
-        }
-        output
-    }
-
     pub struct CaptureResult {
         pub exit_code: i32,
         pub stdout: Vec<u8>,
@@ -710,7 +661,6 @@ mod windows_impl {
         env_map: HashMap<String, String>,
         timeout_ms: Option<u64>,
         cancellation: Option<WindowsSandboxCancellationToken>,
-        use_private_desktop: bool,
     ) -> Result<CaptureResult> {
         run_windows_sandbox_capture_with_filesystem_overrides(
             permission_profile,
@@ -723,7 +673,6 @@ mod windows_impl {
             cancellation,
             &[],
             &[],
-            use_private_desktop,
         )
     }
 
@@ -739,7 +688,6 @@ mod windows_impl {
         cancellation: Option<WindowsSandboxCancellationToken>,
         additional_deny_read_paths: &[AbsolutePathBuf],
         additional_deny_write_paths: &[AbsolutePathBuf],
-        use_private_desktop: bool,
     ) -> Result<CaptureResult> {
         let additional_deny_read_paths = additional_deny_read_paths
             .iter()
@@ -770,9 +718,8 @@ mod windows_impl {
                 "Restricted read-only access requires the elevated Windows sandbox backend"
             );
         }
-        // WRITE_RESTRICTED tokens consult restricting SIDs only for GenericWrite.
-        // This cannot make deny-read ACLs authoritative and does not remove ambient
-        // DELETE, WRITE_DAC, or WRITE_OWNER rights from the signed-in user.
+        // WRITE_RESTRICTED tokens consult restricting SIDs only for writes, so this
+        // backend cannot make capability-SID deny-read ACLs authoritative.
         if !additional_deny_read_paths.is_empty() {
             anyhow::bail!("deny-read overrides require the elevated Windows sandbox backend");
         }
@@ -801,7 +748,6 @@ mod windows_impl {
         let (stdin_pair, stdout_pair, stderr_pair) = unsafe { setup_stdio_pipes()? };
         let ((in_r, in_w), (out_r, out_w), (err_r, err_w)) = (stdin_pair, stdout_pair, stderr_pair);
         let spawn_res = crate::LaunchDesktop::prepare_legacy(
-            use_private_desktop,
             &permissions,
             &current_dir,
             &env_map,
@@ -848,15 +794,50 @@ mod windows_impl {
             CloseHandle(err_w);
         }
 
-        let stop_readers = Arc::new(AtomicBool::new(false));
-        let t_out = {
-            let stop_readers = Arc::clone(&stop_readers);
-            std::thread::spawn(move || read_pipe_until_stopped(out_r, stop_readers))
-        };
-        let t_err = {
-            let stop_readers = Arc::clone(&stop_readers);
-            std::thread::spawn(move || read_pipe_until_stopped(err_r, stop_readers))
-        };
+        let (tx_out, rx_out) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (tx_err, rx_err) = std::sync::mpsc::channel::<Vec<u8>>();
+        let t_out = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            loop {
+                let mut read_bytes: u32 = 0;
+                let ok = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::ReadFile(
+                        out_r,
+                        tmp.as_mut_ptr(),
+                        tmp.len() as u32,
+                        &mut read_bytes,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || read_bytes == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..read_bytes as usize]);
+            }
+            let _ = tx_out.send(buf);
+        });
+        let t_err = std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 8192];
+            loop {
+                let mut read_bytes: u32 = 0;
+                let ok = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::ReadFile(
+                        err_r,
+                        tmp.as_mut_ptr(),
+                        tmp.len() as u32,
+                        &mut read_bytes,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok == 0 || read_bytes == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..read_bytes as usize]);
+            }
+            let _ = tx_err.send(buf);
+        });
 
         let wait_outcome = wait_for_process(pi.hProcess, timeout_ms, cancellation.as_ref());
         let timed_out = matches!(wait_outcome, WaitOutcome::TimedOut);
@@ -892,10 +873,6 @@ mod windows_impl {
             );
         }
 
-        stop_readers.store(true, Ordering::Release);
-        let stdout = t_out.join().unwrap_or_default();
-        let stderr = t_err.join().unwrap_or_default();
-
         unsafe {
             if pi.hThread != 0 {
                 CloseHandle(pi.hThread);
@@ -905,6 +882,10 @@ mod windows_impl {
             }
             CloseHandle(security.h_token);
         }
+        let _ = t_out.join();
+        let _ = t_err.join();
+        let stdout = rx_out.recv().unwrap_or_default();
+        let stderr = rx_err.recv().unwrap_or_default();
         let exit_code = if timed_out {
             128 + 64
         } else {
@@ -1058,7 +1039,6 @@ mod stub {
         _env_map: HashMap<String, String>,
         _timeout_ms: Option<u64>,
         _cancellation: Option<WindowsSandboxCancellationToken>,
-        _use_private_desktop: bool,
     ) -> Result<CaptureResult> {
         bail!("Windows sandbox is only available on Windows")
     }

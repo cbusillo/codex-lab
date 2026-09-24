@@ -6,11 +6,6 @@ use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_model_provider_info::ModelProviderInfo;
-use codex_protocol::AgentPath;
-use codex_protocol::protocol::MultiAgentVersion;
-use codex_rollout::RolloutItem;
-use codex_rollout::append_rollout_item_to_path;
-use codex_rollout::read_session_meta_line;
 use core_test_support::responses;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
@@ -143,6 +138,7 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             )
         })
         .collect();
+    let age = regex_lite::Regex::new(r"\d+d ago$").unwrap();
     let mut selections = Vec::new();
     for grouping in [
         AgentsOverviewGrouping::Project,
@@ -164,7 +160,8 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
             app.keymap = RuntimeKeymap::from_config(&keymap).unwrap();
             let mut view =
                 app.agents_overview_view(threads.clone(), Some(ThreadId::from_u128(/*value*/ 3)));
-            view.handle_key_event(KeyCode::Esc.into());
+            // Clear retained search without dismissing the command center.
+            view.on_ctrl_c();
             if filtered {
                 view.handle_key_event(KeyCode::Char('f').into());
                 view.handle_paste("Task".into());
@@ -194,15 +191,19 @@ async fn hiding_tasks_keeps_selection_adjacent_in_display_order() -> Result<()> 
                     "{grouping:?}, filtered={filtered}"
                 );
                 let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 100);
-                let selected_row = rendered.lines().find(|line| line.contains('›')).unwrap();
+                let selected_row = rendered
+                    .lines()
+                    .find(|line| line.trim_start().starts_with('›'))
+                    .expect("selected task row");
+                let selected_row = selected_row.split('│').next().unwrap().trim();
                 selections.push(format!(
                     "{grouping:?}, filtered={filtered}: {}",
-                    selected_row.split('│').next().unwrap().trim()
+                    age.replace(selected_row, "[age]")
                 ));
                 app.chat_widget.handle_key_event(hide_key.into());
                 let hide = std::iter::from_fn(|| rx.try_recv().ok())
                     .find(|event| matches!(event, AppEvent::HideAgentsOverviewThread { .. }))
-                    .expect("hide shortcut emits an event");
+                    .expect("hide action emits an event");
                 assert!(matches!(
                     &hide,
                     AppEvent::HideAgentsOverviewThread { thread_id }
@@ -268,7 +269,10 @@ async fn hiding_rename_target_does_not_transfer_draft_to_neighbor() -> Result<()
     Box::pin(app.handle_event(&mut tui, &mut app_server, hide)).await?;
     {
         let state = app.agents_overview.view_state.lock().unwrap();
-        assert_eq!((state.renaming, state.input.as_str()), (false, ""));
+        assert_eq!(
+            (state.rename_target.is_some(), state.input.as_str()),
+            (false, "")
+        );
     }
     app.chat_widget.handle_key_event(KeyCode::Enter.into());
     assert!(
@@ -297,7 +301,6 @@ async fn hidden_task_stays_hidden_through_activity_and_seed_until_explicit_resum
     let mut tui = crate::tui::test_support::make_test_tui()?;
     let view = app.agents_overview_view(vec![thread.clone()], Some(id));
     app.chat_widget.show_bottom_pane_view(Box::new(view));
-    app.chat_widget.handle_key_event(KeyCode::Esc.into());
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
     let hide = std::iter::from_fn(|| rx.try_recv().ok())
@@ -403,44 +406,22 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
     ] {
         let key = match action {
             AgentsOverviewAction::Archive => KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
-            AgentsOverviewAction::Delete => KeyCode::Delete.into(),
+            AgentsOverviewAction::Delete => KeyCode::Backspace.into(),
         };
         let (mut app, mut rx, _op_rx) =
             Box::pin(crate::app::tests::make_test_app_with_channels()).await;
-        let mut streams = Vec::new();
-        if attach_child {
-            streams.push(vec![StreamingSseChunk {
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (server, _completions) = start_streaming_sse_server(vec![vec![
+            StreamingSseChunk {
                 gate: None,
-                body: responses::sse(vec![
-                    responses::ev_response_created("parent-followup"),
-                    responses::ev_function_call_with_namespace(
-                        "followup-worker",
-                        "agents",
-                        "followup_task",
-                        r#"{"target":"worker","message":"Keep working"}"#,
-                    ),
-                    responses::ev_completed("parent-followup"),
-                ]),
-            }]);
-        }
-        let mut releases = Vec::new();
-        // Parent and child requests may arrive in either order; keep both active.
-        for _ in 0..if attach_child { 2 } else { 1 } {
-            let (release, gate) = tokio::sync::oneshot::channel();
-            releases.push(release);
-            streams.push(vec![
-                StreamingSseChunk {
-                    gate: None,
-                    body: responses::sse(vec![responses::ev_response_created("running")]),
-                },
-                StreamingSseChunk {
-                    gate: Some(gate),
-                    body: responses::sse(vec![responses::ev_completed("running")]),
-                },
-            ]);
-        }
-        let request_count = streams.len();
-        let (server, _completions) = start_streaming_sse_server(streams).await;
+                body: responses::sse(vec![responses::ev_response_created("running")]),
+            },
+            StreamingSseChunk {
+                gate: Some(gate),
+                body: responses::sse(vec![responses::ev_completed("running")]),
+            },
+        ]])
+        .await;
         app.config.model = Some("gpt-5.2".into());
         app.config.model_provider_id = "lifecycle-test".into();
         app.config.model_provider = ModelProviderInfo {
@@ -481,7 +462,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                         SubAgentSource::ThreadSpawn {
                             parent_thread_id: id,
                             depth: 1,
-                            agent_path: Some(AgentPath::root().join("worker").unwrap()),
+                            agent_path: None,
                             agent_nickname: None,
                             agent_role: None,
                         },
@@ -491,18 +472,6 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                 )
                 .expect("materialize child session"),
             )?;
-            for (thread_id, timestamp) in
-                [(id, "2025-01-05T12-00-00"), (child, "2025-01-05T12-01-00")]
-            {
-                let path = app_test_support::rollout_path(
-                    &app.config.codex_home,
-                    timestamp,
-                    &thread_id.to_string(),
-                );
-                let mut meta = read_session_meta_line(&path).await?;
-                meta.meta.multi_agent_version = Some(MultiAgentVersion::V2);
-                append_rollout_item_to_path(&path, &RolloutItem::SessionMeta(meta)).await?;
-            }
             let state_db = codex_state::StateRuntime::init(
                 codex_state::SqliteConfig::new_for_testing(app.config.codex_home.clone()),
                 app.config.model_provider_id.clone(),
@@ -530,20 +499,15 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
         } else {
             id
         };
-        // Restore the owner before attaching its persisted V2 child.
-        for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
-            let resumed = Box::pin(app_server.resume_thread(
-                &app.local_settings,
-                app.config.clone(),
-                thread_id,
-                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-            ))
+        let resumed = Box::pin(app_server.resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            primary,
+            crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+        ))
+        .await?;
+        app.enqueue_primary_thread_session(resumed.session, resumed.turns)
             .await?;
-            if thread_id == primary {
-                app.enqueue_primary_thread_session(resumed.session, resumed.turns)
-                    .await?;
-            }
-        }
         app.agents_overview.threads.insert(
             id,
             Some(overview_thread(
@@ -554,6 +518,7 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             )),
         );
         app.app_server_target = AppServerTarget::LocalDaemon {
+            allow_embedded_fallback: true,
             endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
                 socket_path: test_path_buf("/tmp/unused.sock").abs(),
             },
@@ -596,19 +561,15 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
                     .is_some()
             );
             std::fs::remove_dir(&blocked_archive)?;
-            for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
-                let resumed = Box::pin(app_server.resume_thread(
-                    &app.local_settings,
-                    app.config.clone(),
-                    thread_id,
-                    crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
-                ))
+            let resumed = Box::pin(app_server.resume_thread(
+                &app.local_settings,
+                app.config.clone(),
+                primary,
+                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
+            ))
+            .await?;
+            app.enqueue_primary_thread_session(resumed.session, resumed.turns)
                 .await?;
-                if thread_id == primary {
-                    app.enqueue_primary_thread_session(resumed.session, resumed.turns)
-                        .await?;
-                }
-            }
             app.open_agents_overview(&app_server);
         }
         let background = ThreadId::from_string(
@@ -683,21 +644,12 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             render_bottom_popup(&app.chat_widget, /*width*/ 80)
         );
         app.chat_widget.handle_key_event(KeyCode::Enter.into());
-        if attach_child {
-            assert_eq!(
-                app_server
-                    .thread_read(primary, /*include_turns*/ false)
-                    .await?
-                    .can_accept_direct_input,
-                Some(false)
-            );
-        }
         app_server
             .request_handle()
             .request_typed::<TurnStartResponse>(ClientRequest::TurnStart {
                 request_id: RequestId::String(Uuid::new_v4().to_string()),
                 params: TurnStartParams {
-                    thread_id: id.to_string(),
+                    thread_id: primary.to_string(),
                     input: vec![codex_app_server_protocol::UserInput::Text {
                         text: "Keep working".into(),
                         text_elements: Vec::new(),
@@ -708,18 +660,16 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             .await?;
         tokio::time::timeout(
             std::time::Duration::from_secs(/*secs*/ 5),
-            server.wait_for_request_count(request_count),
+            server.wait_for_request_count(/*count*/ 1),
         )
         .await?;
-        for thread_id in std::iter::once(id).chain(attach_child.then_some(primary)) {
-            assert!(matches!(
-                app_server
-                    .thread_read(thread_id, /*include_turns*/ false)
-                    .await?
-                    .status,
-                ThreadStatus::Active { .. }
-            ));
-        }
+        assert!(matches!(
+            app_server
+                .thread_read(primary, /*include_turns*/ false)
+                .await?
+                .status,
+            ThreadStatus::Active { .. }
+        ));
         app.chat_widget.handle_key_event(key);
         let confirmation = std::iter::from_fn(|| rx.try_recv().ok())
             .find(|event| matches!(event, AppEvent::ConfirmAgentsOverviewAction { .. }))
@@ -748,7 +698,9 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             // Removal must not depend on the overview having the primary or its ancestors cached.
             app.agents_overview.threads.remove(&primary);
         }
+        crate::chatwidget::activate_voice_for_thread(&mut app.chat_widget, primary);
         Box::pin(app.handle_event(&mut tui, &mut app_server, confirmed)).await?;
+        assert_eq!(app.voice_owner_thread_id(), None);
         assert_eq!(
             (
                 app.primary_thread_id,
@@ -787,103 +739,8 @@ async fn lifecycle_removes_background_and_current_tasks_without_losing_the_dashb
             }
         }
         app_server.shutdown().await?;
-        drop(releases);
+        drop(release);
         server.shutdown().await;
     }
     Ok(())
-}
-
-#[tokio::test]
-async fn disabled_footer_shortcuts_stay_bold_when_wrapped() {
-    let app = make_test_app().await;
-    let mut view = app.agents_overview_view(Vec::new(), /*selected_thread_id*/ None);
-    view.handle_key_event(KeyCode::Esc.into());
-    let area = Rect::new(
-        /*x*/ 0, /*y*/ 0, /*width*/ 84, /*height*/ 24,
-    );
-    let mut buffer = ratatui::buffer::Buffer::empty(area);
-    view.render(area, &mut buffer);
-    let delete_key = crate::key_hint::plain(KeyCode::Delete).display_label();
-    for (key, label) in [
-        ("x", "x stop"),
-        ("h", "h hide"),
-        ("a", "a archive"),
-        (delete_key.as_str(), delete_key.as_str()),
-    ] {
-        let cells = buffer
-            .content()
-            .windows(label.len())
-            .find(|cells| {
-                cells
-                    .iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-                    == label
-            })
-            .expect("footer shortcut");
-        assert_eq!(
-            cells[..key.len()]
-                .iter()
-                .map(|cell| cell.modifier)
-                .collect::<Vec<_>>(),
-            vec![ratatui::style::Modifier::BOLD | ratatui::style::Modifier::DIM; key.len()]
-        );
-    }
-}
-
-#[tokio::test]
-async fn lifecycle_footer_keeps_custom_chords_with_labels() {
-    let mut app = make_test_app().await;
-    app.keymap = RuntimeKeymap::from_config(
-        &serde_json::from_value(serde_json::json!({
-            "agents": { "archive": "f5 f6", "delete": "f5 f7", "hide": "f5 f8" }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    let mut view = app.agents_overview_view(
-        vec![overview_thread(
-            ThreadId::new(),
-            /*parent_thread_id*/ None,
-            "Task",
-            ThreadStatus::Idle,
-        )],
-        /*selected_thread_id*/ None,
-    );
-    view.handle_key_event(KeyCode::Esc.into());
-    for width in [36, 48, 80] {
-        let area = Rect::new(/*x*/ 0, /*y*/ 0, width + 4, /*height*/ 24);
-        let mut buffer = ratatui::buffer::Buffer::empty(area);
-        view.render(area, &mut buffer);
-        let lines = buffer
-            .content()
-            .chunks(usize::from(area.width))
-            .map(|row| {
-                row.iter()
-                    .map(ratatui::buffer::Cell::symbol)
-                    .collect::<String>()
-                    .trim()
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
-        for label in ["archive", "delete", "hide"] {
-            assert!(
-                lines
-                    .iter()
-                    .any(|line| line.contains(label) && line.contains("f5"))
-            );
-        }
-        assert!(
-            lines
-                .iter()
-                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str())
-                    <= usize::from(width))
-        );
-    }
-    app.chat_widget.show_bottom_pane_view(Box::new(view));
-    insta::assert_snapshot!(
-        "agents_custom_lifecycle_chords",
-        render_bottom_popup(&app.chat_widget, /*width*/ 48)
-            .replace(&test_path_display("/tmp/project"), "/tmp/project")
-    );
 }

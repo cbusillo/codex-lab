@@ -6,7 +6,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
-use codex_protocol::protocol::SessionProvenance;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
@@ -126,6 +125,10 @@ pub struct ExtractionOutcome {
 pub struct ThreadMetadata {
     /// Originator recorded at creation, if available.
     pub originator: Option<String>,
+    /// ChatGPT user that created the thread, if known.
+    pub creator_user_id: Option<String>,
+    /// ChatGPT account at creation, if known.
+    pub creator_account_id: Option<String>,
     /// The thread identifier.
     pub id: ThreadId,
     /// The absolute rollout path on disk.
@@ -138,8 +141,6 @@ pub struct ThreadMetadata {
     pub recency_at: DateTime<Utc>,
     /// The session source (stringified enum).
     pub source: String,
-    /// Optional structured launch provenance supplied by an external orchestrator.
-    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
@@ -199,6 +200,10 @@ pub struct ThreadMetadata {
 pub struct ThreadMetadataBuilder {
     /// Originator recorded at creation, if available.
     pub originator: Option<String>,
+    /// ChatGPT user that created the thread, if known.
+    pub creator_user_id: Option<String>,
+    /// ChatGPT account at creation, if known.
+    pub creator_account_id: Option<String>,
     /// The thread identifier.
     pub id: ThreadId,
     /// The absolute rollout path on disk.
@@ -211,8 +216,6 @@ pub struct ThreadMetadataBuilder {
     pub recency_at: Option<DateTime<Utc>>,
     /// The session source.
     pub source: SessionSource,
-    /// Optional structured launch provenance supplied by an external orchestrator.
-    pub session_provenance: Option<SessionProvenance>,
     /// Persisted thread history contract selected when this thread was created.
     pub history_mode: ThreadHistoryMode,
     /// Optional analytics source classification for this thread.
@@ -258,8 +261,9 @@ impl ThreadMetadataBuilder {
             updated_at: None,
             recency_at: None,
             originator: None,
+            creator_user_id: None,
+            creator_account_id: None,
             source,
-            session_provenance: None,
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,
@@ -291,15 +295,17 @@ impl ThreadMetadataBuilder {
             .recency_at
             .map(canonicalize_datetime)
             .unwrap_or(updated_at);
+        let guardian_review = crate::is_guardian_review_source(&self.source);
         ThreadMetadata {
             originator: self.originator.clone(),
+            creator_user_id: self.creator_user_id.clone(),
+            creator_account_id: self.creator_account_id.clone(),
             id: self.id,
             rollout_path: self.rollout_path.clone(),
             created_at,
             updated_at,
             recency_at,
             source,
-            session_provenance: self.session_provenance.clone(),
             history_mode: self.history_mode,
             thread_source: self.thread_source.clone(),
             agent_nickname: self.agent_nickname.clone(),
@@ -316,9 +322,14 @@ impl ThreadMetadataBuilder {
             reasoning_effort: None,
             cwd: self.cwd.clone(),
             cli_version: self.cli_version.clone().unwrap_or_default(),
-            title: String::new(),
-            name: None,
-            preview: None,
+            title: if guardian_review {
+                crate::GUARDIAN_THREAD_TITLE.to_string()
+            } else {
+                String::new()
+            },
+            name: (guardian_review && self.history_mode == ThreadHistoryMode::Paginated)
+                .then(|| crate::GUARDIAN_THREAD_TITLE.to_string()),
+            preview: guardian_review.then(|| crate::GUARDIAN_THREAD_PREVIEW.to_string()),
             sandbox_policy,
             approval_mode,
             tokens_used: 0,
@@ -372,7 +383,11 @@ impl ThreadMetadata {
         }
 
         let title = self.title.trim();
-        if title.is_empty() || self.first_user_message.as_deref().map(str::trim) == Some(title) {
+        if title.is_empty()
+            || self.first_user_message.as_deref().map(str::trim) == Some(title)
+            || (title == crate::GUARDIAN_THREAD_TITLE
+                && crate::extract::metadata_is_guardian_review(self))
+        {
             self.title = existing.title.clone();
         }
     }
@@ -395,10 +410,12 @@ impl ThreadMetadata {
         if self.source != other.source {
             diffs.push("source");
         }
-        if self.session_provenance != other.session_provenance {
-            diffs.push("session_provenance");
+        if self.creator_user_id != other.creator_user_id {
+            diffs.push("creator_user_id");
         }
-
+        if self.creator_account_id != other.creator_account_id {
+            diffs.push("creator_account_id");
+        }
         if self.originator != other.originator {
             diffs.push("originator");
         }
@@ -485,13 +502,14 @@ fn canonicalize_datetime(dt: DateTime<Utc>) -> DateTime<Utc> {
 #[derive(Debug)]
 pub(crate) struct ThreadRow {
     originator: Option<String>,
+    creator_user_id: Option<String>,
+    creator_account_id: Option<String>,
     id: String,
     rollout_path: String,
     created_at: i64,
     updated_at: i64,
     recency_at: i64,
     source: String,
-    session_provenance: Option<String>,
     history_mode: String,
     thread_source: Option<String>,
     agent_nickname: Option<String>,
@@ -526,13 +544,14 @@ impl ThreadRow {
     pub(crate) fn try_from_row(row: &SqliteRow) -> Result<Self> {
         Ok(Self {
             originator: row.try_get("originator")?,
+            creator_user_id: row.try_get("creator_user_id")?,
+            creator_account_id: row.try_get("creator_account_id")?,
             id: row.try_get("id")?,
             rollout_path: row.try_get("rollout_path")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
             recency_at: row.try_get("recency_at")?,
             source: row.try_get("source")?,
-            session_provenance: row.try_get("session_provenance")?,
             history_mode: row.try_get("history_mode")?,
             thread_source: row.try_get("thread_source")?,
             agent_nickname: row.try_get("agent_nickname")?,
@@ -571,13 +590,14 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
     fn try_from(row: ThreadRow) -> std::result::Result<Self, Self::Error> {
         let ThreadRow {
             originator,
+            creator_user_id,
+            creator_account_id,
             id,
             rollout_path,
             created_at,
             updated_at,
             recency_at,
             source,
-            session_provenance,
             history_mode,
             thread_source,
             agent_nickname,
@@ -612,10 +632,6 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
             .transpose()
             .map_err(anyhow::Error::msg)?;
         let history_mode = history_mode.parse().map_err(anyhow::Error::msg)?;
-        let session_provenance = session_provenance
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()?;
         let section = match (section, section_name) {
             (Some(id), Some(name)) => {
                 Some(ThreadSection::from_row((id, name, section_appearance))?)
@@ -635,12 +651,13 @@ impl TryFrom<ThreadRow> for ThreadMetadata {
         Ok(Self {
             id: ThreadId::try_from(id)?,
             originator,
+            creator_user_id,
+            creator_account_id,
             rollout_path: PathBuf::from(rollout_path),
             created_at: epoch_millis_to_datetime(created_at)?,
             updated_at: epoch_millis_to_datetime(updated_at)?,
             recency_at: epoch_millis_to_datetime(recency_at)?,
             source,
-            session_provenance,
             history_mode,
             thread_source,
             agent_nickname,
@@ -747,13 +764,14 @@ mod tests {
     fn thread_row(reasoning_effort: Option<&str>) -> ThreadRow {
         ThreadRow {
             originator: None,
+            creator_user_id: None,
+            creator_account_id: None,
             id: "00000000-0000-0000-0000-000000000123".to_string(),
             rollout_path: "/tmp/rollout-123.jsonl".to_string(),
             created_at: 1_700_000_000,
             updated_at: 1_700_000_100,
             recency_at: 1_700_000_100,
             source: "cli".to_string(),
-            session_provenance: None,
             history_mode: "legacy".to_string(),
             thread_source: None,
             agent_nickname: None,
@@ -788,6 +806,8 @@ mod tests {
     fn expected_thread_metadata(reasoning_effort: Option<ReasoningEffort>) -> ThreadMetadata {
         ThreadMetadata {
             originator: None,
+            creator_user_id: None,
+            creator_account_id: None,
             id: ThreadId::from_string("00000000-0000-0000-0000-000000000123")
                 .expect("valid thread id"),
             rollout_path: PathBuf::from("/tmp/rollout-123.jsonl"),
@@ -795,7 +815,6 @@ mod tests {
             updated_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             recency_at: DateTime::<Utc>::from_timestamp(1_700_000_100, 0).expect("timestamp"),
             source: "cli".to_string(),
-            session_provenance: None,
             history_mode: ThreadHistoryMode::Legacy,
             thread_source: None,
             agent_nickname: None,

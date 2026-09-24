@@ -5,9 +5,6 @@ mod local;
 mod store;
 mod types;
 
-pub use codex_state::ExternalAgentRun;
-pub use codex_state::ExternalAgentRunOutcome;
-pub use codex_state::ExternalAgentRunStart;
 pub use error::AgentGraphStoreError;
 pub use error::AgentGraphStoreResult;
 pub use local::LocalAgentGraphStore;

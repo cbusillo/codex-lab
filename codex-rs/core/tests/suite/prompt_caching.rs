@@ -10,6 +10,7 @@ use codex_features::Feature;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use codex_models_manager::manager::StaticModelsManager;
+use codex_prompts::render_model_instructions;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
@@ -118,31 +119,6 @@ fn assert_tool_names(body: &serde_json::Value, expected_names: &[&str]) {
     );
 }
 
-fn cached_contextual_user_message(input: &[serde_json::Value]) -> &serde_json::Value {
-    input
-        .iter()
-        .find(|item| {
-            item["role"].as_str() == Some("user")
-                && item["content"].as_array().is_some_and(|content| {
-                    content.iter().any(|part| {
-                        part["text"]
-                            .as_str()
-                            .is_some_and(|text| text.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG))
-                    })
-                })
-        })
-        .expect("cached contextual user message")
-}
-
-fn message_input_texts(message: &serde_json::Value) -> Vec<&str> {
-    message["content"]
-        .as_array()
-        .expect("message content array")
-        .iter()
-        .map(|part| part["text"].as_str().expect("input text"))
-        .collect()
-}
-
 fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
@@ -241,7 +217,7 @@ async fn prompt_tools_are_consistent_across_requests(
     let base_instructions = if custom_instructions {
         CUSTOM_BASE_INSTRUCTIONS.to_string()
     } else {
-        let original = model_info.get_model_instructions(config.personality);
+        let original = render_model_instructions(&model_info);
         if expected_update_plan_enabled {
             original
         } else {
@@ -295,13 +271,10 @@ async fn prompt_tools_are_consistent_across_requests(
         expected_tools_names.push("update_plan");
     }
     expected_tools_names.extend([
-        "auto_review_disposition",
-        "code_bridge",
-        "browser",
         "request_user_input",
         "apply_patch",
         "view_image",
-        "agents",
+        "tool_search",
         "web_search",
     ]);
     let body0 = req1.single_request().body_json();
@@ -318,16 +291,11 @@ async fn prompt_tools_are_consistent_across_requests(
             .single_request()
             .message_input_texts("developer")
             .join("\n");
-        if custom_instructions {
-            assert!(
-                developer_text.contains(&mode_instructions),
-                "expected collaboration mode instructions: {developer_text}"
-            );
+        if custom_instructions || expected_update_plan_enabled {
+            assert!(developer_text.contains(&mode_instructions));
         } else {
+            assert!(!developer_text.contains("update_plan"));
             assert!(developer_text.contains("Plan Mode (Conversational)"));
-            if !expected_update_plan_enabled {
-                assert!(!developer_text.contains("update_plan"));
-            }
         }
         if let Some(instructions) = &config.developer_instructions {
             assert!(
@@ -346,6 +314,8 @@ async fn prompt_tools_are_consistent_across_requests(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gpt_5_tools_without_apply_patch_append_apply_patch_instructions() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    use pretty_assertions::assert_eq;
+
     let server = start_mock_server().await;
     let req1 = mount_sse_once(
         &server,
@@ -414,6 +384,7 @@ async fn gpt_5_tools_without_apply_patch_append_apply_patch_instructions() -> an
 async fn prefixes_context_and_instructions_once_and_consistently_across_requests()
 -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    use pretty_assertions::assert_eq;
 
     let server = start_mock_server().await;
     let req1 = mount_sse_once(
@@ -461,26 +432,32 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
 
     let body1 = req1.single_request().body_json();
     let input1 = body1["input"].as_array().expect("input array");
-    let contextual_user_message = cached_contextual_user_message(input1);
-    let contextual_user_texts = message_input_texts(contextual_user_message);
-    let ui_text = contextual_user_texts
-        .iter()
-        .find(|text| text.contains("be consistent and helpful"))
-        .expect("cached user instructions text");
+    assert_eq!(
+        input1.len(),
+        3,
+        "expected permissions + cached contextual user prefix + user msg"
+    );
+
+    let ui_text = input1[1]["content"][0]["text"]
+        .as_str()
+        .expect("ui message text");
     assert!(
         ui_text.contains("be consistent and helpful"),
         "expected user instructions in UI message: {ui_text}"
     );
 
     let cwd_str = config.cwd.to_string_lossy();
-    let env_text = contextual_user_texts
-        .iter()
-        .find(|text| text.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG))
-        .copied()
+    let env_text = input1[1]["content"][1]["text"]
+        .as_str()
         .expect("environment context text");
     assert_default_env_context(env_text, &cwd_str);
+    assert_eq!(
+        input1[1]["content"][1]["type"].as_str(),
+        Some("input_text"),
+        "expected environment context bundled after UI message in cached contextual message"
+    );
     assert_eq_without_metadata_or_item_ids(
-        input1.last().expect("first user message").clone(),
+        input1[2].clone(),
         text_user_input("hello 1".to_string()),
     );
 
@@ -996,29 +973,40 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() -> a
     let body1 = request1.body_json();
     let body2 = request2.body_json();
 
-    let body1_input = body1["input"].as_array().expect("input array");
-    let expected_ui_msg = cached_contextual_user_message(body1_input);
+    let expected_permissions_msg = body1["input"][0].clone();
+    let expected_ui_msg = body1["input"][1].clone();
 
     let default_cwd_lossy = default_cwd.to_string_lossy();
-    let expected_env_text_1 = message_input_texts(expected_ui_msg)
-        .into_iter()
-        .find(|text| text.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG))
+    let expected_env_text_1 = expected_ui_msg["content"][1]["text"]
+        .as_str()
         .expect("cached environment context text")
         .to_string();
     assert_default_env_context(&expected_env_text_1, &default_cwd_lossy);
+
+    let expected_contextual_user_msg_1 = text_user_input_parts(vec![
+        expected_ui_msg["content"][0]["text"]
+            .as_str()
+            .expect("cached user instructions text")
+            .to_string(),
+        expected_env_text_1,
+    ]);
     let expected_user_message_1 = text_user_input("hello 1".to_string());
-    assert_eq_without_metadata_or_item_ids(
-        body1_input.last().expect("first user message").clone(),
-        expected_user_message_1,
-    );
+
+    let expected_input_1 = serde_json::Value::Array(vec![
+        expected_permissions_msg.clone(),
+        expected_contextual_user_msg_1.clone(),
+        expected_user_message_1.clone(),
+    ]);
+    assert_eq_without_metadata_or_item_ids(body1["input"].clone(), expected_input_1);
 
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let mut expected_input_2 = body1_input.to_vec();
-    expected_input_2.push(expected_user_message_2);
-    assert_eq_without_metadata_or_item_ids(
-        body2["input"].clone(),
-        serde_json::Value::Array(expected_input_2),
-    );
+    let expected_input_2 = serde_json::Value::Array(vec![
+        expected_permissions_msg,
+        expected_contextual_user_msg_1,
+        expected_user_message_1,
+        expected_user_message_2,
+    ]);
+    assert_eq_without_metadata_or_item_ids(body2["input"].clone(), expected_input_2);
 
     Ok(())
 }
@@ -1122,22 +1110,30 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
     let body1 = request1.body_json();
     let body2 = request2.body_json();
 
-    let body1_input = body1["input"].as_array().expect("input array");
-    let expected_permissions_msg = body1_input[0].clone();
-    let expected_ui_msg = cached_contextual_user_message(body1_input);
+    let expected_permissions_msg = body1["input"][0].clone();
+    let expected_ui_msg = body1["input"][1].clone();
 
-    let expected_env_text_1 = message_input_texts(expected_ui_msg)
-        .into_iter()
-        .find(|text| text.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG))
+    let expected_env_text_1 = expected_ui_msg["content"][1]["text"]
+        .as_str()
         .expect("cached environment context text")
         .to_string();
     assert_default_env_context(&expected_env_text_1, &default_cwd.to_string_lossy());
+    let expected_contextual_user_msg_1 = text_user_input_parts(vec![
+        expected_ui_msg["content"][0]["text"]
+            .as_str()
+            .expect("cached user instructions text")
+            .to_string(),
+        expected_env_text_1,
+    ]);
     let expected_user_message_1 = text_user_input("hello 1".to_string());
-    assert_eq_without_metadata_or_item_ids(
-        body1_input.last().expect("first user message").clone(),
-        expected_user_message_1,
-    );
+    let expected_input_1 = serde_json::Value::Array(vec![
+        expected_permissions_msg.clone(),
+        expected_contextual_user_msg_1.clone(),
+        expected_user_message_1.clone(),
+    ]);
+    assert_eq_without_metadata_or_item_ids(body1["input"].clone(), expected_input_1);
 
+    let body1_input = body1["input"].as_array().expect("input array");
     let expected_settings_update_msg = body2["input"][body1_input.len()].clone();
     assert_eq!(
         expected_settings_update_msg["role"].as_str(),
@@ -1171,17 +1167,16 @@ async fn send_user_turn_with_changes_sends_environment_context() -> anyhow::Resu
         "expected disabled filesystem profile in environment context: {expected_env_update_text}"
     );
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let mut expected_input_2 = body1_input.to_vec();
-    expected_input_2.extend([
+    let expected_input_2 = serde_json::Value::Array(vec![
+        expected_permissions_msg,
+        expected_contextual_user_msg_1,
+        expected_user_message_1,
         expected_settings_update_msg,
         expected_permissions_update_msg,
         expected_env_update_msg,
         expected_user_message_2,
     ]);
-    assert_eq_without_metadata_or_item_ids(
-        body2["input"].clone(),
-        serde_json::Value::Array(expected_input_2),
-    );
+    assert_eq_without_metadata_or_item_ids(body2["input"].clone(), expected_input_2);
 
     Ok(())
 }

@@ -71,15 +71,6 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
-    /// Account id currently being added by a login flow, when applicable.
-    fn active_login_add_account_id(&self) -> Option<&str> {
-        None
-    }
-
-    fn login_add_account_uses_device_code(&self) -> bool {
-        false
-    }
-
     /// Handle Ctrl-C while this view is active.
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         CancellationEvent::NotHandled

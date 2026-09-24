@@ -11,20 +11,21 @@ use codex_core::ThreadManager;
 use codex_core::config::ConfigOverrides;
 use codex_external_agent_migration::ExternalAgentConfigImportItemResult;
 use codex_external_agent_migration::record_import_error;
-use codex_external_agent_sessions::CompletedExternalAgentSessionImport;
-use codex_external_agent_sessions::ExistingSessionAppend;
-use codex_external_agent_sessions::ExternalAgentSessionMigration;
-use codex_external_agent_sessions::ImportedExternalAgentSession;
-use codex_external_agent_sessions::ImportedSessionConnectorAttribution;
-use codex_external_agent_sessions::PendingSessionImport;
-use codex_external_agent_sessions::SessionImportTarget;
-use codex_external_agent_sessions::SessionMetadataMode;
-use codex_external_agent_sessions::append_existing_session;
-use codex_external_agent_sessions::append_imported_session_connector_names;
-use codex_external_agent_sessions::detect_imported_cla_session_connectors_by_source_path;
-use codex_external_agent_sessions::prepare_validated_session_import_with_metadata_mode;
-use codex_external_agent_sessions::record_completed_session_imports;
+use codex_external_agent_migration::sessions::CompletedExternalAgentSessionImport;
+use codex_external_agent_migration::sessions::ExistingSessionAppend;
+use codex_external_agent_migration::sessions::ExternalAgentSessionMigration;
+use codex_external_agent_migration::sessions::ImportedExternalAgentSession;
+use codex_external_agent_migration::sessions::ImportedSessionConnectorAttribution;
+use codex_external_agent_migration::sessions::PendingSessionImport;
+use codex_external_agent_migration::sessions::SessionImportTarget;
+use codex_external_agent_migration::sessions::SessionMetadataMode;
+use codex_external_agent_migration::sessions::append_existing_session;
+use codex_external_agent_migration::sessions::append_imported_session_connector_names;
+use codex_external_agent_migration::sessions::detect_imported_cla_session_connectors_by_source_path;
+use codex_external_agent_migration::sessions::prepare_validated_session_import_with_metadata_mode;
+use codex_external_agent_migration::sessions::record_completed_session_imports;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_prompts::render_model_instructions;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -455,20 +456,21 @@ impl ExternalAgentSessionImporter {
         };
         let now = Utc::now();
         let create_params = CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: thread_id.into(),
             thread_id,
             extra_config: None,
             forked_from_id: None,
             parent_thread_id: None,
             source: source.clone(),
-            session_provenance: None,
             thread_source: None,
             originator: codex_login::default_client::originator().value,
             base_instructions: BaseInstructions {
                 text: config
                     .base_instructions
                     .clone()
-                    .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
+                    .unwrap_or_else(|| render_model_instructions(&model_info)),
                 provenance: Some(config.base_instructions_provenance.clone().unwrap_or_else(
                     || {
                         if config.base_instructions.is_some() {
@@ -534,7 +536,7 @@ impl ExternalAgentSessionImporter {
             agent_role: Some(source.get_agent_role()),
             agent_path: Some(source.get_agent_path().map(Into::into)),
             cwd: Some(cwd),
-            cli_version: Some(codex_version::CODE_VERSION.to_string()),
+            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             first_user_message,
             memory_mode: Some(memory_mode),
             ..Default::default()

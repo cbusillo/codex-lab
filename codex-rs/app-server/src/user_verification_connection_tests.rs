@@ -24,6 +24,7 @@ fn request() -> rpc::ServerRequestPayload {
         turn_id: None,
         server_name: "codex_apps".into(),
         request: rpc::McpServerElicitationRequest::UserVerification {
+            meta: None,
             title: "Approve".into(),
             description: String::new(),
             challenge: "AQ".into(),
@@ -64,10 +65,9 @@ async fn user_verification_disconnect_releases_ownership_before_rpc_drain() -> R
     h.initialize("codex-tui", /*opt_in*/ true).await;
     let second = initialize_second(&mut h).await?;
     let connections = [ConnectionId(1), ConnectionId(2)];
-    let pending_thread_id = ThreadId::new();
     let (id, pending) = h
         .outgoing
-        .send_request_to_connections(Some(&connections), request(), Some(pending_thread_id))
+        .send_request_to_connections(Some(&connections), request(), /*thread_id*/ None)
         .await;
     assert!(matches!(h.response().await, OutgoingMessage::Request(_)));
     let proof = json!({"action":"accept","content":{"credentialId":"AQ","signature":"Ag"}});
@@ -152,13 +152,6 @@ async fn user_verification_disconnect_releases_ownership_before_rpc_drain() -> R
     release.send(()).expect("release draining handler");
     running.await?;
     disconnect.await;
-    // WebSocket-style early cleanup may race with the final fallback. Both
-    // phases are safe to repeat after ownership has already been removed.
-    h.processor.connection_closing(ConnectionId(2)).await;
-    h.processor.connection_closing(ConnectionId(2)).await;
-    h.processor
-        .connection_closed(ConnectionId(2), &second)
-        .await;
     h.processor
         .connection_closed(ConnectionId(2), &second)
         .await;

@@ -358,7 +358,6 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
         service_tier: None,
         prompt_cache_key: None,
         text: None,
-        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };
@@ -447,7 +446,6 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         service_tier: None,
         prompt_cache_key: None,
         text: None,
-        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };
@@ -569,7 +567,6 @@ async fn azure_store_sends_ids_and_headers() -> Result<()> {
         service_tier: None,
         prompt_cache_key: None,
         text: None,
-        max_output_tokens: None,
         client_metadata: None,
         access_programs: None,
     };

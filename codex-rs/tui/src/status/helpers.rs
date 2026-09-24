@@ -1,3 +1,4 @@
+use crate::clock_format::ClockFormat;
 use crate::exec_command::relativize_to_home;
 use crate::legacy_core::config::Config;
 use crate::status::StatusAccountDisplay;
@@ -10,9 +11,6 @@ use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
 use std::path::Path;
 
-/// Render an instruction-source path the way the rest of the TUI renders paths: simplified for
-/// Windows verbatim prefixes and compacted to `~` when it lives under the home directory. Relative
-/// paths are left alone, and the summary never truncates.
 fn normalize_agents_display_path(path: &Path) -> String {
     format_directory_display(dunce::simplified(path), /*max_width*/ None)
 }
@@ -183,8 +181,12 @@ pub(crate) fn format_directory_display(directory: &Path, max_width: Option<usize
     formatted
 }
 
-pub(crate) fn format_reset_timestamp(dt: DateTime<Local>, captured_at: DateTime<Local>) -> String {
-    let time = dt.format("%H:%M").to_string();
+pub(crate) fn format_reset_timestamp(
+    dt: DateTime<Local>,
+    captured_at: DateTime<Local>,
+    clock_format: ClockFormat,
+) -> String {
+    let time = dt.format(clock_format.time_format()).to_string();
     if dt.date_naive() == captured_at.date_naive() {
         time
     } else {

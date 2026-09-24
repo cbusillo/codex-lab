@@ -20,6 +20,7 @@ pub use codex_protocol::config_types::ApprovalsReviewer;
 pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
 pub use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::ToolExposureSurface;
 pub use codex_protocol::config_types::WebSearchMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::BTreeMap;
@@ -30,6 +31,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+pub use crate::tui_effects::TuiEffects;
 pub use crate::tui_keymap::KeybindingSpec;
 pub use crate::tui_keymap::KeybindingsSpec;
 pub use crate::tui_keymap::MAX_FUNCTION_KEY;
@@ -45,6 +47,7 @@ pub use crate::tui_keymap::TuiPagerKeymap;
 pub use crate::tui_keymap::TuiVimNormalKeymap;
 pub use crate::tui_keymap::TuiVimOperatorKeymap;
 pub use crate::tui_keymap::TuiVimSearchKeymap;
+pub use crate::tui_rendering::TuiRendering;
 
 pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
 pub const DEFAULT_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 2;
@@ -110,11 +113,11 @@ impl ResumeCwdMode {
 #[serde(rename_all = "lowercase")]
 pub enum AuthCredentialsStoreMode {
     #[default]
-    /// Persist credentials in CODEX_LAB_HOME/auth.json.
+    /// Persist credentials in CODEX_HOME/auth.json.
     File,
     /// Persist credentials in the keyring. Fail if unavailable.
     Keyring,
-    /// Use keyring when available; otherwise, fall back to a file in CODEX_LAB_HOME.
+    /// Use keyring when available; otherwise, fall back to a file in CODEX_HOME.
     Auto,
     /// Store credentials in memory only for the current process.
     Ephemeral,
@@ -130,7 +133,7 @@ pub enum OAuthCredentialsStoreMode {
     /// Credentials stored in the keyring will only be readable by Codex unless the user explicitly grants access via OS-level keyring access.
     #[default]
     Auto,
-    /// CODEX_LAB_HOME/.credentials.json
+    /// CODEX_HOME/.credentials.json
     /// This file will be readable to Codex and other applications running as the same user.
     File,
     /// Keyring when available, otherwise fail.
@@ -162,15 +165,13 @@ impl Default for AuthKeyringBackendKind {
 pub enum WindowsSandboxModeToml {
     Elevated,
     Unelevated,
+    Mxc,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct WindowsToml {
     pub sandbox: Option<WindowsSandboxModeToml>,
-    /// Defaults to `true`. Set to `false` to launch the final sandboxed child
-    /// process on `Winsta0\\Default` instead of a private desktop.
-    pub sandbox_private_desktop: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, JsonSchema)]
@@ -192,7 +193,7 @@ pub enum UriBasedFileOpener {
     None,
 }
 
-/// Settings that govern if and what will be written to `~/.codex-lab/history.jsonl`.
+/// Settings that govern if and what will be written to `~/.codex/history.jsonl`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
 #[serde(default)]
 #[schemars(deny_unknown_fields)]
@@ -499,6 +500,12 @@ pub struct AppConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
+    /// Model-facing surfaces from which this connector's tools must be omitted,
+    /// in addition to any server-level omissions. `None` leaves lower-priority
+    /// configuration unchanged; an empty list clears connector-level omissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_tools_from: Option<Vec<ToolExposureSurface>>,
+
     /// Reviewer for approval prompts from this app, overriding the thread default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approvals_reviewer: Option<ApprovalsReviewer>,
@@ -594,6 +601,9 @@ pub struct OtelConfigToml {
     pub tool_result: codex_protocol::config_types::ToolResultLogConfig,
     /// Log user prompt in traces
     pub log_user_prompt: Option<bool>,
+    /// Opt in to logging final main-agent and spawned-subagent responses to an OTLP log exporter.
+    /// Defaults to false. Response text can be sensitive and is capped at 64 KiB.
+    pub log_agent_responses: Option<bool>,
 
     /// Mark traces with environment (dev, staging, prod, test). Defaults to dev.
     pub environment: Option<String>,
@@ -619,6 +629,7 @@ pub struct OtelConfigToml {
 pub struct OtelConfig {
     pub tool_result: codex_protocol::config_types::ToolResultLogConfig,
     pub log_user_prompt: bool,
+    pub log_agent_responses: bool,
     pub environment: String,
     pub exporter: OtelExporterKind,
     pub trace_exporter: OtelExporterKind,
@@ -632,6 +643,7 @@ impl Default for OtelConfig {
         OtelConfig {
             tool_result: Default::default(),
             log_user_prompt: false,
+            log_agent_responses: false,
             environment: DEFAULT_OTEL_ENVIRONMENT.to_owned(),
             exporter: OtelExporterKind::None,
             trace_exporter: OtelExporterKind::None,
@@ -639,6 +651,17 @@ impl Default for OtelConfig {
             span_attributes: BTreeMap::new(),
             tracestate: BTreeMap::new(),
         }
+    }
+}
+
+impl OtelConfig {
+    /// Response text requires a separate opt-in and an explicit OTLP log destination.
+    pub fn agent_response_logging_enabled(&self) -> bool {
+        self.log_agent_responses
+            && matches!(
+                self.exporter,
+                OtelExporterKind::OtlpHttp { .. } | OtelExporterKind::OtlpGrpc { .. }
+            )
     }
 }
 
@@ -703,6 +726,19 @@ pub enum TuiPetAnchor {
     ScreenBottom,
 }
 
+/// When transcript mouse selections are copied on release.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyOnSelect {
+    /// Use the terminal-specific default.
+    #[default]
+    Auto,
+    /// Copy every nonempty transcript mouse selection on release.
+    Always,
+    /// Require an explicit copy action.
+    Never,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiNotificationSettings {
@@ -745,17 +781,23 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub animations: bool,
 
-    /// Enable decorative effects such as Astra composer stars. Also requires animations.
-    /// Defaults to `true`.
-    #[serde(default = "default_true")]
-    pub whimsy: bool,
+    /// Records the one-time screen-reader detection attempt. Either value skips detection.
+    pub screen_reader_detection_done: Option<bool>,
+
+    /// Individual visual effects. Each also requires animations to be enabled.
+    #[serde(default)]
+    pub effects: TuiEffects,
+
+    /// Rich content rendering. Independent of animations and visual effects.
+    #[serde(default)]
+    pub rendering: TuiRendering,
 
     /// Show startup tooltips in the TUI welcome screen.
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_tooltips: bool,
 
-    /// Show an informational notice when the connected app server is an older stable release.
+    /// Show informational notices about connected app server version differences.
     /// Defaults to `true`; this does not control compatibility errors or version status.
     #[serde(default = "default_true")]
     pub show_server_version_notice: bool,
@@ -784,6 +826,17 @@ pub struct Tui {
     /// Defaults to `false`.
     #[serde(default)]
     pub raw_output_mode: bool,
+
+    /// Own the fullscreen transcript, including scrolling, selection, and search.
+    /// Defaults to `true`; alternate-screen restrictions take precedence.
+    #[serde(default = "default_true")]
+    pub fullscreen_transcript: bool,
+
+    /// Copy selected transcript text when the mouse button is released.
+    /// Defaults to `auto`: enabled in tmux/Zellij and in direct macOS terminals except Ghostty/Kitty.
+    /// On other platforms, direct terminals default off except iTerm2/Terminal.app.
+    #[serde(default)]
+    pub copy_on_select: CopyOnSelect,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///
@@ -817,13 +870,13 @@ pub struct Tui {
     /// Syntax highlighting theme name (kebab-case).
     ///
     /// When set, overrides automatic light/dark theme detection.
-    /// Use `/theme` in the TUI or see `$CODEX_LAB_HOME/themes` for custom themes.
+    /// Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.
     #[serde(default)]
     pub theme: Option<String>,
 
     /// Pet id to preselect in the terminal pet picker.
     ///
-    /// Custom pet ids resolve against CODEX_LAB_HOME/pets/<pet-id>/pet.json.
+    /// Custom pet ids resolve against CODEX_HOME/pets/<pet-id>/pet.json.
     #[serde(default)]
     pub pet: Option<String>,
 

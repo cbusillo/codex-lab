@@ -17,7 +17,6 @@ use codex_config::WebSearchModeRequirement;
 use codex_config::format_config_layer_source;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
-use codex_version::BuildProvenance;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use toml::Value as TomlValue;
@@ -30,9 +29,6 @@ pub(crate) fn new_debug_config_output(
         sandbox_mode_is_allowed_by_permissions(&config.permissions, mode)
     });
     lines.extend(render_agents_config_lines(config));
-    lines.extend(render_build_provenance_lines(
-        &codex_version::build_provenance(),
-    ));
 
     if let Some(proxy) = session_network_proxy {
         lines.push("".into());
@@ -56,26 +52,6 @@ pub(crate) fn new_debug_config_output(
     }
 
     PlainHistoryCell::new(lines)
-}
-
-fn render_build_provenance_lines(provenance: &BuildProvenance) -> Vec<Line<'static>> {
-    vec![
-        "".into(),
-        "Build provenance:".bold().into(),
-        format!("  - schema_version = {}", provenance.schema_version).into(),
-        format!("  - version = {}", provenance.version).into(),
-        format!("  - release_version = {}", provenance.release_version).into(),
-        format!(
-            "  - compatibility_version = {}",
-            provenance.compatibility_version
-        )
-        .into(),
-        format!("  - source_commit = {}", provenance.source_commit).into(),
-        format!("  - dirty_state = {}", provenance.dirty_state.as_str()).into(),
-        format!("  - build_profile = {}", provenance.build_profile).into(),
-        format!("  - build_channel = {}", provenance.build_channel).into(),
-        format!("  - executable_path = {}", provenance.executable_path).into(),
-    ]
 }
 
 fn render_agents_config_lines(config: &Config) -> Vec<Line<'static>> {
@@ -227,14 +203,6 @@ fn render_debug_config_lines(
             "feedback.enabled",
             enabled.to_string(),
             Some(&feedback.source),
-        ));
-    }
-
-    if let Some(sandbox_private_desktop) = requirements.windows_sandbox_private_desktop.as_ref() {
-        requirement_lines.push(requirement_line(
-            "windows.sandbox_private_desktop",
-            sandbox_private_desktop.value.to_string(),
-            Some(&sandbox_private_desktop.source),
         ));
     }
 
@@ -687,7 +655,6 @@ fn format_network_unix_socket_permission(
 #[cfg(test)]
 mod tests {
     use super::render_agents_config_lines;
-    use super::render_build_provenance_lines;
     use super::render_debug_config_lines;
     use super::sandbox_mode_is_allowed_by_permissions;
     use super::session_all_proxy_url;
@@ -729,9 +696,6 @@ mod tests {
     use codex_protocol::config_types::WebSearchMode;
     use codex_protocol::models::PermissionProfile;
     use codex_utils_absolute_path::AbsolutePathBuf;
-    use codex_version::BUILD_PROVENANCE_SCHEMA_VERSION;
-    use codex_version::BuildProvenance;
-    use codex_version::DirtyState;
     use ratatui::text::Line;
     use std::collections::BTreeMap;
     use toml::Value as TomlValue;
@@ -760,38 +724,6 @@ interrupt_message = false
             .expect("load config");
 
         insta::assert_snapshot!(render_to_text(&render_agents_config_lines(&config)));
-    }
-
-    #[test]
-    fn debug_config_output_lists_build_provenance() {
-        let provenance = BuildProvenance {
-            schema_version: BUILD_PROVENANCE_SCHEMA_VERSION,
-            version: "1.2.3".to_string(),
-            release_version: "1.2.3-lab.5".to_string(),
-            compatibility_version: "1.2.3".to_string(),
-            source_commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
-            dirty_state: DirtyState::Clean,
-            build_profile: "release".to_string(),
-            build_channel: "codex-lab".to_string(),
-            executable_path: "/opt/codex-lab/bin/codex-lab".to_string(),
-        };
-
-        insta::assert_snapshot!(
-            render_to_text(&render_build_provenance_lines(&provenance)),
-            @r###"
-
-Build provenance:
-  - schema_version = 2
-  - version = 1.2.3
-  - release_version = 1.2.3-lab.5
-  - compatibility_version = 1.2.3
-  - source_commit = 0123456789abcdef0123456789abcdef01234567
-  - dirty_state = clean
-  - build_profile = release
-  - build_channel = codex-lab
-  - executable_path = /opt/codex-lab/bin/codex-lab
-"###
-        );
     }
 
     fn empty_toml_table() -> TomlValue {
@@ -925,10 +857,6 @@ Build provenance:
                 },
                 RequirementSource::LegacyManagedConfigTomlFromMdm,
             )),
-            windows_sandbox_private_desktop: Some(Sourced::new(
-                /*value*/ false,
-                RequirementSource::LegacyManagedConfigTomlFromMdm,
-            )),
             approval_policy: ConstrainedWithSource::new(
                 Constrained::allow_any(AskForApproval::OnRequest.to_core()),
                 Some(RequirementSource::LegacyManagedConfigTomlFromMdm),
@@ -1046,10 +974,10 @@ Build provenance:
             in_app_browser: None,
             windows: Some(WindowsRequirementsToml {
                 allowed_sandbox_implementations: None,
-                sandbox_private_desktop: Some(false),
             }),
             additional_developer_instructions: None,
             guardian_policy_config: Some("Use the managed guardian policy.".to_string()),
+            guardian_extra_policy: None,
             feature_requirements: Some(FeatureRequirementsToml {
                 entries: BTreeMap::from([("guardian_approval".to_string(), true)]),
             }),
@@ -1420,6 +1348,7 @@ approval_policy = "never"
             computer_use: None,
             windows: None,
             guardian_policy_config: None,
+            guardian_extra_policy: None,
             feature_requirements: None,
             hooks: None,
             mcp_servers: None,
@@ -1459,7 +1388,6 @@ approval_policy = "never"
                         pre_tool_use: vec![MatcherGroup {
                             matcher: Some("^Bash$".to_string()),
                             hooks: vec![HookHandlerConfig::Command {
-                                id: None,
                                 command: "python3 /enterprise/hooks/pre.py".to_string(),
                                 command_windows: None,
                                 timeout_sec: Some(10),

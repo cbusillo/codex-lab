@@ -91,27 +91,30 @@ where
     let mut child = Command::new(&helper_paths.codex_exe);
     child.args(["exec-server", "--listen", "ws://127.0.0.1:0"]);
     child.args(args);
-    child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::inherit());
-    child.kill_on_drop(true);
     child.envs(env);
     ExecServerHarness::start(child).await
 }
 
 impl ExecServerHarness {
-    pub(crate) async fn start(mut command: Command) -> anyhow::Result<Self> {
+    pub(crate) async fn start(command: Command) -> anyhow::Result<Self> {
+        Self::start_with_stderr(command, Stdio::inherit()).await
+    }
+
+    pub(crate) async fn start_with_stderr(
+        mut command: Command,
+        stderr: Stdio,
+    ) -> anyhow::Result<Self> {
         let codex_home = TempDir::new()?;
         command.stdin(Stdio::null());
         command.stdout(Stdio::piped());
-        command.stderr(Stdio::inherit());
+        command.stderr(stderr);
         command.kill_on_drop(true);
         if !command
             .as_std()
             .get_envs()
-            .any(|(key, value)| matches!(key.to_str(), Some("CODEX_LAB_HOME")) && value.is_some())
+            .any(|(key, value)| key == "CODEX_HOME" && value.is_some())
         {
-            command.env("CODEX_LAB_HOME", codex_home.path());
+            command.env("CODEX_HOME", codex_home.path());
         }
         let mut child = command.spawn()?;
 

@@ -2,8 +2,6 @@
 
 use anyhow::Result;
 use app_test_support::TestAppServer;
-#[cfg(debug_assertions)]
-use app_test_support::configure_test_keyring_for_std_command;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_core::config::set_project_trust_level;
@@ -84,17 +82,12 @@ foo = "bar"
 "#,
     )?;
 
-    let mut command = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?);
-    command.env("CODEX_LAB_HOME", codex_home.path()).env(
-        "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
-        codex_home.path().join("managed_config.toml"),
-    );
-    #[cfg(debug_assertions)]
-    configure_test_keyring_for_std_command(
-        &mut command,
-        &codex_home.path().join("app-server-test-keyring"),
-    );
-    let output = command
+    let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
+        .env("CODEX_HOME", codex_home.path())
+        .env(
+            "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
+            codex_home.path().join("managed_config.toml"),
+        )
         .args(["--strict-config", "--listen", "off"])
         .output()?;
 
@@ -130,7 +123,7 @@ fn managed_auth_requirements_fail_closed_for_standalone_app_server() -> Result<(
         std::fs::write(codex_home.path().join("config.toml"), config)?;
 
         let output = Command::new(codex_utils_cargo_bin::cargo_bin("codex-app-server")?)
-            .env("CODEX_LAB_HOME", codex_home.path())
+            .env("CODEX_HOME", codex_home.path())
             .env(
                 "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
                 codex_home.path().join("managed_config.toml"),

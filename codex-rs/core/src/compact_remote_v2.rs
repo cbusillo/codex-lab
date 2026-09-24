@@ -7,19 +7,15 @@ use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
-use crate::compact::CompactionJobConfig;
 use crate::compact::InitialContextInjection;
 use crate::compact::build_compaction_initial_context;
 use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
-use crate::compact::preserve_project_validation_correction_pair;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
-use crate::context_manager::ModelRequestHistoryMode;
 use crate::context_manager::estimate_item_token_count;
-use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -28,7 +24,7 @@ use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::ResponsesStreamRetryState;
-use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::responses_retry::handle_response_stream_error;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -87,14 +83,23 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
     client_session: &mut ModelClientSession,
-    config: CompactionJobConfig,
+    initial_context_injection: InitialContextInjection,
+    reason: CompactionReason,
+    phase: CompactionPhase,
 ) -> CodexResult<()> {
+    let compaction_metadata = CompactionTurnMetadata::new(
+        CompactionTrigger::Auto,
+        reason,
+        CompactionImplementation::ResponsesCompactionV2,
+        phase,
+    );
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
         Some(client_session),
-        config,
+        initial_context_injection,
+        compaction_metadata,
     )
     .await
 }
@@ -109,18 +114,19 @@ pub(crate) async fn run_remote_compact_task(
         .await?;
     sess.emit_turn_started(&turn_context).await;
 
+    let compaction_metadata = CompactionTurnMetadata::new(
+        CompactionTrigger::Manual,
+        CompactionReason::UserRequested,
+        CompactionImplementation::ResponsesCompactionV2,
+        CompactionPhase::StandaloneTurn,
+    );
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
         /*client_session*/ None,
-        CompactionJobConfig {
-            initial_context_injection: InitialContextInjection::DoNotInject,
-            model_request_history_mode: ModelRequestHistoryMode::Normal,
-            trigger: CompactionTrigger::Manual,
-            reason: CompactionReason::UserRequested,
-            phase: CompactionPhase::StandaloneTurn,
-        },
+        InitialContextInjection::DoNotInject,
+        compaction_metadata,
     )
     .await
 }
@@ -130,15 +136,10 @@ async fn run_remote_compact_task_inner(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     client_session: Option<&mut ModelClientSession>,
-    config: CompactionJobConfig,
+    initial_context_injection: InitialContextInjection,
+    compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
-    let compaction_metadata = CompactionTurnMetadata::new(
-        config.trigger,
-        config.reason,
-        CompactionImplementation::ResponsesCompactionV2,
-        config.phase,
-    );
     let trigger = compaction_metadata.trigger();
     let reason = compaction_metadata.reason();
     let implementation = compaction_metadata.implementation();
@@ -177,7 +178,7 @@ async fn run_remote_compact_task_inner(
         step_context,
         fallback_step_context,
         client_session,
-        config,
+        initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
     )
@@ -198,7 +199,12 @@ async fn run_remote_compact_task_inner(
         .await;
     match result {
         Ok(()) => Ok(()),
-        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => Err(err),
+        Err(err)
+            if matches!(err.details(), CodexErrorDetails::TurnAborted)
+                || matches!(phase, CompactionPhase::PostTurn) =>
+        {
+            Err(err)
+        }
         Err(err) => {
             sess.track_turn_codex_error(turn_context, &err);
             // Pre-turn failures are reported by run_turn after preserving the incoming prompt.
@@ -218,15 +224,10 @@ async fn run_remote_compact_task_inner_impl(
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
     mut client_session: Option<&mut ModelClientSession>,
-    config: CompactionJobConfig,
+    initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<()> {
-    let CompactionJobConfig {
-        initial_context_injection,
-        model_request_history_mode,
-        ..
-    } = config;
     let turn_context = &step_context.turn;
     let context_compaction_item = ContextCompactionItem::new();
     let compaction_id = context_compaction_item.id.clone();
@@ -244,7 +245,6 @@ async fn run_remote_compact_task_inner_impl(
         sess,
         step_context,
         client_session.as_deref_mut(),
-        model_request_history_mode,
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -273,7 +273,6 @@ async fn run_remote_compact_task_inner_impl(
                 sess,
                 fallback_step_context,
                 client_session,
-                model_request_history_mode,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,
@@ -298,13 +297,12 @@ async fn run_remote_compact_task_inner_impl(
         prompt_input,
         prompt_input_metadata,
         compaction_output,
-        correction_pair,
         compaction_response_id,
         token_usage,
         owned_client_session: _owned_client_session,
     } = attempt;
     if let Some(token_usage) = token_usage {
-        sess.record_rollout_budget_usage(&token_usage)?;
+        sess.record_rollout_budget_usage(&token_usage).await?;
         analytics_details.active_context_tokens_before = Some(token_usage.input_tokens);
         analytics_details.compaction_summary_tokens = Some(token_usage.output_tokens);
         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
@@ -327,8 +325,6 @@ async fn run_remote_compact_task_inner_impl(
         build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
     let new_history =
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context);
-    let new_history =
-        preserve_project_validation_correction_pair(new_history, correction_pair.as_ref());
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
@@ -346,10 +342,9 @@ async fn run_remote_compact_task_inner_impl(
             replacement_history: &replacement_history,
         });
     }
-    let reviewer_compaction_hash = if sess.enabled(Feature::GuardianThreadContext)
-        && crate::context::GuardianContextMode::from_history(
-            sess.conversation_history_snapshot().await.as_ref(),
-        ) == crate::context::GuardianContextMode::Legacy
+    let reviewer_compaction_hash = if crate::context::GuardianContextMode::from_history(
+        sess.conversation_history_snapshot().await.as_ref(),
+    ) == crate::context::GuardianContextMode::Legacy
         && let Some(review_turn) = sess.turn_context_for_sub_id(&turn_context.sub_id).await
     {
         // Previous-model compaction must remain compatible with the continuing turn's
@@ -426,9 +421,8 @@ async fn run_remote_compaction_request_v2(
 
         match result {
             Ok(compaction_output) => return Ok(compaction_output),
-            Err(err) if !err.is_retryable() => return Err(err),
             Err(err) => {
-                handle_retryable_response_stream_error(
+                handle_response_stream_error(
                     &mut retry_state,
                     max_retries,
                     err,
@@ -540,11 +534,7 @@ pub(crate) fn is_client_authored_developer_message(item: &ResponseItemEnvelope) 
     item.metadata
         .as_ref()
         .is_some_and(|metadata| metadata.client_authored)
-        && matches!(
-            &item.item,
-            ResponseItem::Message { role, content, .. }
-                if role == "developer" && has_non_contextual_dev_message_content(content)
-        )
+        && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
 }
 
 fn v2_history_item_groups(
@@ -581,6 +571,7 @@ fn is_retained_for_remote_compaction_v2(
                 content.first(),
                 Some(AgentMessageInputContent::InputText { text })
                     if text.starts_with("Message Type: MESSAGE\n")
+                        || text.starts_with("Message Type: CHANNEL_POST\n")
             );
         let is_completion = matches!(
             content.first(),

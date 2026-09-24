@@ -11,7 +11,6 @@ use super::create_seatbelt_command_args_for_legacy_policy;
 use super::create_seatbelt_command_args_with_profile;
 use super::dynamic_network_policy;
 use super::normalize_path_for_sandbox;
-use super::normalize_writable_root_for_sandbox;
 use super::seatbelt_regex_for_glob;
 use super::seatbelt_regex_for_unreadable_glob;
 use super::unix_socket_dir_params;
@@ -50,13 +49,13 @@ use tempfile::TempDir;
 fn assert_seatbelt_denied(stderr: &[u8], path: &Path) {
     let stderr = String::from_utf8_lossy(stderr);
     let expected = format!("bash: {}: Operation not permitted\n", path.display());
-    let expected_with_line = format!(
-        "bash: line 1: {}: Operation not permitted\n",
-        path.display()
-    );
     assert!(
         stderr == expected
-            || stderr == expected_with_line
+            || stderr
+                == format!(
+                    "bash: line 1: {}: Operation not permitted\n",
+                    path.display()
+                )
             || stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted"),
         "unexpected stderr: {stderr}"
     );
@@ -309,46 +308,6 @@ fn process_platform_defaults_allow_scratch_without_granting_it_to_filesystem_hel
         .expect("build restricted seatbelt command")
     };
 
-    let scratch_grants = [
-        (
-            "/tmp",
-            r#"(allow file-read* file-test-existence file-write* (subpath "/tmp"))"#,
-        ),
-        (
-            "/private/tmp",
-            r#"(allow file-read* file-write* (subpath "/private/tmp"))"#,
-        ),
-        (
-            "/var/tmp",
-            r#"(allow file-read* file-write* (subpath "/var/tmp"))"#,
-        ),
-        (
-            "/private/var/tmp",
-            r#"(allow file-read* file-write* (subpath "/private/var/tmp"))"#,
-        ),
-    ];
-
-    for profile in [
-        MacosSeatbeltProfile::Process,
-        MacosSeatbeltProfile::FileSystemHelper,
-    ] {
-        let args = sandboxed_args(vec!["/usr/bin/true".to_string()], profile);
-        let policy = seatbelt_policy_arg(&args);
-
-        for (scratch_root, scratch_grant) in scratch_grants {
-            match profile {
-                MacosSeatbeltProfile::Process => assert!(
-                    policy.contains(scratch_grant),
-                    "processes should retain scratch read/write access to {scratch_root}"
-                ),
-                MacosSeatbeltProfile::FileSystemHelper => assert!(
-                    !policy.contains(&format!(r#"(subpath "{scratch_root}")"#)),
-                    "filesystem helpers should not inherit scratch access to {scratch_root}"
-                ),
-            }
-        }
-    }
-
     let run_sandboxed = |command: Vec<String>, profile: MacosSeatbeltProfile| {
         Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
             .args(sandboxed_args(command, profile))
@@ -377,9 +336,7 @@ fn process_platform_defaults_allow_scratch_without_granting_it_to_filesystem_hel
         if !process_result.status.success()
             && process_stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
         {
-            eprintln!(
-                "nested Seatbelt is unavailable; generated policies verified every scratch path"
-            );
+            eprintln!("nested Seatbelt is unavailable; scratch access behavior was not verified");
             break;
         }
         assert!(
@@ -819,10 +776,14 @@ async fn prepared_managed_network_context_takes_precedence_over_live_proxy_socke
     let network_config = NetworkProxyConfig {
         enabled: true,
         mode: NetworkMode::Full,
-        dangerously_allow_all_unix_sockets: true,
+        dangerously_allow_all_unix_sockets: Some(true),
         ..Default::default()
     };
-    let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,
@@ -1530,7 +1491,11 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
         ..Default::default()
     };
     network_config.set_allow_unix_sockets(vec![network_socket.to_string()]);
-    let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,
@@ -2020,57 +1985,6 @@ fn create_seatbelt_args_rejects_symlinked_writable_root() {
     assert!(
         error.contains(&workspace.display().to_string()),
         "error should identify the rejected workspace: {error}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn symlinked_codex_home_alias_allows_only_its_descendant_roots() {
-    use std::os::unix::fs::symlink;
-
-    let tmp = TempDir::new().expect("tempdir");
-    let actual_home = tmp.path().join("actual-home");
-    let home_alias = tmp.path().join("home-alias");
-    let project = tmp.path().join("project");
-    let project_alias = tmp.path().join("project-alias");
-    let target = tmp.path().join("target");
-    for path in [&actual_home, &project, &target] {
-        fs::create_dir(path).expect("create fixture directory");
-    }
-    symlink(&actual_home, &home_alias).expect("create home alias");
-    symlink(&project, &project_alias).expect("create project alias");
-    symlink(&target, actual_home.join("visualizations")).expect("create home child alias");
-    symlink(&target, project.join("visualizations")).expect("create project child alias");
-
-    let allowed_home =
-        AbsolutePathBuf::from_absolute_path(actual_home.canonicalize().expect("canonicalize home"))
-            .expect("absolute home");
-    let home_root = AbsolutePathBuf::from_absolute_path(home_alias.join("visualizations"))
-        .expect("absolute home root");
-    let normalized = normalize_writable_root_for_sandbox(home_root.clone(), Some(&allowed_home))
-        .expect("configured home alias should allow its descendant root");
-    let super::NormalizedWritableRoot::Subpath(normalized) = normalized else {
-        panic!("existing directory should normalize as a subpath root");
-    };
-    assert_eq!(
-        normalized.as_path(),
-        target.canonicalize().expect("canonicalize target")
-    );
-    assert!(
-        normalize_writable_root_for_sandbox(home_root, /*allowed_symlinked_codex_home*/ None)
-            .is_err(),
-        "the explicit home opt-out is required"
-    );
-
-    let project_root = AbsolutePathBuf::from_absolute_path(project_alias.join("visualizations"))
-        .expect("absolute project root");
-    let error = normalize_writable_root_for_sandbox(project_root, Some(&allowed_home))
-        .expect_err("unrelated project alias must remain rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("symlinked writable roots are not supported"),
-        "unexpected error: {error}"
     );
 }
 

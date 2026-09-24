@@ -4,16 +4,16 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 
 use super::AdditionalContextUserFragment;
+use super::AgentMessageBoardNotification;
 use super::ContextualUserFragment;
 use super::InternalModelContextFragment;
 use super::LegacyApplyPatchExecCommandWarning;
 use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
-use super::ProjectValidationCorrectionConsumed;
-use super::ProjectValidationFailure;
 use super::RecommendedPluginsInstructions;
 use super::SubagentNotification;
 use super::TurnAborted;
+use super::UserGoalUpdate;
 use super::UserInstructions;
 use super::UserShellCommand;
 use super::world_state::EnvironmentsState;
@@ -22,18 +22,26 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     UserInstructions::matches_text,
     EnvironmentsState::matches_text,
     AdditionalContextUserFragment::matches_text,
+    AgentMessageBoardNotification::matches_text,
     codex_skills_extension::is_skill_prompt_fragment,
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
     SubagentNotification::matches_text,
-    ProjectValidationCorrectionConsumed::matches_text,
-    ProjectValidationFailure::matches_text,
     InternalModelContextFragment::matches_text,
+    // compatibility for user-role recommendation messages in existing rollouts
     RecommendedPluginsInstructions::matches_text,
     LegacyUnifiedExecProcessLimitWarning::matches_text,
     LegacyApplyPatchExecCommandWarning::matches_text,
     LegacyModelMismatchWarning::matches_text,
 ];
+
+/// Hidden runtime context is not user authorization. Explicit user goal edits are.
+pub(crate) fn is_guardian_context_message(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::Message { role, content, .. }
+        if role == "user"
+            && content.iter().any(is_contextual_user_fragment)
+            && UserGoalUpdate::message_text(item).is_none())
+}
 
 /// Uses host annotations rather than text markers to identify user authorization changes.
 pub(crate) fn is_user_authorization_message(item: &ResponseItem) -> bool {

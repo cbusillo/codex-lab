@@ -37,7 +37,7 @@ use tokio::time::sleep;
 const CHILD_MODEL: &str = "test-multi-agent-child";
 const ROOT_MODEL: &str = "test-multi-agent-root";
 const ROOT_PROMPT: &str = "spawn a child";
-const MULTI_AGENT_V2_NAMESPACE: &str = "agents";
+const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const UNSUPPORTED_CODE_MODE_WARNING: &str = "does not advertise Code Mode support";
 
 struct RemoteModelResponse {
@@ -195,8 +195,6 @@ async fn remote_tool_mode_selector_overrides_feature_flags() -> Result<()> {
             codex_code_mode::PUBLIC_TOOL_NAME.to_string(),
             codex_code_mode::WAIT_TOOL_NAME.to_string(),
             "request_user_input".to_string(),
-            // Direct-model-only collaboration tools.
-            "agents".to_string(),
             // Hosted Responses tool.
             "web_search".to_string(),
         ]
@@ -353,7 +351,7 @@ async fn unsupported_code_mode_warning_is_emitted_each_turn() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mandatory_multi_agent_v2_overrides_remote_model_selector() -> Result<()> {
+async fn multi_agent_config_precedence_overrides_remote_model_selector() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut v2_model = remote_model("test-multi-agent-v2");
@@ -382,7 +380,7 @@ async fn mandatory_multi_agent_v2_overrides_remote_model_selector() -> Result<()
 
     let mut v1_model = remote_model("test-multi-agent-v1");
     v1_model.multi_agent_version = Some(MultiAgentVersion::V1);
-    let v2_body = response_body_for_remote_model(v1_model, |config| {
+    let v1_body = response_body_for_remote_model(v1_model, |config| {
         config
             .features
             .enable(Feature::Collab)
@@ -393,15 +391,15 @@ async fn mandatory_multi_agent_v2_overrides_remote_model_selector() -> Result<()
             .expect("test config should allow feature update");
     })
     .await?;
-    assert!(tool_names(&v2_body).contains(&MULTI_AGENT_V2_NAMESPACE.to_string()));
-    assert!(!tool_names(&v2_body).contains(&"multi_agent_v1".to_string()));
+    assert!(tool_names(&v1_body).contains(&"multi_agent_v1".to_string()));
 
     let mut disabled_model = remote_model("test-multi-agent-disabled");
     disabled_model.multi_agent_version = Some(MultiAgentVersion::Disabled);
     let v2_body = response_body_for_remote_model(disabled_model, |config| {
+        config.agents_enabled = false;
         config
             .features
-            .disable(Feature::MultiAgentV2)
+            .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
     })
     .await?;
@@ -411,7 +409,7 @@ async fn mandatory_multi_agent_v2_overrides_remote_model_selector() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_multi_agent_selector_cannot_downgrade_mandatory_v2() -> Result<()> {
+async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = wiremock::MockServer::start().await;
@@ -447,7 +445,7 @@ async fn remote_multi_agent_selector_cannot_downgrade_mandatory_v2() -> Result<(
             models_mock.requests().len(),
             test.codex.multi_agent_version(),
         ),
-        (1, Some(MultiAgentVersion::V2))
+        (1, None)
     );
 
     submit_thread_settings(
@@ -458,10 +456,7 @@ async fn remote_multi_agent_selector_cannot_downgrade_mandatory_v2() -> Result<(
         },
     )
     .await?;
-    assert_eq!(
-        test.codex.multi_agent_version(),
-        Some(MultiAgentVersion::V2)
-    );
+    assert_eq!(test.codex.multi_agent_version(), None);
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {

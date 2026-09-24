@@ -146,7 +146,6 @@ async fn forward_ops_preserves_submission_trace_context() {
     let submission = Submission {
         id: "sub-1".to_string(),
         op: Op::Interrupt,
-        client_user_message_id: None,
         trace: Some(codex_protocol::protocol::W3cTraceContext {
             traceparent: Some(
                 "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
@@ -155,6 +154,7 @@ async fn forward_ops_preserves_submission_trace_context() {
         }),
         parent_turn_id: Some("parent-turn".to_string()),
         root_turn_id: Some("root-turn".to_string()),
+        residency_guard: None,
     };
     tx_ops.send(submission).await.unwrap();
     drop(tx_ops);
@@ -190,7 +190,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
     config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
     let cancel_token = CancellationToken::new();
     cancel_token.cancel();
-    let parent_environments = parent_ctx.environments.clone();
+    let parent_environments = parent_ctx.initial_environments.clone();
 
     let result = timeout(
         Duration::from_secs(/*secs*/ 1),
@@ -205,7 +205,6 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             SubAgentSource::Review,
             codex_extension_api::SessionIsolation::Inherit,
             /*initial_history*/ None,
-            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         ),
@@ -264,12 +263,11 @@ async fn delegate_start_analytics_honors_child_opt_out_with_enabled_parent() {
             Arc::clone(&parent_session.services.models_manager),
             Arc::clone(&parent_session),
             Arc::clone(&parent_ctx),
-            parent_ctx.environments.clone(),
+            parent_ctx.initial_environments.clone(),
             CancellationToken::new(),
             SubAgentSource::Review,
             codex_extension_api::SessionIsolation::Inherit,
             /*initial_history*/ None,
-            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         )
@@ -341,12 +339,11 @@ async fn delegate_isolation_does_not_depend_on_attribution() {
             Arc::clone(&parent_session.services.models_manager),
             Arc::clone(&parent_session),
             Arc::clone(&parent_ctx),
-            parent_ctx.environments.clone(),
+            parent_ctx.initial_environments.clone(),
             CancellationToken::new(),
             subagent_source,
             isolation,
             /*initial_history*/ None,
-            codex_extension_api::ExtensionDataInit::default(),
             crate::session::GitEnrichmentPolicy::Fresh,
             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
         )
@@ -378,7 +375,7 @@ async fn run_codex_thread_interactive_rejects_approval_policy_that_can_prompt() 
         crate::session::tests::make_session_and_context_with_rx().await;
     let mut config = parent_ctx.config.as_ref().clone();
     config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
-    let parent_environments = parent_ctx.environments.clone();
+    let parent_environments = parent_ctx.initial_environments.clone();
 
     let result = run_codex_thread_interactive(
         config,
@@ -391,7 +388,6 @@ async fn run_codex_thread_interactive_rejects_approval_policy_that_can_prompt() 
         SubAgentSource::Review,
         codex_extension_api::SessionIsolation::Inherit,
         /*initial_history*/ None,
-        codex_extension_api::ExtensionDataInit::default(),
         crate::session::GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
     )

@@ -6,7 +6,6 @@
 )]
 
 use crate::DbTelemetry;
-use crate::migrations::repair_legacy_agent_jobs_migration_checksum;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
 use crate::telemetry;
@@ -32,18 +31,7 @@ const GOALS_DB_FILENAME: &str = "goals_1.sqlite";
 const MEMORIES_DB_FILENAME: &str = "memories_1.sqlite";
 const QUEUE_DB_FILENAME: &str = "queue_1.sqlite";
 const STATE_DB_FILENAME: &str = "state_5.sqlite";
-/// Generation 2 of the thread-history projection.
-///
-/// Released builds shipped `thread_history_1.sqlite` with migrations 1 and 2
-/// whose SQL has since been rewritten, so their recorded checksums no longer
-/// match the embedded migration set and `Migrator::run` would fail with
-/// `VersionMismatch` forever. The database is derived entirely from rollout
-/// files, so the safe production strategy is the same generation bump the other
-/// runtime databases already use (`state_5`, `logs_2`): start a fresh file and
-/// rebuild the projection. The `thread_history_1.sqlite` files stay on disk
-/// untouched -- they are never opened again, and leaving them in place keeps
-/// the upgrade reversible for anyone who downgrades.
-const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_2.sqlite";
+const THREAD_HISTORY_DB_FILENAME: &str = "thread_history_1.sqlite";
 
 #[derive(Clone, Copy)]
 struct RuntimeDbSpec {
@@ -286,7 +274,6 @@ impl SqliteConfig {
         let migrate_result = async {
             if matches!(spec.kind, DbKind::State) {
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
-                repair_legacy_agent_jobs_migration_checksum(&pool, migrator).await?;
             }
             migrator.run(&pool).await.map_err(anyhow::Error::from)
         }
@@ -343,7 +330,3 @@ impl SqliteConfig {
             .await
     }
 }
-
-#[cfg(test)]
-#[path = "thread_history_generation_tests.rs"]
-mod thread_history_generation_tests;

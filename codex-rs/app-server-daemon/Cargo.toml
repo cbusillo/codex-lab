@@ -19,7 +19,6 @@ codex-app-server-transport = { workspace = true }
 codex-http-client = { workspace = true }
 codex-install-context = { workspace = true }
 codex-utils-home-dir = { workspace = true }
-codex-version = { workspace = true }
 codex-uds = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }

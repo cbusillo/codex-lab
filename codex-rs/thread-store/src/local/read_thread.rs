@@ -14,6 +14,7 @@ use codex_state::ThreadMetadata;
 use super::LocalThreadStore;
 use super::helpers::distinct_thread_metadata_title;
 use super::helpers::git_info_from_parts;
+use super::helpers::has_guardian_default_title;
 use super::helpers::permission_profile_from_metadata_value;
 use super::helpers::rollout_path_is_archived;
 use super::helpers::set_thread_name;
@@ -349,10 +350,6 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
     };
     let forked_from_id = session_meta.as_ref().and_then(|meta| meta.forked_from_id);
     let parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
-    let session_provenance = session_meta
-        .as_ref()
-        .and_then(|meta| meta.session_provenance.clone())
-        .or_else(|| metadata.session_provenance.clone());
     let history_mode = session_meta
         .as_ref()
         .map(|meta| meta.history_mode)
@@ -365,7 +362,6 @@ pub(super) async fn stored_thread_from_sqlite_metadata(
             .filter(|originator| !originator.is_empty())
     });
     thread.forked_from_id = forked_from_id;
-    thread.session_provenance = session_provenance;
     thread.history_mode = history_mode;
     thread.name = name;
     Ok(thread)
@@ -416,7 +412,6 @@ pub(super) fn stored_thread_from_state_metadata(
         cli_version: metadata.cli_version,
         originator: metadata.originator,
         source: parse_session_source(&metadata.source),
-        session_provenance: metadata.session_provenance,
         history_mode: metadata.history_mode,
         thread_source: metadata.thread_source,
         agent_nickname: metadata.agent_nickname,
@@ -443,14 +438,16 @@ async fn thread_name_from_metadata(
     match history_mode {
         ThreadHistoryMode::Paginated => sqlite_thread_name(metadata),
         ThreadHistoryMode::Legacy => {
-            if let Some(title) = distinct_thread_metadata_title(metadata) {
-                Some(title)
+            let title = distinct_thread_metadata_title(metadata);
+            if title.is_some() && !has_guardian_default_title(metadata) {
+                title
             } else {
                 find_thread_name_by_id(store.config.codex_home.as_path(), &metadata.id)
                     .await
                     .ok()
                     .flatten()
                     .filter(|name| !name.trim().is_empty())
+                    .or(title)
             }
         }
     }
@@ -518,7 +515,6 @@ fn stored_thread_from_meta_line(
         cli_version: meta_line.meta.cli_version,
         originator: (!meta_line.meta.originator.is_empty()).then_some(meta_line.meta.originator),
         source: meta_line.meta.source,
-        session_provenance: meta_line.meta.session_provenance,
         history_mode: meta_line.meta.history_mode,
         thread_source: meta_line.meta.thread_source,
         agent_nickname: meta_line.meta.agent_nickname,

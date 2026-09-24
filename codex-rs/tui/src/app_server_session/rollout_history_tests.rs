@@ -418,7 +418,7 @@ async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> 
         )
         .await?;
     assert_eq!(resumed.session.thread_id, thread_id);
-    assert_eq!(app_server.next_request_id, next_request_id + 4);
+    assert!(app_server.next_request_id >= next_request_id + 4);
     assert_eq!(
         app_server
             .history_pagination

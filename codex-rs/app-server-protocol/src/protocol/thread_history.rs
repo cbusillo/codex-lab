@@ -50,7 +50,6 @@ use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
-use codex_protocol::protocol::ProjectValidationCompletedEvent;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
@@ -102,10 +101,9 @@ pub struct ThreadHistoryItemChange {
     pub completed_at_ms: Option<i64>,
 }
 
-/// Lightweight turn metadata snapshot for projectors that track turn status without
-/// re-reading the full item list.
+/// Turn metadata for history projection and snapshots that do not need items.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ThreadHistoryTurnChange {
+pub struct ThreadHistoryTurnMetadata {
     pub turn_id: String,
     pub root_turn_id: Option<String>,
     pub status: TurnStatus,
@@ -119,7 +117,7 @@ pub struct ThreadHistoryTurnChange {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ThreadHistoryChangeSet {
     pub changed_items: Vec<ThreadHistoryItemChange>,
-    pub changed_turns: Vec<ThreadHistoryTurnChange>,
+    pub changed_turns: Vec<ThreadHistoryTurnMetadata>,
     pub removed_turn_ids: Vec<String>,
 }
 
@@ -131,7 +129,23 @@ impl ThreadHistoryChangeSet {
     }
 }
 
-impl ThreadHistoryTurnChange {
+impl From<ThreadHistoryTurnMetadata> for Turn {
+    /// Builds a wire turn whose items have not been loaded.
+    fn from(value: ThreadHistoryTurnMetadata) -> Self {
+        Self {
+            id: value.turn_id,
+            items: Vec::new(),
+            items_view: TurnItemsView::NotLoaded,
+            error: value.error,
+            status: value.status,
+            started_at: value.started_at,
+            completed_at: value.completed_at,
+            duration_ms: value.duration_ms,
+        }
+    }
+}
+
+impl ThreadHistoryTurnMetadata {
     fn from_pending_turn(turn: &PendingTurn) -> Self {
         Self {
             turn_id: turn.id.clone(),
@@ -152,7 +166,7 @@ impl ThreadHistoryTurnChange {
 struct ThreadHistoryChangeAccumulator {
     changed_items: Vec<Option<ThreadHistoryItemChange>>,
     changed_item_indexes: HashMap<(String, String), usize>,
-    changed_turns: Vec<Option<ThreadHistoryTurnChange>>,
+    changed_turns: Vec<Option<ThreadHistoryTurnMetadata>>,
     changed_turn_indexes: HashMap<String, usize>,
     removed_turn_ids: Vec<String>,
     removed_turn_indexes: HashMap<String, usize>,
@@ -191,7 +205,7 @@ impl ThreadHistoryChangeAccumulator {
         self.changed_items.push(Some(change));
     }
 
-    fn push_turn_change(&mut self, change: ThreadHistoryTurnChange) {
+    fn push_turn_change(&mut self, change: ThreadHistoryTurnMetadata) {
         if let Some(index) = self.changed_turn_indexes.get(&change.turn_id).copied() {
             self.changed_turns[index] = Some(change);
             return;
@@ -266,10 +280,24 @@ impl ThreadHistoryBuilder {
     }
 
     pub fn active_turn_snapshot(&self) -> Option<Turn> {
+        self.active_turn_snapshot_with_items_view(TurnItemsView::Full)
+    }
+
+    /// Snapshots the active or last finished turn, copying only the requested items.
+    pub fn active_turn_snapshot_with_items_view(&self, items_view: TurnItemsView) -> Option<Turn> {
         self.current_turn
             .as_ref()
-            .map(Turn::from)
-            .or_else(|| self.turns.last().map(Turn::from))
+            .or_else(|| self.turns.last())
+            .map(|turn| turn.snapshot(items_view))
+    }
+
+    /// Snapshots active turn metadata without cloning its items.
+    /// Like the full snapshot, falls back to the last finished turn.
+    pub fn active_turn_metadata_snapshot(&self) -> Option<ThreadHistoryTurnMetadata> {
+        self.current_turn
+            .as_ref()
+            .or_else(|| self.turns.last())
+            .map(ThreadHistoryTurnMetadata::from_pending_turn)
     }
 
     /// Returns the id of the active turn without materializing its items.
@@ -380,9 +408,6 @@ impl ThreadHistoryBuilder {
             EventMsg::ExitedReviewMode(payload) => self.handle_exited_review_mode(payload),
             EventMsg::ItemStarted(payload) => self.handle_item_started(payload),
             EventMsg::ItemCompleted(payload) => self.handle_item_completed(payload),
-            EventMsg::ProjectValidationCompleted(payload) => {
-                self.handle_project_validation_completed(payload)
-            }
             EventMsg::HookStarted(_) | EventMsg::HookCompleted(_) => {}
             EventMsg::Error(payload) => self.handle_error(payload),
             EventMsg::TokenCount(_) => {}
@@ -598,29 +623,6 @@ impl ThreadHistoryBuilder {
         self.handle_materialized_item_lifecycle(&payload.turn_id, &payload.item);
     }
 
-    fn handle_project_validation_completed(&mut self, payload: &ProjectValidationCompletedEvent) {
-        let id = payload
-            .item_id
-            .clone()
-            .unwrap_or_else(|| self.next_item_id());
-        self.upsert_item_in_turn_id(
-            &payload.turn_id,
-            ThreadItem::ProjectValidation {
-                id,
-                command: payload.command.clone(),
-                command_truncated: payload.command_truncated,
-                cwd: payload.cwd.clone(),
-                status: payload.status.into(),
-                skip_reason: payload.skip_reason.map(Into::into),
-                changed_file_count: payload.changed_file_count,
-                exit_code: payload.exit_code,
-                output: payload.output.clone(),
-                output_truncated: payload.output_truncated,
-                duration_ms: payload.duration_ms,
-            },
-        );
-    }
-
     fn handle_materialized_item_lifecycle(
         &mut self,
         turn_id: &str,
@@ -756,7 +758,6 @@ impl ThreadHistoryBuilder {
             status: DynamicToolCallStatus::InProgress,
             content_items: None,
             success: None,
-            error: None,
             duration_ms: None,
         };
         if payload.turn_id.is_empty() {
@@ -781,7 +782,6 @@ impl ThreadHistoryBuilder {
             status,
             content_items: Some(convert_dynamic_tool_content_items(&payload.content_items)),
             success: Some(payload.success),
-            error: payload.error.clone(),
             duration_ms,
         };
         if payload.turn_id.is_empty() {
@@ -1242,7 +1242,7 @@ impl ThreadHistoryBuilder {
                 codex_error_info: payload.codex_error_info.clone().map(Into::into),
                 additional_details: None,
             });
-            tracking_changes.then(|| ThreadHistoryTurnChange::from_pending_turn(turn))
+            tracking_changes.then(|| ThreadHistoryTurnMetadata::from_pending_turn(turn))
         } else {
             None
         };
@@ -1256,7 +1256,7 @@ impl ThreadHistoryBuilder {
             turn.status = TurnStatus::Interrupted;
             turn.completed_at = payload.completed_at;
             turn.duration_ms = payload.duration_ms;
-            ThreadHistoryTurnChange::from_pending_turn(turn)
+            ThreadHistoryTurnMetadata::from_pending_turn(turn)
         };
         if let Some(turn_id) = payload.turn_id.as_deref() {
             // Prefer an exact ID match so we interrupt the turn explicitly targeted by the event.
@@ -1270,7 +1270,7 @@ impl ThreadHistoryBuilder {
                 turn.status = TurnStatus::Interrupted;
                 turn.completed_at = payload.completed_at;
                 turn.duration_ms = payload.duration_ms;
-                let changed_turn = ThreadHistoryTurnChange::from_pending_turn(turn);
+                let changed_turn = ThreadHistoryTurnMetadata::from_pending_turn(turn);
                 self.record_changed_turn(changed_turn);
                 return;
             }
@@ -1311,7 +1311,7 @@ impl ThreadHistoryBuilder {
             }
             turn.completed_at = payload.completed_at;
             turn.duration_ms = payload.duration_ms;
-            ThreadHistoryTurnChange::from_pending_turn(turn)
+            ThreadHistoryTurnMetadata::from_pending_turn(turn)
         };
 
         // Prefer an exact ID match from the active turn and then close it.
@@ -1339,7 +1339,7 @@ impl ThreadHistoryBuilder {
             }
             turn.completed_at = payload.completed_at;
             turn.duration_ms = payload.duration_ms;
-            let changed_turn = ThreadHistoryTurnChange::from_pending_turn(turn);
+            let changed_turn = ThreadHistoryTurnMetadata::from_pending_turn(turn);
             self.record_changed_turn(changed_turn);
             return;
         }
@@ -1509,11 +1509,11 @@ impl ThreadHistoryBuilder {
 
     fn record_changed_pending_turn(&mut self, turn: &PendingTurn) {
         if self.is_tracking_changes() {
-            self.record_changed_turn(ThreadHistoryTurnChange::from_pending_turn(turn));
+            self.record_changed_turn(ThreadHistoryTurnMetadata::from_pending_turn(turn));
         }
     }
 
-    fn record_changed_turn(&mut self, turn: ThreadHistoryTurnChange) {
+    fn record_changed_turn(&mut self, turn: ThreadHistoryTurnMetadata) {
         if let Some(change_set) = self.active_change_set.as_mut() {
             change_set.changed_turns.push(turn);
         }
@@ -1719,6 +1719,19 @@ impl PendingTurn {
         self.started_at = started_at;
         self
     }
+
+    fn snapshot(&self, items_view: TurnItemsView) -> Turn {
+        Turn {
+            id: self.id.clone(),
+            items: items_view.project_items(&self.items),
+            items_view,
+            error: self.error.clone(),
+            status: self.status.clone(),
+            started_at: self.started_at,
+            completed_at: self.completed_at,
+            duration_ms: self.duration_ms,
+        }
+    }
 }
 
 impl From<PendingTurn> for Turn {
@@ -1738,16 +1751,7 @@ impl From<PendingTurn> for Turn {
 
 impl From<&PendingTurn> for Turn {
     fn from(value: &PendingTurn) -> Self {
-        Self {
-            id: value.id.clone(),
-            items: value.items.clone(),
-            items_view: TurnItemsView::Full,
-            error: value.error.clone(),
-            status: value.status.clone(),
-            started_at: value.started_at,
-            completed_at: value.completed_at,
-            duration_ms: value.duration_ms,
-        }
+        value.snapshot(TurnItemsView::Full)
     }
 }
 
@@ -2327,7 +2331,7 @@ mod tests {
                         status: "completed".to_string(),
                         revised_prompt: Some("A blue square".to_string()),
                         result: "cG5n".to_string(),
-                        transparent_background: None,
+                        transparent_background: Some(true),
                         failure: None,
                         saved_path: Some(saved_path.clone()),
                         imagegen_request_id: None,
@@ -2361,7 +2365,7 @@ mod tests {
                 status: "completed".to_string(),
                 revised_prompt: Some("A blue square".to_string()),
                 result: "cG5n".to_string(),
-                transparent_background: None,
+                transparent_background: Some(true),
                 failure: None,
                 saved_path: Some(saved_path),
                 imagegen_request_id: None,
@@ -2387,6 +2391,7 @@ mod tests {
         }];
         let command_item = CoreTurnItem::CommandExecution(CoreCommandExecutionItem {
             model_context: None,
+            sandbox_type: None,
             id: "exec-1".to_string(),
             plugin_id: Some("sample@openai-curated".to_string()),
             script_path: Some("scripts/run.py".to_string()),
@@ -2473,6 +2478,7 @@ mod tests {
             build_turns_from_rollout_items(&items[..2])[0].items,
             vec![ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "exec-1".to_string(),
                 plugin_id: Some("sample@openai-curated".to_string()),
                 script_path: Some("scripts/run.py".to_string()),
@@ -2499,6 +2505,7 @@ mod tests {
             turns[0].items,
             vec![ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "exec-1".to_string(),
                 plugin_id: Some("sample@openai-curated".to_string()),
                 script_path: Some("scripts/run.py".to_string()),
@@ -2647,8 +2654,13 @@ mod tests {
                 status: "completed".into(),
                 revised_prompt: Some("final prompt".into()),
                 result: "Zm9v".into(),
-                transparent_background: None,
-                failure: None,
+                transparent_background: Some(true),
+                failure: Some(
+                    codex_extension_items::image_generation::ImageGenerationFailure::UsageLimitExceeded {
+                        limit_id: "image_gen".into(),
+                        resets_at: Some(1_786_150_800),
+                    },
+                ),
                 saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
             })),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
@@ -2688,8 +2700,13 @@ mod tests {
                         status: "completed".into(),
                         revised_prompt: Some("final prompt".into()),
                         result: "Zm9v".into(),
-                        transparent_background: None,
-                        failure: None,
+                        transparent_background: Some(true),
+                        failure: Some(
+                            codex_extension_items::image_generation::ImageGenerationFailure::UsageLimitExceeded {
+                                limit_id: "image_gen".into(),
+                                resets_at: Some(1_786_150_800),
+                            },
+                        ),
                         saved_path: Some(test_path_buf("/tmp/ig_123.png").abs()),
                         imagegen_request_id: None,
                         generation_id: None,
@@ -3177,6 +3194,7 @@ mod tests {
             turns[0].items[2],
             ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "exec-1".into(),
                 plugin_id: None,
                 script_path: None,
@@ -3378,7 +3396,6 @@ mod tests {
                     },
                 ]),
                 success: Some(true),
-                error: None,
                 duration_ms: Some(42),
             }
         );
@@ -3452,6 +3469,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "exec-declined".into(),
                 plugin_id: None,
                 script_path: None,
@@ -3562,6 +3580,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "guardian-exec".into(),
                 plugin_id: Some("sample@openai-curated".into()),
                 script_path: Some("scripts/run.py".into()),
@@ -3636,6 +3655,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "guardian-execve".into(),
                 plugin_id: Some("sample@openai-curated".into()),
                 script_path: Some("scripts/run.py".into()),
@@ -3839,6 +3859,7 @@ mod tests {
             turns[0].items[1],
             ThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "exec-late".into(),
                 plugin_id: None,
                 script_path: None,
@@ -3855,163 +3876,6 @@ mod tests {
                 duration_ms: Some(5),
             }
         );
-    }
-
-    #[test]
-    fn assigns_late_project_validation_to_original_turn() {
-        let events = vec![
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: "turn-a".into(),
-                root_turn_id: None,
-                trace_id: None,
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: Default::default(),
-            }),
-            EventMsg::UserMessage(UserMessageEvent {
-                client_id: None,
-                message: "first".into(),
-                images: None,
-                text_elements: Vec::new(),
-                local_images: Vec::new(),
-                ..Default::default()
-            }),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: "turn-a".into(),
-                last_agent_message: None,
-                error: None,
-                started_at: None,
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: "turn-b".into(),
-                root_turn_id: None,
-                trace_id: None,
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: Default::default(),
-            }),
-            EventMsg::UserMessage(UserMessageEvent {
-                client_id: None,
-                message: "second".into(),
-                images: None,
-                text_elements: Vec::new(),
-                local_images: Vec::new(),
-                ..Default::default()
-            }),
-            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
-                turn_id: "turn-a".into(),
-                item_id: Some("validation-a".into()),
-                command: Vec::new(),
-                command_truncated: false,
-                cwd: None,
-                status: codex_protocol::protocol::ProjectValidationStatus::Skipped,
-                skip_reason: Some(
-                    codex_protocol::protocol::ProjectValidationSkipReason::NoApplicableProvider,
-                ),
-                changed_file_count: Some(1),
-                exit_code: None,
-                output: "automatic validation skipped".into(),
-                output_truncated: false,
-                duration_ms: 0,
-            }),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: "turn-b".into(),
-                last_agent_message: None,
-                error: None,
-                started_at: None,
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        ];
-
-        let items = events
-            .into_iter()
-            .map(RolloutItem::EventMsg)
-            .collect::<Vec<_>>();
-        let turns = build_turns_from_rollout_items(&items);
-        assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].id, "turn-a");
-        assert_eq!(turns[1].id, "turn-b");
-        assert_eq!(turns[0].items.len(), 2);
-        assert_eq!(turns[1].items.len(), 1);
-        assert!(matches!(
-            &turns[0].items[1],
-            ThreadItem::ProjectValidation {
-                id,
-                status: crate::protocol::v2::ProjectValidationStatus::Skipped,
-                skip_reason: Some(
-                    crate::protocol::v2::ProjectValidationSkipReason::NoApplicableProvider
-                ),
-                changed_file_count: Some(1),
-                ..
-            } if id == "validation-a"
-        ));
-    }
-
-    #[test]
-    fn preserves_distinct_project_validation_items_in_one_turn() {
-        let events = vec![
-            EventMsg::TurnStarted(TurnStartedEvent {
-                turn_id: "turn-a".into(),
-                root_turn_id: None,
-                trace_id: None,
-                started_at: None,
-                model_context_window: None,
-                collaboration_mode_kind: Default::default(),
-            }),
-            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
-                turn_id: "turn-a".into(),
-                item_id: Some("validation-initial".into()),
-                command: vec!["cargo".into(), "check".into()],
-                command_truncated: false,
-                cwd: None,
-                status: codex_protocol::protocol::ProjectValidationStatus::ActionableFailure,
-                skip_reason: None,
-                changed_file_count: Some(1),
-                exit_code: Some(1),
-                output: "first failure".into(),
-                output_truncated: false,
-                duration_ms: 10,
-            }),
-            EventMsg::ProjectValidationCompleted(ProjectValidationCompletedEvent {
-                turn_id: "turn-a".into(),
-                item_id: Some("validation-rerun".into()),
-                command: vec!["cargo".into(), "check".into()],
-                command_truncated: false,
-                cwd: None,
-                status: codex_protocol::protocol::ProjectValidationStatus::Passed,
-                skip_reason: None,
-                changed_file_count: Some(1),
-                exit_code: Some(0),
-                output: "clean".into(),
-                output_truncated: false,
-                duration_ms: 8,
-            }),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: "turn-a".into(),
-                last_agent_message: None,
-                error: None,
-                started_at: None,
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        ];
-
-        let items = events
-            .into_iter()
-            .map(RolloutItem::EventMsg)
-            .collect::<Vec<_>>();
-        let turns = build_turns_from_rollout_items(&items);
-
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].items.len(), 2);
-        assert_eq!(turns[0].items[0].id(), "validation-initial");
-        assert_eq!(turns[0].items[1].id(), "validation-rerun");
     }
 
     #[test]
@@ -4112,6 +3976,125 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn active_turn_summary_preserves_selection_and_completed_metadata() {
+        let mut builder = ThreadHistoryBuilder::new();
+        assert_eq!(
+            builder.active_turn_snapshot_with_items_view(TurnItemsView::Summary),
+            None
+        );
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".into(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at: Some(100),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_event(&EventMsg::UserMessage(UserMessageEvent {
+            message: "first".into(),
+            ..Default::default()
+        }));
+        let first_user = builder.active_turn_snapshot().unwrap().items[0].clone();
+        builder.handle_event(&EventMsg::UserMessage(UserMessageEvent {
+            message: "steering".into(),
+            ..Default::default()
+        }));
+        for message in ["draft", "answer"] {
+            builder.handle_event(&EventMsg::AgentMessage(AgentMessageEvent {
+                message: message.into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            }));
+        }
+        let final_agent = builder
+            .active_turn_snapshot()
+            .unwrap()
+            .items
+            .last()
+            .unwrap()
+            .clone();
+        builder.handle_event(&EventMsg::AgentReasoning(AgentReasoningEvent {
+            text: "not included in the summary".repeat(1024),
+        }));
+        let mut expected = builder.active_turn_snapshot().unwrap();
+        expected.items = vec![first_user, final_agent];
+        expected.items_view = TurnItemsView::Summary;
+        assert_eq!(
+            builder.active_turn_snapshot_with_items_view(TurnItemsView::Summary),
+            Some(expected.clone())
+        );
+        builder.handle_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".into(),
+            started_at: Some(100),
+            last_agent_message: None,
+            error: None,
+            completed_at: Some(102),
+            duration_ms: Some(2_000),
+            time_to_first_token_ms: None,
+        }));
+        expected.status = TurnStatus::Completed;
+        expected.completed_at = Some(102);
+        expected.duration_ms = Some(2_000);
+        assert_eq!(
+            builder.active_turn_snapshot_with_items_view(TurnItemsView::Summary),
+            Some(expected)
+        );
+        assert_eq!(
+            builder.active_turn_snapshot_with_items_view(TurnItemsView::NotLoaded),
+            builder.active_turn_metadata_snapshot().map(Turn::from)
+        );
+    }
+
+    #[test]
+    fn active_turn_metadata_snapshot_tracks_turn_lifecycle() {
+        let mut builder = ThreadHistoryBuilder::new();
+        assert_eq!(builder.active_turn_metadata_snapshot(), None);
+        builder.handle_event(&EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".into(),
+            root_turn_id: Some("root-turn".into()),
+            trace_id: None,
+            started_at: Some(100),
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }));
+        builder.handle_event(&EventMsg::UserMessage(UserMessageEvent {
+            message: "hello".into(),
+            ..Default::default()
+        }));
+        let mut expected = ThreadHistoryTurnMetadata {
+            turn_id: "turn-1".into(),
+            root_turn_id: Some("root-turn".into()),
+            error: None,
+            status: TurnStatus::InProgress,
+            started_at: Some(100),
+            completed_at: None,
+            duration_ms: None,
+        };
+        assert_eq!(
+            builder.active_turn_metadata_snapshot(),
+            Some(expected.clone())
+        );
+        assert_eq!(builder.active_turn_snapshot().unwrap().items.len(), 1);
+
+        builder.handle_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".into(),
+            started_at: Some(100),
+            last_agent_message: None,
+            error: None,
+            completed_at: Some(102),
+            duration_ms: Some(2_000),
+            time_to_first_token_ms: None,
+        }));
+        expected.status = TurnStatus::Completed;
+        expected.completed_at = Some(102);
+        expected.duration_ms = Some(2_000);
+        assert_eq!(builder.active_turn_metadata_snapshot(), Some(expected));
+        assert_eq!(builder.active_turn_snapshot().unwrap().items.len(), 1);
     }
 
     #[test]
@@ -4535,6 +4518,7 @@ mod tests {
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                resume_metadata: None,
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-compact".into(),
@@ -5186,7 +5170,7 @@ mod tests {
                     started_at_ms: None,
                     completed_at_ms: None,
                 }],
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: "rollout-0".into(),
                     root_turn_id: None,
                     status: TurnStatus::Completed,
@@ -5294,7 +5278,7 @@ mod tests {
             start_changes,
             ThreadHistoryChangeSet {
                 changed_items: Vec::new(),
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: "turn-a".into(),
                     root_turn_id: Some("root-turn".into()),
                     status: TurnStatus::InProgress,
@@ -5333,7 +5317,7 @@ mod tests {
             complete_changes,
             ThreadHistoryChangeSet {
                 changed_items: Vec::new(),
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: "turn-a".into(),
                     root_turn_id: Some("root-turn".into()),
                     status: TurnStatus::Completed,
@@ -5381,7 +5365,7 @@ mod tests {
                     started_at_ms: None,
                     completed_at_ms: None,
                 }],
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: "rollout-0".into(),
                     root_turn_id: None,
                     status: TurnStatus::Completed,
@@ -5422,7 +5406,7 @@ mod tests {
             changes,
             ThreadHistoryChangeSet {
                 changed_items: Vec::new(),
-                changed_turns: vec![ThreadHistoryTurnChange {
+                changed_turns: vec![ThreadHistoryTurnMetadata {
                     turn_id: "turn-a".into(),
                     root_turn_id: Some("root-turn".into()),
                     status: TurnStatus::Completed,

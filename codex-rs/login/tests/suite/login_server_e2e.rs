@@ -15,7 +15,6 @@ use codex_login::LoginCallbackResult;
 use codex_login::LoginOnboardingEntrypoint;
 use codex_login::LoginSuccessPage;
 use codex_login::LoginSuccessPageBrand;
-use codex_login::PreviousAuthHandling;
 use codex_login::ServerOptions;
 use codex_login::run_login_server;
 use core_test_support::skip_if_no_network;
@@ -124,11 +123,25 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
 
     // Run server in background
     let server_home = codex_home.clone();
+    let content = codex_http_client::NetworkPolicyController::default();
+    let local = codex_http_client::NetworkPolicyController::default();
+    let local_policy = local.policy();
+    local.publish(
+        local_policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    );
+    let factory = codex_http_client::HttpClientFactory::new(
+        codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+    );
+    let routes = codex_login::AuthRouteConfig::from_http_client_factory(
+        factory.clone().with_network_policy(content.policy()),
+    )
+    .with_local_bootstrap_factory(factory.with_network_policy(local_policy));
 
     let opts = ServerOptions {
         codex_home: server_home,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        auth_route_config: codex_login::test_support::transport_default_auth_route_config(),
+        auth_route_config: routes,
         client_id: codex_login::CLIENT_ID.to_string(),
         issuer,
         port: 0,
@@ -136,7 +149,6 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         force_state: Some(state),
         forced_chatgpt_workspace_id: Some(vec![chatgpt_account_id.to_string()]),
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -153,6 +165,31 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let client = HttpClientBuilder::new()
         .without_redirects()
         .build_direct()?;
+    // Reject unrecognized metadata before processing codes or provider errors.
+    for state in [
+        "wrong_state.onboarding_entrypoint=life_sciences",
+        "test_state_123.onboarding_entrypoint=unknown",
+        "test_state_123.onboarding_entrypoint=life_sciences.onboarding_entrypoint=life_sciences",
+        "test_state_123.extra=value.onboarding_entrypoint=life_sciences",
+    ] {
+        let response = client
+            .get(format!("http://127.0.0.1:{login_port}/auth/callback"))
+            .query(&[
+                ("state", state),
+                ("code", "untrusted"),
+                ("error", "access_denied"),
+            ])
+            .send()
+            .await?;
+        assert_eq!(response.status(), 400);
+        assert_eq!(response.text().await?, "State mismatch");
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(
+            codex_home.join("auth.json")
+        )?)?,
+        stale_auth
+    );
     let url = format!(
         "http://127.0.0.1:{login_port}/auth/callback?code=abc&state=test_state_123.onboarding_entrypoint=life_sciences"
     );
@@ -210,7 +247,6 @@ async fn hosted_login_redirects_to_configured_open_app_url() -> Result<()> {
         force_state: Some("streamlined_state".to_string()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         login_success_page: LoginSuccessPage::Hosted {
             url: Url::parse("http://localhost:3000/codex/open-app?source=old")?,
             app_brand: LoginSuccessPageBrand::Chatgpt,
@@ -264,7 +300,6 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         force_state: Some(state),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -311,7 +346,6 @@ async fn login_server_includes_forced_workspaces_as_one_query_param() -> Result<
             WORKSPACE_ID_SECOND_ALLOWED.to_string(),
         ]),
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -353,7 +387,6 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: Some(vec![WORKSPACE_ID_ALLOWED.to_string()]),
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -417,7 +450,6 @@ async fn oauth_access_denied_missing_entitlement_blocks_login_with_clear_error()
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -489,7 +521,6 @@ async fn oauth_access_denied_unknown_reason_uses_generic_error_page() -> Result<
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -640,7 +671,6 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         force_state: Some("cancel_state".to_string()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };
@@ -665,7 +695,6 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         force_state: Some("cancel_state_2".to_string()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
-        previous_auth_handling: PreviousAuthHandling::RevokeAndRemoveStoredAccount,
         auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
         login_success_page: LoginSuccessPage::Local,
     };

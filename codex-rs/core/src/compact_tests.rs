@@ -1,8 +1,11 @@
 use super::*;
 use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
+use crate::tools::context::ToolCallSource;
+use crate::tools::context::ToolPayload;
+use crate::tools::router::ToolCall;
+use codex_code_mode::CellId;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
-use codex_history::ContextFragmentKind;
 use codex_history::ResponseItemEnvelope;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
@@ -13,6 +16,7 @@ use codex_protocol::models::ExecutedToolCall;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_tools::ToolName;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -44,7 +48,7 @@ async fn local_compaction_respects_tool_metadata_state(
     .await;
 
     let mut items = vec![user_message("Update the plan")];
-    for index in 0..5 {
+    for index in 0..300 {
         let call_id = format!("direct-{index}");
         let arguments = json!({"plan": [{"step": "x".repeat(7 * 1024), "status": "completed"}]});
         assert!(serde_json::to_vec(&arguments)?.len() < 8 * 1024);
@@ -78,10 +82,46 @@ async fn local_compaction_respects_tool_metadata_state(
         output.mark_tool_calls_complete();
         items.push(output);
     }
+    let cell = CellId::new("local-compaction-cell".to_string());
+    let nested_call = ExecutedToolCall::new("nested_tool".to_string(), json!({}));
+    let recorder = &session.services.executed_tool_calls;
+    recorder.start_cell(&cell, "exec");
+    recorder.record_tool_call(
+        &ToolCall {
+            tool_name: ToolName::plain("nested_tool"),
+            call_id: "nested".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        },
+        &ToolCallSource::CodeMode {
+            cell_id: cell.as_str().to_string(),
+            runtime_tool_call_id: "nested".to_string(),
+        },
+        &StepContext::for_test(Arc::clone(&turn)),
+    );
+    recorder.finish_cell_recording(&cell);
+    items.push(serde_json::from_value(json!({
+        "type": "custom_tool_call", "call_id": "exec", "name": "exec", "input": "",
+    }))?);
+    items.push(serde_json::from_value(json!({
+        "type": "custom_tool_call_output", "call_id": "exec", "output": "done",
+    }))?);
     session
         .record_conversation_items(&turn, turn.model_info(), &items)
         .await;
     let live_history = session.clone_history().await;
+    let mut expected_code_mode_output = live_history
+        .raw_items()
+        .find(|item| matches!(item, ResponseItem::CustomToolCallOutput { .. }))
+        .expect("Code Mode output recorded")
+        .clone();
+    if metadata_enabled {
+        expected_code_mode_output.append_executed_tool_calls(vec![nested_call]);
+        expected_code_mode_output.set_tool_call_cell_id("exec");
+        expected_code_mode_output.mark_tool_calls_complete();
+    }
     let outputs = live_history
         .raw_items()
         .filter_map(|item| match item {
@@ -89,7 +129,7 @@ async fn local_compaction_respects_tool_metadata_state(
             _ => None,
         })
         .collect::<serde_json::Result<Vec<_>>>()?;
-    assert_eq!(outputs.len(), 5);
+    assert_eq!(outputs.len(), 300);
     let metadata_bytes: usize = outputs
         .iter()
         .map(|item| {
@@ -100,7 +140,7 @@ async fn local_compaction_respects_tool_metadata_state(
         .sum();
     // Compaction does not rebudget source records as a normal inference request.
     // Passthrough bytes are also excluded from model token estimates.
-    assert!(metadata_bytes > 32 * 1024);
+    assert!(metadata_bytes > 2 * 1024 * 1024);
 
     if !metadata_enabled {
         let mut config = (*session.get_config().await).clone();
@@ -129,6 +169,10 @@ async fn local_compaction_respects_tool_metadata_state(
 
     let request = mock.single_request();
     assert!(request.inputs_of_type("compaction_trigger").is_empty());
+    assert_eq!(
+        request.custom_tool_call_output("exec"),
+        serde_json::to_value(expected_code_mode_output)?,
+    );
     for mut output in outputs {
         let call_id = output["call_id"].as_str().expect("source call id");
         let compact_output = request.function_call_output(call_id);
@@ -176,59 +220,6 @@ fn user_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
-}
-
-#[tokio::test]
-async fn v2_compacted_history_retains_locally_injected_usage_hint_metadata() {
-    let (session, turn_context) = crate::session::tests::make_session_and_context().await;
-    let turn_context = Arc::new(turn_context);
-    let step_context =
-        crate::session::step_context::StepContext::for_test(Arc::clone(&turn_context));
-    let world_state = Arc::new(
-        session
-            .build_world_state_for_step(&step_context)
-            .await
-            .expect("world state should build"),
-    );
-    let initial_context_injection = InitialContextInjection::BeforeLastUserMessage {
-        world_state,
-        step_context,
-    };
-
-    let (initial_context, _) =
-        build_compaction_initial_context(&session, &initial_context_injection).await;
-    let refreshed = insert_initial_context_before_last_real_user_or_summary(
-        annotated(vec![user_message("summary")]),
-        initial_context,
-    );
-
-    assert!(refreshed.iter().any(|envelope| {
-        envelope.metadata.as_ref().is_some_and(|metadata| {
-            metadata.context_fragment.as_ref() == Some(&ContextFragmentKind::MultiAgentUsageHint)
-        })
-    }));
-}
-
-#[test]
-fn preserves_active_validation_correction_pair_before_summary() {
-    let failure = ResponseItemEnvelope::new(user_message(
-        "<project_validation_failure>active</project_validation_failure>",
-    ));
-    let consumed = ResponseItemEnvelope::new(user_message(
-        "<project_validation_correction_consumed>active</project_validation_correction_consumed>",
-    ));
-    let summary = ResponseItemEnvelope::new(user_message(&format!("{SUMMARY_PREFIX}\nsummary")));
-    let pair = ProjectValidationCorrectionPair {
-        failure: failure.clone(),
-        consumed: consumed.clone(),
-    };
-
-    let history = preserve_project_validation_correction_pair(
-        vec![failure.clone(), summary.clone()],
-        Some(&pair),
-    );
-
-    assert_eq!(history, vec![failure, consumed, summary]);
 }
 
 fn compacted_user_message(text: &str) -> CompactedUserMessage {
@@ -318,7 +309,7 @@ fn collect_annotated_user_messages_extracts_user_text_only() {
         ResponseItemEnvelope::new(ResponseItem::Other),
     ];
 
-    let collected = collect_annotated_user_messages(&items, CompactedMessageIdentity::Preserve);
+    let collected = collect_annotated_user_messages(&items);
 
     assert_eq!(
         vec![CompactedUserMessage {

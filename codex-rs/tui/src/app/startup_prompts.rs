@@ -98,15 +98,6 @@ pub(super) fn project_config_warning(config: &Config) -> Option<String> {
     Some(message)
 }
 
-pub(super) fn emit_pinned_candidate_warning(app_event_tx: &AppEventSender, config: &Config) {
-    let Some(warning) = crate::pinned_candidate_warning::find_in(&config.startup_warnings) else {
-        return;
-    };
-    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-        history_cell::new_warning_event(warning.to_string()),
-    )));
-}
-
 pub(super) fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &Config) {
     let Some(message) =
         codex_sandboxing::system_bwrap_warning(config.permissions.permission_profile())
@@ -129,7 +120,7 @@ pub(super) fn model_upgrade_for_migration(
 
     // Saved selections can outlive their catalog entries. Keep only their migration metadata.
     let (target_model, current_name, target_name) = match model {
-        "gpt-5.4-mini" => ("gpt-5.6-luna", "GPT-5.4 Mini", "GPT-5.6 Luna"),
+        "gpt-5.4-mini" => ("gpt-6-luna", "GPT-5.4 Mini", "GPT-6 Luna"),
         _ => return None,
     };
     Some(ModelUpgrade {
@@ -465,7 +456,7 @@ mod tests {
         let mut rendered = Vec::new();
         while let Ok(AppEvent::InsertHistoryCell(cell)) = rx.try_recv() {
             rendered.extend(
-                cell.display_lines(/*width*/ 120)
+                cell.transcript_lines(/*width*/ 120)
                     .iter()
                     .map(render_line_text),
             );

@@ -79,11 +79,8 @@ impl UpdateAction {
     }
 }
 
-#[cfg(any(not(debug_assertions), test))]
+#[cfg(not(debug_assertions))]
 pub fn get_update_action() -> Option<UpdateAction> {
-    if codex_version::is_lab_build() {
-        return None;
-    }
     UpdateAction::from_install_context(InstallContext::current())
 }
 

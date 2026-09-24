@@ -16,10 +16,10 @@ use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
-use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
-use core_test_support::test_codex::test_codex_with_agents as test_codex;
+use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -28,7 +28,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
 
-const COLLABORATION_NAMESPACE: &str = "agents";
+#[path = "multi_agent_restore_tests.rs"]
+mod restore_tests;
+
+const COLLABORATION_NAMESPACE: &str = "collaboration";
 const SPAWN_CALL_ID: &str = "spawn-worker";
 const NESTED_CALL_ID: &str = "spawn-grandchild";
 const QUEUE_CALL_ID: &str = "queue-worker-message";
@@ -54,81 +57,6 @@ const ROLE_MODEL: &str = "gpt-5.6-sol";
 const ROLE_MODEL_PROVIDER_ID: &str = "openai";
 const ROLE_DEVELOPER_INSTRUCTIONS: &str = "Keep the durable worker role configuration.";
 const SUBAGENT_DEVELOPER_INSTRUCTIONS: &str = "Use the default durable worker instructions.";
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_v1_history_resumes_with_v2_tools_and_preserved_context() -> Result<()> {
-    assert_recorded_history_resumes_with_v2_tools("v1", "legacy V1").await
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disabled_history_resumes_with_v2_tools_and_preserved_context() -> Result<()> {
-    assert_recorded_history_resumes_with_v2_tools("disabled", "disabled").await
-}
-
-async fn assert_recorded_history_resumes_with_v2_tools(
-    recorded_version: &str,
-    history_label: &str,
-) -> Result<()> {
-    let server = start_mock_server().await;
-    let historical_context = format!("{history_label} context");
-    let historical_response = format!("{history_label} response");
-    mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-legacy"),
-            ev_assistant_message("msg-legacy", &historical_response),
-            ev_completed("resp-legacy"),
-        ]),
-    )
-    .await;
-    let mut initial_builder = test_codex();
-    let initial = initial_builder.build_with_auto_env(&server).await?;
-    let home = initial.home.clone();
-    let rollout_path = initial
-        .codex
-        .rollout_path()
-        .expect("legacy rollout path")
-        .to_path_buf();
-    initial.submit_turn(&historical_context).await?;
-    initial.codex.shutdown_and_wait().await?;
-    drop(initial);
-    let rollout = std::fs::read_to_string(&rollout_path)?;
-    let legacy_rollout = rollout
-        .lines()
-        .map(|line| -> Result<String> {
-            let mut item: Value = serde_json::from_str(line)?;
-            if item.get("type").and_then(Value::as_str) == Some("session_meta") {
-                item.pointer_mut("/payload/multi_agent_version")
-                    .expect("session metadata should record the multi-agent version")
-                    .clone_from(&json!(recorded_version));
-            }
-            Ok(serde_json::to_string(&item)?)
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join("\n");
-    std::fs::write(&rollout_path, format!("{legacy_rollout}\n"))?;
-
-    let resumed_response = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-resumed"),
-            ev_assistant_message("msg-resumed", "resumed response"),
-            ev_completed("resp-resumed"),
-        ]),
-    )
-    .await;
-    let mut resume_builder = test_codex();
-    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
-    resumed.submit_turn("resume under V2").await?;
-
-    let request = resumed_response.single_request();
-    let body = request.body_json();
-    assert!(namespace_child_tool(&body, "agents", "spawn_agent").is_some());
-    assert!(namespace_child_tool(&body, "multi_agent_v1", "spawn_agent").is_none());
-    assert!(request.body_contains_text(&historical_context));
-    assert!(request.body_contains_text(&historical_response));
-    Ok(())
-}
 
 fn decoded_body(request: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = request
@@ -221,7 +149,8 @@ fn configure_multi_agent_v2_with_role(
         .expect("test config should allow feature update");
     config.multi_agent_v2.subagent_developer_instructions =
         Some(SUBAGENT_DEVELOPER_INSTRUCTIONS.to_string());
-    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    // Keep the root, worker, grandchild, and sibling resident until explicit shutdown.
+    config.multi_agent_v2.max_concurrent_threads_per_session = 4;
     let role_path = config.codex_home.join("durable-worker-role.toml");
     std::fs::write(
         &role_path,
@@ -236,7 +165,6 @@ fn configure_multi_agent_v2_with_role(
             description: Some("Durable worker role".to_string()),
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
-            backend: None,
         },
     );
 }
@@ -294,17 +222,37 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         sse(vec![ev_completed("resp-parent-turn-assistant")]),
     )
     .await;
-    for (text, is_subagent) in [(NESTED_CALL_ID, true), (QUEUE_CALL_ID, false)] {
-        mount_sse_once_match(
-            &server,
-            move |request: &wiremock::Request| {
-                body_contains(request, text)
-                    && request_has_input_type(request, "agent_message") == is_subagent
-            },
-            sse(vec![ev_completed("resp-parent-turn-assistant")]),
-        )
+    // The grandchild's completion can arrive during the worker's completion response,
+    // causing one more sampling request to drain that message before the turn ends.
+    let worker_completion = wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(|request: &wiremock::Request| {
+            decoded_body(request)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|body| {
+                    body["input"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["type"] == "function_call_output"
+                                && item["call_id"] == NESTED_CALL_ID
+                        })
+                    })
+                })
+        })
+        .respond_with(sse_response(sse(vec![ev_completed(
+            "resp-worker-complete",
+        )])))
+        .expect(1..=2)
+        .mount_as_scoped(&server)
         .await;
-    }
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            body_contains(request, QUEUE_CALL_ID)
+                && !request_has_input_type(request, "agent_message")
+        },
+        sse(vec![ev_completed("resp-parent-turn-assistant")]),
+    )
+    .await;
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
@@ -342,7 +290,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     })
     .await;
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(2);
     let worker_thread_id = loop {
         if let Some(thread_id) = initial_child_request
             .requests()
@@ -448,6 +396,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     worker_thread.shutdown_and_wait().await?;
     drop(sibling_thread);
     drop(worker_thread);
+    drop(worker_completion);
 
     let followup_args = serde_json::to_string(&json!({
         "target": "worker",

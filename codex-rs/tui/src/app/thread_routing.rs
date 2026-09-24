@@ -18,7 +18,13 @@ const REALTIME_STOP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 1);
 
 impl App {
     pub(super) async fn stop_realtime_conversation(&mut self, app_server: &mut AppServerSession) {
-        let Some(thread_id) = self.chat_widget.reset_realtime_conversation() else {
+        let thread_id = self
+            .background_voice
+            .as_mut()
+            .and_then(|owner| owner.reset_realtime_conversation())
+            .or_else(|| self.chat_widget.reset_realtime_conversation());
+        self.retire_background_voice();
+        let Some(thread_id) = thread_id else {
             return;
         };
         match tokio::time::timeout(
@@ -39,14 +45,8 @@ impl App {
 
     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
         self.stop_realtime_conversation(app_server).await;
-        self.shutdown_side_threads(app_server).await;
-        if let Some(thread_id) = self.chat_widget.thread_id() {
-            if let Err(err) = app_server.thread_unsubscribe(thread_id).await {
-                tracing::warn!("failed to unsubscribe thread {thread_id}: {err}");
-            }
-            self.abort_thread_event_listener(thread_id);
-            self.pending_server_profiles.remove(&thread_id);
-        }
+        self.detach_current_thread_for_navigation(app_server, /*destination*/ None)
+            .await;
     }
 
     pub(super) async fn shutdown_side_threads(&mut self, app_server: &mut AppServerSession) {
@@ -386,6 +386,10 @@ impl App {
     }
 
     pub(super) fn push_thread_interactive_request(&mut self, request: ThreadInteractiveRequest) {
+        if self.chat_widget.has_misalignment_policy_violation() {
+            return;
+        }
+
         match request {
             ThreadInteractiveRequest::AppLink(params) => {
                 self.chat_widget.open_app_link_view(params);
@@ -393,6 +397,9 @@ impl App {
             ThreadInteractiveRequest::Approval(request) => {
                 self.render_inactive_patch_preview(&request);
                 self.chat_widget.push_approval_request(request);
+                if self.startup_protected_input_boundary && !self.chat_widget.has_active_modal() {
+                    self.startup_pending_protected_request = true;
+                }
             }
             ThreadInteractiveRequest::UserVerification { thread_id, request } => {
                 self.chat_widget
@@ -755,7 +762,14 @@ impl App {
                             )
                             .await
                         {
-                            Ok(_) => return Ok(true),
+                            Ok(_) => {
+                                if self.active_thread_id == Some(thread_id)
+                                    && self.chat_widget.thread_id() == Some(thread_id)
+                                {
+                                    crate::startup_recovery::acknowledged(client_user_message_id);
+                                }
+                                return Ok(true);
+                            }
                             Err(error) => {
                                 if let Some(turn_error) =
                                     active_turn_not_steerable_turn_error(&error)
@@ -875,6 +889,7 @@ impl App {
                     if self.active_thread_id == Some(thread_id)
                         && self.chat_widget.thread_id() == Some(thread_id)
                     {
+                        crate::startup_recovery::acknowledged(client_user_message_id);
                         self.chat_widget
                             .record_safety_buffering_turn(response.turn.id, op);
                     }
@@ -1129,6 +1144,7 @@ impl App {
         thread_id: ThreadId,
         notification: ServerNotification,
     ) -> Result<()> {
+        self.deliver_background_voice_notification(thread_id, &notification);
         if self.abandoned_side_threads.contains(&thread_id) {
             return Ok(());
         }
@@ -1246,7 +1262,13 @@ impl App {
                 guard.push_notification_ref(&notification);
                 Some(notification)
             } else {
-                self.retain_inactive_realtime_transcript(thread_id, &notification);
+                if self
+                    .background_voice
+                    .as_ref()
+                    .is_none_or(|owner| owner.thread_id() != Some(thread_id))
+                {
+                    self.retain_inactive_realtime_transcript(thread_id, &notification);
+                }
                 guard.push_notification(notification);
                 None
             };
@@ -1275,6 +1297,34 @@ impl App {
             notification = None;
         }
         if permission_change_confirmed {
+            if self.chat_widget.thread_id() == Some(thread_id)
+                && let Some(profile) = self
+                    .chat_widget
+                    .config_ref()
+                    .permissions
+                    .active_permission_profile()
+                && profile.id.starts_with(':')
+            {
+                let config = self.chat_widget.config_ref();
+                let network = config
+                    .network_proxy_spec_for_active_permission_profile(
+                        &profile,
+                        config.permissions.permission_profile(),
+                    )
+                    .unwrap_or_else(|err| {
+                        tracing::warn!(%err, "failed to refresh local permission network settings");
+                        None
+                    });
+                self.chat_widget.set_permission_network(network);
+                self.config.permissions = self.chat_widget.config_ref().permissions.clone();
+                self.config.approvals_reviewer = self.chat_widget.config_ref().approvals_reviewer;
+                self.runtime_approval_policy_override =
+                    Some(RuntimeApprovalPolicyOverride::Explicit(
+                        self.config.permissions.approval_policy.value().into(),
+                    ));
+                self.runtime_permission_profile_override =
+                    Some(RuntimePermissionProfileOverride::from_config(&self.config));
+            }
             self.app_event_tx.send(AppEvent::SettingsSelectionSettled);
         }
 
@@ -1441,17 +1491,7 @@ impl App {
             // retaining another deep copy for thread replay only accumulates already-delivered
             // history data. Inactive responses still need the buffer because they are not sent.
             if !should_send || !matches!(&event, HistoryLookupResponse::Batch { .. }) {
-                guard
-                    .buffer
-                    .push_back(ThreadBufferedEvent::HistoryEntryResponse(event.clone()));
-                if guard.buffer.len() > guard.capacity
-                    && let Some(removed) = guard.buffer.pop_front()
-                    && let ThreadBufferedEvent::Request(request) = &removed
-                {
-                    guard
-                        .pending_interactive_replay
-                        .note_evicted_server_request(request.as_ref());
-                }
+                guard.push_buffered_event(ThreadBufferedEvent::HistoryEntryResponse(event.clone()));
             }
             should_send
         };
@@ -1540,7 +1580,7 @@ impl App {
             self.chat_widget.set_token_info(/*info*/ None);
         }
         match presentation {
-            ThreadAttachPresentation::SessionLineage => {
+            ThreadAttachPresentation::Fresh | ThreadAttachPresentation::SessionLineage => {
                 self.chat_widget.handle_thread_session(session);
             }
         }
@@ -1568,6 +1608,7 @@ impl App {
             &replayed_final_items,
             retained_assistant_captions,
         );
+        self.restore_voice_owner_after_replay();
         let pending = std::mem::take(&mut self.pending_primary_events);
         for pending_event in pending {
             match pending_event {
@@ -1582,10 +1623,6 @@ impl App {
                     self.enqueue_thread_history_entry_response(thread_id, event)
                         .await?;
                 }
-                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
-                    self.enqueue_thread_auto_review_summary(thread_id, run_id, *result)
-                        .await?;
-                }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
                 }
@@ -1594,67 +1631,6 @@ impl App {
         self.chat_widget
             .set_initial_user_message_submit_suppressed(/*suppressed*/ false);
         self.chat_widget.submit_initial_user_message_if_pending();
-        Ok(())
-    }
-
-    pub(super) async fn enqueue_thread_auto_review_summary(
-        &mut self,
-        thread_id: ThreadId,
-        run_id: String,
-        result: Result<AutoReviewSummaryReadResponse, String>,
-    ) -> Result<()> {
-        let (sender, store) = {
-            let channel = self.ensure_thread_channel(thread_id);
-            (channel.sender.clone(), Arc::clone(&channel.store))
-        };
-
-        let should_send = {
-            let mut guard = store.lock().await;
-            guard.push_auto_review_summary(run_id.clone(), result.clone());
-            guard.active
-        };
-
-        if should_send {
-            let event = ThreadBufferedEvent::AutoReviewSummaryLoaded {
-                run_id,
-                result: Box::new(result),
-            };
-            match sender.try_send(event) {
-                Ok(()) => {}
-                Err(TrySendError::Full(event)) => {
-                    tokio::spawn(async move {
-                        if let Err(err) = sender.send(event).await {
-                            tracing::warn!("thread {thread_id} event channel closed: {err}");
-                        }
-                    });
-                }
-                Err(TrySendError::Closed(_)) => {
-                    tracing::warn!("thread {thread_id} event channel closed");
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub(super) async fn enqueue_primary_thread_auto_review_summary(
-        &mut self,
-        thread_id: ThreadId,
-        run_id: String,
-        result: Result<AutoReviewSummaryReadResponse, String>,
-    ) -> Result<()> {
-        if self.primary_thread_id == Some(thread_id) {
-            return self
-                .enqueue_thread_auto_review_summary(thread_id, run_id, result)
-                .await;
-        }
-        if self.primary_thread_id.is_none() {
-            self.pending_primary_events
-                .push_back(ThreadBufferedEvent::AutoReviewSummaryLoaded {
-                    run_id,
-                    result: Box::new(result),
-                });
-        }
         Ok(())
     }
 
@@ -1700,7 +1676,7 @@ impl App {
                 &self.local_settings,
                 self.config.clone(),
                 thread_id,
-                self.resume_model_settings(),
+                crate::app_server_session::ResumeModelSettings::PreserveExistingThread,
             )
             .await
         {
@@ -1762,7 +1738,7 @@ impl App {
             .retain_mut(ThreadEventStore::event_survives_session_refresh);
     }
 
-    /// Opens the `/agent` picker after refreshing cached labels for known threads.
+    /// Opens the `/subagents` picker after refreshing cached labels for known threads.
     ///
     /// The picker state is derived from long-lived thread channels plus best-effort metadata
     /// refreshes from the backend. Refresh failures are treated as "thread is only inspectable by
@@ -1916,28 +1892,13 @@ impl App {
             self.chat_widget
                 .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
         }
-        let replayed_auto_review_summaries = snapshot
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, .. } => Some(run_id.clone()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
         for (event, changes) in snapshot.events.into_iter().zip(request_changes) {
             reasoning_replay.before_event(&event, &mut self.chat_widget);
-            if suppress_replay_notices && replay_filter::event_is_notice(&event) {
-                continue;
-            }
             match (event, changes) {
                 (ThreadBufferedEvent::Request(request), Some(changes)) => {
                     self.handle_file_change_request(*request, changes)
                 }
-                (event, _) => self.handle_thread_event_replay(
-                    event,
-                    &replayed_auto_review_summaries,
-                    /*fetch_missing_auto_review_summaries*/ resume_restored_queue,
-                ),
+                (event, _) => self.handle_thread_event_replay(event),
             }
         }
         reasoning_replay.restore(&mut self.chat_widget);
@@ -1957,6 +1918,7 @@ impl App {
             &replayed_final_items,
             retained_assistant_captions,
         );
+        self.restore_voice_owner_after_replay();
         self.chat_widget
             .set_queue_autosend_suppressed(/*suppressed*/ false);
         self.chat_widget
@@ -1973,12 +1935,6 @@ impl App {
             session_selection,
             SessionSelection::StartFresh | SessionSelection::Exit
         )
-    }
-
-    pub(super) fn should_fetch_auto_review_summary_after_startup(
-        session_selection: &SessionSelection,
-    ) -> bool {
-        matches!(session_selection, SessionSelection::Resume(_))
     }
 
     pub(super) fn should_prompt_for_paused_goal_after_startup_resume(
@@ -2079,7 +2035,7 @@ impl App {
                         .handle_server_request(*request, /*replay_kind*/ None);
                     if may_open_protected_view
                         && self.startup_protected_input_boundary
-                        && !self.chat_widget.has_active_view()
+                        && !self.chat_widget.has_active_modal()
                     {
                         self.startup_pending_protected_request = true;
                     }
@@ -2087,10 +2043,6 @@ impl App {
             }
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event);
-            }
-            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => {
-                self.chat_widget
-                    .handle_auto_review_summary_loaded(run_id, *result);
             }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
@@ -2101,23 +2053,11 @@ impl App {
         }
     }
 
-    pub(super) fn handle_thread_event_replay(
-        &mut self,
-        event: ThreadBufferedEvent,
-        replayed_auto_review_summaries: &HashSet<String>,
-        fetch_missing_auto_review_summaries: bool,
-    ) {
+    pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
         match event {
-            ThreadBufferedEvent::Notification(notification) => {
-                if fetch_missing_auto_review_summaries {
-                    self.maybe_fetch_replayed_auto_review_summary(
-                        notification.as_ref(),
-                        replayed_auto_review_summaries,
-                    );
-                }
-                self.chat_widget
-                    .handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot));
-            }
+            ThreadBufferedEvent::Notification(notification) => self
+                .chat_widget
+                .handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot)),
             ThreadBufferedEvent::Request(request) => {
                 let may_open_protected_view =
                     self.startup_request_may_open_protected_view(request.as_ref());
@@ -2125,7 +2065,7 @@ impl App {
                     .handle_server_request(*request, Some(ReplayKind::ThreadSnapshot));
                 if may_open_protected_view
                     && self.startup_protected_input_boundary
-                    && !self.chat_widget.has_active_view()
+                    && !self.chat_widget.has_active_modal()
                 {
                     self.startup_pending_protected_request = true;
                 }
@@ -2133,39 +2073,10 @@ impl App {
             ThreadBufferedEvent::HistoryEntryResponse(event) => {
                 self.chat_widget.handle_history_entry_response(event)
             }
-            ThreadBufferedEvent::AutoReviewSummaryLoaded { run_id, result } => self
-                .chat_widget
-                .handle_auto_review_summary_loaded(run_id, *result),
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
         }
-    }
-
-    fn maybe_fetch_replayed_auto_review_summary(
-        &mut self,
-        notification: &ServerNotification,
-        replayed_auto_review_summaries: &HashSet<String>,
-    ) {
-        let ServerNotification::BackgroundAutoReviewStatusChanged(notification) = notification
-        else {
-            return;
-        };
-        if !background_auto_review_status_has_summary(notification.status)
-            || replayed_auto_review_summaries.contains(&notification.run_id)
-        {
-            return;
-        }
-        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
-            return;
-        };
-        if !self.try_claim_auto_review_summary_fetch(thread_id, &notification.run_id) {
-            return;
-        }
-        self.app_event_tx.send(AppEvent::FetchAutoReviewSummary {
-            thread_id,
-            run_id: notification.run_id.clone(),
-        });
     }
 
     /// Handles an event emitted by the currently active thread.
@@ -2250,7 +2161,7 @@ impl App {
         } else {
             None
         };
-        let had_active_view = self.chat_widget.has_active_view();
+        let had_active_modal = self.chat_widget.has_active_modal();
         self.handle_thread_event_now_recovering_file_changes(event)
             .await;
         if let Some(user_message) = automatic_title_user_message
@@ -2264,8 +2175,8 @@ impl App {
                 super::thread_title::thread_title_prompt(&user_message),
             );
         }
-        if !had_active_view
-            && self.chat_widget.has_active_view()
+        if !had_active_modal
+            && self.chat_widget.has_active_modal()
             && self.startup_protected_input_boundary
         {
             self.chat_widget.pre_draw_tick();
@@ -2283,12 +2194,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::test_support::make_test_app_with_event_rx;
-    use codex_app_server_protocol::BackgroundAutoReviewStatusChangedNotification;
-    use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
     use codex_protocol::models::ActivePermissionProfile;
     use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
-    use pretty_assertions::assert_eq;
 
     async fn config_with_workspace_profile() -> Config {
         let temp_dir = tempfile::tempdir().expect("tempdir");
@@ -2355,120 +2262,5 @@ mod tests {
             ),
             TurnPermissionsOverride::LegacySandbox(effective_permission_profile)
         );
-    }
-    fn status_notification(
-        thread_id: ThreadId,
-        run_id: &str,
-        status: BackgroundAutoReviewStatus,
-    ) -> ServerNotification {
-        ServerNotification::BackgroundAutoReviewStatusChanged(
-            BackgroundAutoReviewStatusChangedNotification {
-                thread_id: thread_id.to_string(),
-                run_id: run_id.to_string(),
-                status,
-                review_target: ApiReviewTarget::UncommittedChanges,
-                error_summary: None,
-            },
-        )
-    }
-
-    fn drain_summary_fetches(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
-    ) -> Vec<(ThreadId, String)> {
-        let mut fetches = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            if let AppEvent::FetchAutoReviewSummary { thread_id, run_id } = event {
-                fetches.push((thread_id, run_id));
-            }
-        }
-        fetches
-    }
-
-    /// Resuming a thread replays every buffered background-review status, so a
-    /// run that walked Pending -> Running -> Completed would ask the app server
-    /// for the same summary several times if the replay path did not claim the
-    /// fetch. Only the terminal status carries a summary, and only once.
-    #[tokio::test]
-    async fn replayed_statuses_fetch_each_run_summary_once() {
-        let (mut app, mut rx) = make_test_app_with_event_rx().await;
-        let thread_id = ThreadId::new();
-
-        for status in [
-            BackgroundAutoReviewStatus::Pending,
-            BackgroundAutoReviewStatus::Running,
-            BackgroundAutoReviewStatus::Completed,
-            // A duplicate terminal status can arrive from a second replay pass.
-            BackgroundAutoReviewStatus::Completed,
-        ] {
-            app.maybe_fetch_replayed_auto_review_summary(
-                &status_notification(thread_id, "run-1", status),
-                &HashSet::new(),
-            );
-        }
-
-        assert_eq!(
-            drain_summary_fetches(&mut rx),
-            vec![(thread_id, "run-1".to_string())]
-        );
-    }
-
-    /// Every terminal status persists a summary, and each distinct run needs its
-    /// own fetch: the claim is per `(thread, run)`, not per thread.
-    #[tokio::test]
-    async fn each_terminal_run_gets_its_own_summary_fetch() {
-        let (mut app, mut rx) = make_test_app_with_event_rx().await;
-        let thread_id = ThreadId::new();
-
-        for (run_id, status) in [
-            ("run-completed", BackgroundAutoReviewStatus::Completed),
-            ("run-failed", BackgroundAutoReviewStatus::Failed),
-            ("run-cancelled", BackgroundAutoReviewStatus::Cancelled),
-            ("run-superseded", BackgroundAutoReviewStatus::Superseded),
-            ("run-skipped", BackgroundAutoReviewStatus::Skipped),
-        ] {
-            app.maybe_fetch_replayed_auto_review_summary(
-                &status_notification(thread_id, run_id, status),
-                &HashSet::new(),
-            );
-        }
-
-        assert_eq!(
-            drain_summary_fetches(&mut rx),
-            vec![
-                (thread_id, "run-completed".to_string()),
-                (thread_id, "run-failed".to_string()),
-                (thread_id, "run-cancelled".to_string()),
-                (thread_id, "run-superseded".to_string()),
-                (thread_id, "run-skipped".to_string()),
-            ]
-        );
-    }
-
-    /// A summary that the replay already delivered must not be re-fetched, and a
-    /// run that has not reached a terminal status has no summary to fetch yet.
-    #[tokio::test]
-    async fn replayed_summaries_and_non_terminal_statuses_skip_the_fetch() {
-        let (mut app, mut rx) = make_test_app_with_event_rx().await;
-        let thread_id = ThreadId::new();
-        let already_replayed = HashSet::from(["run-replayed".to_string()]);
-
-        app.maybe_fetch_replayed_auto_review_summary(
-            &status_notification(
-                thread_id,
-                "run-replayed",
-                BackgroundAutoReviewStatus::Completed,
-            ),
-            &already_replayed,
-        );
-        app.maybe_fetch_replayed_auto_review_summary(
-            &status_notification(
-                thread_id,
-                "run-running",
-                BackgroundAutoReviewStatus::Running,
-            ),
-            &already_replayed,
-        );
-
-        assert_eq!(drain_summary_fetches(&mut rx), Vec::new());
     }
 }
