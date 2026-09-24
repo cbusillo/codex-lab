@@ -1,3 +1,59 @@
+# Codex Lab
+
+Read [DIRECTION.md](DIRECTION.md) first. Its purpose, stop boundaries, and
+milestone order govern this repository. When issues or other documents disagree,
+follow `DIRECTION.md`; `plan:active` does not override its milestone order.
+
+## Execution and skill scope
+
+- Carry the user's authorized task through implementation and verification.
+  Preserve unrelated changes; use an isolated task worktree when needed. Ask
+  only when missing information, overlapping edits, or an authorization boundary
+  prevents safe progress. Continue independent authorized work while waiting.
+- Explicit user instructions take precedence over skill guidelines. Reuse
+  authorization already given for the same action and scope; retain requirements
+  for exact-response, release, production, and other specifically scoped approval.
+- If an instruction requires a pause, link the exact source file, quote the
+  relevant instruction, explain the unresolved decision, and finish independent
+  work first.
+- Select skills by their full source path when names overlap. When the shared
+  `codex-skills` installation is available, use its `babysit-pr` workflow for
+  this fork's PR monitoring; the repo-local skill is a standalone fallback.
+  Use one watcher and one workflow, not both copies together.
+  Resolve the shared source from its full catalog path; if discovery is missing,
+  check `skills/babysit-pr/SKILL.md` under `CODE_HOME`, then `CODEX_HOME`, then
+  `~/.code`. Resolve helper paths relative to the selected skill directory while
+  keeping the target repository as the working directory. Missing shared
+  credentials are an authorization/configuration blocker, not permission to
+  fall back to another identity.
+- The shared repository intentionally maintains `openai-docs`, `plan`,
+  `plugin-creator`, and `skill-creator` overrides. When available, use those
+  maintained sources rather than combining them with generated `.system` copies.
+  Otherwise use the installed skill supplied by the host. Treat bundled samples
+  under `codex-rs/skills/src/assets/samples` as product source, not an additional
+  set of instructions to load for ordinary repository work.
+- Apply upstream-only skills and approval procedures only to their named
+  repository and verified access requirements; this fork does not inherit an
+  internal upstream approval flow merely because it shares source history.
+
+## Planning and historical references
+
+- Treat GitHub issues as the durable work list within `DIRECTION.md`. Use its
+  milestone order first, then the GitHub planning index and `plan` / `plan:active`
+  state to find work in that milestone. Do not hardcode a transient active issue
+  as the recovery point.
+- Do not rely on local handoff files or local plan drafts as the source of truth
+  for GitHub-backed work.
+- Treat `.github/github.json` as repository-owned workflow metadata. Preserve
+  its default-branch, readiness-gate, and JetBrains routing configuration when
+  updating upstream, even when the file is absent upstream.
+- New implementation work belongs in this repo unless the user explicitly says
+  otherwise.
+- The archived Lab main, `../code-prealign-new-skills`, and `../code` are
+  historical references only. Code comes back from them only for a kept need
+  listed in `DIRECTION.md`; their old product flows, plans, and convergence
+  machinery do not define current requirements. Never delete the archived main.
+
 # Rust/codex-rs
 
 In the codex-rs folder where the rust code lives:
