@@ -1,5 +1,7 @@
 # Direction
 
+<!-- Temporary CODEOWNERS routing probe for #967; close without merging. -->
+
 This file is the current direction for Codex Lab. When an issue, milestone,
 or other document disagrees with it, this file wins and the other source is
 corrected or closed. Issues are a work list, not instructions.
