@@ -27,9 +27,7 @@ An agent asks the owner before:
 - replacing or rewriting the default branch
 - starting a catch-up with upstream
 - changing credentials, account storage, or login flows
-- publishing a release or replacing the installed binary
-- breaking Launchplane's agent workers or the owner's remote access, which
-  run through the installed build
+- publishing a release
 - writing to openai/codex or any other person's repository
 
 Everything else is ordinary engineering and needs no ceremony.
@@ -51,6 +49,10 @@ step does not work yet is the next piece of work.
 - discord-blue and the remote inbox as requirements; remote access that
   works is the requirement
 - Auto Drive, and Every Code (`code`) as a runtime
+- the installed Lab build and its services: the remote-control app-server,
+  housekeeping jobs, the self-hosted release and signing runners, and the
+  Every Code worker. Nothing depends on them; their sessions are kept as
+  evidence before removal
 
 A retired concept comes back only through a direction change, in a shape
 that fits this file.
@@ -58,8 +60,8 @@ that fits this file.
 ## Milestones
 
 - `Fresh start on upstream` proves main is upstream HEAD, the old main is
-  archived, and the installed build still serves Launchplane and remote
-  access; ends if the archive or the installed build is lost.
+  archived, and the retired installed build and its services are removed
+  after their sessions are saved; ends if the archive is lost.
 - `Remote access on the fresh start` proves the owner gets and gives quick
   updates to a CLI session from away, with Launchplane integration; ends if
   it needs broad patches to upstream's files.
