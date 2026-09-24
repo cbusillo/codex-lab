@@ -25,3 +25,4 @@
 
 # Keep ownership changes reviewed by the fork owner.
 /.github/CODEOWNERS @cbusillo
+/DIRECTION.md @cbusillo
