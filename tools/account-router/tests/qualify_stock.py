@@ -20,6 +20,7 @@ from codex_account_router.cli import begin_task, configure, create_task
 from codex_account_router.proxy import Proxy, application
 from codex_account_router.rpc import RpcError
 from codex_account_router.selection import Selection
+from codex_account_router.service import refresh_subscriptions
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--codex", required=True, type=Path)
@@ -360,7 +361,10 @@ async def main():
         await close_stock(process, rpc)
         proxy.denied.clear()  # Reload the router's in-memory auth quarantine too.
         process, rpc = await start_control()
-        resumed = await rpc.call("thread/resume", {"threadId": thread})
+        # The service preloads registered tasks and keeps this observer alive
+        # before a phone client resumes with its model selection.
+        await refresh_subscriptions(rpc, data, set())
+        resumed = await rpc.call("thread/resume", {"threadId": thread, "model": "gpt-5.4"})
         assert resumed["modelProvider"] == "account-router"
         statuses.append((await rpc.turn(thread, "continue after restart"))["status"])
         await select_idle("phone-owner")
@@ -406,6 +410,7 @@ async def main():
             "refreshes": refreshes,
             "execution_sequence": [row["account"] for row in requests],
             "same_thread_after_cold_resume": True,
+            "phone_model_override_after_service_preload": True,
             "final_status": await proxy.selection.status(),
         }
         (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")

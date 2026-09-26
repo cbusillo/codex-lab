@@ -37,7 +37,7 @@ def admin_application(selection):
     return app
 
 
-async def serve(args):
+async def serve(args, *, stopped=None):
     private_directory(args.data_dir)
     async with AsyncExitStack() as stack:
         lease = Lease(args.data_dir / "router.lock")
@@ -89,11 +89,12 @@ async def serve(args):
         await web.UnixSite(admin, str(socket_path)).start()
         socket_path.chmod(0o600)
         stack.callback(partial(socket_path.unlink, missing_ok=True))
-        stopped = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stopped.set)
-            stack.callback(loop.remove_signal_handler, sig)
+        if stopped is None:
+            stopped = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, stopped.set)
+                stack.callback(loop.remove_signal_handler, sig)
         print(
             f"Account router ready on loopback:{args.port}; execution labels: {', '.join(workers)}",
             flush=True,

@@ -126,6 +126,57 @@ limited. Tailscale's hostname-triggered On Demand rule matches `.ts.net`; a shor
 hostname may not activate it. See the official [Shortcuts actions](https://tailscale.com/docs/features/mac-ios-shortcuts)
 and [On Demand rules](https://tailscale.com/docs/features/client/ios-vpn-on-demand).
 
+## Independent macOS startup
+
+`service` supervises an already enrolled isolated phone host and its router.
+It locks that home, verifies the control identity, and restores registered tasks
+before enabling Remote. It keeps observer subscriptions for the latest 100 root
+registrations, discovers new ones every five seconds, and releases older ones.
+These observers prevent a phone model override from cold-resuming with stock's
+other default provider. They never start turns or answer approval/tool requests.
+Use the router's `start` command for new routed tasks.
+
+Create a mode-0600 configuration outside the source checkout, for example
+`~/.codex/account-router/service.json`:
+
+```json
+{
+  "codex": "/absolute/resolved/pinned-release/bin/codex",
+  "data_dir": "/absolute/private/account-router",
+  "control_home": "/absolute/private/account-router/phone",
+  "control_account_id": "account/read workspaceRouting.chatgptAccountId",
+  "accounts": ["execution-a", "execution-b"],
+  "port": 41979
+}
+```
+
+Use the intended host's existing RPC account identifier, never a token. Its
+control home must be a direct child of the data directory, with an existing
+stock file login and the configured provider using its `host.sock` and router
+port. All paths must be absolute and resolved; pin the qualified stock release.
+Install a built wheel with `uv tool install`, then render from that installation:
+
+```sh
+umask 077
+mkdir -p "$HOME/Library/LaunchAgents"
+"$HOME/.local/bin/codex-account-router" launch-agent "$HOME/.codex/account-router/service.json" > "$HOME/Library/LaunchAgents/com.codex.account-router.plist"
+plutil -lint "$HOME/Library/LaunchAgents/com.codex.account-router.plist"
+# After reviewing paths and stopping the idle foreground pilot:
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.codex.account-router.plist"
+launchctl print "gui/$(id -u)/com.codex.account-router"
+# Stop for maintenance or rollback:
+launchctl bootout "gui/$(id -u)/com.codex.account-router"
+```
+
+launchd starts it at user login and restarts failures with a delay. Screen lock
+is supported; logout stops it and a reboot requires login. Check router `status`
+before planned restart because active turns can be interrupted. Verify Remote,
+the account menu and same-ID resume after installation. Logs rotate under
+`data_dir/logs/` (four files of roughly 1 MiB each). Rollback unloads this agent,
+removes only its plist, and restores the retained wheel/foreground setup; preserve
+all account homes, provider configuration and history. Other CLI hosts' sessions
+remain on their original host and are not migrated by this service.
+
 ## Ownership and failure behavior
 
 Stock app-server workers own execution refresh and persistence in separate
