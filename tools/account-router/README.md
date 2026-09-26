@@ -35,7 +35,10 @@ then start it with `uv run codex-account-router serve execution-a execution-b`.
 Complete each stock device sign-in as the corresponding execution account.
 `configure` adds only the `account-router` provider through stock's versioned
 config RPC. It preserves the default provider and refuses a conflicting existing
-definition. Its supported auth command reads the current control access token
+definition. After installing the same package into a different environment,
+rerun `configure` from that installation: it can update the interpreter path when
+every other managed provider/auth setting is unchanged.
+Its supported auth command reads the current control access token
 through the local socket and delivers it over a private credential pipe; it does
 not create another credential store or force a refresh. The provider uses this
 command instead of `requires_openai_auth`, so the control account's exhausted
@@ -78,6 +81,10 @@ not a claim that the model turn completed; task state comes from the owning serv
 The phone list contains the most recent 100 explicitly registered tasks; inherited
 children are omitted. A fork needs an explicit `select NEW_TASK_UUID LABEL` before
 it appears there. Forks do not inherit a selection automatically.
+Start each additional routed task with `codex-account-router start`. Stock TUI
+`/new` uses the host's default provider and can run on the phone/control account;
+the launcher covers only the specific task it opens. Do not treat `/new` as a
+routed task when the host default is unchanged.
 
 All global options precede the command: `--data-dir`, `--control-socket`, `--codex`,
 and `--port`. Defaults use the current `CODEX_HOME` (or `~/.codex`), a private

@@ -11,7 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from .accounts import AccountError, enroll
-from .rpc import Rpc, RpcError
+from .rpc import ConnectionLost, Rpc, RpcError
 from .server import serve
 
 
@@ -55,7 +55,12 @@ async def configure(rpc, port, auth_command):
     if current == value:
         return {"provider": "account-router", "changed": False}
     if current is not None:
-        raise AccountError("account-router provider already exists with different settings")
+        relocated = dict(current)
+        existing_auth = current.get("auth")
+        if isinstance(existing_auth, dict):
+            relocated["auth"] = dict(existing_auth, command=auth_command["command"])
+        if relocated != value:
+            raise AccountError("account-router provider already exists with different settings")
     user = next(
         (
             layer
@@ -103,11 +108,19 @@ async def begin_task(rpc, thread_id, prompt):
                 try:
                     await rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
                     return started["turn"]["id"]
+                except ConnectionLost:
+                    raise AccountError(
+                        f"control connection lost; the first turn may still be running. "
+                        f"Reconnect with resume {thread_id} and the same connection options"
+                    ) from None
                 except RpcError:
                     await asyncio.sleep(0.1)
     except TimeoutError:
         pass
-    raise AccountError(f"task {thread_id} started but is not ready for TUI attachment")
+    raise AccountError(
+        f"the first turn may still be running; TUI attachment timed out. "
+        f"Reconnect with resume {thread_id} and the same connection options"
+    )
 
 
 async def run(args):
