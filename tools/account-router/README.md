@@ -1,16 +1,127 @@
 # Stock Codex account router
 
-Package scaffold for a sidecar that separates a shared Codex server's phone/control
-login from model execution accounts. The owning work item is
+This experimental sidecar keeps the shared stock server's phone/control login
+stable while an owner selects a separate account for an opted-in task's model
+requests. Selection is manual and happens between turns. Future automatic
+selection can use the same interface; this package does not rotate accounts.
+The owning work item and live acceptance record are
 [codex-lab #979](https://github.com/cbusillo/codex-lab/issues/979).
 
-This package targets macOS and Linux hosts with a local Unix control socket.
-Installation or import does not change credentials, configuration, or services.
+The host target is macOS or Linux with a local Unix control socket. The stock RPC
+adapter requires app-server 0.157.1. A different version needs qualification
+before changing that guard. Synthetic qualification is not proof that real
+encrypted reasoning or compacted history works across accounts, or that the
+phone can reach the host. Those remain live acceptance gates in #979.
 
-From this directory:
+## Setup
+
+Use fresh device logins for execution accounts. Never copy the main server's or
+retired Lab's credential files. The main server must already be running with its
+normal control login. From this directory:
 
 ```sh
 uv sync --locked --group dev
+uv run codex-account-router login first
+uv run codex-account-router login second
+uv run codex-account-router configure
+uv run codex-account-router serve first second
+```
+
+Complete each stock device sign-in as the corresponding execution account.
+`configure` adds only the `account-router` provider through stock's versioned
+config RPC. It preserves the default provider and refuses a conflicting existing
+definition. `serve` runs in the foreground, binds model HTTP to `127.0.0.1:41979`,
+and exposes administration only through a private Unix socket. It must stay
+running while opted-in tasks execute. The first listed execution account supplies
+the model catalog, which stock requests without a task identity.
+
+In another terminal:
+
+```sh
+uv run codex-account-router start first --cwd /absolute/path/to/repository
+uv run codex-account-router status
+uv run codex-account-router select TASK_UUID second
+```
+
+`start` creates a task in the existing shared server and opens stock `codex resume`
+with an explicit `--remote` Unix socket, preventing a fallback to another owner.
+Its creator connection stays subscribed while the TUI is open;
+it never answers the TUI's approval or tool requests. The account panel in stock
+Codex still describes the control account. Router status and selection receipts
+identify execution labels separately. `lastRequest.httpStatus` is an HTTP receipt,
+not a claim that the model turn completed; task state comes from the owning server.
+The phone list contains the most recent 100 explicitly registered tasks; inherited
+children are omitted. A fork needs an explicit `select NEW_TASK_UUID LABEL` before
+it appears there. Forks do not inherit a selection automatically.
+
+All global options precede the command: `--data-dir`, `--control-socket`, `--codex`,
+and `--port`. Defaults use the current `CODEX_HOME` (or `~/.codex`), a private
+`account-router` subdirectory, and the stock `app-server-control` socket.
+Use the same options for every command. Configuration and serve ports must match.
+
+## Phone selector
+
+Use ordinary SSH over Tailscale. The phone and host must be on the same reachable
+Tailscale network, TCP 22 must be allowed, and the phone needs the Mac's SSH login.
+This does not require the Tailscale SSH server feature or public port forwarding.
+
+Build a native Shortcut with these actions:
+
+1. Connect Tailscale using its Shortcuts action.
+2. Run Script Over SSH on the host's full MagicDNS name ending in `.ts.net`,
+   invoking the installed router command with `status`.
+3. Decode the JSON, choose one task by its `name` and retain its `thread` UUID.
+   Choose a label from `accounts`, then confirm that task and label together.
+4. Run Script Over SSH again with `select TASK_UUID LABEL`, then Show Result.
+
+Use an absolute installed command path in SSH because its PATH can differ from
+Terminal. Never interpolate task names into shell code; pass the selected UUID
+and validated account label. The owner enters SSH authentication in Shortcuts.
+Test from cellular with Wi-Fi disabled, including while the execution account is
+limited. Tailscale's hostname-triggered On Demand rule matches `.ts.net`; a short
+hostname may not activate it. See the official [Shortcuts actions](https://tailscale.com/docs/features/mac-ios-shortcuts)
+and [On Demand rules](https://tailscale.com/docs/features/client/ios-vpn-on-demand).
+
+## Ownership and failure behavior
+
+Stock app-server workers own execution refresh and persistence in separate
+0700 homes. The router receives access tokens in memory through owner-local
+`getAuthStatus` and validates `account/read` routing and account identity. It does
+not read refresh tokens. Kernel locks are inherited by worker/login processes,
+so an exiting parent cannot admit a concurrent credential writer prematurely.
+Execution identities must differ from the control account and from one another.
+Read-only control connections reconnect to the same account after a disconnect;
+dead credential workers can restart while retaining their account lock and binding.
+This first qualification targets personal ChatGPT accounts. Identity comparison
+uses workspace IDs, so separate seats in one Business/Enterprise workspace are
+not supported. A worker that times out without disconnecting needs an operator
+restart: interrupt its affected turn, then restart the router when routed tasks
+are idle. A timeout does not automatically terminate a possibly running refresh.
+
+The HTTP caller must supply the current control token; comparisons never force a
+control refresh. Execution 401s get one worker refresh and one retry. Rejected
+execution tokens are then quarantined until credentials change or the router is
+restarted. Every exposed authentication failure is 403, preventing stock from
+refreshing the control login in response. Usage limits pass through as 429.
+
+Account pins survive router restart. Active targets reject selection; stock's
+idle-after-error status permits recovery from a usage limit. Unknown tasks fail
+closed. Children inherit only through a parent relationship verified with stock,
+and follow the parent's selection on each new turn unless selected explicitly.
+Model requests support `/responses`, `/responses/compact`, and catalog `/models`;
+other backend endpoints fail explicitly. Bodies and SSE bytes retain compression,
+redirects are refused, and a partial response is never replayed by the router.
+
+Stop the foreground router before re-enrolling a label. Stock login must return
+to that label's original account; a changed identity fails closed. To roll back,
+stop the router and its owned workers after the canary is idle. Preserve execution
+homes and the provider definition while tasks still depend on them. Unrelated
+tasks and the shared phone server keep their existing provider and ownership.
+
+## Development checks
+
+```sh
+uv run python -m unittest discover -s tests
 uv run ruff check .
 uv run ruff format --check .
 ```
