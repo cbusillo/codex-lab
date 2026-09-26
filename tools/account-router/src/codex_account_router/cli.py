@@ -11,6 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from .accounts import AccountError, enroll
+from .phone import choices
 from .rpc import ConnectionLost, Rpc, RpcError
 from .server import serve
 
@@ -132,6 +133,18 @@ async def run(args):
         return None
     if args.command == "status":
         return await admin(args, "GET", "/status")
+    if args.command in ("phone-list", "phone-select"):
+        available = choices(await admin(args, "GET", "/status"))
+        if args.command == "phone-list":
+            if not available:
+                raise AccountError("no idle routed tasks are available")
+            return "\n".join(available)
+        # Compare data with a fresh inventory. Never evaluate or interpolate
+        # the task name as shell code, and refuse stale/busy selections.
+        selected = available.get(sys.stdin.read(513).strip())
+        if selected is None:
+            raise AccountError("choice is unavailable; run the Shortcut again")
+        return await admin(args, "POST", "/select", selected)
     if args.command == "select":
         return await admin(
             args, "POST", "/select", {"thread": args.thread, "execution": args.account}
@@ -220,6 +233,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("configure", help="add the opt-in provider through stock config RPC")
     commands.add_parser("status", help="show task choices and last-request receipts as JSON")
+    commands.add_parser("phone-list", help="list idle task/account choices, one per line")
+    commands.add_parser("phone-select", help="select the exact phone-list choice from stdin")
     commands.add_parser(
         "login", help="run stock device login into an isolated execution home"
     ).add_argument("account")
@@ -253,7 +268,7 @@ def main():
     try:
         result = asyncio.run(run(args))
         if result is not None:
-            print(json.dumps(result, indent=2))
+            print(result if isinstance(result, str) else json.dumps(result, indent=2))
     except (AccountError, RpcError) as error:
         parser.exit(1, f"account-router: {error}\n")
     except (OSError, aiohttp.ClientError, TimeoutError):
