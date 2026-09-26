@@ -31,7 +31,7 @@ CODEX = str(args.codex.resolve(strict=True))
 POLICY = '(version 1) (allow default) (deny network-outbound) (allow network-outbound (remote ip "localhost:*"))'
 
 
-def token(account):
+def token(account, login=None):
     def encode(value):
         return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
 
@@ -39,6 +39,7 @@ def token(account):
         "sub": "synthetic-user",
         "email": "synthetic@example.invalid",
         "exp": 2100000000,
+        "synthetic_login": login or account,
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account,
             "chatgpt_user_id": "synthetic-user",
@@ -145,6 +146,8 @@ async def main():
         payload = json.loads(body)
         account = request.headers["ChatGPT-Account-Id"]
         assert identity(request.headers["Authorization"]) == account
+        if account == "control":
+            assert request.headers["Authorization"] == f"Bearer {token('control', 'phone-owner')}"
         requests.append({"account": account, "payload": payload})
         if state["reject"]:
             return web.json_response({"error": {"message": "synthetic auth error"}}, status=401)
@@ -205,13 +208,13 @@ async def main():
 
     async def refresh(request):
         body = await request.json()
-        account = body["refresh_token"].split(":")[1]
-        refreshes.append(account)
+        _, account, login, _ = body["refresh_token"].split(":")
+        refreshes.append(login)
         return web.json_response(
             {
-                "access_token": token(account),
-                "id_token": token(account),
-                "refresh_token": f"synthetic:{account}:rotated",
+                "access_token": token(account, login),
+                "id_token": token(account, login),
+                "refresh_token": f"synthetic:{account}:{login}:rotated",
                 "token_type": "Bearer",
             }
         )
@@ -235,6 +238,7 @@ async def main():
         wrapper.chmod(0o700)
 
         def prepare(fixture_home, account):
+            login = fixture_home.name
             fixture_home.mkdir(mode=0o700, exist_ok=True)
             (fixture_home / "config.toml").write_text(
                 f'model = "gpt-5.4"\nchatgpt_base_url = "{backend_url}/backend-api"\ncli_auth_credentials_store = "file"\napproval_policy = "never"\nsandbox_mode = "read-only"\n[analytics]\nenabled = false\n[feedback]\nenabled = false\n[features]\nremote_control = false\napps = false\n'
@@ -243,9 +247,9 @@ async def main():
                 "auth_mode": "chatgpt",
                 "OPENAI_API_KEY": None,
                 "tokens": {
-                    "access_token": token(account),
-                    "id_token": token(account),
-                    "refresh_token": f"synthetic:{account}:old",
+                    "access_token": token(account, login),
+                    "id_token": token(account, login),
+                    "refresh_token": f"synthetic:{account}:{login}:old",
                     "account_id": account,
                 },
                 "last_refresh": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -255,13 +259,17 @@ async def main():
 
         data = run / "router"
         workers = {}
-        for label in ("first", "second"):
-            home = account_home(data, label)
-            prepare(home, label)
-            worker = await AccountWorker.start(data, label, str(wrapper))
+        for worker_label, worker_account in (
+            ("first", "first"),
+            ("second", "second"),
+            ("phone-owner", "control"),
+        ):
+            home = account_home(data, worker_label)
+            prepare(home, worker_account)
+            worker = await AccountWorker.start(data, worker_label, str(wrapper))
             stack.push_async_callback(worker.close)
             credential = await worker.credentials()
-            assert credential.account_id == label
+            assert credential.account_id == worker_account
 
             class LoopbackWorker:
                 def __init__(self, credential_worker):
@@ -270,7 +278,7 @@ async def main():
                 async def credentials(self, **kwargs):
                     return replace(await self.worker.credentials(**kwargs), origin=backend_url)
 
-            workers[label] = LoopbackWorker(worker)
+            workers[worker_label] = LoopbackWorker(worker)
         session = await stack.enter_async_context(aiohttp.ClientSession(auto_decompress=False))
         proxy = Proxy(None, None, workers, session)
         router_url = await listen(stack, application(proxy))
@@ -318,8 +326,25 @@ async def main():
         first_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
         second_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
         assert first_config["changed"] and not second_config["changed"]
+        moved_python = run / "relocated-python"
+        moved_python.symlink_to(sys.executable)
+        moved = await configure(
+            rpc, int(router_url.rsplit(":", 1)[1]), dict(auth_command, command=str(moved_python))
+        )
+        restored = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
+        assert moved["changed"] and restored["changed"]
         thread = await create_task(rpc, run, "Synthetic account-router task")
-        await proxy.selection.select(thread, "first")
+
+        async def select_idle(label):
+            async with asyncio.timeout(5):
+                while (
+                    proxy.selection.active
+                    or (await proxy.selection.thread(thread))["status"]["type"] == "active"
+                ):
+                    await asyncio.sleep(0.02)
+            await proxy.selection.select(thread, label)
+
+        await select_idle("first")
         first_turn = await begin_task(rpc, thread, "first synthetic turn")
         attached = await rpc.call("thread/read", {"threadId": thread, "includeTurns": False})
         assert attached["thread"]["id"] == thread
@@ -327,7 +352,7 @@ async def main():
         statuses = [(await rpc.completed(first_turn))["status"]]
         state["limit"] = True
         statuses.append((await rpc.turn(thread, "synthetic limit"))["status"])
-        await proxy.selection.select(thread, "second")
+        await select_idle("second")
         statuses.append((await rpc.turn(thread, "continue on second"))["status"])
         state["reject"] = True
         statuses.append((await rpc.turn(thread, "synthetic bad execution auth"))["status"])
@@ -338,8 +363,28 @@ async def main():
         resumed = await rpc.call("thread/resume", {"threadId": thread})
         assert resumed["modelProvider"] == "account-router"
         statuses.append((await rpc.turn(thread, "continue after restart"))["status"])
-        assert statuses == ["completed", "failed", "completed", "failed", "completed"], statuses
-        assert refreshes == ["second"], refreshes
+        await select_idle("phone-owner")
+        statuses.append(
+            (await rpc.turn(thread, "use the separately enrolled phone account"))["status"]
+        )
+        state["reject"] = True
+        statuses.append((await rpc.turn(thread, "reject only that execution login"))["status"])
+        state["reject"] = False
+        await select_idle("second")
+        statuses.append(
+            (await rpc.turn(thread, "continue after shared-identity rejection"))["status"]
+        )
+        assert statuses == [
+            "completed",
+            "failed",
+            "completed",
+            "failed",
+            "completed",
+            "completed",
+            "failed",
+            "completed",
+        ], statuses
+        assert refreshes == ["second", "phone-owner"], refreshes
         assert (control_home / "auth.json").read_bytes() == control_auth
         assert "first_OK" in json.dumps(requests[-1]["payload"])
         async with asyncio.timeout(5):
@@ -351,10 +396,13 @@ async def main():
             "execution_worker_restart": True,
             "network": "stock processes restricted to localhost",
             "config_rpc_idempotent": True,
+            "managed_auth_environment_relocation": True,
             "command_backed_caller_auth": True,
             "initial_prompt_allows_same_server_attachment": True,
             "turn_statuses": statuses,
             "control_credential_unchanged": True,
+            "control_identity_execution_uses_separate_login": True,
+            "control_identity_execution_refresh_isolated": True,
             "refreshes": refreshes,
             "execution_sequence": [row["account"] for row in requests],
             "same_thread_after_cold_resume": True,

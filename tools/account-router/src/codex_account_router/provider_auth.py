@@ -5,8 +5,10 @@ import asyncio
 import sys
 from pathlib import Path
 
+import aiohttp
+
 from .accounts import AccountError
-from .rpc import Rpc
+from .rpc import Rpc, RpcError
 
 
 async def control_token(socket_path):
@@ -29,7 +31,7 @@ def main():
         parser.exit(1, "provider auth requires an absolute local socket and a credential pipe\n")
     try:
         token = asyncio.run(control_token(args.socket))
-    except Exception:
+    except (AccountError, RpcError, OSError, aiohttp.ClientError, TimeoutError, ValueError):
         parser.exit(1, "control credential lookup failed\n")
     print(token)
 

@@ -10,7 +10,7 @@ from aiohttp import web
 
 class ProviderAuthTest(unittest.IsolatedAsyncioTestCase):
     async def test_command_exports_only_current_control_token_without_forced_refresh(self):
-        current = {"authMethod": "chatgpt", "authToken": "synthetic-first"}
+        current: dict[str, str | None] = {"authMethod": "chatgpt", "authToken": "synthetic-first"}
         calls = []
 
         async def handle(request):

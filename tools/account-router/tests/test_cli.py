@@ -5,10 +5,18 @@ from unittest.mock import AsyncMock, patch
 
 from codex_account_router.accounts import AccountError
 from codex_account_router.cli import begin_task, run
-from codex_account_router.rpc import RpcError
+from codex_account_router.rpc import ConnectionLost, RpcError
 
 
 class LauncherTest(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_loss_after_submission_reports_how_to_reconnect(self):
+        rpc = SimpleNamespace(
+            call=AsyncMock(side_effect=[{"turn": {"id": "turn"}}, ConnectionLost("closed")])
+        )
+        with self.assertRaisesRegex(AccountError, "may still be running.*resume task"):
+            await begin_task(rpc, "task", "owner request")
+        self.assertEqual(rpc.call.await_count, 2)
+
     async def test_resume_uses_the_socket_owners_config_and_never_starts_a_turn(self):
         rpc = SimpleNamespace(
             call=AsyncMock(
@@ -68,7 +76,8 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         class Stock:
-            async def call(self, method, params):
+            @staticmethod
+            async def call(method, params):
                 calls.append((method, params))
                 if method == "turn/start":
                     return {"turn": {"id": "first-turn"}}

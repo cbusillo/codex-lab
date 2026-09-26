@@ -157,6 +157,7 @@ class AccountWorker:
         self.lease = lease
         self.rpc = rpc
         self.codex = codex
+        self.email: str | None = None
         self.excluded_ids = frozenset(excluded_ids)
         self._refresh = asyncio.Lock()
         self._last_rejected_token = None
@@ -220,15 +221,15 @@ class AccountWorker:
         account = await self.rpc.call("account/read", {"refreshToken": False})
         credential = credentials_from(exported, account)
         if credential.account_id in self.excluded_ids:
-            raise AccountError(
-                "execution login must differ from control and other execution accounts"
-            )
+            raise AccountError("execution labels must use different accounts")
         if self._account_id and credential.account_id != self._account_id:
             raise AccountError("execution login changed identity; enrollment review required")
         if self._account_id is None:
             path = self.home / "router-identity.json"
             write_metadata(path, {"account_id": credential.account_id})
             self._account_id = credential.account_id
+        email = (account.get("account") or {}).get("email")
+        self.email = email if isinstance(email, str) else None
         return credential
 
     async def close(self):
