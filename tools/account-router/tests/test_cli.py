@@ -76,7 +76,8 @@ class LauncherTest(unittest.IsolatedAsyncioTestCase):
         calls = []
 
         class Stock:
-            async def call(self, method, params):
+            @staticmethod
+            async def call(method, params):
                 calls.append((method, params))
                 if method == "turn/start":
                     return {"turn": {"id": "first-turn"}}

@@ -193,11 +193,14 @@ async def run(args):
             ),
             None,
         )
-        if user is None or not Path(user["name"]["file"]).is_absolute():
+        if not isinstance(user, dict):
+            raise AccountError("local server did not report its user config location")
+        user_config = Path(user["name"]["file"])
+        if not user_config.is_absolute():
             raise AccountError("local server did not report its user config location")
         # --remote still loads client configuration locally. Match the socket's
         # stock home so a separate control host has the same named provider.
-        tui_environment = dict(os.environ, CODEX_HOME=str(Path(user["name"]["file"]).parent))
+        tui_environment = dict(os.environ, CODEX_HOME=str(user_config.parent))
         process = await asyncio.create_subprocess_exec(
             args.codex,
             "--remote",
