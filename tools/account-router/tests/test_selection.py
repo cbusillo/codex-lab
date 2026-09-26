@@ -39,6 +39,7 @@ class SelectionTest(unittest.IsolatedAsyncioTestCase):
                     raise AccountError("credential worker unavailable")
             expected = {
                 "accounts": ["first"],
+                "accountNames": {},
                 "tasks": [
                     {
                         "thread": "task",

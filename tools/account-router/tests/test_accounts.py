@@ -36,6 +36,7 @@ def routing(identity):
 class FakeRpc:
     def __init__(self):
         self.identity = "account-a"
+        self.email = "owner@example.invalid"
         self.revision = "old"
         self.refreshes = 0
         self.rotate = True
@@ -43,7 +44,7 @@ class FakeRpc:
     async def call(self, method, params):
         await asyncio.sleep(0)
         if method == "account/read":
-            return routing(self.identity)
+            return dict(routing(self.identity), account={"email": self.email})
         if params["refreshToken"]:
             self.refreshes += 1
             if self.rotate:
@@ -55,14 +56,14 @@ class FakeRpc:
 
 
 class AccountsTest(unittest.IsolatedAsyncioTestCase):
-    async def test_control_or_duplicate_execution_identity_is_rejected_before_binding(self):
+    async def test_duplicate_execution_identity_is_rejected_before_binding(self):
         with tempfile.TemporaryDirectory() as directory:
             home = account_home(Path(directory), "first")
             worker = AccountWorker(
                 home, Lease(home / "worker.lock"), FakeRpc(), excluded_ids={"account-a"}
             )
             try:
-                with self.assertRaisesRegex(AccountError, "must differ"):
+                with self.assertRaisesRegex(AccountError, "must use different accounts"):
                     await worker.credentials()
                 self.assertFalse((home / "router-identity.json").exists())
                 damaged = home / "selection.json"

@@ -9,8 +9,14 @@ from codex_account_router.cli import run
 
 class PhoneTest(unittest.IsolatedAsyncioTestCase):
     async def test_choice_round_trip_keeps_shell_metacharacters_as_data(self):
+        account_names = {
+            "execution-a": "first@example.invalid",
+            "execution-b": "second@example.invalid",
+            "phone-owner": "owner@example.invalid",
+        }
         status = {
-            "accounts": ["execution-a", "execution-b"],
+            "accounts": ["execution-a", "execution-b", "phone-owner"],
+            "accountNames": account_names,
             "tasks": [
                 {
                     "thread": "task-id",
@@ -24,12 +30,22 @@ class PhoneTest(unittest.IsolatedAsyncioTestCase):
         admin = AsyncMock(side_effect=[status, status, {"execution": "execution-b"}])
         with patch("codex_account_router.cli.admin", admin):
             listed = await run(args)
-            self.assertEqual(len(listed.splitlines()), 2)
+            self.assertEqual(
+                listed.splitlines(),
+                [
+                    f"Review $(touch /tmp/no) | 'quotes' → {email} ({label}) · task-id"
+                    for label, email in account_names.items()
+                ],
+            )
             selected = listed.splitlines()[1]
             args.command = "phone-select"
             with patch("sys.stdin", io.StringIO(selected + "\n")):
                 result = await run(args)
-        self.assertEqual(result, {"execution": "execution-b"})
+        self.assertEqual(
+            result,
+            "Selected second@example.invalid (execution-b) for the next turn.\n"
+            "Your phone login stays unchanged.",
+        )
         self.assertEqual(
             admin.call_args_list[-1],
             call(args, "POST", "/select", {"thread": "task-id", "execution": "execution-b"}),

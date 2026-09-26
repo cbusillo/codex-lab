@@ -11,7 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from .accounts import AccountError, enroll
-from .phone import choices
+from .phone import account_name, choices
 from .rpc import ConnectionLost, Rpc, RpcError
 from .server import serve
 
@@ -134,7 +134,8 @@ async def run(args):
     if args.command == "status":
         return await admin(args, "GET", "/status")
     if args.command in ("phone-list", "phone-select"):
-        available = choices(await admin(args, "GET", "/status"))
+        status = await admin(args, "GET", "/status")
+        available = choices(status)
         if args.command == "phone-list":
             if not available:
                 raise AccountError("no idle routed tasks are available")
@@ -144,7 +145,11 @@ async def run(args):
         selected = available.get(sys.stdin.read(513).strip())
         if selected is None:
             raise AccountError("choice is unavailable; run the Shortcut again")
-        return await admin(args, "POST", "/select", selected)
+        await admin(args, "POST", "/select", selected)
+        return (
+            f"Selected {account_name(status, selected['execution'])} for the next turn.\n"
+            "Your phone login stays unchanged."
+        )
     if args.command == "select":
         return await admin(
             args, "POST", "/select", {"thread": args.thread, "execution": args.account}

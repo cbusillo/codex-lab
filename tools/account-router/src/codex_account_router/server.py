@@ -46,7 +46,7 @@ async def serve(args):
         stack.push_async_callback(control.close)
         await control.connection()
         workers = {}
-        identities = {control.owner_id}
+        identities = set()
         for label in dict.fromkeys(args.accounts):
             worker = await AccountWorker.start(
                 args.data_dir, label, args.codex, excluded_ids=identities
@@ -54,7 +54,14 @@ async def serve(args):
             stack.push_async_callback(worker.close)
             identities.add((await worker.credentials()).account_id)
             workers[label] = worker
-        selection = Selection(args.data_dir, control, workers)
+        selection = Selection(
+            args.data_dir,
+            control,
+            workers,
+            account_names={
+                label: worker.email for label, worker in workers.items() if worker.email
+            },
+        )
         session = await stack.enter_async_context(
             aiohttp.ClientSession(
                 auto_decompress=False,

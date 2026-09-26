@@ -9,10 +9,11 @@ from .rpc import RpcError
 
 
 class Selection:
-    def __init__(self, root: Path, rpc, labels):
+    def __init__(self, root: Path, rpc, labels, *, account_names=None):
         self.path = root / "selection.json"
         self.rpc = rpc
         self.labels = set(labels)
+        self.account_names = dict(account_names or {})
         self.entries = read_metadata(self.path)
         if any(
             not isinstance(entry, dict)
@@ -141,4 +142,4 @@ class Selection:
                 }
 
         rows = await asyncio.gather(*(row(key, entry) for key, entry in snapshot))
-        return {"accounts": sorted(self.labels), "tasks": rows}
+        return {"accounts": sorted(self.labels), "accountNames": self.account_names, "tasks": rows}
