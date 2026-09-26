@@ -14,6 +14,7 @@ codex-account-router = "codex_account_router.cli:main"
 
 [dependency-groups]
 dev = ["ruff>=0.15.8"]
+qualification = ["zstandard==0.25.0"]
 
 [tool.ruff]
 target-version = "py312"

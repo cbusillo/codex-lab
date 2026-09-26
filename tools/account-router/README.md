@@ -125,3 +125,18 @@ uv run python -m unittest discover -s tests
 uv run ruff check .
 uv run ruff format --check .
 ```
+
+On macOS, qualify the installed stock binary against local fake OAuth/model
+servers and fresh synthetic homes. Stock subprocesses can contact only loopback.
+The output directory must be new and is retained for inspection:
+
+```sh
+uv run --group qualification python tests/qualify_stock.py \
+  --codex /absolute/path/to/codex --output /absolute/path/to/new-evidence-directory
+```
+
+The probe covers configuration idempotence, normal turns, a usage limit, manual
+selection, bounded execution refresh, control credential preservation, history
+continuity, and cold resume on the same task. Real backend reasoning/compaction,
+same-server TUI attachment, OAuth enrollment, and phone use need separate live
+acceptance. It never accepts real auth files as fixture input.
