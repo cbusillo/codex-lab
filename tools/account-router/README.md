@@ -35,7 +35,10 @@ then start it with `uv run codex-account-router serve execution-a execution-b`.
 Complete each stock device sign-in as the corresponding execution account.
 `configure` adds only the `account-router` provider through stock's versioned
 config RPC. It preserves the default provider and refuses a conflicting existing
-definition. Its supported auth command reads the current control access token
+definition. After installing the same package into a different environment,
+rerun `configure` from that installation: it can update the interpreter path when
+every other managed provider/auth setting is unchanged.
+Its supported auth command reads the current control access token
 through the local socket and delivers it over a private credential pipe; it does
 not create another credential store or force a refresh. The provider uses this
 command instead of `requires_openai_auth`, so the control account's exhausted
@@ -78,6 +81,10 @@ not a claim that the model turn completed; task state comes from the owning serv
 The phone list contains the most recent 100 explicitly registered tasks; inherited
 children are omitted. A fork needs an explicit `select NEW_TASK_UUID LABEL` before
 it appears there. Forks do not inherit a selection automatically.
+Start each additional routed task with `codex-account-router start`. Stock TUI
+`/new` uses the host's default provider and can run on the phone/control account;
+the launcher covers only the specific task it opens. Do not treat `/new` as a
+routed task when the host default is unchanged.
 
 All global options precede the command: `--data-dir`, `--control-socket`, `--codex`,
 and `--port`. Defaults use the current `CODEX_HOME` (or `~/.codex`), a private
@@ -94,14 +101,19 @@ Build a native Shortcut with these actions:
 
 1. Connect Tailscale using its Shortcuts action.
 2. Run Script Over SSH on the host's full MagicDNS name ending in `.ts.net`,
-   invoking the installed router command with `status`.
-3. Decode the JSON, choose one task by its `name` and retain its `thread` UUID.
-   Choose a label from `accounts`, then confirm that task and label together.
-4. Run Script Over SSH again with `select TASK_UUID LABEL`, then Show Result.
+   invoking the installed router command with `phone-list`.
+3. Split the result by new lines, then Choose from List. Each row names an idle
+   task and an execution label; its UUID distinguishes tasks with the same name.
+4. Show Alert with the chosen row and a Cancel button to confirm the target.
+5. Run Script Over SSH with the fixed command `codex-account-router phone-select`.
+   Set this action's **Input** to the chosen item, then Show Result.
 
 Use an absolute installed command path in SSH because its PATH can differ from
-Terminal. Never interpolate task names into shell code; pass the selected UUID
-and validated account label. The owner enters SSH authentication in Shortcuts.
+Terminal. Pass the choice through the SSH action's Input field (stdin), never
+interpolate task names into shell code. The selector compares it against a fresh
+inventory and refuses a stale, busy, or unavailable choice. The JSON `status` and
+`select TASK_UUID LABEL` commands remain available for other clients.
+The owner enters SSH authentication in Shortcuts.
 Test from cellular with Wi-Fi disabled, including while the execution account is
 limited. Tailscale's hostname-triggered On Demand rule matches `.ts.net`; a short
 hostname may not activate it. See the official [Shortcuts actions](https://tailscale.com/docs/features/mac-ios-shortcuts)

@@ -318,6 +318,13 @@ async def main():
         first_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
         second_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
         assert first_config["changed"] and not second_config["changed"]
+        moved_python = run / "relocated-python"
+        moved_python.symlink_to(sys.executable)
+        moved = await configure(
+            rpc, int(router_url.rsplit(":", 1)[1]), dict(auth_command, command=str(moved_python))
+        )
+        restored = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
+        assert moved["changed"] and restored["changed"]
         thread = await create_task(rpc, run, "Synthetic account-router task")
         await proxy.selection.select(thread, "first")
         first_turn = await begin_task(rpc, thread, "first synthetic turn")
@@ -351,6 +358,7 @@ async def main():
             "execution_worker_restart": True,
             "network": "stock processes restricted to localhost",
             "config_rpc_idempotent": True,
+            "managed_auth_environment_relocation": True,
             "command_backed_caller_auth": True,
             "initial_prompt_allows_same_server_attachment": True,
             "turn_statuses": statuses,

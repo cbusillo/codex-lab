@@ -11,7 +11,8 @@ from pathlib import Path
 import aiohttp
 
 from .accounts import AccountError, enroll
-from .rpc import Rpc, RpcError
+from .phone import choices
+from .rpc import ConnectionLost, Rpc, RpcError
 from .server import serve
 
 
@@ -55,7 +56,12 @@ async def configure(rpc, port, auth_command):
     if current == value:
         return {"provider": "account-router", "changed": False}
     if current is not None:
-        raise AccountError("account-router provider already exists with different settings")
+        relocated = dict(current)
+        existing_auth = current.get("auth")
+        if isinstance(existing_auth, dict):
+            relocated["auth"] = dict(existing_auth, command=auth_command["command"])
+        if relocated != value:
+            raise AccountError("account-router provider already exists with different settings")
     user = next(
         (
             layer
@@ -103,11 +109,19 @@ async def begin_task(rpc, thread_id, prompt):
                 try:
                     await rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
                     return started["turn"]["id"]
+                except ConnectionLost:
+                    raise AccountError(
+                        f"control connection lost; the first turn may still be running. "
+                        f"Reconnect with resume {thread_id} and the same connection options"
+                    ) from None
                 except RpcError:
                     await asyncio.sleep(0.1)
     except TimeoutError:
         pass
-    raise AccountError(f"task {thread_id} started but is not ready for TUI attachment")
+    raise AccountError(
+        f"the first turn may still be running; TUI attachment timed out. "
+        f"Reconnect with resume {thread_id} and the same connection options"
+    )
 
 
 async def run(args):
@@ -119,6 +133,18 @@ async def run(args):
         return None
     if args.command == "status":
         return await admin(args, "GET", "/status")
+    if args.command in ("phone-list", "phone-select"):
+        available = choices(await admin(args, "GET", "/status"))
+        if args.command == "phone-list":
+            if not available:
+                raise AccountError("no idle routed tasks are available")
+            return "\n".join(available)
+        # Compare data with a fresh inventory. Never evaluate or interpolate
+        # the task name as shell code, and refuse stale/busy selections.
+        selected = available.get(sys.stdin.read(513).strip())
+        if selected is None:
+            raise AccountError("choice is unavailable; run the Shortcut again")
+        return await admin(args, "POST", "/select", selected)
     if args.command == "select":
         return await admin(
             args, "POST", "/select", {"thread": args.thread, "execution": args.account}
@@ -167,11 +193,14 @@ async def run(args):
             ),
             None,
         )
-        if user is None or not Path(user["name"]["file"]).is_absolute():
+        if not isinstance(user, dict):
+            raise AccountError("local server did not report its user config location")
+        user_config = Path(user["name"]["file"])
+        if not user_config.is_absolute():
             raise AccountError("local server did not report its user config location")
         # --remote still loads client configuration locally. Match the socket's
         # stock home so a separate control host has the same named provider.
-        tui_environment = dict(os.environ, CODEX_HOME=str(Path(user["name"]["file"]).parent))
+        tui_environment = dict(os.environ, CODEX_HOME=str(user_config.parent))
         process = await asyncio.create_subprocess_exec(
             args.codex,
             "--remote",
@@ -207,6 +236,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("configure", help="add the opt-in provider through stock config RPC")
     commands.add_parser("status", help="show task choices and last-request receipts as JSON")
+    commands.add_parser("phone-list", help="list idle task/account choices, one per line")
+    commands.add_parser("phone-select", help="select the exact phone-list choice from stdin")
     commands.add_parser(
         "login", help="run stock device login into an isolated execution home"
     ).add_argument("account")
@@ -240,7 +271,7 @@ def main():
     try:
         result = asyncio.run(run(args))
         if result is not None:
-            print(json.dumps(result, indent=2))
+            print(result if isinstance(result, str) else json.dumps(result, indent=2))
     except (AccountError, RpcError) as error:
         parser.exit(1, f"account-router: {error}\n")
     except (OSError, aiohttp.ClientError, TimeoutError):

@@ -89,6 +89,9 @@ class Selection:
             if entry.get("pinTurn") != turn_id:
                 entry.update(pinTurn=turn_id, pinLabel=entry["label"])
                 self.save()
+            if entry.get("lastRequest") is not None:
+                entry["lastRequest"] = None
+                self.save()
             label = entry["pinLabel"]
             if label not in self.labels:
                 raise AccountError("selected execution account is unavailable")
@@ -134,7 +137,7 @@ class Selection:
                     else entry["label"],
                     "name": entry["name"],
                     "state": state,
-                    "lastRequest": entry.get("lastRequest"),
+                    "lastRequest": entry.get("lastRequest") if state != "unavailable" else None,
                 }
 
         rows = await asyncio.gather(*(row(key, entry) for key, entry in snapshot))

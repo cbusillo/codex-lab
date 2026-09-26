@@ -26,6 +26,35 @@ class Host:
 
 
 class SelectionTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_next_request_and_unavailable_task_do_not_show_old_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            host = Host()
+            host.add("task")
+            choices = Selection(Path(directory), host, ["first"])
+            await choices.select("task", "first")
+            async with choices.route("task", "first-turn"):
+                await choices.receipt("task", "first", 200)
+            with self.assertRaises(AccountError):
+                async with choices.route("task", "next-turn"):
+                    raise AccountError("credential worker unavailable")
+            expected = {
+                "accounts": ["first"],
+                "tasks": [
+                    {
+                        "thread": "task",
+                        "execution": "first",
+                        "name": "task",
+                        "state": "idle",
+                        "lastRequest": None,
+                    }
+                ],
+            }
+            self.assertEqual(await choices.status(), expected)
+            await choices.receipt("task", "first", 200)
+            host.threads["task"]["modelProvider"] = "openai"
+            expected["tasks"][0]["state"] = "unavailable"
+            self.assertEqual(await choices.status(), expected)
+
     async def test_cancellation_clears_active_count_even_when_selection_lock_is_held(self):
         with tempfile.TemporaryDirectory() as directory:
             host = Host()
