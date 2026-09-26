@@ -98,8 +98,9 @@ class Proxy:
             if request.headers.get("thread-id") != thread_id:
                 raise AccountError("model request thread identities disagree")
             async with self.selection.route(thread_id, turn_id) as label:
-                response = await self.forward(request, label)
-                await self.selection.receipt(thread_id, label, response.status)
+                response = await self.forward(request, label, thread_id=thread_id)
+                if isinstance(response, web.Response):
+                    await self.selection.receipt(thread_id, label, response.status)
                 return response
         except (AccountError, ValueError, TypeError, KeyError) as error:
             message = (
@@ -111,7 +112,7 @@ class Proxy:
         except (RpcError, TimeoutError):
             return failure(503, "owning stock server or credential worker is unavailable")
 
-    async def forward(self, request, label):
+    async def forward(self, request, label, *, thread_id=None):
         worker = self.workers[label]
         credential = await worker.credentials()
         if self.denied.get(label) == credential.token:
@@ -150,6 +151,10 @@ class Proxy:
                     response = web.StreamResponse(
                         status=upstream.status, headers=headers_without_identity(upstream.headers)
                     )
+                    # Stock closes after response.completed and can cancel this
+                    # handler before EOF. A header receipt is not turn completion.
+                    if thread_id is not None:
+                        await self.selection.receipt(thread_id, label, upstream.status)
                     await response.prepare(request)
                     async for chunk in upstream.content.iter_chunked(65536):
                         await response.write(chunk)

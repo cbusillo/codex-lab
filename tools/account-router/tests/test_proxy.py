@@ -141,7 +141,6 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         choices = Choices()
         self.proxy.selection = choices
         self.reject_first = True
-        self.release.set()
         self.headers.update(
             {
                 "thread-id": "task",
@@ -151,8 +150,13 @@ class ProxyTest(unittest.IsolatedAsyncioTestCase):
         async with self.session.post(
             self.server.make_url(PREFIX + "/responses"), headers=self.headers, data=b"payload"
         ) as response:
+            first = await response.content.readline()
+            self.assertEqual(choices.received, [("task", "turn"), ("task", "first", 200)])
+            self.assertFalse(self.release.is_set())
+            self.release.set()
             self.assertEqual(
-                (response.status, await response.read()), (200, b"data: first\n\ndata: last\n\n")
+                (response.status, first + await response.read()),
+                (200, b"data: first\n\ndata: last\n\n"),
             )
         self.assertEqual(
             (len(self.requests), self.worker.refreshes, choices.received),

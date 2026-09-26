@@ -35,16 +35,19 @@ def provider_settings(read):
     return {
         key: value
         for key, value in provider.items()
-        if value is not None and not (key == "supports_standalone_web_search" and value is False)
+        if value is not None
+        and not (
+            key in ("supports_standalone_web_search", "requires_openai_auth") and value is False
+        )
     }
 
 
-async def configure(rpc, port):
+async def configure(rpc, port, auth_command):
     value = {
         "name": "OpenAI",
         "base_url": f"http://127.0.0.1:{port}/backend-api/codex",
         "wire_api": "responses",
-        "requires_openai_auth": True,
+        "auth": auth_command,
         "supports_websockets": False,
     }
     before = await rpc.call("config/read", {"includeLayers": True})
@@ -81,6 +84,32 @@ async def configure(rpc, port):
     return {"provider": "account-router", "changed": True}
 
 
+async def create_task(rpc, cwd, name):
+    started = await rpc.call("thread/start", {"modelProvider": "account-router", "cwd": str(cwd)})
+    thread_id = started["thread"]["id"]
+    await rpc.call("thread/name/set", {"threadId": thread_id, "name": name})
+    return thread_id
+
+
+async def begin_task(rpc, thread_id, prompt):
+    started = await rpc.call(
+        "turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]}
+    )
+    # Stock cannot resume a new empty task. The owner's first input persists
+    # its history asynchronously; wait for a successful same-server attachment.
+    try:
+        async with asyncio.timeout(10):
+            for _ in range(50):
+                try:
+                    await rpc.call("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+                    return started["turn"]["id"]
+                except RpcError:
+                    await asyncio.sleep(0.1)
+    except TimeoutError:
+        pass
+    raise AccountError(f"task {thread_id} started but is not ready for TUI attachment")
+
+
 async def run(args):
     if args.command == "login":
         await enroll(args.data_dir, args.account, args.codex)
@@ -97,29 +126,62 @@ async def run(args):
     rpc = await Rpc.local(args.control_socket)
     try:
         if args.command == "configure":
-            return await configure(rpc, args.port)
+            return await configure(
+                rpc,
+                args.port,
+                {
+                    "command": sys.executable,
+                    "args": ["-m", "codex_account_router.provider_auth", str(args.control_socket)],
+                    "cwd": str(args.control_socket.parent),
+                    "timeout_ms": 5000,
+                    "refresh_interval_ms": 1,
+                },
+            )
         status = await admin(args, "GET", "/status")
-        if args.account not in status["accounts"]:
-            raise AccountError("unknown execution label")
-        started = await rpc.call(
-            "thread/start",
-            {"modelProvider": "account-router", "cwd": str(args.cwd)},
-        )
-        thread_id = started["thread"]["id"]
-        await admin(args, "POST", "/select", {"thread": thread_id, "execution": args.account})
-        print(
-            f"Task {thread_id} — execution {args.account}; phone/control login stays separate",
-            flush=True,
-        )
+        if args.command == "resume":
+            thread = (
+                await rpc.call("thread/read", {"threadId": args.thread, "includeTurns": False})
+            )["thread"]
+            if thread["id"] != args.thread or thread["modelProvider"] != "account-router":
+                raise AccountError("task does not use the account-router provider")
+            thread_id, cwd = args.thread, Path(thread["cwd"])
+        else:
+            if args.account not in status["accounts"]:
+                raise AccountError("unknown execution label")
+            cwd = args.cwd
+            thread_id = await create_task(rpc, cwd, args.name or cwd.name or "New task")
+            await admin(args, "POST", "/select", {"thread": thread_id, "execution": args.account})
+            print(
+                f"Task {thread_id} — execution {args.account}; phone/control login stays separate",
+                flush=True,
+            )
+            await begin_task(rpc, thread_id, args.prompt)
         # Keep the creator subscription alive while stock TUI attaches and runs.
         # This observer never answers approval or tool requests for that TUI.
+        config = await rpc.call("config/read", {"includeLayers": True})
+        user = next(
+            (
+                layer
+                for layer in config["layers"]
+                if layer["name"]["type"] == "user" and not layer["name"].get("profile")
+            ),
+            None,
+        )
+        if user is None or not Path(user["name"]["file"]).is_absolute():
+            raise AccountError("local server did not report its user config location")
+        # --remote still loads client configuration locally. Match the socket's
+        # stock home so a separate control host has the same named provider.
+        tui_environment = dict(os.environ, CODEX_HOME=str(Path(user["name"]["file"]).parent))
         process = await asyncio.create_subprocess_exec(
             args.codex,
             "--remote",
             "unix://" + str(args.control_socket),
+            "-c",
+            'model_provider="account-router"',
             "resume",
             thread_id,
-            cwd=args.cwd,
+            cwd=cwd,
+            env=tui_environment,
         )
         try:
             if await process.wait():
@@ -158,12 +220,23 @@ def main():
     select.add_argument("account")
     start = commands.add_parser("start", help="create an opted-in task and attach stock TUI")
     start.add_argument("account")
+    start.add_argument("prompt", nargs="?", help="first task request; prompted for when omitted")
     start.add_argument("--cwd", type=Path, default=Path.cwd())
+    start.add_argument("--name", help="task name shown in the TUI and phone selector")
+    commands.add_parser(
+        "resume", help="reattach a routed task with the same provider"
+    ).add_argument("thread")
     args = parser.parse_args()
     args.data_dir = args.data_dir.expanduser().absolute()
     args.control_socket = args.control_socket.expanduser().absolute()
     if args.command == "start":
         args.cwd = args.cwd.expanduser().resolve()
+        try:
+            args.prompt = args.prompt if args.prompt is not None else input("Task: ")
+        except (EOFError, KeyboardInterrupt):
+            parser.exit(1, "account-router: cancelled before creating a task\n")
+        if not args.prompt.strip():
+            parser.error("the first task request must not be empty")
     try:
         result = asyncio.run(run(args))
         if result is not None:

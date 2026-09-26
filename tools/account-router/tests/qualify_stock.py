@@ -16,8 +16,9 @@ import zstandard
 from aiohttp import web
 
 from codex_account_router.accounts import AccountWorker, account_home, worker_environment
-from codex_account_router.cli import configure
+from codex_account_router.cli import begin_task, configure, create_task
 from codex_account_router.proxy import Proxy, application
+from codex_account_router.rpc import RpcError
 from codex_account_router.selection import Selection
 
 parser = argparse.ArgumentParser(description=__doc__)
@@ -80,7 +81,7 @@ class Rpc:
         await self.send({"id": self.counter, "method": method, "params": params})
         obj = await asyncio.wait_for(future, 30)
         if "error" in obj:
-            raise RuntimeError(f"{method}: {obj['error']}")
+            raise RpcError(f"{method}: {obj['error']}")
         return obj["result"]
 
     async def turn(self, thread, text):
@@ -88,6 +89,9 @@ class Rpc:
             "turn/start", {"threadId": thread, "input": [{"type": "text", "text": text}]}
         )
         turn_id = start["turn"]["id"]
+        return await self.completed(turn_id)
+
+    async def completed(self, turn_id):
         async with asyncio.timeout(60):
             while True:
                 obj = await self.events.get()
@@ -273,6 +277,15 @@ async def main():
         control_home = run / "control"
         prepare(control_home, "control")
         control_auth = (control_home / "auth.json").read_bytes()
+        token_helper = run / "synthetic-caller-auth.py"
+        token_helper.write_text(f"print({token('control')!r})\n")
+        auth_command = {
+            "command": sys.executable,
+            "args": [str(token_helper)],
+            "cwd": str(control_home),
+            "timeout_ms": 5000,
+            "refresh_interval_ms": 1,
+        }
 
         async def start_control():
             control_process = await asyncio.create_subprocess_exec(
@@ -302,13 +315,16 @@ async def main():
         await workers["first"].worker.rpc.close()
         assert (await workers["first"].worker.credentials()).account_id == "first"
         process, rpc = await start_control()
-        first_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]))
-        second_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]))
+        first_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
+        second_config = await configure(rpc, int(router_url.rsplit(":", 1)[1]), auth_command)
         assert first_config["changed"] and not second_config["changed"]
-        start = await rpc.call("thread/start", {"cwd": str(run), "modelProvider": "account-router"})
-        thread = start["thread"]["id"]
+        thread = await create_task(rpc, run, "Synthetic account-router task")
         await proxy.selection.select(thread, "first")
-        statuses = [(await rpc.turn(thread, "first synthetic turn"))["status"]]
+        first_turn = await begin_task(rpc, thread, "first synthetic turn")
+        attached = await rpc.call("thread/read", {"threadId": thread, "includeTurns": False})
+        assert attached["thread"]["id"] == thread
+        assert attached["thread"]["modelProvider"] == "account-router"
+        statuses = [(await rpc.completed(first_turn))["status"]]
         state["limit"] = True
         statuses.append((await rpc.turn(thread, "synthetic limit"))["status"])
         await proxy.selection.select(thread, "second")
@@ -335,6 +351,8 @@ async def main():
             "execution_worker_restart": True,
             "network": "stock processes restricted to localhost",
             "config_rpc_idempotent": True,
+            "command_backed_caller_auth": True,
+            "initial_prompt_allows_same_server_attachment": True,
             "turn_statuses": statuses,
             "control_credential_unchanged": True,
             "refreshes": refreshes,

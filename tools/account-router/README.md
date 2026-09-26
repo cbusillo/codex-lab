@@ -15,22 +15,35 @@ phone can reach the host. Those remain live acceptance gates in #979.
 
 ## Setup
 
-Use fresh device logins for execution accounts. Never copy the main server's or
-retired Lab's credential files. The main server must already be running with its
-normal control login. From this directory:
+Use fresh device logins for execution accounts with available model allowance.
+These are separate from the phone/control account. Labels such as `execution-a`
+are local names for execution slots; they do not mean the owner's primary account.
+Never copy the main server's or retired Lab's credential files. The main server
+must already be running with its normal control login. From this directory:
 
 ```sh
 uv sync --locked --group dev
-uv run codex-account-router login first
-uv run codex-account-router login second
+uv run codex-account-router login execution-a
 uv run codex-account-router configure
-uv run codex-account-router serve first second
+uv run codex-account-router serve execution-a
 ```
 
+One control account and one distinct execution account are enough to test
+separation. To test switching, stop the router while its tasks are idle, enroll
+another execution account with `uv run codex-account-router login execution-b`,
+then start it with `uv run codex-account-router serve execution-a execution-b`.
 Complete each stock device sign-in as the corresponding execution account.
 `configure` adds only the `account-router` provider through stock's versioned
 config RPC. It preserves the default provider and refuses a conflicting existing
-definition. `serve` runs in the foreground, binds model HTTP to `127.0.0.1:41979`,
+definition. Its supported auth command reads the current control access token
+through the local socket and delivers it over a private credential pipe; it does
+not create another credential store or force a refresh. The provider uses this
+command instead of `requires_openai_auth`, so the control account's exhausted
+allowance does not drive the TUI's automatic model selection.
+The configured command uses this package's Python environment, which must remain
+available while routed tasks exist. Do not run the credential helper as a logging
+or diagnostic command: its stdout is a bearer token for stock to consume.
+`serve` runs in the foreground, binds model HTTP to `127.0.0.1:41979`,
 and exposes administration only through a private Unix socket. It must stay
 running while opted-in tasks execute. The first listed execution account supplies
 the model catalog, which stock requests without a task identity.
@@ -38,13 +51,25 @@ the model catalog, which stock requests without a task identity.
 In another terminal:
 
 ```sh
-uv run codex-account-router start first --cwd /absolute/path/to/repository
+uv run codex-account-router start execution-a "Describe this project" --cwd /absolute/path/to/repository --name "My task"
 uv run codex-account-router status
-uv run codex-account-router select TASK_UUID second
+uv run codex-account-router select TASK_UUID execution-b
+uv run codex-account-router resume TASK_UUID
 ```
 
-`start` creates a task in the existing shared server and opens stock `codex resume`
+`start` creates and names a task in the existing shared server, submits the given
+first request, then opens stock `codex resume`
 with an explicit `--remote` Unix socket, preventing a fallback to another owner.
+It also selects `account-router` in the TUI's local configuration so the client
+uses the same provider semantics as the owning task.
+The TUI uses the local server's user config directory, discovered through config
+RPC, so an explicitly selected isolated control socket loads that host's provider.
+Use the router's `resume` command when reconnecting: it checks the task's provider
+and supplies that same client configuration without creating a new turn.
+If the request is omitted, the command prompts for it before creating the task.
+Stock defers empty-task history, so the first request must be persisted before
+another client can attach; the launcher verifies that same-server resume succeeds.
+Without `--name`, the task initially uses the working directory's name.
 Its creator connection stays subscribed while the TUI is open;
 it never answers the TUI's approval or tool requests. The account panel in stock
 Codex still describes the control account. Router status and selection receipts
