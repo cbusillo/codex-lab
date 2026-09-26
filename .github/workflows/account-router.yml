@@ -1,0 +1,34 @@
+name: Account router
+
+on:
+  pull_request:
+    paths:
+      - "tools/account-router/**"
+      - ".github/workflows/account-router.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tools/account-router/**"
+      - ".github/workflows/account-router.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/account-router
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked --group dev
+      - run: uv run python -m unittest discover -s tests
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
