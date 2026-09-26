@@ -9,6 +9,9 @@ description = "Separate stock Codex control and execution accounts"
 requires-python = ">=3.12"
 dependencies = ["aiohttp>=3.13,<4"]
 
+[project.scripts]
+codex-account-router = "codex_account_router.cli:main"
+
 [dependency-groups]
 dev = ["ruff>=0.15.8"]
 
