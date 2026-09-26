@@ -60,9 +60,10 @@ that fits this file.
 ## Milestones
 
 - `Remote access on the fresh start` proves the owner gets and gives quick
-  updates to a CLI session from away, with Launchplane integration; ends if
-  it needs broad patches to upstream's files.
-- `Other needs on the fresh start` proves multiple accounts and other
+  updates to a CLI session from away, with Launchplane integration, and can
+  switch execution accounts after a usage limit without losing local or
+  phone access; ends if it needs broad patches to upstream's files.
+- `Other needs on the fresh start` proves the remaining account needs and other
   providers' agents work through sidecars or small patches, with the number
   of upstream files changed recorded; ends if any need costs more than a day
   per catch-up.
