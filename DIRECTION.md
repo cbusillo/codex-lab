@@ -59,9 +59,6 @@ that fits this file.
 
 ## Milestones
 
-- `Fresh start on upstream` proves main is upstream HEAD, the old main is
-  archived, and the retired installed build and its services are removed
-  after their sessions are saved; ends if the archive is lost.
 - `Remote access on the fresh start` proves the owner gets and gives quick
   updates to a CLI session from away, with Launchplane integration; ends if
   it needs broad patches to upstream's files.
