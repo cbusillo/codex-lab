@@ -125,6 +125,14 @@ async def begin_task(rpc, thread_id, prompt):
 
 
 async def run(args):
+    if args.command in ("service", "launch-agent"):
+        from .service import Service, launch_agent, run_service
+
+        service = Service.load(args.config)
+        if args.command == "launch-agent":
+            return launch_agent(args.config, service)
+        await run_service(service)
+        return None
     if args.command == "login":
         await enroll(args.data_dir, args.account, args.codex)
         return {"enrolled": args.account}
@@ -239,6 +247,11 @@ def main():
     parser.add_argument("--codex", default=shutil.which("codex") or "codex")
     parser.add_argument("--port", type=int, default=41979)
     commands = parser.add_subparsers(dest="command", required=True)
+    for command, help_text in (
+        ("service", "supervise an isolated phone host and router in the foreground"),
+        ("launch-agent", "print a macOS LaunchAgent for an installed service configuration"),
+    ):
+        commands.add_parser(command, help=help_text).add_argument("config", type=Path)
     commands.add_parser("configure", help="add the opt-in provider through stock config RPC")
     commands.add_parser("status", help="show task choices and last-request receipts as JSON")
     commands.add_parser("phone-list", help="list idle task/account choices, one per line")
