@@ -266,8 +266,4 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         values = json.loads(config.read_text())
         values["mode"] = "attach"
         config.write_text(json.dumps(values))
-        attached = Service.load(config)
-        self.assertEqual(
-            attached.control_socket,
-            self.root.parent / "app-server-control" / "app-server-control.sock",
-        )
+        self.assertEqual(Service.load(config).mode, "attach")

@@ -7,7 +7,7 @@ from aiohttp import web
 
 from codex_account_router.accounts import AccountError
 from codex_account_router.control import Control
-from codex_account_router.rpc import RpcError
+from codex_account_router.rpc import QUALIFIED_STOCK_VERSION, RpcError
 
 
 class ControlTest(unittest.IsolatedAsyncioTestCase):
@@ -25,7 +25,7 @@ class ControlTest(unittest.IsolatedAsyncioTestCase):
                     continue
                 method = item["method"]
                 result = (
-                    {"userAgent": "stock/0.157.1 test"}
+                    {"userAgent": f"stock/{QUALIFIED_STOCK_VERSION} test"}
                     if method == "initialize"
                     else {"workspaceRouting": {"chatgptAccountId": owner}}
                 )
