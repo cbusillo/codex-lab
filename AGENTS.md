@@ -36,20 +36,6 @@ follow `DIRECTION.md`; `plan:active` does not override its milestone order.
   repository and verified access requirements; this fork does not inherit an
   internal upstream approval flow merely because it shares source history.
 
-## Tests this fork owns
-
-- A test must fail when the product is broken and pass when someone makes an
-  intended change. Do not assert a literal that is defined elsewhere (versions,
-  toolchains, hashes, socket paths, user-facing copy); import it from its one
-  source of truth or assert the behaviour it controls.
-- Do not assert workflow or configuration text. Enforce the rule where it runs:
-  in the workflow itself, in a helper script with its own test, or in a linter.
-- Verification and loading code must not depend on the state of the working
-  tree; check live state only on the path that acts on it.
-- Byte-exact and hash checks are for real artifacts and immutable evidence only.
-- Leave upstream's tests alone unless a kept patch needs them changed; every
-  line in upstream's files adds catch-up cost.
-
 ## Planning and historical references
 
 - Treat GitHub issues as the durable work list within `DIRECTION.md`. Use its
