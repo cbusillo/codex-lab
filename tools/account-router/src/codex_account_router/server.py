@@ -16,7 +16,7 @@ from .rpc import RpcError
 from .selection import Selection
 
 
-def admin_application(selection):
+def admin_application(selection, adopt=None):
     async def handle(request):
         try:
             if request.path == "/status" and request.method == "GET":
@@ -24,6 +24,11 @@ def admin_application(selection):
             if request.path == "/select" and request.method == "POST":
                 data = await request.json()
                 return web.json_response(await selection.select(data["thread"], data["execution"]))
+            if request.path == "/adopt" and request.method == "POST":
+                if adopt is None:
+                    raise AccountError("adoption requires the supervised router service")
+                data = await request.json()
+                return web.json_response(await adopt(data["thread"], data["execution"], selection))
             raise web.HTTPNotFound()
         except AccountError as error:
             return web.json_response({"error": str(error)}, status=409)
@@ -37,7 +42,7 @@ def admin_application(selection):
     return app
 
 
-async def serve(args, *, stopped=None):
+async def serve(args, *, stopped=None, adopt=None):
     private_directory(args.data_dir)
     async with AsyncExitStack() as stack:
         lease = Lease(args.data_dir / "router.lock")
@@ -82,7 +87,7 @@ async def serve(args, *, stopped=None):
             if not socket_path.is_socket() or socket_path.stat().st_uid != os.getuid():
                 raise AccountError("refusing to replace an unrelated control socket")
             socket_path.unlink()
-        admin = web.AppRunner(admin_application(selection), access_log=None)
+        admin = web.AppRunner(admin_application(selection, adopt), access_log=None)
         await admin.setup()
         stack.push_async_callback(admin.cleanup)
         # Private parent directory protects the socket even before chmod.

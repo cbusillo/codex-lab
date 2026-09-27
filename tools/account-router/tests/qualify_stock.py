@@ -15,12 +15,17 @@ import aiohttp
 import zstandard
 from aiohttp import web
 
-from codex_account_router.accounts import AccountWorker, account_home, worker_environment
+from codex_account_router.accounts import (
+    AccountError,
+    AccountWorker,
+    account_home,
+    worker_environment,
+)
 from codex_account_router.cli import begin_task, configure, create_task
 from codex_account_router.proxy import Proxy, application
 from codex_account_router.rpc import RpcError
 from codex_account_router.selection import Selection
-from codex_account_router.service import refresh_subscriptions
+from codex_account_router.service import TaskObserver, refresh_subscriptions
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--codex", required=True, type=Path)
@@ -139,6 +144,8 @@ async def main():
     refreshes: list[str] = []
 
     async def upstream(request):
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return web.Response(status=426)
         if request.path.endswith("/models"):
             return web.json_response({"models": []})
         body = await request.read()
@@ -148,7 +155,8 @@ async def main():
         account = request.headers["ChatGPT-Account-Id"]
         assert identity(request.headers["Authorization"]) == account
         if account == "control":
-            assert request.headers["Authorization"] == f"Bearer {token('control', 'phone-owner')}"
+            login = "control" if state.get("original") else "phone-owner"
+            assert request.headers["Authorization"] == f"Bearer {token('control', login)}"
         requests.append({"account": account, "payload": payload})
         if state["reject"]:
             return web.json_response({"error": {"message": "synthetic auth error"}}, status=401)
@@ -394,6 +402,49 @@ async def main():
         async with asyncio.timeout(5):
             while proxy.selection.active:
                 await asyncio.sleep(0.02)
+        # Adopt an ordinary existing task, including its prior model history.
+        # The still-attached creator prevents a provider change; after a cold
+        # reopen the maintained observer must retain that exact task instead.
+        original_backend = web.Application()
+        original_backend.router.add_route("*", "/backend-api/codex/{tail:.*}", upstream)
+        original_url = await listen(stack, original_backend)
+        original = await rpc.call(
+            "thread/start",
+            {
+                "modelProvider": "openai",
+                "cwd": str(run),
+                "config": {"openai_base_url": original_url + "/backend-api/codex"},
+            },
+        )
+        original_id = original["thread"]["id"]
+        state["original"] = True
+        assert (await rpc.turn(original_id, "Original ordinary task"))["status"] == "completed"
+        state["original"] = False
+        async with asyncio.timeout(5):
+            while (await rpc.call("thread/read", {"threadId": original_id, "includeTurns": False}))[
+                "thread"
+            ]["status"]["type"] == "active":
+                await asyncio.sleep(0.02)
+        try:
+            await TaskObserver(rpc, data).adopt(original_id, "second", proxy.selection)
+        except AccountError as error:
+            assert "still attached" in str(error)
+        else:
+            raise AssertionError("an attached ordinary task unexpectedly changed provider")
+        await close_stock(process, rpc)
+        process, rpc = await start_control()
+        observer = TaskObserver(rpc, data)
+        assert await observer.adopt(original_id, "second", proxy.selection) == {
+            "thread": original_id,
+            "execution": "second",
+        }
+        rejoined = await rpc.call("thread/resume", {"threadId": original_id, "model": "gpt-5.4"})
+        assert rejoined["thread"]["id"] == original_id
+        assert rejoined["modelProvider"] == "account-router"
+        assert (await rpc.turn(original_id, "Continue the original task"))["status"] == "completed"
+        assert requests[-1]["account"] == "second"
+        assert "control_OK" in json.dumps(requests[-1]["payload"])
+        assert (control_home / "auth.json").read_bytes() == control_auth
         result = {
             "synthetic_only": True,
             "maintained_router": True,
@@ -411,6 +462,8 @@ async def main():
             "execution_sequence": [row["account"] for row in requests],
             "same_thread_after_cold_resume": True,
             "phone_model_override_after_service_preload": True,
+            "existing_task_adoption_preserves_id_and_history": True,
+            "attached_existing_task_refused": True,
             "final_status": await proxy.selection.status(),
         }
         (run / "result.json").write_text(json.dumps(result, indent=2) + "\n")

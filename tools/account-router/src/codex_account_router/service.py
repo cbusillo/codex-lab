@@ -1,4 +1,4 @@
-"""Foreground ownership of an isolated stock phone host and its account router."""
+"""Supervise a router with an isolated host or an existing stock daemon."""
 
 import asyncio
 import logging
@@ -27,9 +27,12 @@ class Service:
     control_account_id: str
     accounts: list[str]
     port: int = 41979
+    mode: str = "isolated"
 
     @property
     def control_socket(self):
+        if self.mode == "attach":
+            return self.control_home / "app-server-control" / "app-server-control.sock"
         return self.control_home / "host.sock"
 
     @classmethod
@@ -43,9 +46,15 @@ class Service:
                 values[key] = str(value) if key == "codex" else value
             service = cls(**values)
             if (
-                service.control_home.parent != service.data_dir
-                or service.control_home.name == "accounts"
-                or service.control_home == Path.home() / ".codex"
+                service.mode not in ("isolated", "attach")
+                or (
+                    service.mode == "isolated"
+                    and (
+                        service.control_home.parent != service.data_dir
+                        or service.control_home.name == "accounts"
+                        or service.control_home == Path.home() / ".codex"
+                    )
+                )
                 or not isinstance(service.control_account_id, str)
                 or not service.control_account_id
                 or not isinstance(service.accounts, list)
@@ -54,7 +63,7 @@ class Service:
                 or type(service.port) is not int
                 or not 0 < service.port < 65536
             ):
-                raise ValueError("invalid isolated service settings")
+                raise ValueError("invalid service settings")
             return service
         except (KeyError, TypeError, ValueError):
             raise AccountError("invalid service configuration; see the package README") from None
@@ -106,6 +115,45 @@ async def refresh_subscriptions(rpc, data_dir, subscribed):
         subscribed.remove(thread)
 
 
+class TaskObserver:
+    """Keep adopted tasks attached before the owner or phone rejoins them."""
+
+    def __init__(self, rpc, data_dir):
+        self.rpc = rpc
+        self.data_dir = data_dir
+        self.subscribed = set()
+        self.lock = asyncio.Lock()
+
+    async def refresh(self):
+        async with self.lock:
+            await refresh_subscriptions(self.rpc, self.data_dir, self.subscribed)
+
+    async def adopt(self, thread_id, label, selection):
+        async with self.lock:
+            if label not in selection.labels:
+                raise AccountError("unknown execution label")
+            thread = (
+                await self.rpc.call("thread/read", {"threadId": thread_id, "includeTurns": False})
+            )["thread"]
+            if thread["id"] != thread_id or thread.get("parentThreadId"):
+                raise AccountError("adoption requires an existing root task")
+            if thread["status"]["type"] not in ("idle", "notLoaded", "systemError"):
+                raise AccountError("task is busy; let its turn finish before adopting it")
+            resumed = await self.rpc.call(
+                "thread/resume",
+                {"threadId": thread_id, "modelProvider": "account-router", "excludeTurns": True},
+            )
+            if resumed.get("modelProvider") != "account-router":
+                await self.rpc.call("thread/unsubscribe", {"threadId": thread_id})
+                raise AccountError("task is still attached; exit its other harnesses and retry")
+            if resumed["thread"]["id"] != thread_id:
+                raise AccountError("stock did not resume the original task")
+            self.subscribed.add(thread_id)
+            selected = await selection.select(thread_id, label)
+            await refresh_subscriptions(self.rpc, self.data_dir, self.subscribed)
+            return selected
+
+
 async def start_router(service, stopped):
     async with AsyncExitStack() as stack:
         async with asyncio.timeout(30):
@@ -120,10 +168,10 @@ async def start_router(service, stopped):
             identity = (account.get("workspaceRouting") or {}).get("chatgptAccountId")
             if identity != service.control_account_id:
                 raise AccountError("control identity changed; review the service configuration")
-        subscribed = set()
-        await refresh_subscriptions(rpc, service.data_dir, subscribed)
+        observer = TaskObserver(rpc, service.data_dir)
+        await observer.refresh()
         await rpc.call("remoteControl/enable", {"ephemeral": True})
-        router = asyncio.create_task(serve(service, stopped=stopped))
+        router = asyncio.create_task(serve(service, stopped=stopped, adopt=observer.adopt))
         try:
             while not router.done():
                 await asyncio.wait([router], timeout=5)
@@ -134,7 +182,7 @@ async def start_router(service, stopped):
                         raise AccountError(
                             "control identity changed; review the service configuration"
                         )
-                    await refresh_subscriptions(rpc, service.data_dir, subscribed)
+                    await observer.refresh()
             await router
         finally:
             router.cancel()
@@ -143,6 +191,12 @@ async def start_router(service, stopped):
 
 async def supervise(service, stopped, logger):
     private_directory(service.data_dir)
+    if service.mode == "attach":
+        # The stock daemon retains its own process, storage and lifecycle. This
+        # service neither starts nor stops it, including when its login differs.
+        logger.info("Attaching router to the existing stock daemon")
+        await start_router(service, stopped)
+        return
     private_directory(service.control_home)
     with ExitStack() as stack:
         owner = Lease(service.control_home / "owner.lock")

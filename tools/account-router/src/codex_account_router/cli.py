@@ -158,9 +158,9 @@ async def run(args):
             f"Selected {account_name(status, selected['execution'])} for the next turn.\n"
             "Your phone login stays unchanged."
         )
-    if args.command == "select":
+    if args.command in ("select", "adopt"):
         return await admin(
-            args, "POST", "/select", {"thread": args.thread, "execution": args.account}
+            args, "POST", "/" + args.command, {"thread": args.thread, "execution": args.account}
         )
     rpc = await Rpc.local(args.control_socket)
     try:
@@ -248,7 +248,7 @@ def main():
     parser.add_argument("--port", type=int, default=41979)
     commands = parser.add_subparsers(dest="command", required=True)
     for command, help_text in (
-        ("service", "supervise an isolated phone host and router in the foreground"),
+        ("service", "supervise the router with an isolated host or existing daemon"),
         ("launch-agent", "print a macOS LaunchAgent for an installed service configuration"),
     ):
         commands.add_parser(command, help=help_text).add_argument("config", type=Path)
@@ -267,6 +267,11 @@ def main():
     )
     select.add_argument("thread")
     select.add_argument("account")
+    adopt = commands.add_parser(
+        "adopt", help="route an existing idle task after its other harnesses disconnect"
+    )
+    adopt.add_argument("thread")
+    adopt.add_argument("account")
     start = commands.add_parser("start", help="create an opted-in task and attach stock TUI")
     start.add_argument("account")
     start.add_argument("prompt", nargs="?", help="first task request; prompted for when omitted")
