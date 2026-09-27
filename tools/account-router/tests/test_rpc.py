@@ -2,7 +2,7 @@ import asyncio
 import json
 import unittest
 
-from codex_account_router.rpc import Rpc, RpcError
+from codex_account_router.rpc import QUALIFIED_STOCK_VERSION, Rpc, RpcError
 
 
 class RpcTest(unittest.IsolatedAsyncioTestCase):
@@ -36,5 +36,24 @@ class RpcTest(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertRaisesRegex(RpcError, "connection closed"):
                 await asyncio.wait_for(rpc.call("account/read", {}), 1)
+        finally:
+            await rpc.close()
+
+    async def test_unqualified_stock_version_is_refused_before_use(self):
+        sent = asyncio.Queue()
+
+        async def incoming():
+            item = await sent.get()
+            agent = f"codex/{QUALIFIED_STOCK_VERSION}-unqualified test"
+            yield json.dumps({"id": item["id"], "result": {"userAgent": agent}})
+
+        async def close():
+            pass
+
+        rpc = Rpc(sent.put, incoming(), close)
+        try:
+            with self.assertRaisesRegex(RpcError, "qualification"):
+                await rpc.initialize()
+            self.assertTrue(sent.empty())
         finally:
             await rpc.close()
