@@ -6,11 +6,18 @@ import plistlib
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from codex_account_router.accounts import AccountError, Lease
-from codex_account_router.service import Service, launch_agent, refresh_subscriptions, supervise
+from codex_account_router.service import (
+    Service,
+    TaskObserver,
+    launch_agent,
+    refresh_subscriptions,
+    supervise,
+)
 
 
 class ServiceTest(unittest.IsolatedAsyncioTestCase):
@@ -41,9 +48,87 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         self.spawn_patch.start()
         self.addCleanup(self.spawn_patch.stop)
 
-    async def serve(self, _service, *, stopped):
+    async def serve(self, _service, *, stopped, **_options):
         self.ready.set()
         await stopped.wait()
+
+    async def test_attached_service_never_owns_the_existing_host(self):
+        service = replace(self.service, mode="attach")
+        rpc = AsyncMock()
+        rpc.call.return_value = {"workspaceRouting": {"chatgptAccountId": "control-id"}}
+        self.home.joinpath("auth.json").unlink()
+        with (
+            patch("codex_account_router.service.Rpc.local", return_value=rpc),
+            patch("codex_account_router.service.serve", self.serve),
+        ):
+            task = asyncio.create_task(supervise(service, self.stopped, logging.getLogger()))
+            try:
+                await asyncio.wait_for(self.ready.wait(), 5)
+            finally:
+                self.stopped.set()
+                await asyncio.wait_for(task, 5)
+        self.assertEqual(self.processes, [])
+        rpc.close.assert_awaited_once()
+        self.assertFalse((self.home / "owner.lock").exists())
+
+    async def test_attached_wrong_identity_does_not_touch_host_or_enable_remote(self):
+        rpc = AsyncMock()
+        rpc.call.return_value = {"workspaceRouting": {"chatgptAccountId": "another-id"}}
+        with patch("codex_account_router.service.Rpc.local", return_value=rpc):
+            with self.assertRaisesRegex(AccountError, "control identity changed"):
+                await supervise(
+                    replace(self.service, mode="attach"), self.stopped, logging.getLogger()
+                )
+        self.assertEqual(self.processes, [])
+        rpc.call.assert_awaited_once_with("account/read", {"refreshToken": False})
+
+    async def test_adoption_keeps_the_same_task_subscribed_without_starting_a_turn(self):
+        rpc = AsyncMock()
+        rpc.call.side_effect = [
+            {"thread": {"id": "existing", "status": {"type": "notLoaded"}}},
+            {"thread": {"id": "existing"}, "modelProvider": "account-router"},
+        ]
+        selection = AsyncMock(labels={"first"})
+
+        async def select(thread, label):
+            (self.root / "selection.json").write_text(json.dumps({thread: {"label": label}}))
+            return {"thread": thread, "execution": label}
+
+        selection.select.side_effect = select
+        observer = TaskObserver(rpc, self.root)
+        result = await observer.adopt("existing", "first", selection)
+        self.assertEqual(
+            (result, observer.subscribed, [call.args[0] for call in rpc.call.call_args_list]),
+            (
+                {"thread": "existing", "execution": "first"},
+                {"existing"},
+                ["thread/read", "thread/resume"],
+            ),
+        )
+
+    async def test_busy_or_attached_tasks_cannot_be_adopted(self):
+        for state, provider, expected in (
+            ("active", "openai", "busy"),
+            ("idle", "openai", "still attached"),
+        ):
+            with self.subTest(state=state):
+                rpc = AsyncMock()
+                rpc.call.side_effect = [
+                    {"thread": {"id": "existing", "status": {"type": state}}},
+                    {"thread": {"id": "existing"}, "modelProvider": provider},
+                    {},
+                ]
+                selection = AsyncMock(labels={"first"})
+                observer = TaskObserver(rpc, self.root)
+                with self.assertRaisesRegex(AccountError, expected):
+                    await observer.adopt("existing", "first", selection)
+                selection.select.assert_not_awaited()
+                self.assertEqual(observer.subscribed, set())
+                if state == "idle":
+                    self.assertEqual(
+                        rpc.call.call_args,
+                        unittest.mock.call("thread/unsubscribe", {"threadId": "existing"}),
+                    )
 
     async def test_owned_startup_and_shutdown_preserve_home(self):
         rpc = AsyncMock()
@@ -178,3 +263,11 @@ class ServiceTest(unittest.IsolatedAsyncioTestCase):
         config.write_text(config.read_text().replace(str(self.home), str(self.root.parent)))
         with self.assertRaises(AccountError):
             Service.load(config)
+        values = json.loads(config.read_text())
+        values["mode"] = "attach"
+        config.write_text(json.dumps(values))
+        attached = Service.load(config)
+        self.assertEqual(
+            attached.control_socket,
+            self.root.parent / "app-server-control" / "app-server-control.sock",
+        )

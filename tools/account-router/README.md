@@ -177,6 +177,42 @@ removes only its plist, and restores the retained wheel/foreground setup; preser
 all account homes, provider configuration and history. Other CLI hosts' sessions
 remain on their original host and are not migrated by this service.
 
+### Attach to the everyday daemon
+
+An installed isolated service does not expose another daemon's sessions. To use
+the existing everyday daemon, set `"mode": "attach"` and `control_home` to that
+daemon's existing Codex home in the service configuration. Set the expected
+`control_account_id` from that daemon's `account/read` response after its normal
+stock sign-in. The socket is `control_home/app-server-control/app-server-control.sock`.
+The service verifies the identity before enabling Remote. It never starts, stops,
+replaces or writes credentials for the existing daemon. At login it waits for the
+daemon; launchd retries if the daemon is not available yet. The stock daemon keeps
+its normal startup/update ownership; an unqualified stock version is refused.
+
+For a transition from an isolated pilot, first let its turns finish, stop its
+service, and preserve its configuration and selection registry for rollback.
+Start the everyday service with its own empty `selection.json`, retaining the
+existing enrolled account homes. Do not copy credentials or conversation history.
+Configure the named provider through `configure` with the everyday socket before
+starting adoption. The phone account and everyday daemon's control sign-in must
+match; sign in and pair through stock's normal flow when ready.
+
+Let each existing task finish its turn, then exit its other harnesses normally.
+An idle client still owns a subscription, so merely waiting between turns does
+not make a different provider effective. Adopt the saved task by its original ID:
+
+```sh
+codex-account-router adopt TASK_UUID execution-a
+codex-account-router resume TASK_UUID
+```
+
+Adoption refuses busy tasks and provider changes while another client remains
+attached. It starts no model turn, preserves the task ID and history, selects the
+execution account and retains a service subscription before returning. The same
+task can then be opened locally or on the paired phone. New routed tasks still
+use `start`; ordinary stock `/new` continues to use the host default provider.
+Changing only the control login does not route existing or new ordinary tasks.
+
 ## Ownership and failure behavior
 
 Stock app-server workers own execution refresh and persistence in separate
