@@ -7,6 +7,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from codex_account_router.rpc import QUALIFIED_STOCK_VERSION
+
 
 class ProviderAuthTest(unittest.IsolatedAsyncioTestCase):
     async def test_command_exports_only_current_control_token_without_forced_refresh(self):
@@ -21,7 +23,7 @@ class ProviderAuthTest(unittest.IsolatedAsyncioTestCase):
                 if request_data.get("method") == "initialized":
                     continue
                 if request_data["method"] == "initialize":
-                    result = {"userAgent": "codex/0.157.1"}
+                    result = {"userAgent": f"codex/{QUALIFIED_STOCK_VERSION}"}
                 else:
                     calls.append((request_data["method"], request_data["params"]))
                     result = dict(current)

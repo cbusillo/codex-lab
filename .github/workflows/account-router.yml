@@ -20,6 +20,8 @@ jobs:
       matrix:
         python: ["3.12", "3.13"]
     runs-on: ubuntu-latest
+    # Pull-request budget: the lane takes about 15 seconds; fail loudly if it grows.
+    timeout-minutes: 5
     defaults:
       run:
         working-directory: tools/account-router

@@ -7,6 +7,9 @@ from typing import cast
 
 import aiohttp
 
+# The one stock app-server version this adapter is qualified against.
+QUALIFIED_STOCK_VERSION = "0.157.1"
+
 
 class RpcError(RuntimeError):
     pass
@@ -55,9 +58,11 @@ class Rpc:
                 "capabilities": {"experimentalApi": True},
             },
         )
-        if initialized.get("userAgent", "").split(" ", 1)[0].rsplit("/", 1)[-1] != "0.157.1":
+        version = initialized.get("userAgent", "").split(" ", 1)[0].rsplit("/", 1)[-1]
+        if version != QUALIFIED_STOCK_VERSION:
             raise RpcError(
-                "stock app-server version needs account-router qualification (expected 0.157.1)"
+                "stock app-server version needs account-router qualification "
+                f"(expected {QUALIFIED_STOCK_VERSION})"
             )
         await self._send({"method": "initialized"})
         return self
