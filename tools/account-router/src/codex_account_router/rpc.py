@@ -8,7 +8,7 @@ from typing import cast
 import aiohttp
 
 # The one stock app-server version this adapter is qualified against.
-QUALIFIED_STOCK_VERSION = "0.157.1"
+QUALIFIED_STOCK_VERSION = "0.158.0"
 
 
 class RpcError(RuntimeError):

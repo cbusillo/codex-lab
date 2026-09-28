@@ -8,7 +8,7 @@ The owning work item and live acceptance record are
 [codex-lab #979](https://github.com/cbusillo/codex-lab/issues/979).
 
 The host target is macOS or Linux with a local Unix control socket. The stock RPC
-adapter requires app-server 0.157.1. A different version needs qualification
+adapter requires app-server 0.158.0. A different version needs qualification
 before changing that guard. Synthetic qualification is not proof that real
 encrypted reasoning or compacted history works across accounts, or that the
 phone can reach the host. Those remain live acceptance gates in #979.
